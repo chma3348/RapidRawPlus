@@ -12,12 +12,14 @@ import {
   TriangleRight,
   User,
   Sun,
+  Highlighter,
 } from 'lucide-react';
 import i18n from 'i18next';
 
 export enum Mask {
   AiDepth = 'ai-depth',
   AiForeground = 'ai-foreground',
+  AiPaint = 'ai-paint',
   AiSky = 'ai-sky',
   AiSubject = 'ai-subject',
   All = 'all',
@@ -66,6 +68,7 @@ export interface SubMask {
 export function formatMaskTypeName(type: string) {
   if (type === Mask.AiDepth) return i18n.t('masks.types.depth');
   if (type === Mask.AiSubject) return i18n.t('masks.types.subject');
+  if (type === Mask.AiPaint) return i18n.t('masks.types.aiPaint');
   if (type === Mask.AiForeground) return i18n.t('masks.types.foreground');
   if (type === Mask.AiSky) return i18n.t('masks.types.sky');
   if (type === Mask.All) return i18n.t('masks.types.all');
@@ -96,6 +99,7 @@ export const MASK_ICON_MAP: Record<Mask, any> = {
   [Mask.AiForeground]: User,
   [Mask.AiSky]: Cloud,
   [Mask.AiSubject]: Sparkles,
+  [Mask.AiPaint]: Highlighter,
   [Mask.All]: RectangleHorizontal,
   [Mask.Brush]: Brush,
   [Mask.Flow]: Droplets,
@@ -112,6 +116,12 @@ export const MASK_PANEL_CREATION_TYPES: Array<MaskType> = [
     icon: Sparkles,
     name: 'Subject',
     type: Mask.AiSubject,
+  },
+  {
+    disabled: false,
+    icon: Highlighter,
+    name: 'AI Paint',
+    type: Mask.AiPaint,
   },
   {
     disabled: false,
@@ -161,6 +171,12 @@ export const AI_PANEL_CREATION_TYPES: Array<MaskType> = [
   },
   {
     disabled: false,
+    icon: Highlighter,
+    name: 'AI Paint',
+    type: Mask.AiPaint,
+  },
+  {
+    disabled: false,
     icon: User,
     name: 'Foreground',
     type: Mask.AiForeground,
@@ -191,6 +207,12 @@ export const SUB_MASK_COMPONENT_TYPES: Array<MaskType> = [
     icon: Sparkles,
     name: 'Subject',
     type: Mask.AiSubject,
+  },
+  {
+    disabled: false,
+    icon: Highlighter,
+    name: 'AI Paint',
+    type: Mask.AiPaint,
   },
   {
     disabled: false,
@@ -270,6 +292,12 @@ export const AI_SUB_MASK_COMPONENT_TYPES: Array<MaskType> = [
     icon: Sparkles,
     name: 'Subject',
     type: Mask.AiSubject,
+  },
+  {
+    disabled: false,
+    icon: Highlighter,
+    name: 'AI Paint',
+    type: Mask.AiPaint,
   },
   {
     disabled: false,

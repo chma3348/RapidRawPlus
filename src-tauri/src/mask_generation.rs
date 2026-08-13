@@ -1323,7 +1323,7 @@ fn generate_sub_mask_bitmap(
             crop_offset,
             warped_image,
         ),
-        "ai-subject" => {
+        "ai-subject" | "ai-paint" => {
             generate_ai_subject_bitmap(&sub_mask.parameters, width, height, scale, crop_offset)
         }
         "ai-foreground" => {

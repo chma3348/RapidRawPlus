@@ -1045,7 +1045,8 @@
       "quickEraser": "Gomme rapide",
       "radial": "Radial",
       "sky": "Ciel",
-      "subject": "Sujet"
+      "subject": "Sujet",
+      "aiPaint": "Peinture IA"
     }
   },
   "menus": {

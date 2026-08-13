@@ -380,6 +380,171 @@ pub async fn generate_ai_subject_mask(
     })
 }
 
+/// Paint-to-select: the user's rough brush strokes (display space) are
+/// un-transformed to image space, rasterized, and handed to SAM as a
+/// multi-point + mask-prior prompt.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn generate_ai_paint_mask(
+    js_adjustments: serde_json::Value,
+    path: String,
+    lines: serde_json::Value,
+    rotation: f32,
+    flip_horizontal: bool,
+    flip_vertical: bool,
+    orientation_steps: u8,
+    state: tauri::State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+) -> Result<AiSubjectMaskParameters, String> {
+    let (registry, model) = resolve_and_prepare(
+        &app_handle,
+        &state.model_registry,
+        TaskType::Mask,
+        "mask_subject",
+        mask_subtype_filter("subject"),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    let encoder_session = registry
+        .get_session(&model.manifest.id, None)
+        .map_err(|e| e.to_string())?;
+    let decoder_session = registry
+        .get_session(&model.manifest.id, Some("decoder"))
+        .map_err(|e| e.to_string())?;
+
+    let path_hash = {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(path.as_bytes());
+        hasher.update(model.manifest.id.as_bytes());
+        let mut geo_hasher = DefaultHasher::new();
+        for key in GEOMETRY_KEYS {
+            if let Some(val) = js_adjustments.get(key) {
+                key.hash(&mut geo_hasher);
+                val.to_string().hash(&mut geo_hasher);
+            }
+        }
+        hasher.update(&geo_hasher.finish().to_le_bytes());
+        hasher.finalize().to_hex().to_string()
+    };
+
+    ensure_ai_state(&state.ai_state);
+    let embeddings = {
+        let mut ai_state_lock = state.ai_state.lock().unwrap();
+        let ai_state = ai_state_lock.as_mut().unwrap();
+        if let Some(cached) = &ai_state.embeddings
+            && cached.path_hash == path_hash
+        {
+            cached.clone()
+        } else {
+            let warped_image = get_cached_full_warped_image(&state, &js_adjustments)?;
+            let mut new_embeddings =
+                generate_image_embeddings(warped_image.as_ref(), &encoder_session)
+                    .map_err(|e| e.to_string())?;
+            new_embeddings.path_hash = path_hash.clone();
+            ai_state.embeddings = Some(new_embeddings.clone());
+            new_embeddings
+        }
+    };
+
+    let (img_w, img_h) = embeddings.original_size;
+    let (coarse_rotated_w, coarse_rotated_h) = if orientation_steps % 2 == 1 {
+        (img_h as f64, img_w as f64)
+    } else {
+        (img_w as f64, img_h as f64)
+    };
+    let center = (coarse_rotated_w / 2.0, coarse_rotated_h / 2.0);
+    let angle_rad = (rotation as f64).to_radians();
+    let cos_a = angle_rad.cos();
+    let sin_a = angle_rad.sin();
+
+    // Same un-transform chain the click prompt uses, applied per point.
+    let to_image_space = |p: (f64, f64)| -> (f64, f64) {
+        let px = p.0 - center.0;
+        let py = p.1 - center.1;
+        let mut x = px * cos_a + py * sin_a + center.0;
+        let mut y = -px * sin_a + py * cos_a + center.1;
+        if flip_horizontal {
+            x = coarse_rotated_w - x;
+        }
+        if flip_vertical {
+            y = coarse_rotated_h - y;
+        }
+        match orientation_steps {
+            1 => (y, img_h as f64 - x),
+            2 => (img_w as f64 - x, img_h as f64 - y),
+            3 => (img_w as f64 - y, x),
+            _ => (x, y),
+        }
+    };
+
+    // Rasterize the strokes as filled discs along each segment.
+    let mut paint = GrayImage::new(img_w, img_h);
+    let empty = Vec::new();
+    let lines_arr = lines.as_array().unwrap_or(&empty);
+    let mut stamped = 0u32;
+    for line in lines_arr {
+        let radius = (line["brushSize"].as_f64().unwrap_or(50.0) / 2.0).max(4.0);
+        let pts: Vec<(f64, f64)> = line["points"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|p| Some((p["x"].as_f64()?, p["y"].as_f64()?)))
+                    .map(&to_image_space)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let stamp = |paint: &mut GrayImage, cx: f64, cy: f64| {
+            let r = radius as i64;
+            for dy in -r..=r {
+                for dx in -r..=r {
+                    if (dx * dx + dy * dy) as f64 <= radius * radius {
+                        let x = cx as i64 + dx;
+                        let y = cy as i64 + dy;
+                        if x >= 0 && y >= 0 && (x as u32) < img_w && (y as u32) < img_h {
+                            paint.put_pixel(x as u32, y as u32, image::Luma([255]));
+                        }
+                    }
+                }
+            }
+        };
+        if pts.len() == 1 {
+            stamp(&mut paint, pts[0].0, pts[0].1);
+            stamped += 1;
+        }
+        for pair in pts.windows(2) {
+            let (x1, y1) = pair[0];
+            let (x2, y2) = pair[1];
+            let dist = ((x2 - x1).powi(2) + (y2 - y1).powi(2)).sqrt();
+            let steps = ((dist / (radius / 2.0)).ceil() as usize).max(1);
+            for s in 0..=steps {
+                let t = s as f64 / steps as f64;
+                stamp(&mut paint, x1 + (x2 - x1) * t, y1 + (y2 - y1) * t);
+            }
+            stamped += 1;
+        }
+    }
+    if stamped == 0 {
+        return Err("Paint over the subject first, then release.".to_string());
+    }
+
+    let mask_bitmap =
+        ai_processing::run_sam_decoder_with_paint(&decoder_session, &embeddings, &paint)
+            .map_err(|e| e.to_string())?;
+    let base64_data = encode_to_base64_png(&mask_bitmap)?;
+
+    Ok(AiSubjectMaskParameters {
+        start_x: 0.0,
+        start_y: 0.0,
+        end_x: img_w as f64,
+        end_y: img_h as f64,
+        mask_data_base64: Some(base64_data),
+        rotation: Some(rotation),
+        flip_horizontal: Some(flip_horizontal),
+        flip_vertical: Some(flip_vertical),
+        orientation_steps: Some(orientation_steps),
+    })
+}
+
 #[tauri::command]
 pub async fn precompute_ai_subject_mask(
     js_adjustments: serde_json::Value,

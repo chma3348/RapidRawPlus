@@ -122,6 +122,13 @@ const SUB_MASK_CONFIG: Record<Mask, any> = {
   [Mask.AiDepth]: {
     parameters: [{ key: 'feather', min: 0, max: 100, step: 1, defaultValue: 15 }],
   },
+  [Mask.AiPaint]: {
+    showBrushTools: true,
+    parameters: [
+      { key: 'grow', min: -100, max: 100, step: 1, defaultValue: 0 },
+      { key: 'feather', min: 0, max: 100, step: 1, defaultValue: 15 },
+    ],
+  },
   [Mask.AiSubject]: {
     parameters: [
       { key: 'grow', min: -100, max: 100, step: 1, defaultValue: 0 },

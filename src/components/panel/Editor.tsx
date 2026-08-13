@@ -133,7 +133,7 @@ export default function Editor({ onBackToLibrary, onContextMenu, transformWrappe
     },
     [debouncedSetHistory, setEditor],
   );
-  const { handleGenerateAiMask, handleQuickErase } = useAiMasking();
+  const { handleGenerateAiMask, handleGenerateAiPaintMask, handleQuickErase } = useAiMasking();
   const [crop, setCrop] = useState<Crop | null>(null);
   const prevCropParams = useRef<any>(null);
   const lastValidCropRef = useRef<PercentCrop | null>(null);
@@ -2023,6 +2023,7 @@ export default function Editor({ onBackToLibrary, onContextMenu, transformWrappe
             isSliderDragging={isSliderDragging}
             maskOverlayUrl={maskOverlayUrl}
             onGenerateAiMask={handleGenerateAiMask}
+            onGenerateAiPaintMask={handleGenerateAiPaintMask}
             onLiveMaskPreview={handleLiveMaskPreview}
             onQuickErase={handleQuickErase}
             onSelectAiSubMask={(id) => setEditor({ activeAiSubMaskId: id })}

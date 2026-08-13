@@ -730,6 +730,7 @@ fn apply_tonal_adjustments(
 fn apply_highlights_adjustment(
     color_in: vec3<f32>,
     blurred_color_input_space: vec3<f32>,
+    neighborhood_input_space: vec3<f32>,
     is_raw: u32,
     highlights_adj: f32
 ) -> vec3<f32> {
@@ -737,15 +738,36 @@ fn apply_highlights_adjustment(
     if (adjustments.global.process_version >= 2u) {
         var lab = linear_to_oklab(max(color_in, vec3<f32>(0.0)));
         let t = clamp(lab.x, 0.0, 1.0);
-        let mask = smoothstep(0.55, 0.95, t);
+        // Wide, smooth zone weight: the blotch-maker was a steep mask edge
+        // meeting clipped, chroma-less pixels.
+        let mask = smoothstep(0.45, 1.0, t);
         if (highlights_adj < 0.0) {
-            // Recovery: compress bright lightness downward, harder with L.
-            let compress = -highlights_adj * 0.6 * mask;
-            lab.x = lab.x - compress * (lab.x - 0.55);
-            // Pull back a little chroma too: recovered skies stay believable.
-            let cs = 1.0 - (-highlights_adj) * 0.15 * mask;
-            lab.y *= cs;
-            lab.z *= cs;
+            let compress = -highlights_adj * 0.55 * mask;
+            lab.x = lab.x - compress * (lab.x - 0.45);
+
+            // Clipped pixels carry no color of their own — when pulled
+            // down they'd surface as gray/white blotches. Reconstruct
+            // their chroma from the local neighborhood instead (the
+            // blurred image is already on hand), scaled by how clipped
+            // the pixel actually is.
+            var neighborhood_linear: vec3<f32>;
+            if (is_raw == 1u) {
+                neighborhood_linear = neighborhood_input_space;
+            } else {
+                neighborhood_linear = srgb_to_linear(neighborhood_input_space);
+            }
+            let min_ch = min(color_in.r, min(color_in.g, color_in.b));
+            let clipped = smoothstep(0.82, 1.0, min_ch);
+            if (clipped > 0.001) {
+                let blab = linear_to_oklab(max(neighborhood_linear, vec3<f32>(0.0)));
+                // The neighborhood blur includes the blown region itself,
+                // diluting its chroma — amplify to compensate. Near truly
+                // neutral surroundings the absolute chroma stays tiny, so
+                // this cannot invent color that is not there.
+                let inherit = clipped * min(-highlights_adj, 1.0);
+                lab.y = mix(lab.y, blab.y * 2.4, inherit);
+                lab.z = mix(lab.z, blab.z * 2.4, inherit);
+            }
         } else {
             lab.x = lab.x + highlights_adj * 0.5 * mask * (1.15 - t);
         }
@@ -1934,7 +1956,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     composite_rgb_linear = apply_color_wheels(composite_rgb_linear, t_cw_lift, t_cw_gamma, t_cw_gain, t_cw_offset);
     composite_rgb_linear = apply_filmic_exposure(composite_rgb_linear, t_brightness);
     composite_rgb_linear = apply_tonal_adjustments(composite_rgb_linear, tonal_blurred, is_raw, t_contrast, t_shadows, t_whites, t_blacks, t_pivot);
-    composite_rgb_linear = apply_highlights_adjustment(composite_rgb_linear, tonal_blurred, is_raw, t_highlights);
+    composite_rgb_linear = apply_highlights_adjustment(composite_rgb_linear, tonal_blurred, structure_blurred, is_raw, t_highlights);
     composite_rgb_linear = apply_color_calibration(composite_rgb_linear, adjustments.global.color_calibration);
     composite_rgb_linear = apply_hsl_panel(composite_rgb_linear, final_hsl, absolute_coord_i);
     composite_rgb_linear = apply_hue_shift(composite_rgb_linear, t_hue);

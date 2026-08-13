@@ -1045,7 +1045,8 @@
       "quickEraser": "快速橡皮擦",
       "radial": "径向",
       "sky": "天空",
-      "subject": "主体"
+      "subject": "主体",
+      "aiPaint": "AI 涂抹"
     }
   },
   "menus": {

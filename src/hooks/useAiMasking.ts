@@ -317,6 +317,37 @@ export function useAiMasking() {
     }
   };
 
+  const handleGenerateAiPaintMask = async (subMaskId: string, lines: any[]) => {
+    const { selectedImage, adjustments, patchesSentToBackend } = useEditorStore.getState();
+    if (!selectedImage?.path) return;
+    setEditor({ isGeneratingAiMask: true });
+
+    try {
+      const transformAdjustments = getTransformAdjustments(adjustments);
+      const newParameters: any = await invoke(Invokes.GenerateAiPaintMask, {
+        jsAdjustments: transformAdjustments,
+        lines,
+        flipHorizontal: adjustments.flipHorizontal,
+        flipVertical: adjustments.flipVertical,
+        orientationSteps: adjustments.orientationSteps,
+        path: selectedImage.path,
+        rotation: adjustments.rotation,
+      });
+
+      const subMask = [...(adjustments.masks || []), ...(adjustments.aiPatches || [])]
+        .flatMap((p: any) => p.subMasks)
+        .find((sm: SubMask) => sm.id === subMaskId);
+      // Keep the strokes so painting more refines the same selection.
+      const mergedParameters = { ...(subMask?.parameters || {}), ...newParameters, lines };
+      patchesSentToBackend.delete(subMaskId);
+      updateSubMask(subMaskId, { parameters: mergedParameters });
+    } catch (error) {
+      toast.error(`AI Paint Failed: ${error}`);
+    } finally {
+      setEditor({ isGeneratingAiMask: false });
+    }
+  };
+
   const handleGenerateAiDepthMask = async (subMaskId: string, parameters: any) => {
     const { selectedImage, adjustments, patchesSentToBackend } = useEditorStore.getState();
     if (!selectedImage?.path) return;
@@ -430,6 +461,7 @@ export function useAiMasking() {
     updateSubMask,
     handleGenerativeReplace,
     handleSpotEnhance,
+    handleGenerateAiPaintMask,
     handleQuickErase,
     handleDeleteMaskContainer,
     handleDeleteAiPatch,

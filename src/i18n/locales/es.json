@@ -1045,7 +1045,8 @@
       "quickEraser": "Borrador rápido",
       "radial": "Radial",
       "sky": "Cielo",
-      "subject": "Sujeto"
+      "subject": "Sujeto",
+      "aiPaint": "Pintura IA"
     }
   },
   "menus": {

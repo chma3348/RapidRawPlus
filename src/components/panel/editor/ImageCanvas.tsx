@@ -45,6 +45,7 @@ interface ImageCanvasProps {
   isRotationActive?: boolean;
   maskOverlayUrl: string | null;
   onGenerateAiMask(id: string | null, start: Coord, end: Coord): void;
+  onGenerateAiPaintMask?(id: string | null, lines: any[]): void;
   onLiveMaskPreview?: (previewMaskDef: any) => void;
   onQuickErase(subMaskId: string | null, startPoint: Coord, endpoint: Coord): void;
   onSelectAiSubMask(id: string | null): void;
@@ -630,7 +631,7 @@ const MaskOverlay = memo(
       return null;
     }
 
-    if (subMask.type === Mask.Brush || subMask.type === Mask.Flow) {
+    if (subMask.type === Mask.Brush || subMask.type === Mask.Flow || subMask.type === Mask.AiPaint) {
       const { lines = [] } = p;
       return (
         <Group
@@ -1011,6 +1012,7 @@ const ImageCanvas = memo(
     isRotationActive,
     maskOverlayUrl,
     onGenerateAiMask,
+    onGenerateAiPaintMask,
     onLiveMaskPreview,
     onQuickErase,
     onSelectAiSubMask,
@@ -1232,7 +1234,8 @@ const ImageCanvas = memo(
     const brushImageSpaceSize = brushStageSize / (imageRenderSize.scale || 1);
 
     const isBrushActive =
-      (isMasking || isAiEditing) && (activeSubMask?.type === Mask.Brush || activeSubMask?.type === Mask.Flow);
+      (isMasking || isAiEditing) &&
+      (activeSubMask?.type === Mask.Brush || activeSubMask?.type === Mask.Flow || activeSubMask?.type === Mask.AiPaint);
     const activeLineFlow = activeSubMask?.type === Mask.Flow ? (activeSubMask?.parameters?.flow ?? 10) : undefined;
     const brushCursorPreview = useMemo(() => {
       const radius = Math.max(0.1, brushStageSize / 2);
@@ -1983,13 +1986,19 @@ const ImageCanvas = memo(
         };
 
         const existingLines = activeSubMask?.parameters.lines || [];
+        const allLines = [...existingLines, imageSpaceLine];
 
         updateSubMask(activeId, {
           parameters: {
             ...activeSubMask?.parameters,
-            lines: [...existingLines, imageSpaceLine],
+            lines: allLines,
           },
         });
+
+        // AI Paint: the rough strokes become a SAM prompt on release.
+        if (activeSubMask?.type === Mask.AiPaint && onGenerateAiPaintMask) {
+          onGenerateAiPaintMask(activeId, allLines);
+        }
 
         const lastPoint = line.points[line.points.length - 1];
         if (lastPoint) {

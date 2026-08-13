@@ -1045,7 +1045,8 @@
       "quickEraser": "빠른 지우개",
       "radial": "원형",
       "sky": "하늘",
-      "subject": "피사체"
+      "subject": "피사체",
+      "aiPaint": "AI 페인트"
     }
   },
   "menus": {

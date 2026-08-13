@@ -43,11 +43,23 @@ fn make_device() -> Option<(wgpu::Device, wgpu::Queue, wgpu::Limits)> {
 
 /// Renders `pixels` (linear RGBA f32, W×H) through the full pipeline.
 fn render(processor: &GpuProcessor, device: &wgpu::Device, queue: &wgpu::Queue, pixels: &[f32], adjustments: AllAdjustments) -> Vec<u8> {
+    render_sized(processor, device, queue, pixels, adjustments, W, H)
+}
+
+fn render_sized(
+    processor: &GpuProcessor,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    pixels: &[f32],
+    adjustments: AllAdjustments,
+    w: u32,
+    h: u32,
+) -> Vec<u8> {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("test input"),
         size: wgpu::Extent3d {
-            width: W,
-            height: H,
+            width: w,
+            height: h,
             depth_or_array_layers: 1,
         },
         mip_level_count: 1,
@@ -68,23 +80,23 @@ fn render(processor: &GpuProcessor, device: &wgpu::Device, queue: &wgpu::Queue, 
         bytemuck::cast_slice(&half_pixels),
         wgpu::TexelCopyBufferLayout {
             offset: 0,
-            bytes_per_row: Some(W * 8),
-            rows_per_image: Some(H),
+            bytes_per_row: Some(w * 8),
+            rows_per_image: Some(h),
         },
         wgpu::Extent3d {
-            width: W,
-            height: H,
+            width: w,
+            height: h,
             depth_or_array_layers: 1,
         },
     );
     let view = texture.create_view(&Default::default());
-    let dummy_mask = ImageBuffer::<Luma<u8>, Vec<u8>>::new(W, H);
+    let dummy_mask = ImageBuffer::<Luma<u8>, Vec<u8>>::new(w, h);
     let masks = [dummy_mask.clone(), dummy_mask];
     let (data, out_w, out_h, _, _) = processor
         .run(
             &view,
-            W,
-            H,
+            w,
+            h,
             RenderRequest {
                 adjustments,
                 mask_bitmaps: &masks,
@@ -95,7 +107,7 @@ fn render(processor: &GpuProcessor, device: &wgpu::Device, queue: &wgpu::Queue, 
             false,
         )
         .expect("render");
-    assert_eq!((out_w, out_h), (W, H));
+    assert_eq!((out_w, out_h), (w, h));
     data
 }
 
@@ -278,5 +290,74 @@ fn v2_contrast_is_hue_stable_and_filmic_rolls_off() {
         filmic[x_white] < 252,
         "no shoulder: input 1.0 rendered at {}",
         filmic[x_white]
+    );
+
+    // ---- 3. highlight recovery reconstructs clipped color ----
+    // Orange scene with a blown white disc in the middle; pulling
+    // highlights down must give the disc back its surroundings' color
+    // instead of leaving a gray/white blotch.
+    const RW: u32 = 256;
+    const RH: u32 = 256;
+    // Fresh processor sized so blur radii are physically meaningful.
+    let Some((d2, q2, l2)) = make_device() else {
+        return;
+    };
+    let rdevice = Arc::new(d2);
+    let rqueue = Arc::new(q2);
+    let recovery_processor = GpuProcessor::new(
+        GpuContext {
+            device: rdevice.clone(),
+            queue: rqueue.clone(),
+            limits: l2,
+            display: Arc::new(std::sync::Mutex::new(None)),
+        },
+        RW,
+        RH,
+    )
+    .expect("recovery processor");
+    let mut scene = vec![0f32; (RW * RH * 4) as usize];
+    let (cx, cy, radius) = (RW as f32 / 2.0, RH as f32 / 2.0, 7.0f32);
+    for y in 0..RH {
+        for x in 0..RW {
+            let i = ((y * RW + x) * 4) as usize;
+            let d = ((x as f32 - cx).powi(2) + (y as f32 - cy).powi(2)).sqrt();
+            if d < radius {
+                scene[i] = 2.5;
+                scene[i + 1] = 2.5;
+                scene[i + 2] = 2.5;
+            } else {
+                scene[i] = 0.9;
+                scene[i + 1] = 0.45;
+                scene[i + 2] = 0.15;
+            }
+            scene[i + 3] = 1.0;
+        }
+    }
+    let center_chroma = |pv: u32| -> f32 {
+        let mut adj = AllAdjustments::default();
+        adj.global.is_raw_image = 1;
+        adj.global.process_version = pv;
+        adj.global.highlights = -0.9;
+        adj.global.contrast_pivot = 0.5;
+        adj.global.tonemapper_mode = 0;
+        let out = render_sized(&recovery_processor, &rdevice, &rqueue, &scene, adj, RW, RH);
+        let i = (((RH / 2) * RW + RW / 2) * 4) as usize;
+        let (_, c) = oklab_hue_deg(
+            out[i] as f32 / 255.0,
+            out[i + 1] as f32 / 255.0,
+            out[i + 2] as f32 / 255.0,
+        );
+        c
+    };
+    let c1 = center_chroma(1);
+    let c2 = center_chroma(2);
+    println!("recovered disc chroma: v1 {c1:.4}, v2 {c2:.4}");
+    assert!(
+        c2 > c1 + 0.01,
+        "v2 recovery should reconstruct color in the blown disc (v1 {c1:.4}, v2 {c2:.4})"
+    );
+    assert!(
+        c2 > 0.02,
+        "recovered disc still gray (chroma {c2:.4})"
     );
 }

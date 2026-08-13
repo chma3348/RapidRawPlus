@@ -1156,6 +1156,132 @@ pub fn run_sam_decoder(
     Ok(feathered_mask)
 }
 
+/// Paint-prompted SAM decode: the user's rough paint becomes (a) up to nine
+/// positive point prompts spread across the painted region and (b) a
+/// low-res mask prior fed into the decoder — dramatically better lock-on
+/// than a single click or box for subjects the model is unsure about.
+pub fn run_sam_decoder_with_paint(
+    decoder: &Mutex<Session>,
+    embeddings: &ImageEmbeddings,
+    paint: &GrayImage,
+) -> Result<GrayImage> {
+    let (orig_width, orig_height) = embeddings.original_size;
+    let long_side = orig_width.max(orig_height) as f64;
+    let scale = SAM_INPUT_SIZE as f64 / long_side;
+
+    // Collect painted pixels (subsampled for speed).
+    let stride = ((paint.width().max(paint.height()) / 256).max(1)) as usize;
+    let mut painted: Vec<(f32, f32)> = Vec::new();
+    for (x, y, p) in paint.enumerate_pixels() {
+        if p[0] > 127 && (x as usize).is_multiple_of(stride) && (y as usize).is_multiple_of(stride) {
+            painted.push((x as f32, y as f32));
+        }
+    }
+    if painted.is_empty() {
+        return Err(anyhow::anyhow!("Paint a region first, then release to detect."));
+    }
+
+    // Centroid + greedy farthest-point sampling for good spatial coverage.
+    let n = painted.len() as f32;
+    let centroid = painted
+        .iter()
+        .fold((0.0, 0.0), |acc, p| (acc.0 + p.0 / n, acc.1 + p.1 / n));
+    let mut chosen: Vec<(f32, f32)> = vec![centroid];
+    while chosen.len() < 9 {
+        let mut best = None;
+        let mut best_d = -1.0f32;
+        for p in painted.iter() {
+            let d = chosen
+                .iter()
+                .map(|c| (p.0 - c.0).powi(2) + (p.1 - c.1).powi(2))
+                .fold(f32::MAX, f32::min);
+            if d > best_d {
+                best_d = d;
+                best = Some(*p);
+            }
+        }
+        match best {
+            Some(p) if best_d > 4.0 => chosen.push(p),
+            _ => break,
+        }
+    }
+
+    let point_coords: Vec<(f32, f32)> = chosen
+        .iter()
+        .map(|p| ((p.0 as f64 * scale) as f32, (p.1 as f64 * scale) as f32))
+        .collect();
+    let point_labels: Vec<f32> = vec![1.0; point_coords.len()];
+
+    // Low-res prior on the SAM 256x256 mask grid (which spans the padded
+    // 1024 input square): painted -> +6 logits, everything else -> -6.
+    let mut mask_input_flat = vec![-6.0f32; 256 * 256];
+    for gy in 0..256usize {
+        for gx in 0..256usize {
+            let sam_x = (gx as f64 + 0.5) * 4.0;
+            let sam_y = (gy as f64 + 0.5) * 4.0;
+            let ox = sam_x / scale;
+            let oy = sam_y / scale;
+            if ox < orig_width as f64 && oy < orig_height as f64 {
+                let px = paint.get_pixel(ox as u32, oy as u32)[0];
+                if px > 127 {
+                    mask_input_flat[gy * 256 + gx] = 6.0;
+                }
+            }
+        }
+    }
+    let mask_input = Array::from_shape_vec((1, 1, 256, 256), mask_input_flat)?.into_dyn();
+
+    let orig_im_size =
+        Array::from_shape_vec((2,), vec![orig_height as f32, orig_width as f32])?.into_dyn();
+
+    let pc_len = point_coords.len();
+    let coords_flat: Vec<f32> = point_coords.iter().flat_map(|&(x, y)| vec![x, y]).collect();
+    let coords_array = Array::from_shape_vec((1, pc_len, 2), coords_flat)?.into_dyn();
+    let labels_array = Array::from_shape_vec((1, pc_len), point_labels)?.into_dyn();
+
+    let t_embeddings = Tensor::from_array(
+        embeddings
+            .embeddings
+            .clone()
+            .as_standard_layout()
+            .into_owned(),
+    )?;
+    let t_point_coords = Tensor::from_array(coords_array.as_standard_layout().into_owned())?;
+    let t_point_labels = Tensor::from_array(labels_array.as_standard_layout().into_owned())?;
+    let t_mask_input = Tensor::from_array(mask_input.as_standard_layout().into_owned())?;
+    let t_has_mask = Tensor::from_array(
+        Array::from_elem((1,), 1.0f32)
+            .into_dyn()
+            .as_standard_layout()
+            .into_owned(),
+    )?;
+    let t_orig_im_size = Tensor::from_array(orig_im_size.as_standard_layout().into_owned())?;
+
+    let mask_tensor = {
+        let mut session = decoder.lock().unwrap();
+        let outputs = session.run(ort::inputs![
+            t_embeddings,
+            t_point_coords,
+            t_point_labels,
+            t_mask_input,
+            t_has_mask,
+            t_orig_im_size
+        ])?;
+        outputs[0].try_extract_array::<f32>()?.to_owned()
+    };
+
+    let dims = mask_tensor.shape();
+    let (h, w) = (dims[2], dims[3]);
+    let slice = mask_tensor.as_slice().unwrap();
+    let data: Vec<u8> = slice[0..h * w]
+        .iter()
+        .map(|&v| if v > 0.0 { 255 } else { 0 })
+        .collect();
+    let gray = GrayImage::from_raw(w as u32, h as u32, data)
+        .ok_or_else(|| anyhow::anyhow!("Failed to build mask from SAM output"))?;
+    Ok(image::imageops::blur(&gray, 2.0))
+}
+
 pub fn run_sky_seg_model(
     image: &DynamicImage,
     sky_seg_session: &Mutex<Session>,

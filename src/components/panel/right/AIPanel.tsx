@@ -99,6 +99,13 @@ const SUB_MASK_CONFIG: any = {
       { key: 'feather', min: 0, max: 100, step: 1, defaultValue: 25 },
     ],
   },
+  [Mask.AiPaint]: {
+    showBrushTools: true,
+    parameters: [
+      { key: 'grow', min: -100, max: 100, step: 1, defaultValue: 50 },
+      { key: 'feather', min: 0, max: 100, step: 1, defaultValue: 25 },
+    ],
+  },
   [Mask.AiForeground]: {
     parameters: [
       { key: 'grow', min: -100, max: 100, step: 1, defaultValue: 50 },
