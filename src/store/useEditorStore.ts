@@ -54,6 +54,9 @@ interface EditorState {
   overlayRotation: number;
   isStraightenActive: boolean;
   isWbPickerActive: boolean;
+  // Color Mixer eyedropper: click the photo to pick which HSL band to edit.
+  isMixerPickerActive: boolean;
+  mixerTargetBand: string | null;
   liveRotation: number | null;
   brushSettings: BrushSettings | null;
 
@@ -120,6 +123,8 @@ export const useEditorStore = create<EditorState>((set) => ({
   transformedOriginalUrl: null,
   isStraightenActive: false,
   isWbPickerActive: false,
+  isMixerPickerActive: false,
+  mixerTargetBand: null,
   liveRotation: null,
 
   copiedSectionAdjustments: null,

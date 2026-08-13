@@ -67,6 +67,7 @@
       "tint": "Tint",
       "toggleSliders": "Toggle Sliders",
       "vibrance": "Vibrance",
+      "mixerPickerTooltip": "Click the photo to jump to the matching color band",
       "wbPickerTooltip": "White Balance Picker",
       "wbPickerWgpuDisabled": "WB Picker: Disable WGPU in Settings.",
       "whiteBalance": "White Balance",

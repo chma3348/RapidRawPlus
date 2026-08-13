@@ -8,6 +8,7 @@ import HueCurvesPanel from './HueCurves';
 import { ColorAdjustment, ColorCalibration, HueSatLum, INITIAL_ADJUSTMENTS } from '../../utils/adjustments';
 import { Adjustments, ColorGrading } from '../../utils/adjustments';
 import { AppSettings } from '../ui/AppProperties';
+import { useEditorStore } from '../../store/useEditorStore';
 import Text from '../ui/Text';
 import { TextColors, TextVariants, TextWeights } from '../../types/typography';
 
@@ -24,6 +25,8 @@ interface ColorPanelProps {
   isForMask?: boolean;
   isWbPickerActive?: boolean;
   toggleWbPicker?: () => void;
+  isMixerPickerActive?: boolean;
+  toggleMixerPicker?: () => void;
   onDragStateChange?: (isDragging: boolean) => void;
 }
 
@@ -450,6 +453,8 @@ export default function ColorPanel({
   isForMask = false,
   isWbPickerActive = false,
   toggleWbPicker,
+  isMixerPickerActive = false,
+  toggleMixerPicker,
   onDragStateChange,
 }: ColorPanelProps) {
   const { t } = useTranslation();
@@ -513,6 +518,16 @@ export default function ColorPanel({
       },
     }));
   };
+
+  // Adopt a band picked with the eyedropper on the canvas: ImageCanvas
+  // writes the nearest band name to the store; consume and clear it.
+  const mixerTargetBand = useEditorStore((s) => s.mixerTargetBand);
+  useEffect(() => {
+    if (mixerTargetBand && !isForMask) {
+      setActiveColor(mixerTargetBand);
+      useEditorStore.getState().setEditor({ mixerTargetBand: null });
+    }
+  }, [mixerTargetBand, isForMask]);
 
   const hue_slider = `hue-slider-${activeColor}`;
   const saturation_slider = `sat-slider-${activeColor}`;
@@ -626,9 +641,22 @@ export default function ColorPanel({
       )}
 
       <div className="p-2 bg-bg-tertiary rounded-md">
-        <Text variant={TextVariants.heading} className="mb-3">
-          {t('adjustments.color.colorMixer')}
-        </Text>
+        <div className="flex justify-between items-center mb-3">
+          <Text variant={TextVariants.heading}>{t('adjustments.color.colorMixer')}</Text>
+          {!isForMask && toggleMixerPicker && (
+            <button
+              onClick={toggleMixerPicker}
+              className={`p-1.5 rounded-md transition-colors ${
+                isMixerPickerActive
+                  ? 'bg-accent text-button-text'
+                  : 'hover:bg-bg-secondary text-text-secondary'
+              }`}
+              data-tooltip={t('adjustments.color.mixerPickerTooltip')}
+            >
+              <Pipette size={16} />
+            </button>
+          )}
+        </div>
         <div className="flex justify-between mb-4 px-1">
           {HSL_COLORS.map(({ name, color, label }) => (
             <ColorSwatch

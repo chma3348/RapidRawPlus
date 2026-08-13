@@ -529,7 +529,7 @@ function App() {
   const handleRightPanelSelect = useCallback(
     (panelId: Panel) => {
       setRightPanel(panelId);
-      setEditor({ activeMaskId: null, activeAiSubMaskId: null, isWbPickerActive: false });
+      setEditor({ activeMaskId: null, activeAiSubMaskId: null, isWbPickerActive: false, isMixerPickerActive: false });
     },
     [setRightPanel, setEditor],
   );

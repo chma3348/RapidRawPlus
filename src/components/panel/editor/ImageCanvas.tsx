@@ -62,6 +62,8 @@ interface ImageCanvasProps {
   interactivePatch?: { url: string; normX: number; normY: number; normW: number; normH: number } | null;
   isWbPickerActive?: boolean;
   onWbPicked?: () => void;
+  isMixerPickerActive?: boolean;
+  onMixerBandPicked?: (band: string) => void;
   setAdjustments(fn: (prev: Adjustments) => Adjustments): void;
   overlayMode?: OverlayMode;
   overlayRotation?: number;
@@ -1048,6 +1050,8 @@ const ImageCanvas = memo(
     updateSubMask,
     isWbPickerActive = false,
     onWbPicked,
+    isMixerPickerActive = false,
+    onMixerBandPicked,
     setAdjustments,
     overlayRotation,
     overlayMode,
@@ -1469,6 +1473,101 @@ const ImageCanvas = memo(
       [isWbPickerActive, finalPreviewUrl, imageRenderSize, onWbPicked, setAdjustments, getCanvasPointer],
     );
 
+    // Color Mixer eyedropper: sample the displayed preview at the click and
+    // report the nearest HSL band. Same sampling approach as the WB picker,
+    // so it works under any renderer.
+    const handleMixerClick = useCallback(
+      (e: any) => {
+        if (!isMixerPickerActive || !finalPreviewUrl || !onMixerBandPicked) return;
+
+        const stage = e.target.getStage();
+        const pointerPos = getCanvasPointer(stage);
+        if (!pointerPos) return;
+
+        const x = pointerPos.x / imageRenderSize.scale;
+        const y = pointerPos.y / imageRenderSize.scale;
+        const imgLogicalWidth = imageRenderSize.width / imageRenderSize.scale;
+        const imgLogicalHeight = imageRenderSize.height / imageRenderSize.scale;
+        if (x < 0 || x > imgLogicalWidth || y < 0 || y > imgLogicalHeight) return;
+
+        const img = new Image();
+        img.crossOrigin = 'Anonymous';
+        img.src = finalPreviewUrl;
+        img.onload = () => {
+          const radius = 2;
+          const canvas = document.createElement('canvas');
+          const side = radius * 2 + 1;
+          canvas.width = side;
+          canvas.height = side;
+          const ctx = canvas.getContext('2d', { willReadFrequently: true });
+          if (!ctx) return;
+
+          const srcX = Math.floor((x * img.width) / imgLogicalWidth);
+          const srcY = Math.floor((y * img.height) / imgLogicalHeight);
+          const startX = Math.max(0, srcX - radius);
+          const startY = Math.max(0, srcY - radius);
+          const sw = Math.min(img.width, srcX + radius + 1) - startX;
+          const sh = Math.min(img.height, srcY + radius + 1) - startY;
+          if (sw <= 0 || sh <= 0) return;
+
+          ctx.drawImage(img, startX, startY, sw, sh, 0, 0, sw, sh);
+          const data = ctx.getImageData(0, 0, sw, sh).data;
+          let r = 0,
+            g = 0,
+            b = 0,
+            count = 0;
+          for (let i = 0; i < data.length; i += 4) {
+            r += data[i];
+            g += data[i + 1];
+            b += data[i + 2];
+            count++;
+          }
+          if (count === 0) return;
+          r /= count * 255;
+          g /= count * 255;
+          b /= count * 255;
+
+          const max = Math.max(r, g, b);
+          const min = Math.min(r, g, b);
+          const d = max - min;
+          if (d < 0.02) return; // near-neutral: no meaningful band
+          let hue: number;
+          if (max === r) {
+            hue = 60 * (((g - b) / d) % 6);
+          } else if (max === g) {
+            hue = 60 * ((b - r) / d + 2);
+          } else {
+            hue = 60 * ((r - g) / d + 4);
+          }
+          hue = ((hue % 360) + 360) % 360;
+
+          // Same band centers as the mixer's colorHueMap.
+          const bands: Array<[string, number]> = [
+            ['reds', 0],
+            ['oranges', 30],
+            ['yellows', 60],
+            ['greens', 120],
+            ['aquas', 180],
+            ['blues', 240],
+            ['purples', 300],
+            ['magentas', 340],
+          ];
+          let best = bands[0][0];
+          let bestDist = 361;
+          for (const [name, center] of bands) {
+            const diff = Math.abs(hue - center);
+            const dist = Math.min(diff, 360 - diff);
+            if (dist < bestDist) {
+              bestDist = dist;
+              best = name;
+            }
+          }
+          onMixerBandPicked(best);
+        };
+      },
+      [isMixerPickerActive, finalPreviewUrl, imageRenderSize, onMixerBandPicked, getCanvasPointer],
+    );
+
     const handleStart = useCallback(
       (e: any) => {
         if (e.evt && typeof e.evt.button === 'number' && e.evt.button !== 0) {
@@ -1479,6 +1578,11 @@ const ImageCanvas = memo(
 
         if (isWbPickerActive) {
           handleWbClick(e);
+          return;
+        }
+
+        if (isMixerPickerActive) {
+          handleMixerClick(e);
           return;
         }
 
@@ -1667,6 +1771,8 @@ const ImageCanvas = memo(
       [
         isWbPickerActive,
         handleWbClick,
+        isMixerPickerActive,
+        handleMixerClick,
         isInitialDrawing,
         isBrushActive,
         activeLineFlow,
@@ -1694,7 +1800,7 @@ const ImageCanvas = memo(
 
     const handleMove = useCallback(
       (e: any) => {
-        if (isWbPickerActive) {
+        if (isWbPickerActive || isMixerPickerActive) {
           return;
         }
 
@@ -2263,13 +2369,13 @@ const ImageCanvas = memo(
     };
 
     const effectiveCursor = useMemo(() => {
-      if (isWbPickerActive) return 'crosshair';
+      if (isWbPickerActive || isMixerPickerActive) return 'crosshair';
       if (isParametricActive) return 'crosshair';
       if (isInitialDrawing) return 'crosshair';
       if (isBrushActive) return 'none';
       if (isAiSubjectActive) return 'crosshair';
       return cursorStyle;
-    }, [isWbPickerActive, isInitialDrawing, isBrushActive, isAiSubjectActive, isParametricActive, cursorStyle]);
+    }, [isWbPickerActive, isMixerPickerActive, isInitialDrawing, isBrushActive, isAiSubjectActive, isParametricActive, cursorStyle]);
 
     const handlePreviewUpdate = useCallback(
       (id: string, subMaskPreview: Partial<SubMask>) => {
@@ -2432,7 +2538,7 @@ const ImageCanvas = memo(
             </div>
           </div>
 
-          {(isMasking || isAiEditing || isWbPickerActive) && (
+          {(isMasking || isAiEditing || isWbPickerActive || isMixerPickerActive) && (
             <div
               style={{
                 position: 'absolute',
