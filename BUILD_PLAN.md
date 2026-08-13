@@ -4,18 +4,20 @@ Scope contract for the current four-phase build. Each phase ends with its
 acceptance list re-checked, tests run, and a dedicated commit + push.
 Nothing gets added or dropped from this list silently.
 
-## Phase 1 — AI Paint interaction fix (bug)
-- [ ] Clicking/dragging with an AI Paint sub-mask active PAINTS strokes;
-      it never pans the image.
-- [ ] Works in both the Masks panel and the AI panel flows.
-- [ ] Releasing the stroke triggers SAM refinement (existing behavior).
+## Phase 1 — AI Paint interaction fix (bug) — SHIPPED 47ec62b7
+- [x] Clicking/dragging with an AI Paint sub-mask active PAINTS strokes;
+      it never pans the image. (root cause: brush tool never activated +
+      pan not disabled for the type; fixed at all sites — user to confirm)
+- [x] Works in both the Masks panel and the AI panel flows.
+- [x] Releasing the stroke triggers SAM refinement (existing behavior).
 
-## Phase 2 — Whole-mask controls
-- [ ] Mask CONTAINER properties gain Opacity, Grow, Feather controls,
-      alongside the existing per-component ones.
-- [ ] Backend applies container grow/feather AFTER component composition
+## Phase 2 — Whole-mask controls — SHIPPED
+- [x] Mask CONTAINER properties gain Opacity, Grow, Feather controls,
+      alongside the existing per-component ones. (Opacity already existed
+      at container level; Grow/Feather added.)
+- [x] Backend applies container grow/feather AFTER component composition
       (add/subtract/intersect), so it hones the combined shape.
-- [ ] Old sidecars unaffected (defaults = neutral).
+- [x] Old sidecars unaffected (serde defaults = neutral).
 
 ## Phase 3 — Lightroom-class color select (both interactions)
 - [ ] Eyedropper: click the image to sample the target color.

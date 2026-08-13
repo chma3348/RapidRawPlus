@@ -2457,6 +2457,32 @@ function SettingsPanel({
             onDragStateChange={onDragStateChange}
           />
 
+          {!isComponentMode && (
+            <>
+              <Slider
+                defaultValue={0}
+                label={t('editor.masks.params.grow')}
+                max={100}
+                min={-100}
+                value={displayContainer.grow ?? 0}
+                onChange={(e: any) => handleMaskPropertyChange('grow', Number(e.target.value))}
+                step={1}
+                onDragStateChange={onDragStateChange}
+              />
+              <Slider
+                defaultValue={0}
+                label={t('editor.masks.params.feather')}
+                max={100}
+                min={0}
+                value={displayContainer.feather ?? 0}
+                onChange={(e: any) => handleMaskPropertyChange('feather', Number(e.target.value))}
+                step={1}
+                fillOrigin="min"
+                onDragStateChange={onDragStateChange}
+              />
+            </>
+          )}
+
           {isComponentMode && (
             <>
               {isAiMask && aiModelDownloadStatus && (

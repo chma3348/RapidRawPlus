@@ -54,6 +54,11 @@ pub struct MaskDefinition {
     pub invert: bool,
     #[serde(default = "default_opacity")]
     pub opacity: f32,
+    // Whole-mask shape honing, applied AFTER component composition.
+    #[serde(default)]
+    pub grow: f32,
+    #[serde(default)]
+    pub feather: f32,
     pub adjustments: Value,
     pub sub_masks: Vec<SubMask>,
 }
@@ -1393,6 +1398,10 @@ pub fn generate_mask_bitmap(
                 }
             }
         }
+    }
+
+    if mask_def.grow != 0.0 || mask_def.feather != 0.0 {
+        apply_grow_and_feather(&mut final_mask, mask_def.grow, mask_def.feather, width, height);
     }
 
     if mask_def.invert {

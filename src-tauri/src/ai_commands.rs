@@ -799,6 +799,8 @@ pub async fn invoke_generative_replace_with_mask_def(
         visible: patch_definition.visible,
         invert: patch_definition.invert,
         opacity: 100.0,
+        grow: 0.0,
+        feather: 0.0,
         adjustments: serde_json::Value::Null,
         sub_masks: patch_definition.sub_masks,
     };
@@ -1188,6 +1190,8 @@ pub async fn invoke_spot_enhance_with_mask_def(
         visible: patch_definition.visible,
         invert: patch_definition.invert,
         opacity: 100.0,
+        grow: 0.0,
+        feather: 0.0,
         adjustments: serde_json::Value::Null,
         sub_masks: patch_definition.sub_masks.clone(),
     };
