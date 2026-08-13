@@ -537,7 +537,7 @@ export default function AIPanel() {
     onSelectPatchContainer(newContainer.id);
     onSelectSubMask(subMask.id);
     setExpandedContainers((prev) => new Set(prev).add(newContainer.id));
-    if (type === Mask.Brush) selectBrushToolForNewMask();
+    if (type === Mask.Brush || type === Mask.AiPaint) selectBrushToolForNewMask();
 
     if (type === Mask.AiForeground) handleGenerateAiForegroundMask(subMask.id);
   };
@@ -564,7 +564,7 @@ export default function AIPanel() {
     onSelectPatchContainer(containerId);
     onSelectSubMask(subMask.id);
     setExpandedContainers((prev) => new Set(prev).add(containerId));
-    if (type === Mask.Brush) selectBrushToolForNewMask();
+    if (type === Mask.Brush || type === Mask.AiPaint) selectBrushToolForNewMask();
     if (type === Mask.AiForeground) handleGenerateAiForegroundMask(subMask.id);
   };
 
