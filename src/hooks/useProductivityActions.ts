@@ -136,7 +136,7 @@ export function useProductivityActions(refreshImageList: () => Promise<void>) {
     return savedPath;
   }, [refreshImageList]);
 
-  const handleApplyEnhance = useCallback(async (strength: number, outputScale: number, chainStep: number = 0) => {
+  const handleApplyEnhance = useCallback(async (strength: number, outputScale: number, chainStep: number = 0, texture: number = 0, grain: number = 0) => {
     const { enhanceModalState } = useUIStore.getState();
     if (enhanceModalState.targetPaths.length === 0) return;
 
@@ -156,6 +156,8 @@ export function useProductivityActions(refreshImageList: () => Promise<void>) {
         path: enhanceModalState.targetPaths[0],
         task: enhanceModalState.task,
         strength,
+        texture,
+        grain,
         outputScale,
         chainStep,
         // Chained passes work on the previous result, which already has

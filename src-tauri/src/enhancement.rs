@@ -372,15 +372,71 @@ fn enhancement_cache_key(
     format!("{}|{}|{}|{:x}", path, task, model_id, h.finish())
 }
 
+/// Robust estimate of an image's fine-grained noise level: the median
+/// absolute 4-neighbor Laplacian of luma over a sample grid. The median
+/// ignores edges (sparse outliers), so this tracks noise/grain amplitude
+/// rather than image content.
+fn estimate_fine_noise(img: &Rgb32FImage) -> f32 {
+    let (w, h) = img.dimensions();
+    if w < 8 || h < 8 {
+        return 0.0;
+    }
+    let luma = |x: u32, y: u32| {
+        let p = img.get_pixel(x, y);
+        0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2]
+    };
+    // Cap the sample count so huge upscales don't pay a full-image pass.
+    let step = (((w as u64 * h as u64) as f32 / 250_000.0).sqrt().ceil() as u32).max(1);
+    let mut vals: Vec<f32> = Vec::with_capacity(260_000);
+    let mut y = 1;
+    while y < h - 1 {
+        let mut x = 1;
+        while x < w - 1 {
+            let lap = luma(x, y) - (luma(x - 1, y) + luma(x + 1, y) + luma(x, y - 1) + luma(x, y + 1)) * 0.25;
+            vals.push(lap.abs());
+            x += step;
+        }
+        y += step;
+    }
+    if vals.is_empty() {
+        return 0.0;
+    }
+    let mid = vals.len() / 2;
+    vals.select_nth_unstable_by(mid, |a, b| a.total_cmp(b));
+    // MAD → σ (×1.4826), then unwind the Laplacian kernel's gain on white
+    // noise (√1.25 ≈ 1.118) so both measurements are in pixel-value units.
+    vals[mid] * 1.4826 / 1.118
+}
+
+/// Deterministic per-pixel noise in (-1, 1) with ~0.408 std (triangular):
+/// hash-based so retries are reproducible (no RNG state).
+fn grain_noise(i: u32) -> f32 {
+    let hash = |mut x: u32| -> u32 {
+        x = (x ^ 61) ^ (x >> 16);
+        x = x.wrapping_mul(9);
+        x ^= x >> 4;
+        x = x.wrapping_mul(0x27d4_eb2d);
+        x ^ (x >> 15)
+    };
+    let u1 = hash(i) as f32 / u32::MAX as f32;
+    let u2 = hash(i ^ 0x9E37_79B9) as f32 / u32::MAX as f32;
+    u1 + u2 - 1.0
+}
+
 /// Produces the delivered image from a raw model output: resize to the
-/// target dims, blend with the original at `strength`, emit the result
-/// payload. Shared by fresh runs and instant retries.
+/// target dims, swap the original's fine-detail layer back in at
+/// `texture`, blend with the original at `strength`, close any remaining
+/// grain deficit at `grain`, emit the result payload. Shared by fresh
+/// runs and instant retries.
+#[allow(clippy::too_many_arguments)]
 fn finish_enhancement(
     raw: &Rgb32FImage,
     original: &Rgb32FImage,
     target_w: u32,
     target_h: u32,
     strength: f32,
+    texture: f32,
+    grain: f32,
     app_handle: &AppHandle,
 ) -> Result<DynamicImage, String> {
     let mut enhanced = if raw.dimensions() != (target_w, target_h) {
@@ -391,9 +447,11 @@ fn finish_enhancement(
     };
 
     let strength = strength.clamp(0.0, 1.0);
-    if strength < 1.0 {
-        let _ = app_handle.emit("enhance-progress", "Blending with original...");
-        let reference = if original.dimensions() == (target_w, target_h) {
+    let texture = texture.clamp(0.0, 1.0);
+    let grain = grain.clamp(0.0, 1.0);
+
+    let reference = if strength < 1.0 || texture > 0.0 || grain > 0.0 {
+        Some(if original.dimensions() == (target_w, target_h) {
             original.clone()
         } else {
             image::imageops::resize(
@@ -402,11 +460,82 @@ fn finish_enhancement(
                 target_h,
                 image::imageops::FilterType::Lanczos3,
             )
-        };
+        })
+    } else {
+        None
+    };
+
+    // Authentic texture: keep the model output's structure (low/mid
+    // frequencies — the actual repair) but blend the ORIGINAL's
+    // fine-detail layer back on top. Restoration models smooth away real
+    // micro-texture (pores, hair, grain) along with the noise; this puts
+    // the real texture back without undoing the repair.
+    if texture > 0.0 {
+        let _ = app_handle.emit("enhance-progress", "Restoring original texture...");
+        let reference = reference.as_ref().unwrap();
+        let sigma = (target_w.min(target_h) as f32 / 1200.0).clamp(1.2, 3.5);
+        let enhanced_low = image::imageops::fast_blur(&enhanced, sigma);
+        let reference_low = image::imageops::fast_blur(reference, sigma);
+        let row = (target_w * 3) as usize;
+        use rayon::prelude::*;
+        enhanced
+            .par_chunks_mut(row)
+            .zip(enhanced_low.par_chunks(row))
+            .zip(reference.par_chunks(row).zip(reference_low.par_chunks(row)))
+            .for_each(|((e_row, el_row), (r_row, rl_row))| {
+                for i in 0..e_row.len() {
+                    let own_high = e_row[i] - el_row[i];
+                    let ref_high = r_row[i] - rl_row[i];
+                    e_row[i] = el_row[i] + own_high * (1.0 - texture) + ref_high * texture;
+                }
+            });
+    }
+
+    if strength < 1.0 {
+        let _ = app_handle.emit("enhance-progress", "Blending with original...");
+        let reference = reference.as_ref().unwrap();
         for (out_p, ref_p) in enhanced.pixels_mut().zip(reference.pixels()) {
             for c in 0..3 {
                 out_p[c] = out_p[c] * strength + ref_p[c] * (1.0 - strength);
             }
+        }
+    }
+
+    // Grain match: if the result is smoother than the original, add
+    // neutral luma grain to close the measured gap (variances add, so the
+    // needed σ is the quadrature difference). Never adds grain when the
+    // result is already at least as grainy — this only restores the
+    // photo's noise signature, it doesn't stylize.
+    if grain > 0.0 {
+        let reference = reference.as_ref().unwrap();
+        let sigma_ref = estimate_fine_noise(reference);
+        let sigma_out = estimate_fine_noise(&enhanced);
+        let deficit = (sigma_ref * sigma_ref - sigma_out * sigma_out).max(0.0).sqrt();
+        let sigma_add = (deficit * grain).min(0.06);
+        if sigma_add > 1e-4 {
+            let _ = app_handle.emit("enhance-progress", "Matching grain...");
+            let amplitude = sigma_add / 0.408;
+            let row = (target_w * 3) as usize;
+            use rayon::prelude::*;
+            enhanced
+                .par_chunks_mut(row)
+                .enumerate()
+                .for_each(|(y, e_row)| {
+                    for px in 0..(e_row.len() / 3) {
+                        let l = 0.2126 * e_row[px * 3]
+                            + 0.7152 * e_row[px * 3 + 1]
+                            + 0.0722 * e_row[px * 3 + 2];
+                        // Film-like: strongest in midtones, present but
+                        // subdued in deep shadows and near white.
+                        let weight = 0.35 + 0.65 * (4.0 * l * (1.0 - l)).clamp(0.0, 1.0);
+                        let n = grain_noise((y as u32).wrapping_mul(target_w).wrapping_add(px as u32))
+                            * amplitude
+                            * weight;
+                        for c in 0..3 {
+                            e_row[px * 3 + c] = (e_row[px * 3 + c] + n).max(0.0);
+                        }
+                    }
+                });
         }
     }
 
@@ -422,11 +551,14 @@ fn finish_enhancement(
     Ok(out_dynamic)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn enhance_image(
     rgb_input: Rgb32FImage,
     session: std::sync::Arc<Mutex<Session>>,
     params: EnhanceModelParams,
     strength: f32,
+    texture: f32,
+    grain: f32,
     output_scale: u32,
     app_handle: AppHandle,
 ) -> Result<(DynamicImage, Rgb32FImage, Rgb32FImage), String> {
@@ -467,6 +599,8 @@ fn enhance_image(
         in_w * target_scale,
         in_h * target_scale,
         strength,
+        texture,
+        grain,
         &app_handle,
     )?;
     Ok((out_dynamic, enhanced, rgb_input))
@@ -481,6 +615,8 @@ pub async fn apply_enhancement(
     path: String,
     task: String,
     strength: Option<f32>,
+    texture: Option<f32>,
+    grain: Option<f32>,
     output_scale: Option<u32>,
     chain_step: Option<u32>,
     js_adjustments: Option<serde_json::Value>,
@@ -511,6 +647,8 @@ pub async fn apply_enhancement(
         let result_handle = state.enhancement_result.clone();
         let key = cache_key.clone();
         let strength_v = strength.unwrap_or(1.0);
+        let texture_v = texture.unwrap_or(0.0);
+        let grain_v = grain.unwrap_or(0.0);
         let output_scale_v = output_scale;
         let handle = app_handle.clone();
         let hit = tokio::task::spawn_blocking(move || -> Result<bool, String> {
@@ -529,8 +667,16 @@ pub async fn apply_enhancement(
             } else {
                 (w * target_scale, h * target_scale)
             };
-            let out =
-                finish_enhancement(&cached.raw, &cached.original, tw, th, strength_v, &handle)?;
+            let out = finish_enhancement(
+                &cached.raw,
+                &cached.original,
+                tw,
+                th,
+                strength_v,
+                texture_v,
+                grain_v,
+                &handle,
+            )?;
             *result_handle.lock().unwrap() = Some(out);
             Ok(true)
         })
@@ -577,6 +723,8 @@ pub async fn apply_enhancement(
         return run_comfy_enhancement(
             model,
             strength.unwrap_or(1.0),
+            texture.unwrap_or(0.0),
+            grain.unwrap_or(0.0),
             rgb_input,
             cache_key,
             app_handle,
@@ -602,6 +750,8 @@ pub async fn apply_enhancement(
             session,
             params,
             strength,
+            texture.unwrap_or(0.0),
+            grain.unwrap_or(0.0),
             output_scale,
             app_handle.clone(),
         ) {
@@ -874,6 +1024,8 @@ pub(crate) fn align_for_engine(img: &Rgb32FImage, min_short: u32, max_short: u32
 async fn run_comfy_enhancement(
     model: crate::model_registry::RegisteredModel,
     strength: f32,
+    texture: f32,
+    grain: f32,
     rgb: Rgb32FImage,
     cache_key: String,
     app_handle: tauri::AppHandle,
@@ -930,7 +1082,8 @@ async fn run_comfy_enhancement(
             .map_err(|e| e.to_string())?
             .to_rgb32f();
         let (rw, rh) = raw.dimensions();
-        let out_dynamic = finish_enhancement(&raw, &rgb_input, rw, rh, strength, &app_handle)?;
+        let out_dynamic =
+            finish_enhancement(&raw, &rgb_input, rw, rh, strength, texture, grain, &app_handle)?;
         *result_handle.lock().unwrap() = Some(out_dynamic);
         // native_scale 0 = engine result: retries deliver at raw dims.
         *raw_handle.lock().unwrap() = Some(crate::app_state::EnhancementRaw {
@@ -1017,4 +1170,35 @@ pub async fn save_enhanced_image(
     let _ = source_sidecar_path;
 
     Ok(output_path.to_string_lossy().to_string())
+}
+
+#[cfg(test)]
+mod authentic_texture_tests {
+    use super::*;
+
+    /// The grain-match loop relies on the estimator reading the σ it will
+    /// later inject: synthesize noise with the same generator and check
+    /// the round trip, plus zero on a flat image.
+    #[test]
+    fn noise_estimator_tracks_known_sigma() {
+        let mut img = Rgb32FImage::from_pixel(256, 256, Rgb([0.5f32, 0.5, 0.5]));
+        let target = 0.02f32;
+        let amplitude = target / 0.408;
+        for (i, p) in img.pixels_mut().enumerate() {
+            let n = grain_noise(i as u32) * amplitude;
+            for c in 0..3 {
+                p[c] += n;
+            }
+        }
+        let est = estimate_fine_noise(&img);
+        assert!(
+            (est - target).abs() < target * 0.35,
+            "estimated σ {} too far from injected σ {}",
+            est,
+            target
+        );
+
+        let flat = Rgb32FImage::from_pixel(64, 64, Rgb([0.5f32, 0.5, 0.5]));
+        assert!(estimate_fine_noise(&flat) < 1e-4);
+    }
 }

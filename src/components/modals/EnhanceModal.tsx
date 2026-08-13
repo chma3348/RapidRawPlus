@@ -73,7 +73,7 @@ const PreviewCompare = ({ original, enhanced, strength }: { original: string; en
 interface EnhanceModalProps {
   isOpen: boolean;
   onClose(): void;
-  onEnhance(strength: number, outputScale: number, chainStep: number): void;
+  onEnhance(strength: number, outputScale: number, chainStep: number, texture: number, grain: number): void;
   onSave(): Promise<string>;
   onOpenFile(path: string): void;
   error: string | null;
@@ -115,6 +115,16 @@ export default function EnhanceModal({
   const [strength, setStrength] = useState(() => {
     const saved = Number(localStorage.getItem('rapidraw-enhance-strength'));
     return Number.isFinite(saved) && saved >= 10 && saved <= 100 ? saved : 70;
+  });
+  // Authentic-texture blend: how much of the ORIGINAL's fine detail layer
+  // (micro-texture, grain) survives over the model output.
+  const [texture, setTexture] = useState(() => {
+    const saved = Number(localStorage.getItem('rapidraw-enhance-texture'));
+    return Number.isFinite(saved) && saved >= 0 && saved <= 100 ? saved : 40;
+  });
+  const [grain, setGrain] = useState(() => {
+    const saved = Number(localStorage.getItem('rapidraw-enhance-grain'));
+    return Number.isFinite(saved) && saved >= 0 && saved <= 100 ? saved : 50;
   });
   const [outputScale, setOutputScale] = useState(2);
   const [previewData, setPreviewData] = useState<PreviewData | null>(null);
@@ -207,7 +217,7 @@ export default function EnhanceModal({
   const handleRun = () => {
     setSavedPath(null);
     setSaveError(null);
-    onEnhance(strength / 100, task === 'upscale' ? outputScale : 1, chainStep);
+    onEnhance(strength / 100, task === 'upscale' ? outputScale : 1, chainStep, texture / 100, grain / 100);
   };
 
   // Promote the current result to the working input and switch task —
@@ -582,49 +592,89 @@ export default function EnhanceModal({
 
     return (
       <div className={`w-full flex items-center gap-4 ${disabled ? 'opacity-50 pointer-events-none' : ''}`}>
-        <div className="flex-1 flex items-center gap-6">
-          <div className="flex flex-col gap-1 w-[240px] mt-2 shrink-0">
-            <Text variant={TextVariants.body} weight={TextWeights.medium}>
-              {t('modelRegistry.model')}
-            </Text>
-            <ModelPicker taskType={taskType} value={preferredModelId} onChange={handleModelChange} />
-          </div>
-          <div className="flex-1 max-w-[220px]">
-            <Slider
-              label={t('modals.enhance.strengthLabel')}
-              value={strength}
-              min={10}
-              max={100}
-              step={5}
-              defaultValue={70}
-              onChange={(e: any) => {
-                const v = Number(e.target.value);
-                setStrength(v);
-                localStorage.setItem('rapidraw-enhance-strength', String(v));
-                markDirty();
-              }}
-              trackClassName="bg-bg-secondary"
-              fillOrigin="min"
-            />
-          </div>
-          {task === 'upscale' && (
-            <div className="flex flex-col gap-1 w-[110px] mt-2 shrink-0">
+        <div className="flex-1 flex flex-col gap-1">
+          <div className="flex items-center gap-6">
+            <div className="flex flex-col gap-1 w-[240px] mt-2 shrink-0">
               <Text variant={TextVariants.body} weight={TextWeights.medium}>
-                {t('modals.enhance.outputSizeLabel')}
+                {t('modelRegistry.model')}
               </Text>
-              <Dropdown
-                options={[
-                  { label: '2x', value: 2 },
-                  { label: '4x', value: 4 },
-                ]}
-                value={outputScale}
-                onChange={(v: number) => {
-                  setOutputScale(v);
+              <ModelPicker taskType={taskType} value={preferredModelId} onChange={handleModelChange} />
+            </div>
+            {task === 'upscale' && (
+              <div className="flex flex-col gap-1 w-[110px] mt-2 shrink-0">
+                <Text variant={TextVariants.body} weight={TextWeights.medium}>
+                  {t('modals.enhance.outputSizeLabel')}
+                </Text>
+                <Dropdown
+                  options={[
+                    { label: '2x', value: 2 },
+                    { label: '4x', value: 4 },
+                  ]}
+                  value={outputScale}
+                  onChange={(v: number) => {
+                    setOutputScale(v);
+                    markDirty();
+                  }}
+                />
+              </div>
+            )}
+          </div>
+          <div className="flex items-center gap-4">
+            <div className="flex-1 min-w-0">
+              <Slider
+                label={t('modals.enhance.strengthLabel')}
+                value={strength}
+                min={10}
+                max={100}
+                step={5}
+                defaultValue={70}
+                onChange={(e: any) => {
+                  const v = Number(e.target.value);
+                  setStrength(v);
+                  localStorage.setItem('rapidraw-enhance-strength', String(v));
                   markDirty();
                 }}
+                trackClassName="bg-bg-secondary"
+                fillOrigin="min"
               />
             </div>
-          )}
+            <div className="flex-1 min-w-0" data-tooltip={t('modals.enhance.textureTooltip')}>
+              <Slider
+                label={t('modals.enhance.textureLabel')}
+                value={texture}
+                min={0}
+                max={100}
+                step={5}
+                defaultValue={40}
+                onChange={(e: any) => {
+                  const v = Number(e.target.value);
+                  setTexture(v);
+                  localStorage.setItem('rapidraw-enhance-texture', String(v));
+                  markDirty();
+                }}
+                trackClassName="bg-bg-secondary"
+                fillOrigin="min"
+              />
+            </div>
+            <div className="flex-1 min-w-0" data-tooltip={t('modals.enhance.grainTooltip')}>
+              <Slider
+                label={t('modals.enhance.grainLabel')}
+                value={grain}
+                min={0}
+                max={100}
+                step={5}
+                defaultValue={50}
+                onChange={(e: any) => {
+                  const v = Number(e.target.value);
+                  setGrain(v);
+                  localStorage.setItem('rapidraw-enhance-grain', String(v));
+                  markDirty();
+                }}
+                trackClassName="bg-bg-secondary"
+                fillOrigin="min"
+              />
+            </div>
+          </div>
         </div>
 
         <div className="h-10 w-px bg-surface shrink-0" />
