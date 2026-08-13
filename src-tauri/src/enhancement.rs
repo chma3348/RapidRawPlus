@@ -444,9 +444,23 @@ fn finish_enhancement(
 
     let _ = app_handle.emit("enhance-progress", "Generating previews...");
     let out_dynamic = DynamicImage::ImageRgb32F(enhanced);
+    // The compare view overlays both images in one zoom/pan space, so they
+    // MUST have identical dimensions: at 2x rebuild the raw original is
+    // half the result's size, which skewed and misaligned the wipe overlay
+    // (and hid every slider change behind the breakage).
+    let display_original = if original.dimensions() == (target_w, target_h) {
+        DynamicImage::ImageRgb32F(original.clone())
+    } else {
+        DynamicImage::ImageRgb32F(image::imageops::resize(
+            original,
+            target_w,
+            target_h,
+            image::imageops::FilterType::Lanczos3,
+        ))
+    };
     let payload = serde_json::json!({
         "enhanced": encode_preview(&out_dynamic)?,
-        "original": encode_preview(&DynamicImage::ImageRgb32F(original.clone()))?,
+        "original": encode_preview(&display_original)?,
         "width": target_w,
         "height": target_h,
     });
