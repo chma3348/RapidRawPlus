@@ -585,7 +585,9 @@
         "grow": "Expandir",
         "tolerance": "Tolerancia",
         "clean": "Limpiar",
-        "matteView": "Mostrar mate B/N"
+        "matteView": "Mostrar mate B/N",
+        "whiteThreshold": "Umbral de blancos",
+        "blackThreshold": "Umbral de negros"
       },
       "patches": {
         "copyName": "{{name}} Copia",
@@ -1052,7 +1054,8 @@
       "radial": "Radial",
       "sky": "Cielo",
       "subject": "Sujeto",
-      "aiPaint": "Pintura IA"
+      "aiPaint": "Pintura IA",
+      "clipped": "Recortado"
     }
   },
   "menus": {

@@ -122,6 +122,15 @@ const SUB_MASK_CONFIG: Record<Mask, any> = {
   [Mask.AiDepth]: {
     parameters: [{ key: 'feather', min: 0, max: 100, step: 1, defaultValue: 15 }],
   },
+  [Mask.Clipped]: {
+    parameters: [
+      { key: 'whiteThreshold', min: 50, max: 100, step: 1, defaultValue: 98 },
+      { key: 'blackThreshold', min: 0, max: 50, step: 1, defaultValue: 2 },
+      { key: 'clean', min: 0, max: 100, step: 1, defaultValue: 0 },
+      { key: 'grow', min: -100, max: 100, step: 1, defaultValue: 0 },
+      { key: 'feather', min: 0, max: 100, step: 1, defaultValue: 10 },
+    ],
+  },
   [Mask.AiPaint]: {
     showBrushTools: true,
     parameters: [
@@ -798,6 +807,20 @@ export default function MasksPanel() {
       subMask.parameters.minFade = 15;
       subMask.parameters.maxFade = 15;
       subMask.parameters.feather = 10;
+    }
+    if (type === Mask.Clipped) {
+      if (!subMask.parameters) subMask.parameters = {} as any;
+      Object.assign(subMask.parameters as any, {
+        whiteThreshold: 98,
+        blackThreshold: 2,
+        clean: 0,
+        grow: 0,
+        feather: 10,
+        rotation: adjustments?.rotation || 0,
+        flipHorizontal: adjustments?.flipHorizontal || false,
+        flipVertical: adjustments?.flipVertical || false,
+        orientationSteps: adjustments?.orientationSteps || 0,
+      });
     }
     return subMask;
   };

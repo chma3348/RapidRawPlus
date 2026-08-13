@@ -585,7 +585,9 @@
         "grow": "拡張",
         "tolerance": "Tolerance",
         "clean": "クリーン",
-        "matteView": "白黒マットを表示"
+        "matteView": "白黒マットを表示",
+        "whiteThreshold": "白のしきい値",
+        "blackThreshold": "黒のしきい値"
       },
       "patches": {
         "copyName": "{{name}} のコピー",
@@ -1051,7 +1053,8 @@
       "radial": "円形",
       "sky": "空",
       "subject": "被写体",
-      "aiPaint": "AIペイント"
+      "aiPaint": "AIペイント",
+      "clipped": "クリップ領域"
     }
   },
   "menus": {

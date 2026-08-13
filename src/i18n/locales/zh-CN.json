@@ -585,7 +585,9 @@
         "grow": "扩展",
         "tolerance": "容差",
         "clean": "净化",
-        "matteView": "显示黑白蒙版"
+        "matteView": "显示黑白蒙版",
+        "whiteThreshold": "白色阈值",
+        "blackThreshold": "黑色阈值"
       },
       "patches": {
         "copyName": "{{name}} 副本",
@@ -1052,7 +1054,8 @@
       "radial": "径向",
       "sky": "天空",
       "subject": "主体",
-      "aiPaint": "AI 涂抹"
+      "aiPaint": "AI 涂抹",
+      "clipped": "溢出区域"
     }
   },
   "menus": {

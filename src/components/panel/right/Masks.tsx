@@ -13,6 +13,7 @@ import {
   User,
   Sun,
   Highlighter,
+  Contrast,
 } from 'lucide-react';
 import i18n from 'i18next';
 
@@ -25,6 +26,7 @@ export enum Mask {
   All = 'all',
   Brush = 'brush',
   Flow = 'flow',
+  Clipped = 'clipped',
   Color = 'color',
   Linear = 'linear',
   Luminance = 'luminance',
@@ -76,6 +78,7 @@ export function formatMaskTypeName(type: string) {
   if (type === Mask.Brush) return i18n.t('masks.types.brush');
   if (type === Mask.Flow) return i18n.t('masks.types.flow');
   if (type === Mask.Color) return i18n.t('masks.types.color');
+  if (type === Mask.Clipped) return i18n.t('masks.types.clipped');
   if (type === Mask.Linear) return i18n.t('masks.types.linear');
   if (type === Mask.Luminance) return i18n.t('masks.types.luminance');
   if (type === Mask.Radial) return i18n.t('masks.types.radial');
@@ -100,6 +103,7 @@ export const MASK_ICON_MAP: Record<Mask, any> = {
   [Mask.AiSky]: Cloud,
   [Mask.AiSubject]: Sparkles,
   [Mask.AiPaint]: Highlighter,
+  [Mask.Clipped]: Contrast,
   [Mask.All]: RectangleHorizontal,
   [Mask.Brush]: Brush,
   [Mask.Flow]: Droplets,
@@ -162,6 +166,12 @@ export const AI_PANEL_CREATION_TYPES: Array<MaskType> = [
     icon: Eraser,
     name: 'Quick Erase',
     type: Mask.QuickEraser,
+  },
+  {
+    disabled: false,
+    icon: Contrast,
+    name: 'Reconstruct',
+    type: Mask.Clipped,
   },
   {
     disabled: false,
@@ -248,6 +258,12 @@ export const SUB_MASK_COMPONENT_TYPES: Array<MaskType> = [
 ];
 
 export const OTHERS_MASK_TYPES: Array<MaskType> = [
+  {
+    disabled: false,
+    icon: Contrast,
+    name: 'Clipped',
+    type: Mask.Clipped,
+  },
   {
     disabled: false,
     icon: BringToFront,

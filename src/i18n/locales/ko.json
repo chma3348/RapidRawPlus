@@ -585,7 +585,9 @@
         "grow": "확장",
         "tolerance": "허용 오차",
         "clean": "정리",
-        "matteView": "흑백 매트 보기"
+        "matteView": "흑백 매트 보기",
+        "whiteThreshold": "화이트 임계값",
+        "blackThreshold": "블랙 임계값"
       },
       "patches": {
         "copyName": "{{name}} 복사본",
@@ -1052,7 +1054,8 @@
       "radial": "원형",
       "sky": "하늘",
       "subject": "피사체",
-      "aiPaint": "AI 페인트"
+      "aiPaint": "AI 페인트",
+      "clipped": "클리핑 영역"
     }
   },
   "menus": {

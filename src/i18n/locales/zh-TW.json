@@ -585,7 +585,9 @@
         "grow": "擴張",
         "tolerance": "容差",
         "clean": "淨化",
-        "matteView": "顯示黑白遮罩"
+        "matteView": "顯示黑白遮罩",
+        "whiteThreshold": "白色閾值",
+        "blackThreshold": "黑色閾值"
       },
       "patches": {
         "copyName": "{{name}} 副本",
@@ -1052,7 +1054,8 @@
       "radial": "徑向",
       "sky": "天空",
       "subject": "主體",
-      "aiPaint": "AI 塗抹"
+      "aiPaint": "AI 塗抹",
+      "clipped": "溢出區域"
     }
   },
   "menus": {

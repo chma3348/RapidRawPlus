@@ -585,7 +585,9 @@
         "grow": "Agrandir",
         "tolerance": "Tolérance",
         "clean": "Nettoyer",
-        "matteView": "Afficher le cache N/B"
+        "matteView": "Afficher le cache N/B",
+        "whiteThreshold": "Seuil des blancs",
+        "blackThreshold": "Seuil des noirs"
       },
       "patches": {
         "copyName": "Copie de {{name}}",
@@ -1052,7 +1054,8 @@
       "radial": "Radial",
       "sky": "Ciel",
       "subject": "Sujet",
-      "aiPaint": "Peinture IA"
+      "aiPaint": "Peinture IA",
+      "clipped": "Écrêté"
     }
   },
   "menus": {

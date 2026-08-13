@@ -585,7 +585,9 @@
         "grow": "Erweitern",
         "tolerance": "Toleranz",
         "clean": "Bereinigen",
-        "matteView": "S/W-Matte anzeigen"
+        "matteView": "S/W-Matte anzeigen",
+        "whiteThreshold": "Weiß-Schwelle",
+        "blackThreshold": "Schwarz-Schwelle"
       },
       "patches": {
         "copyName": "{{name}} Kopie",
@@ -1052,7 +1054,8 @@
       "radial": "Radial",
       "sky": "Himmel",
       "subject": "Motiv",
-      "aiPaint": "KI-Malen"
+      "aiPaint": "KI-Malen",
+      "clipped": "Beschnitten"
     }
   },
   "menus": {

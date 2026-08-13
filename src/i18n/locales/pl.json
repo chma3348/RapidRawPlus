@@ -621,7 +621,9 @@
         "grow": "Rozszerzanie",
         "tolerance": "Tolerancja",
         "clean": "Oczyść",
-        "matteView": "Pokaż matę cz-b"
+        "matteView": "Pokaż matę cz-b",
+        "whiteThreshold": "Próg bieli",
+        "blackThreshold": "Próg czerni"
       },
       "patches": {
         "copyName": "{{name}} Kopia",
@@ -1096,7 +1098,8 @@
       "radial": "Radialny",
       "sky": "Niebo",
       "subject": "Temat",
-      "aiPaint": "Malowanie AI"
+      "aiPaint": "Malowanie AI",
+      "clipped": "Przycięte"
     }
   },
   "menus": {

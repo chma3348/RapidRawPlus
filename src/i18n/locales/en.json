@@ -585,7 +585,9 @@
         "grow": "Grow",
         "tolerance": "Tolerance",
         "clean": "Clean",
-        "matteView": "Show B/W matte"
+        "matteView": "Show B/W matte",
+        "whiteThreshold": "White threshold",
+        "blackThreshold": "Black threshold"
       },
       "patches": {
         "copyName": "{{name}} Copy",
@@ -1052,7 +1054,8 @@
       "radial": "Radial",
       "sky": "Sky",
       "subject": "Subject",
-      "aiPaint": "AI Paint"
+      "aiPaint": "AI Paint",
+      "clipped": "Clipped"
     }
   },
   "menus": {

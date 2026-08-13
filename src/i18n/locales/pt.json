@@ -585,7 +585,9 @@
         "grow": "Expandir",
         "tolerance": "Tolerância",
         "clean": "Limpar",
-        "matteView": "Mostrar máscara P/B"
+        "matteView": "Mostrar máscara P/B",
+        "whiteThreshold": "Limite de brancos",
+        "blackThreshold": "Limite de pretos"
       },
       "patches": {
         "copyName": "Cópia de {{name}}",
@@ -1052,7 +1054,8 @@
       "radial": "Radial",
       "sky": "Céu",
       "subject": "Motivo",
-      "aiPaint": "Pintura IA"
+      "aiPaint": "Pintura IA",
+      "clipped": "Recortado"
     }
   },
   "menus": {

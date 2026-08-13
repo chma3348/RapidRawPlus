@@ -585,7 +585,9 @@
         "grow": "Расширение",
         "tolerance": "Допуск",
         "clean": "Очистка",
-        "matteView": "Показать ч/б маску"
+        "matteView": "Показать ч/б маску",
+        "whiteThreshold": "Порог белого",
+        "blackThreshold": "Порог чёрного"
       },
       "patches": {
         "copyName": "Копия {{name}}",
@@ -1051,7 +1053,8 @@
       "radial": "Радиальный градиент",
       "sky": "Небо",
       "subject": "Объект",
-      "aiPaint": "ИИ-кисть"
+      "aiPaint": "ИИ-кисть",
+      "clipped": "Клиппинг"
     }
   },
   "menus": {

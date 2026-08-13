@@ -67,7 +67,11 @@ impl MaskDefinition {
     pub fn requires_warped_image(&self) -> bool {
         self.sub_masks
             .iter()
-            .any(|sm| sm.mask_type == "color" || sm.mask_type == "luminance")
+            .any(|sm| {
+                sm.mask_type == "color"
+                    || sm.mask_type == "luminance"
+                    || sm.mask_type == "clipped"
+            })
     }
 }
 
@@ -207,6 +211,15 @@ struct ParametricExtras {
     swatch_hue: Option<f32>,
     #[serde(default)]
     swatch_width: Option<f32>,
+}
+
+#[derive(serde::Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+struct ClippedExtras {
+    #[serde(default)]
+    white_threshold: Option<f32>,
+    #[serde(default)]
+    black_threshold: Option<f32>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -1266,6 +1279,106 @@ fn generate_color_bitmap(
     Some(mask)
 }
 
+/// Selects clipped pixels: fully blown whites (all channels above the white
+/// threshold) and/or crushed blacks (all channels below the black
+/// threshold), with soft 3%-wide edges. Made for AI reconstruction of
+/// blown/crushed regions — correctly exposed pixels stay unselected.
+fn generate_clipped_bitmap(
+    params_value: &Value,
+    width: u32,
+    height: u32,
+    scale: f32,
+    crop_offset: (f32, f32),
+    warped_image: Option<&image::DynamicImage>,
+) -> Option<GrayImage> {
+    let params: ParametricMaskParameters = serde_json::from_value(params_value.clone()).ok()?;
+    let extras: ClippedExtras = serde_json::from_value(params_value.clone()).unwrap_or_default();
+    let warped = warped_image?;
+    let (full_w, full_h) = warped.dimensions();
+
+    let white_t = extras.white_threshold.map(|t| (t / 100.0).clamp(0.5, 1.0));
+    let black_t = extras.black_threshold.map(|t| (t / 100.0).clamp(0.0, 0.5));
+    if white_t.is_none() && black_t.is_none() {
+        return None;
+    }
+
+    let mut mask = GrayImage::new(width, height);
+
+    let angle_rad = params.rotation * PI / 180.0;
+    let cos_a = angle_rad.cos();
+    let sin_a = angle_rad.sin();
+    let (coarse_rotated_w, coarse_rotated_h) = if params.orientation_steps % 2 == 1 {
+        (full_h, full_w)
+    } else {
+        (full_w, full_h)
+    };
+    let scaled_w = coarse_rotated_w as f32 * scale;
+    let scaled_h = coarse_rotated_h as f32 * scale;
+    let center_x = scaled_w / 2.0;
+    let center_y = scaled_h / 2.0;
+    let inv_scale = 1.0 / scale;
+
+    for y_out in 0..height {
+        let y_uncrop = y_out as f32 + crop_offset.1;
+        let y_centered = y_uncrop - center_y;
+        let y_sin = y_centered * sin_a;
+        let y_cos = y_centered * cos_a;
+        for x_out in 0..width {
+            let x_uncrop = x_out as f32 + crop_offset.0;
+            let x_centered = x_uncrop - center_x;
+            let x_unrotated = x_centered * cos_a + y_sin + center_x;
+            let y_unrotated = -x_centered * sin_a + y_cos + center_y;
+            let x_unflipped = if params.flip_horizontal {
+                scaled_w - x_unrotated
+            } else {
+                x_unrotated
+            };
+            let y_unflipped = if params.flip_vertical {
+                scaled_h - y_unrotated
+            } else {
+                y_unflipped_src(y_unrotated)
+            };
+            let (xc, yc) = match params.orientation_steps {
+                0 => (x_unflipped, y_unflipped),
+                1 => (y_unflipped, scaled_w - x_unflipped),
+                2 => (scaled_w - x_unflipped, scaled_h - y_unflipped),
+                3 => (scaled_h - y_unflipped, x_unflipped),
+                _ => (x_unflipped, y_unflipped),
+            };
+            if xc >= 0.0 && yc >= 0.0 {
+                let x_src = (xc * inv_scale) as u32;
+                let y_src = (yc * inv_scale) as u32;
+                if x_src < full_w && y_src < full_h {
+                    let p = warped.get_pixel(x_src, y_src);
+                    let r = p[0] as f32 / 255.0;
+                    let g = p[1] as f32 / 255.0;
+                    let b = p[2] as f32 / 255.0;
+                    let min_c = r.min(g).min(b);
+                    let max_c = r.max(g).max(b);
+                    let mut alpha = 0.0f32;
+                    if let Some(t) = white_t {
+                        alpha = alpha.max(((min_c - (t - 0.03)) / 0.03).clamp(0.0, 1.0));
+                    }
+                    if let Some(t) = black_t {
+                        alpha = alpha.max((((t + 0.03) - max_c) / 0.03).clamp(0.0, 1.0));
+                    }
+                    if alpha > 0.003 {
+                        mask.put_pixel(x_out, y_out, Luma([(alpha * 255.0) as u8]));
+                    }
+                }
+            }
+        }
+    }
+
+    apply_matte_clean(&mut mask, params.clean);
+    apply_grow_and_feather(&mut mask, params.grow, params.feather, width, height);
+    Some(mask)
+}
+
+fn y_unflipped_src(y: f32) -> f32 {
+    y
+}
+
 fn generate_luminance_bitmap(
     params_value: &Value,
     width: u32,
@@ -1412,6 +1525,14 @@ fn generate_sub_mask_bitmap(
             scale,
             crop_offset,
         )),
+        "clipped" => generate_clipped_bitmap(
+            &sub_mask.parameters,
+            width,
+            height,
+            scale,
+            crop_offset,
+            warped_image,
+        ),
         "color" => generate_color_bitmap(
             &sub_mask.parameters,
             width,

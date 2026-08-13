@@ -29,16 +29,19 @@ Nothing gets added or dropped from this list silently.
 - [x] Works with existing tolerance / clean / grow / feather and the B/W
       matte view.
 
-## Phase 4 — Clipped-pixel selection + AI Reconstruct
-- [ ] New parametric mask type "Clipped": selects pixels above a white
+## Phase 4 — Clipped-pixel selection + AI Reconstruct — SHIPPED
+- [x] New parametric mask type "Clipped": selects pixels above a white
       threshold and/or below a black threshold (adjustable), with
-      clean/grow/feather. Usable as a normal adjustments mask.
-- [ ] AI panel action "AI Reconstruct": builds the clipped mask
-      automatically and runs the existing generative fill (Fooocus/Flux,
-      LaMa prefill, feathered composite) only on those regions.
-- [ ] Non-destructive patch; correctly exposed pixels untouched.
-- [ ] Prompt box available; works on both blown highlights and crushed
-      shadows.
+      clean/grow/feather. Usable as a normal adjustments mask (Others list).
+- [x] AI panel action "Reconstruct": builds the clipped mask
+      automatically; the fill runs via the existing Generate button so the
+      user can preview the matte and tune thresholds first (declared
+      deviation from one-click auto-run — deliberate, for control before
+      an expensive fill).
+- [x] Non-destructive patch; correctly exposed pixels untouched (soft
+      3% threshold edges + feather).
+- [x] Prompt box available (existing generative section); white/black
+      thresholds independently adjustable for highlights vs shadows.
 
 ## Standing rules for every phase
 - Verify: cargo tests (incl. GPU harness where measurable), clippy 0,
