@@ -12,6 +12,8 @@ import PanoramaModal from './PanoramaModal';
 import HdrModal from './HdrModal';
 import NegativeConversionModal from './NegativeConversionModal';
 import DenoiseModal from './DenoiseModal';
+import EnhanceModal from './EnhanceModal';
+import ExpandModal from './ExpandModal';
 import CreateFolderModal from './CreateFolderModal';
 import RenameFolderModal from './RenameFolderModal';
 import RenameFileModal from './RenameFileModal';
@@ -32,6 +34,10 @@ export interface AppModalsProps {
   handleApplyDenoise: (intensity: number, method: 'ai' | 'bm3d') => Promise<void>;
   handleBatchDenoise: (intensity: number, method: 'ai' | 'bm3d', paths: string[]) => Promise<string[]>;
   handleSaveDenoisedImage: () => Promise<string>;
+  handleApplyEnhance: (strength: number, outputScale: number) => Promise<void>;
+  handleSaveEnhancedImage: () => Promise<string>;
+  handleApplyExpansion: (left: number, top: number, right: number, bottom: number) => Promise<void>;
+  handleSaveExpandedImage: (variantIndex: number) => Promise<string>;
   handleCreateFolder: (folderName: string) => Promise<void>;
   handleRenameFolder: (newName: string) => Promise<void>;
   handleSaveRename: (nameTemplate: string) => Promise<void>;
@@ -71,6 +77,8 @@ export default function AppModals(props: AppModalsProps) {
     hdrModalState,
     negativeModalState,
     denoiseModalState,
+    enhanceModalState,
+    expandModalState,
     cullingModalState,
     collageModalState,
     setUI,
@@ -93,6 +101,8 @@ export default function AppModals(props: AppModalsProps) {
       hdrModalState: state.hdrModalState,
       negativeModalState: state.negativeModalState,
       denoiseModalState: state.denoiseModalState,
+      enhanceModalState: state.enhanceModalState,
+      expandModalState: state.expandModalState,
       cullingModalState: state.cullingModalState,
       collageModalState: state.collageModalState,
       setUI: state.setUI,
@@ -237,6 +247,45 @@ export default function AppModals(props: AppModalsProps) {
           denoiseModalState.targetPaths.length > 0
             ? thumbnails[denoiseModalState.targetPaths[0]] ||
               (selectedImage?.path === denoiseModalState.targetPaths[0] ? finalPreviewUrl : null)
+            : null
+        }
+      />
+      <EnhanceModal
+        isOpen={enhanceModalState.isOpen}
+        onClose={() => setUI((state) => ({ enhanceModalState: { ...state.enhanceModalState, isOpen: false } }))}
+        onEnhance={props.handleApplyEnhance}
+        onSave={props.handleSaveEnhancedImage}
+        onOpenFile={props.handleImageSelect}
+        previewBase64={enhanceModalState.previewBase64}
+        originalBase64={enhanceModalState.originalBase64 || null}
+        isProcessing={enhanceModalState.isProcessing}
+        error={enhanceModalState.error}
+        progressMessage={enhanceModalState.progressMessage}
+        task={enhanceModalState.task}
+        targetPaths={enhanceModalState.targetPaths}
+        resultDims={enhanceModalState.resultDims || null}
+        loadingImageUrl={
+          enhanceModalState.targetPaths.length > 0
+            ? thumbnails[enhanceModalState.targetPaths[0]] ||
+              (selectedImage?.path === enhanceModalState.targetPaths[0] ? finalPreviewUrl : null)
+            : null
+        }
+      />
+      <ExpandModal
+        isOpen={expandModalState.isOpen}
+        onClose={() => setUI((state) => ({ expandModalState: { ...state.expandModalState, isOpen: false } }))}
+        onExpand={props.handleApplyExpansion}
+        onSave={props.handleSaveExpandedImage}
+        onOpenFile={props.handleImageSelect}
+        error={expandModalState.error}
+        variants={expandModalState.variants}
+        isProcessing={expandModalState.isProcessing}
+        progressMessage={expandModalState.progressMessage}
+        targetPaths={expandModalState.targetPaths}
+        loadingImageUrl={
+          expandModalState.targetPaths.length > 0
+            ? thumbnails[expandModalState.targetPaths[0]] ||
+              (selectedImage?.path === expandModalState.targetPaths[0] ? finalPreviewUrl : null)
             : null
         }
       />

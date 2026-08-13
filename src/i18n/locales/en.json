@@ -15,7 +15,8 @@
       "reset": "Reset",
       "shadows": "Shadows",
       "toneMapper": "Tone Mapper",
-      "whites": "Whites"
+      "whites": "Whites",
+      "contrastPivot": "Contrast Pivot"
     },
     "color": {
       "ariaSelectColor": "Select {{name}} color",
@@ -63,7 +64,23 @@
       "vibrance": "Vibrance",
       "wbPickerTooltip": "White Balance Picker",
       "wbPickerWgpuDisabled": "WB Picker: Disable WGPU in Settings.",
-      "whiteBalance": "White Balance"
+      "whiteBalance": "White Balance",
+      "wheels": {
+        "title": "Color Wheels",
+        "lift": "Lift",
+        "gamma": "Gamma",
+        "gain": "Gain",
+        "offset": "Offset"
+      },
+      "hueCurves": {
+        "title": "Color Curves",
+        "reset": "Reset",
+        "hint": "Click to add a point, drag to shape, double-click to remove.",
+        "hueHue": "Hue vs Hue",
+        "hueSat": "Hue vs Saturation",
+        "hueLum": "Hue vs Luminance",
+        "lumSat": "Luminance vs Saturation"
+      }
     },
     "curves": {
       "channelTitle": "{{channel}} Channel",
@@ -108,7 +125,8 @@
       "sharpening": "Sharpening",
       "sharpness": "Sharpness",
       "structure": "Structure",
-      "threshold": "Threshold"
+      "threshold": "Threshold",
+      "texture": "Texture"
     },
     "effects": {
       "amount": "Amount",
@@ -177,8 +195,10 @@
       "convertNegative": "Convert Negative",
       "copyAdjustments": "Copy Adjustments",
       "cullImage": "Cull Image",
+      "deblur": "AI Deblur",
       "denoise": "Denoise Image",
       "editImage": "Edit Image",
+      "expand": "AI Expand",
       "exportImage": "Export Image",
       "frameImage": "Frame Image",
       "mergeHdr": "Merge to HDR",
@@ -191,9 +211,11 @@
       "ratingLabel_other": "{{count}} Stars",
       "redo": "Redo",
       "resetAdjustments": "Reset Adjustments",
+      "restore": "AI Restore",
       "stitchPanorama": "Stitch Panorama",
       "tagging": "Tagging",
-      "undo": "Undo"
+      "undo": "Undo",
+      "upscale": "AI Upscale"
     },
     "folders": {
       "changeIcon": "Change Icon",
@@ -385,7 +407,12 @@
         "placeholder": "e.g., a field of flowers",
         "quickEraseDesc": "Fill selection to remove the object.",
         "selectionPropertiesTitle": "Selection Properties",
-        "useBasicInpaint": "Use basic inpainting"
+        "useBasicInpaint": "Use basic inpainting",
+        "spotEnhanceTitle": "Spot Enhance",
+        "spotEnhanceDesc": "Sharpen or restore only the brushed area — the rest of the photo is untouched.",
+        "spotEnhanceMode": "Mode",
+        "spotSharpen": "Sharpen",
+        "spotEnhanceButton": "Enhance Selection"
       }
     },
     "crop": {
@@ -438,12 +465,12 @@
       },
       "presets": {
         "custom": {
-          "name": "Custom",
+          "name": "Exact ratio",
           "tooltip": "Enter custom aspect ratio"
         },
         "free": {
           "desc": "Freeform crop",
-          "name": "Free"
+          "name": "Free (drag)"
         },
         "original": {
           "desc": "Original image aspect ratio",
@@ -496,7 +523,8 @@
         "switchToLandscape": "Switch to landscape",
         "switchToPortrait": "Switch to portrait",
         "transform": "Perspective and keystone correction"
-      }
+      },
+      "done": "Done"
     },
     "masks": {
       "actions": {
@@ -550,7 +578,9 @@
         "feather": "Feather",
         "globalFeather": "Global Feather",
         "grow": "Grow",
-        "tolerance": "Tolerance"
+        "tolerance": "Tolerance",
+        "clean": "Clean",
+        "matteView": "Show B/W matte"
       },
       "patches": {
         "copyName": "{{name}} Copy",
@@ -1083,7 +1113,9 @@
         "tone": "Tone",
         "transformRotation": "Transform & Rotation",
         "vignette": "Vignette",
-        "whiteBalance": "White Balance"
+        "whiteBalance": "White Balance",
+        "colorWheels": "Color Wheels",
+        "hueCurves": "Color Curves"
       },
       "includedAdjustments": "Included Adjustments",
       "modeMerge": "Merge",
@@ -1166,6 +1198,53 @@
       "strengthLabel": "Strength",
       "titleBatch": "Denoise Images",
       "titleSingle": "Denoise Image"
+    },
+    "enhance": {
+      "btnRetry": "Retry",
+      "btnSave": "Save",
+      "btnStart": "Start",
+      "cancel": "Cancel",
+      "clickToPreview": "Click a spot to preview the model there",
+      "close": "Close",
+      "deblurProgress": "Deblurring image…",
+      "descriptionDeblur": "Attempt to reduce blur using a local AI model. Results vary with the type and strength of the blur — treat this as best-effort.",
+      "descriptionRestore": "Repair image artifacts with a local AI model — pick the model that matches the problem: screen moiré patterns (demoiré) or general noise and compression artifacts.",
+      "descriptionUpscale": "Upscale this image 4x using a local AI model. Large images are processed in tiles, which can take a while on the CPU.",
+      "dragToPreview": "Click or drag a box to preview that area",
+      "initializing": "Initializing…",
+      "openInEditor": "Open in Editor",
+      "outputSizeLabel": "Output size",
+      "previewEnhanced": "Preview",
+      "previewNote": "Preview of the selected area — Start processes the full photo.",
+      "previewOriginal": "Original",
+      "previewRunning": "Rendering preview…",
+      "processingFailed": "Enhancement failed",
+      "restoreProgress": "Restoring image…",
+      "saveSuccess": "Image saved next to the original.",
+      "speedNotice": "Processing time depends on image size and hardware.",
+      "strengthLabel": "Strength",
+      "titleDeblur": "AI Deblurring",
+      "titleRestore": "AI Restore",
+      "titleUpscale": "AI Upscaling",
+      "upscaleProgress": "Upscaling image…",
+      "continueWith": "Continue with",
+      "chainNote": "Working on the previous result"
+    },
+    "expand": {
+      "btnGenerate": "Generate",
+      "btnRetry": "Regenerate",
+      "btnSave": "Save",
+      "cancel": "Cancel",
+      "close": "Close",
+      "dragHint": "Drag the handles outward to set the new frame",
+      "generating": "Generating fill…",
+      "openInEditor": "Open in Editor",
+      "processingFailed": "Expansion failed",
+      "saveSuccess": "Image saved next to the original.",
+      "variantLabel": "Option {{current}} of {{total}}",
+      "targetSize": "Target size",
+      "output": "Output",
+      "guidesTooltip": "Toggle composition guides"
     },
     "hdr": {
       "cancel": "Cancel",
@@ -1320,6 +1399,11 @@
       "zoomInTooltip": "Zoom In",
       "zoomOutTooltip": "Zoom Out"
     }
+  },
+  "modelRegistry": {
+    "model": "Model",
+    "noModels": "No models available",
+    "notDownloaded": "not downloaded"
   },
   "settings": {
     "adjustments": {
@@ -1494,6 +1578,27 @@
       "saved": "Saved Lenses",
       "title": "My Lenses"
     },
+    "modelLibrary": {
+      "addButton": "Add",
+      "addDescription": "Direct link to a .onnx file. It will be downloaded, verified, and added to the matching dropdown.",
+      "addNamePlaceholder": "Display name",
+      "addTitle": "Add model from URL",
+      "browseButton": "Choose file…",
+      "delete": "Remove from disk",
+      "description": "Download curated AI models, remove ones you don't use, or add your own from a direct link.",
+      "download": "Download",
+      "installedTitle": "Available models",
+      "needsConversion": "will be converted",
+      "noResults": "No ONNX models found — try different keywords.",
+      "searchPlaceholder": "Search models on Hugging Face…",
+      "taskMask": "Masking",
+      "title": "Model Library",
+      "engineTitle": "AI Engine",
+      "engineDesc": "Powers Restore and generative fill/expand. One-time ~2 GB install.",
+      "engineInstalled": "Installed",
+      "engineInstall": "Install Engine",
+      "engineInstalling": "Installing..."
+    },
     "processing": {
       "ai": {
         "cloud": {
@@ -1544,6 +1649,18 @@
           "cpu": "CPU"
         },
         "title": "Generative AI"
+      },
+      "aiModels": {
+        "deblur": "Deblurring",
+        "depth": "Depth Estimation",
+        "description": "Choose which on-device model runs each AI feature. Add your own models by placing a manifest file in the models/manifests folder.",
+        "foreground": "Foreground Masking",
+        "inpaint": "Object Removal (Inpainting)",
+        "restore": "Restoration",
+        "sky": "Sky Masking",
+        "subject": "Subject Masking",
+        "title": "Local AI Models",
+        "upscale": "Upscaling"
       },
       "backend": "Processing Backend",
       "backendDesc": "Select the graphics API. 'Auto' is recommended. May fix crashes on some systems.",

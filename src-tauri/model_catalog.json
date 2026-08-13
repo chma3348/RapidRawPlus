@@ -1,0 +1,35 @@
+[
+  {
+    "id": "realesrgan-x2plus",
+    "display_name": "Real-ESRGAN x2plus (Moderate)",
+    "task_type": "upscale",
+    "file_path": "realesrgan_x2plus_fp16.onnx",
+    "download": {
+      "url": "https://huggingface.co/tamnvcc/RealESRGAN-onnx/resolve/main/onnx/RealESRGAN_x2plus.fp16.onnx?download=true",
+      "sha256": "0b1770bcb31b3a9021d4251b538da4eb47c84f42706504d44a76d17e8c267606"
+    },
+    "params": { "scale_factor": 2, "tile_size": 512, "tile_overlap": 16 },
+    "description": "Native 2x upscaler — noticeably gentler than the 4x models, good default for a natural look.",
+    "size_bytes": 33619494
+  },
+  {
+    "id": "scunet-real-psnr",
+    "display_name": "SCUNet Artifact Removal (Natural)",
+    "task_type": "restore",
+    "file_path": "scunet_color_real_psnr.onnx",
+    "aux_files": { "data": "scunet_color_real_psnr.onnx.data" },
+    "download": {
+      "url": "https://huggingface.co/Heliosoph/scunet-onnx/resolve/main/scunet_color_real_psnr.onnx?download=true",
+      "sha256": "231be201ab413dbc999d7951caa9844846b93a12a40a41e037d6b5888ed4e88c"
+    },
+    "aux_downloads": {
+      "data": {
+        "url": "https://huggingface.co/Heliosoph/scunet-onnx/resolve/main/scunet_color_real_psnr.onnx.data?download=true",
+        "sha256": "98825ea1210b641c71e5f052f582c70c49fd44b35387ebe2c034268c17df3feb"
+      }
+    },
+    "params": { "scale_factor": 1, "input_height": 512, "input_width": 512, "tile_overlap": 32 },
+    "description": "Fidelity-trained variant of SCUNet: softer, faithful cleanup without invented texture.",
+    "size_bytes": 76936425
+  }
+]

@@ -15,7 +15,8 @@
       "reset": "Zurücksetzen",
       "shadows": "Tiefen",
       "toneMapper": "Tonemapper",
-      "whites": "Weiß"
+      "whites": "Weiß",
+      "contrastPivot": "Kontrast-Pivot"
     },
     "color": {
       "ariaSelectColor": "{{name}}-Farbe auswählen",
@@ -63,7 +64,23 @@
       "vibrance": "Dynamik",
       "wbPickerTooltip": "Weißabgleich-Pipette",
       "wbPickerWgpuDisabled": "WA-Pipette: WGPU in den Einstellungen deaktivieren.",
-      "whiteBalance": "Weißabgleich"
+      "whiteBalance": "Weißabgleich",
+      "wheels": {
+        "title": "Farbräder",
+        "lift": "Lift",
+        "gamma": "Gamma",
+        "gain": "Gain",
+        "offset": "Offset"
+      },
+      "hueCurves": {
+        "title": "Farbkurven",
+        "reset": "Zurücksetzen",
+        "hint": "Klicken fügt Punkte hinzu, Ziehen formt, Doppelklick entfernt.",
+        "hueHue": "Farbton vs. Farbton",
+        "hueSat": "Farbton vs. Sättigung",
+        "hueLum": "Farbton vs. Luminanz",
+        "lumSat": "Luminanz vs. Sättigung"
+      }
     },
     "curves": {
       "channelTitle": "{{channel}}-Kanal",
@@ -108,7 +125,8 @@
       "sharpening": "Schärfen",
       "sharpness": "Schärfe",
       "structure": "Struktur",
-      "threshold": "Schwellenwert"
+      "threshold": "Schwellenwert",
+      "texture": "Textur"
     },
     "effects": {
       "amount": "Betrag",
@@ -177,8 +195,10 @@
       "convertNegative": "Negativ umwandeln",
       "copyAdjustments": "Einstellungen kopieren",
       "cullImage": "Bild aussortieren",
+      "deblur": "KI-Entschärfung",
       "denoise": "Bild entrauschen",
       "editImage": "Bild bearbeiten",
+      "expand": "KI-Erweitern",
       "exportImage": "Bild exportieren",
       "frameImage": "Bild rahmen",
       "mergeHdr": "Zu HDR zusammenfügen",
@@ -191,9 +211,11 @@
       "ratingLabel_other": "{{count}} Sterne",
       "redo": "Wiederholen",
       "resetAdjustments": "Einstellungen zurücksetzen",
+      "restore": "KI-Reparatur",
       "stitchPanorama": "Panorama zusammenfügen",
       "tagging": "Tagging",
-      "undo": "Rückgängig"
+      "undo": "Rückgängig",
+      "upscale": "KI-Hochskalierung"
     },
     "folders": {
       "changeIcon": "Symbol ändern",
@@ -385,7 +407,12 @@
         "placeholder": "z. B. ein Blumenfeld",
         "quickEraseDesc": "Auswahl füllen, um das Objekt zu entfernen.",
         "selectionPropertiesTitle": "Auswahleigenschaften",
-        "useBasicInpaint": "Einfaches Reparieren verwenden"
+        "useBasicInpaint": "Einfaches Reparieren verwenden",
+        "spotEnhanceTitle": "Punktuelle Verbesserung",
+        "spotEnhanceDesc": "Nur den markierten Bereich schärfen oder wiederherstellen — der Rest bleibt unberührt.",
+        "spotEnhanceMode": "Modus",
+        "spotSharpen": "Schärfen",
+        "spotEnhanceButton": "Auswahl verbessern"
       }
     },
     "crop": {
@@ -438,12 +465,12 @@
       },
       "presets": {
         "custom": {
-          "name": "Benutzerdefiniert",
+          "name": "Exaktes Verhältnis",
           "tooltip": "Eigenes Seitenverhältnis eingeben"
         },
         "free": {
           "desc": "Freier Zuschnitt",
-          "name": "Frei"
+          "name": "Frei (ziehen)"
         },
         "original": {
           "desc": "Original-Seitenverhältnis",
@@ -496,7 +523,8 @@
         "switchToLandscape": "Zum Querformat wechseln",
         "switchToPortrait": "Zum Hochformat wechseln",
         "transform": "Perspektiv- und Trapezkorrektur"
-      }
+      },
+      "done": "Fertig"
     },
     "masks": {
       "actions": {
@@ -550,7 +578,9 @@
         "feather": "Weiche Kante",
         "globalFeather": "Globale weiche Kante",
         "grow": "Erweitern",
-        "tolerance": "Toleranz"
+        "tolerance": "Toleranz",
+        "clean": "Bereinigen",
+        "matteView": "S/W-Matte anzeigen"
       },
       "patches": {
         "copyName": "{{name}} Kopie",
@@ -1083,7 +1113,9 @@
         "tone": "Tonwerte",
         "transformRotation": "Transformieren & Drehen",
         "vignette": "Vignettierung",
-        "whiteBalance": "Weißabgleich"
+        "whiteBalance": "Weißabgleich",
+        "colorWheels": "Farbräder",
+        "hueCurves": "Farbkurven"
       },
       "includedAdjustments": "Einbezogene Anpassungen",
       "modeMerge": "Zusammenführen",
@@ -1166,6 +1198,53 @@
       "strengthLabel": "Stärke",
       "titleBatch": "Bilder entrauschen",
       "titleSingle": "Bild entrauschen"
+    },
+    "enhance": {
+      "btnRetry": "Erneut",
+      "btnSave": "Speichern",
+      "btnStart": "Starten",
+      "cancel": "Abbrechen",
+      "clickToPreview": "Auf eine Stelle klicken, um dort eine Vorschau zu sehen",
+      "close": "Schließen",
+      "deblurProgress": "Bild wird geschärft…",
+      "descriptionDeblur": "Versucht, Unschärfe mit einem lokalen KI-Modell zu reduzieren. Die Ergebnisse hängen von Art und Stärke der Unschärfe ab.",
+      "descriptionRestore": "Bildartefakte mit einem lokalen KI-Modell beheben — wähle das passende Modell: Bildschirm-Moiré (Demoiré) oder allgemeines Rauschen und Kompressionsartefakte.",
+      "descriptionUpscale": "Skaliert dieses Bild mit einem lokalen KI-Modell um das 4-Fache hoch. Große Bilder werden in Kacheln verarbeitet, was auf der CPU dauern kann.",
+      "dragToPreview": "Klicken oder Rahmen aufziehen, um den Bereich vorab zu sehen",
+      "initializing": "Initialisierung…",
+      "openInEditor": "Im Editor öffnen",
+      "outputSizeLabel": "Ausgabegröße",
+      "previewEnhanced": "Vorschau",
+      "previewNote": "Vorschau des gewählten Bereichs — »Starten« verarbeitet das ganze Foto.",
+      "previewOriginal": "Original",
+      "previewRunning": "Vorschau wird berechnet…",
+      "processingFailed": "Verbesserung fehlgeschlagen",
+      "restoreProgress": "Bild wird repariert…",
+      "saveSuccess": "Bild neben dem Original gespeichert.",
+      "speedNotice": "Die Verarbeitungszeit hängt von Bildgröße und Hardware ab.",
+      "strengthLabel": "Stärke",
+      "titleDeblur": "KI-Entschärfung",
+      "titleRestore": "KI-Reparatur",
+      "titleUpscale": "KI-Hochskalierung",
+      "upscaleProgress": "Bild wird hochskaliert…",
+      "continueWith": "Weiter mit",
+      "chainNote": "Bearbeitet das vorherige Ergebnis"
+    },
+    "expand": {
+      "btnGenerate": "Generieren",
+      "btnRetry": "Neu generieren",
+      "btnSave": "Speichern",
+      "cancel": "Abbrechen",
+      "close": "Schließen",
+      "dragHint": "Ziehe die Griffe nach außen, um den neuen Rahmen festzulegen",
+      "generating": "Füllung wird generiert…",
+      "openInEditor": "Im Editor öffnen",
+      "processingFailed": "Erweiterung fehlgeschlagen",
+      "saveSuccess": "Bild neben dem Original gespeichert.",
+      "variantLabel": "Option {{current}} von {{total}}",
+      "targetSize": "Zielgröße",
+      "output": "Ausgabe",
+      "guidesTooltip": "Kompositionslinien ein-/ausblenden"
     },
     "hdr": {
       "cancel": "Abbrechen",
@@ -1320,6 +1399,11 @@
       "zoomInTooltip": "Vergrößern",
       "zoomOutTooltip": "Verkleinern"
     }
+  },
+  "modelRegistry": {
+    "model": "Modell",
+    "noModels": "Keine Modelle verfügbar",
+    "notDownloaded": "nicht heruntergeladen"
   },
   "settings": {
     "adjustments": {
@@ -1494,6 +1578,27 @@
       "saved": "Gespeicherte Objektive",
       "title": "Meine Objektive"
     },
+    "modelLibrary": {
+      "addButton": "Hinzufügen",
+      "addDescription": "Direktlink zu einer .onnx-Datei. Sie wird heruntergeladen, verifiziert und dem passenden Dropdown hinzugefügt.",
+      "addNamePlaceholder": "Anzeigename",
+      "addTitle": "Modell per URL hinzufügen",
+      "browseButton": "Datei wählen…",
+      "delete": "Von der Festplatte entfernen",
+      "description": "Lade kuratierte KI-Modelle herunter, entferne ungenutzte oder füge eigene über einen Direktlink hinzu.",
+      "download": "Herunterladen",
+      "installedTitle": "Verfügbare Modelle",
+      "needsConversion": "wird konvertiert",
+      "noResults": "Keine ONNX-Modelle gefunden — andere Suchbegriffe versuchen.",
+      "searchPlaceholder": "Modelle auf Hugging Face suchen…",
+      "taskMask": "Maskierung",
+      "title": "Modellbibliothek",
+      "engineTitle": "KI-Engine",
+      "engineDesc": "Für Wiederherstellung und generatives Füllen/Erweitern. Einmalige Installation (~2 GB).",
+      "engineInstalled": "Installiert",
+      "engineInstall": "Engine installieren",
+      "engineInstalling": "Wird installiert..."
+    },
     "processing": {
       "ai": {
         "cloud": {
@@ -1544,6 +1649,18 @@
           "cpu": "CPU"
         },
         "title": "Generative KI"
+      },
+      "aiModels": {
+        "deblur": "Entschärfung",
+        "depth": "Tiefenschätzung",
+        "description": "Wähle, welches lokale Modell für jede KI-Funktion verwendet wird. Eigene Modelle können über eine Manifest-Datei im Ordner models/manifests hinzugefügt werden.",
+        "foreground": "Vordergrund-Maskierung",
+        "inpaint": "Objektentfernung (Inpainting)",
+        "restore": "Reparatur",
+        "sky": "Himmel-Maskierung",
+        "subject": "Motiv-Maskierung",
+        "title": "Lokale KI-Modelle",
+        "upscale": "Hochskalierung"
       },
       "backend": "Verarbeitungs-Backend",
       "backendDesc": "Wählen Sie die Grafik-API. 'Auto' wird empfohlen. Kann Abstürze auf einigen Systemen beheben.",

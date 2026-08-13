@@ -8,23 +8,28 @@ static GLOBAL: MiMalloc = MiMalloc;
 mod adjustment_utils;
 mod ai_commands;
 mod ai_connector;
-mod ai_processing;
+pub mod ai_processing;
 mod android_integration;
 mod app_settings;
 mod app_state;
 mod cache_utils;
+pub mod comfy_engine;
 mod culling;
 mod denoising;
+pub mod enhancement;
 mod exif_processing;
+pub mod expansion;
 mod export_processing;
 mod file_management;
 mod formats;
 mod gpu_processing;
-mod image_loader;
-mod image_processing;
+pub mod image_loader;
+pub mod image_processing;
 mod lens_correction;
 mod lut_processing;
 mod mask_generation;
+pub mod model_library;
+pub mod model_registry;
 mod negative_conversion;
 mod panorama_stitching;
 mod panorama_utils;
@@ -2169,6 +2174,10 @@ pub fn run() {
             hdr_result: Arc::new(Mutex::new(None)),
             panorama_result: Arc::new(Mutex::new(None)),
             denoise_result: Arc::new(Mutex::new(None)),
+            enhancement_result: Arc::new(Mutex::new(None)),
+            enhancement_raw: Arc::new(Mutex::new(None)),
+            enhancement_chain_input: Arc::new(Mutex::new(None)),
+            expansion_results: Arc::new(Mutex::new(Vec::new())),
             indexing_task_handle: Mutex::new(None),
             lut_cache: Mutex::new(HashMap::new()),
             initial_file_path: Mutex::new(None),
@@ -2186,6 +2195,8 @@ pub fn run() {
             full_transformed_cache: Mutex::new(None),
             decoded_image_cache: Mutex::new(DecodedImageCache::new(5)),
             thumbnail_manager: ThumbnailManager::new(),
+            model_registry: Mutex::new(None),
+            comfy_process: Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
             apply_adjustments,
@@ -2224,6 +2235,25 @@ pub fn run() {
             ai_commands::check_ai_connector_status,
             ai_commands::test_ai_connector_connection,
             ai_commands::invoke_generative_replace_with_mask_def,
+            model_registry::list_registered_models,
+            model_registry::rescan_model_registry,
+            model_registry::test_model_round_trip,
+            model_library::get_model_library,
+            ai_commands::invoke_spot_enhance_with_mask_def,
+            comfy_engine::get_engine_status,
+            comfy_engine::install_ai_engine,
+            model_library::download_library_model,
+            model_library::delete_library_model,
+            model_library::add_model_from_url,
+            model_library::add_model_from_file,
+            model_library::search_remote_models,
+            model_library::install_remote_model,
+            enhancement::apply_enhancement,
+            enhancement::get_enhancement_overview,
+            enhancement::preview_enhancement,
+            enhancement::save_enhanced_image,
+            expansion::apply_expansion,
+            expansion::save_expanded_image,
             denoising::apply_denoising,
             denoising::batch_denoise_images,
             denoising::save_denoised_image,
@@ -2309,6 +2339,10 @@ pub fn run() {
                 tauri::RunEvent::ExitRequested { api, .. } => {
                     api.prevent_exit();
 
+                    // The app force-exits below; make sure the managed
+                    // generative engine doesn't outlive it.
+                    comfy_engine::stop(&app_handle.state::<AppState>().comfy_process);
+
                     #[cfg(target_os = "macos")]
                     unsafe { libc::_exit(0); }
 
@@ -2316,6 +2350,8 @@ pub fn run() {
                     std::process::exit(0);
                 }
                 tauri::RunEvent::Exit => {
+                    comfy_engine::stop(&app_handle.state::<AppState>().comfy_process);
+
                     #[cfg(target_os = "macos")]
                     unsafe { libc::_exit(0); }
 

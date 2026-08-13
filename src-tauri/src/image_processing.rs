@@ -1337,6 +1337,25 @@ pub struct GlobalAdjustments {
     pub halation_amount: f32,
     pub flare_amount: f32,
     pub sharpness_threshold: f32,
+
+    // Resolve-style primary wheels: [r, g, b, master].
+    pub cw_lift: [f32; 4],
+    pub cw_gamma: [f32; 4],
+    pub cw_gain: [f32; 4],
+    pub cw_offset: [f32; 4],
+    pub contrast_pivot: f32,
+    pub texture_amount: f32,
+    pub _pad_pro1: f32,
+    pub _pad_pro2: f32,
+    // Hue/luma delta curves (x normalized 0..1, y -1..1).
+    pub hue_hue_curve: [Point; 16],
+    pub hue_sat_curve: [Point; 16],
+    pub hue_lum_curve: [Point; 16],
+    pub lum_sat_curve: [Point; 16],
+    pub hue_hue_count: u32,
+    pub hue_sat_count: u32,
+    pub hue_lum_count: u32,
+    pub lum_sat_count: u32,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, Pod, Zeroable, Default)]
@@ -1391,6 +1410,16 @@ pub struct MaskAdjustments {
     _pad_end5: f32,
     _pad_end6: f32,
     _pad_end7: f32,
+
+    pub cw_lift: [f32; 4],
+    pub cw_gamma: [f32; 4],
+    pub cw_gain: [f32; 4],
+    pub cw_offset: [f32; 4],
+    // Signed pivot delta; the global struct carries the absolute pivot.
+    pub contrast_pivot: f32,
+    pub texture_amount: f32,
+    pub _pad_pro3: f32,
+    pub _pad_pro4: f32,
 }
 
 pub const MAX_MASKS: usize = 32;
@@ -1866,6 +1895,69 @@ pub fn is_image_edited(
     bytemuck::bytes_of(&current_adj) != bytemuck::bytes_of(&default_adj)
 }
 
+/// Parses one color wheel stored wheel-native ({hue 0-360, saturation
+/// 0-100, luminance -100..100}, same shape the grading wheels persist) into
+/// the shader's [r, g, b, master]. The chroma direction is zero-mean so a
+/// push toward a hue doesn't shift overall brightness.
+fn parse_color_wheel(v: &serde_json::Value) -> [f32; 4] {
+    let hue = v["hue"].as_f64().unwrap_or(0.0) as f32;
+    let sat = (v["saturation"].as_f64().unwrap_or(0.0) as f32 / 100.0).clamp(0.0, 1.0);
+    let master = (v["luminance"].as_f64().unwrap_or(0.0) as f32 / 100.0).clamp(-1.0, 1.0);
+    if sat < 0.001 && master.abs() < 0.001 {
+        return [0.0; 4];
+    }
+    let h = hue.rem_euclid(360.0) / 60.0;
+    let x = 1.0 - ((h % 2.0) - 1.0).abs();
+    let (r, g, b) = match h as u32 {
+        0 => (1.0, x, 0.0),
+        1 => (x, 1.0, 0.0),
+        2 => (0.0, 1.0, x),
+        3 => (0.0, x, 1.0),
+        4 => (x, 0.0, 1.0),
+        _ => (1.0, 0.0, x),
+    };
+    let mean = (r + g + b) / 3.0;
+    let k = sat * 0.75;
+    [(r - mean) * k, (g - mean) * k, (b - mean) * k, master]
+}
+
+/// Bakes a UI delta curve into normalized shader points. `x_max` is the UI
+/// x-domain (360 for hue, 100 for luminance); y is -100..100. Hue-domain
+/// curves wrap: phantom copies of the outermost points are added across the
+/// 0/1 seam so the shader can do a plain scan.
+fn convert_delta_curve(points_json: Option<&serde_json::Value>, x_max: f32, wrap: bool) -> ([Point; 16], u32) {
+    let mut pts: Vec<(f32, f32)> = points_json
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|p| {
+                    let x = p["x"].as_f64()? as f32 / x_max;
+                    let y = (p["y"].as_f64()? as f32 / 100.0).clamp(-1.0, 1.0);
+                    Some((x.clamp(0.0, 1.0), y))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    // A curve of all-zero deltas is neutral — skip it entirely.
+    if pts.iter().all(|(_, y)| y.abs() < 0.0001) {
+        return ([Point::default(); 16], 0);
+    }
+    pts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    pts.truncate(14);
+    if wrap && pts.len() >= 2 {
+        let first = pts[0];
+        let last = pts[pts.len() - 1];
+        pts.insert(0, (last.0 - 1.0, last.1));
+        pts.push((first.0 + 1.0, first.1));
+    }
+    pts.truncate(16);
+    let mut out = [Point::default(); 16];
+    for (i, (x, y)) in pts.iter().enumerate() {
+        out[i] = Point { x: *x, y: *y, _pad1: 0.0, _pad2: 0.0 };
+    }
+    (out, pts.len() as u32)
+}
+
 fn get_global_adjustments_from_json(
     js_adjustments: &serde_json::Value,
     is_raw: bool,
@@ -1972,6 +2064,27 @@ fn get_global_adjustments_from_json(
 
     let tone_mapper = js_adjustments["toneMapper"].as_str().unwrap_or("basic");
     let (pipe_to_rendering, rendering_to_pipe) = calculate_agx_matrices();
+
+    let cw_obj = js_adjustments.get("colorWheels").cloned().unwrap_or_default();
+    let cw = |name: &str| -> [f32; 4] {
+        if is_visible("color") {
+            parse_color_wheel(&cw_obj[name])
+        } else {
+            [0.0; 4]
+        }
+    };
+    let hc_obj = js_adjustments.get("hueCurves").cloned().unwrap_or_default();
+    let hue_curve = |name: &str, x_max: f32, wrap: bool| -> ([Point; 16], u32) {
+        if is_visible("color") {
+            convert_delta_curve(hc_obj.get(name), x_max, wrap)
+        } else {
+            ([Point::default(); 16], 0)
+        }
+    };
+    let (hh_pts, hh_n) = hue_curve("hueHue", 360.0, true);
+    let (hs_pts, hs_n) = hue_curve("hueSat", 360.0, true);
+    let (hl_pts, hl_n) = hue_curve("hueLum", 360.0, true);
+    let (ls_pts, ls_n) = hue_curve("lumSat", 100.0, false);
 
     let (has_lut, lut_intensity) = if is_visible("effects") {
         (
@@ -2152,6 +2265,25 @@ fn get_global_adjustments_from_json(
             SCALES.sharpness_threshold,
             Some(15.0),
         ),
+
+        cw_lift: cw("lift"),
+        cw_gamma: cw("gamma"),
+        cw_gain: cw("gain"),
+        cw_offset: cw("offset"),
+        // Absolute pivot in 0..1; slider is 0..100 with 50 = classic center.
+        contrast_pivot: get_val("basic", "contrastPivot", 100.0, Some(50.0)),
+        // Texture shares clarity's scale: a fine-detail local contrast band.
+        texture_amount: get_val("details", "texture", SCALES.clarity, None),
+        _pad_pro1: 0.0,
+        _pad_pro2: 0.0,
+        hue_hue_curve: hh_pts,
+        hue_sat_curve: hs_pts,
+        hue_lum_curve: hl_pts,
+        lum_sat_curve: ls_pts,
+        hue_hue_count: hh_n,
+        hue_sat_count: hs_n,
+        hue_lum_count: hl_n,
+        lum_sat_count: ls_n,
     }
 }
 
@@ -2283,6 +2415,21 @@ fn get_mask_adjustments_from_json(adj: &serde_json::Value) -> MaskAdjustments {
         _pad_end5: 0.0,
         _pad_end6: 0.0,
         _pad_end7: 0.0,
+
+        cw_lift: if is_visible("color") { parse_color_wheel(&adj["colorWheels"]["lift"]) } else { [0.0; 4] },
+        cw_gamma: if is_visible("color") { parse_color_wheel(&adj["colorWheels"]["gamma"]) } else { [0.0; 4] },
+        cw_gain: if is_visible("color") { parse_color_wheel(&adj["colorWheels"]["gain"]) } else { [0.0; 4] },
+        cw_offset: if is_visible("color") { parse_color_wheel(&adj["colorWheels"]["offset"]) } else { [0.0; 4] },
+        // The mask slider shows the same 0..100 pivot; the shader wants a
+        // delta on top of the global pivot, so 50 is neutral.
+        contrast_pivot: if is_visible("basic") {
+            (adj["contrastPivot"].as_f64().unwrap_or(50.0) as f32 - 50.0) / 100.0
+        } else {
+            0.0
+        },
+        texture_amount: get_val("details", "texture", SCALES.clarity),
+        _pad_pro3: 0.0,
+        _pad_pro4: 0.0,
     }
 }
 
@@ -3259,4 +3406,54 @@ pub fn calculate_auto_adjustments(
     let results = perform_auto_analysis(&original_image);
 
     Ok(auto_results_to_json(&results))
+}
+
+
+#[cfg(test)]
+mod pro_color_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn color_wheel_chroma_is_zero_mean() {
+        let v = json!({"hue": 15.0, "saturation": 60.0, "luminance": 0.0});
+        let w = parse_color_wheel(&v);
+        let sum = w[0] + w[1] + w[2];
+        assert!(sum.abs() < 1e-4, "chroma should be zero-mean, got sum {sum}");
+        assert!(w[0] > 0.0, "a red-ish hue should push red positive");
+    }
+
+    #[test]
+    fn color_wheel_neutral_is_zero() {
+        let w = parse_color_wheel(&json!({"hue": 200.0, "saturation": 0.0, "luminance": 0.0}));
+        assert_eq!(w, [0.0; 4]);
+    }
+
+    #[test]
+    fn delta_curve_wraps_hue_domain() {
+        let pts = json!([{"x": 10.0, "y": 50.0}, {"x": 350.0, "y": -50.0}]);
+        let (baked, n) = convert_delta_curve(Some(&pts), 360.0, true);
+        assert_eq!(n, 4, "two user points + two phantom wrap points");
+        // Phantom before 0 copies the LAST point's y; phantom after 1 the first's.
+        assert!(baked[0].x < 0.0 && (baked[0].y - (-0.5)).abs() < 1e-5);
+        assert!(baked[3].x > 1.0 && (baked[3].y - 0.5).abs() < 1e-5);
+        // Interior points normalized and ordered.
+        assert!((baked[1].x - 10.0 / 360.0).abs() < 1e-5);
+        assert!((baked[2].x - 350.0 / 360.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn delta_curve_all_zero_is_neutral() {
+        let pts = json!([{"x": 100.0, "y": 0.0}, {"x": 200.0, "y": 0.0}]);
+        let (_, n) = convert_delta_curve(Some(&pts), 360.0, true);
+        assert_eq!(n, 0, "flat curves must bake to empty (shader skips)");
+    }
+
+    #[test]
+    fn mask_pivot_is_delta_from_center() {
+        let m = get_mask_adjustments_from_json(&json!({"contrastPivot": 75.0}));
+        assert!((m.contrast_pivot - 0.25).abs() < 1e-5);
+        let m2 = get_mask_adjustments_from_json(&json!({}));
+        assert_eq!(m2.contrast_pivot, 0.0, "absent pivot must be neutral");
+    }
 }

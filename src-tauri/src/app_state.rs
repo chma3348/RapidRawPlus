@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, Mutex};
 
-use image::{DynamicImage, GrayImage};
+use image::{DynamicImage, GrayImage, RgbaImage};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as TokioMutex;
 use tokio::task::JoinHandle;
@@ -12,6 +12,7 @@ use wgpu::{Texture, TextureView};
 
 use crate::ai_processing::AiState;
 use crate::cache_utils::DecodedImageCache;
+use crate::model_registry::ModelRegistry;
 use crate::gpu_processing::GpuProcessor;
 use crate::image_processing::GpuContext;
 use crate::lens_correction::LensDatabase;
@@ -106,6 +107,13 @@ impl ThumbnailManager {
 
 pub type TransformedImageCache = (u64, Arc<DynamicImage>, (f32, f32));
 
+pub struct EnhancementRaw {
+    pub key: String,
+    pub raw: image::Rgb32FImage,
+    pub original: image::Rgb32FImage,
+    pub native_scale: u32,
+}
+
 pub struct AppState {
     pub window_setup_complete: AtomicBool,
     pub gpu_crash_flag_path: Mutex<Option<PathBuf>>,
@@ -120,6 +128,17 @@ pub struct AppState {
     pub hdr_result: Arc<Mutex<Option<DynamicImage>>>,
     pub panorama_result: Arc<Mutex<Option<DynamicImage>>>,
     pub denoise_result: Arc<Mutex<Option<DynamicImage>>>,
+    pub enhancement_result: Arc<Mutex<Option<DynamicImage>>>,
+    /// Raw (un-blended, native-scale) model output of the last enhancement
+    /// run plus its input, keyed by what produced it — lets retries with a
+    /// different strength/output size re-blend instantly instead of
+    /// re-running the model.
+    pub enhancement_raw: Arc<Mutex<Option<EnhancementRaw>>>,
+    /// Input image pinned per chain step: retries within a step must feed
+    /// on the PREVIOUS step's result, not the step's own output (which has
+    /// already replaced `enhancement_result` by then).
+    pub enhancement_chain_input: Arc<Mutex<Option<(u32, image::Rgb32FImage)>>>,
+    pub expansion_results: Arc<Mutex<Vec<RgbaImage>>>,
     pub indexing_task_handle: Mutex<Option<JoinHandle<()>>>,
     pub lut_cache: Mutex<HashMap<String, Arc<Lut>>>,
     pub initial_file_path: Mutex<Option<String>>,
@@ -137,4 +156,6 @@ pub struct AppState {
     pub full_transformed_cache: Mutex<Option<TransformedImageCache>>,
     pub decoded_image_cache: Mutex<DecodedImageCache>,
     pub thumbnail_manager: Arc<ThumbnailManager>,
+    pub model_registry: Mutex<Option<Arc<ModelRegistry>>>,
+    pub comfy_process: Mutex<Option<std::process::Child>>,
 }

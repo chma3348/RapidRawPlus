@@ -15,6 +15,8 @@ export interface InteractivePatch {
 }
 
 interface EditorState {
+  maskMatteView: boolean;
+  setMaskMatteView: (v: boolean) => void;
   // Core Image & Adjustments
   selectedImage: SelectedImage | null;
   adjustments: Adjustments;
@@ -105,6 +107,8 @@ export const useEditorStore = create<EditorState>((set) => ({
   activeAiSubMaskId: null,
 
   zoom: 1,
+  maskMatteView: false,
+  setMaskMatteView: (v: boolean) => set({ maskMatteView: v }),
   displaySize: { width: 0, height: 0 },
   previewSize: { width: 0, height: 0 },
   baseRenderSize: { width: 0, height: 0 },

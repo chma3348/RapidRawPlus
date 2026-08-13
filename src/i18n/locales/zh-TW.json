@@ -15,7 +15,8 @@
       "reset": "重置",
       "shadows": "陰影",
       "toneMapper": "色調映射",
-      "whites": "白色"
+      "whites": "白色",
+      "contrastPivot": "對比度軸心"
     },
     "color": {
       "ariaSelectColor": "選擇 {{name}} 顏色",
@@ -63,7 +64,23 @@
       "vibrance": "鮮豔度",
       "wbPickerTooltip": "白平衡選取器",
       "wbPickerWgpuDisabled": "白平衡選取器：請在設定中停用 WGPU。",
-      "whiteBalance": "白平衡"
+      "whiteBalance": "白平衡",
+      "wheels": {
+        "title": "色輪",
+        "lift": "暗部 (Lift)",
+        "gamma": "中間調 (Gamma)",
+        "gain": "亮部 (Gain)",
+        "offset": "整體 (Offset)"
+      },
+      "hueCurves": {
+        "title": "色彩曲線",
+        "reset": "重置",
+        "hint": "點擊新增控制點，拖曳調整，雙擊刪除。",
+        "hueHue": "色相 vs 色相",
+        "hueSat": "色相 vs 飽和度",
+        "hueLum": "色相 vs 明亮度",
+        "lumSat": "明亮度 vs 飽和度"
+      }
     },
     "curves": {
       "channelTitle": "{{channel}} 通道",
@@ -108,7 +125,8 @@
       "sharpening": "銳化",
       "sharpness": "銳度",
       "structure": "結構",
-      "threshold": "臨界值"
+      "threshold": "臨界值",
+      "texture": "紋理"
     },
     "effects": {
       "amount": "數量",
@@ -177,8 +195,10 @@
       "convertNegative": "轉換負片",
       "copyAdjustments": "複製調整",
       "cullImage": "篩選影像",
+      "deblur": "AI 去模糊",
       "denoise": "降噪影像",
       "editImage": "編輯影像",
+      "expand": "AI 擴展",
       "exportImage": "匯出影像",
       "frameImage": "裝裱影像",
       "mergeHdr": "合併為 HDR",
@@ -191,9 +211,11 @@
       "ratingLabel_other": "{{count}} 星",
       "redo": "重做",
       "resetAdjustments": "重置調整",
+      "restore": "AI 修復",
       "stitchPanorama": "拼接全景圖",
       "tagging": "標籤",
-      "undo": "復原"
+      "undo": "復原",
+      "upscale": "AI 放大"
     },
     "folders": {
       "changeIcon": "更換圖示",
@@ -385,7 +407,12 @@
         "placeholder": "例如，一片花海",
         "quickEraseDesc": "填充選區以移除物件。",
         "selectionPropertiesTitle": "選區屬性",
-        "useBasicInpaint": "使用基礎影像修復"
+        "useBasicInpaint": "使用基礎影像修復",
+        "spotEnhanceTitle": "局部增強",
+        "spotEnhanceDesc": "僅銳化或修復塗抹的區域，照片其餘部分保持不變。",
+        "spotEnhanceMode": "模式",
+        "spotSharpen": "銳化",
+        "spotEnhanceButton": "增強所選區域"
       }
     },
     "crop": {
@@ -438,12 +465,12 @@
       },
       "presets": {
         "custom": {
-          "name": "自定義",
+          "name": "精確比例",
           "tooltip": "輸入自定義寬高比"
         },
         "free": {
           "desc": "自由裁剪",
-          "name": "自由"
+          "name": "自由（拖曳）"
         },
         "original": {
           "desc": "原始影像寬高比",
@@ -496,7 +523,8 @@
         "switchToLandscape": "切換為橫向",
         "switchToPortrait": "切換為縱向",
         "transform": "透視和梯形校正"
-      }
+      },
+      "done": "完成"
     },
     "masks": {
       "actions": {
@@ -550,7 +578,9 @@
         "feather": "羽化",
         "globalFeather": "全域羽化",
         "grow": "擴張",
-        "tolerance": "容差"
+        "tolerance": "容差",
+        "clean": "淨化",
+        "matteView": "顯示黑白遮罩"
       },
       "patches": {
         "copyName": "{{name}} 副本",
@@ -1083,7 +1113,9 @@
         "tone": "色調",
         "transformRotation": "變換與旋轉",
         "vignette": "暗角",
-        "whiteBalance": "白平衡"
+        "whiteBalance": "白平衡",
+        "colorWheels": "色輪",
+        "hueCurves": "色彩曲線"
       },
       "includedAdjustments": "包含的調整",
       "modeMerge": "合併",
@@ -1166,6 +1198,53 @@
       "strengthLabel": "強度",
       "titleBatch": "降噪影像",
       "titleSingle": "降噪影像"
+    },
+    "enhance": {
+      "btnRetry": "重試",
+      "btnSave": "儲存",
+      "btnStart": "開始",
+      "cancel": "取消",
+      "clickToPreview": "點擊任意位置預覽模型效果",
+      "close": "關閉",
+      "deblurProgress": "正在去模糊…",
+      "descriptionDeblur": "嘗試使用本機 AI 模型減少模糊。效果因模糊類型與強度而異。",
+      "descriptionRestore": "使用本機 AI 模型修復影像瑕疵——依問題選擇模型：螢幕摩爾紋（去摩爾紋）或一般雜訊與壓縮瑕疵。",
+      "descriptionUpscale": "使用本機 AI 模型將影像放大 4 倍。大型影像會以圖塊處理，在 CPU 上可能需要一些時間。",
+      "dragToPreview": "點擊或框選區域進行預覽",
+      "initializing": "正在初始化…",
+      "openInEditor": "在編輯器中開啟",
+      "outputSizeLabel": "輸出尺寸",
+      "previewEnhanced": "預覽",
+      "previewNote": "所選區域的預覽——「開始」將處理整張照片。",
+      "previewOriginal": "原圖",
+      "previewRunning": "正在產生預覽…",
+      "processingFailed": "處理失敗",
+      "restoreProgress": "正在修復影像…",
+      "saveSuccess": "影像已儲存在原圖旁。",
+      "speedNotice": "處理時間取決於影像大小與硬體。",
+      "strengthLabel": "強度",
+      "titleDeblur": "AI 去模糊",
+      "titleRestore": "AI 修復",
+      "titleUpscale": "AI 放大",
+      "upscaleProgress": "正在放大影像…",
+      "continueWith": "繼續使用",
+      "chainNote": "正在基於上一次結果處理"
+    },
+    "expand": {
+      "btnGenerate": "產生",
+      "btnRetry": "重新產生",
+      "btnSave": "儲存",
+      "cancel": "取消",
+      "close": "關閉",
+      "dragHint": "向外拖曳控點以設定新的畫框",
+      "generating": "正在產生填充…",
+      "openInEditor": "在編輯器中開啟",
+      "processingFailed": "擴展失敗",
+      "saveSuccess": "影像已儲存在原圖旁。",
+      "variantLabel": "選項 {{current}}/{{total}}",
+      "targetSize": "目標尺寸",
+      "output": "輸出",
+      "guidesTooltip": "切換構圖參考線"
     },
     "hdr": {
       "cancel": "取消",
@@ -1320,6 +1399,11 @@
       "zoomInTooltip": "放大",
       "zoomOutTooltip": "縮小"
     }
+  },
+  "modelRegistry": {
+    "model": "模型",
+    "noModels": "沒有可用的模型",
+    "notDownloaded": "未下載"
   },
   "settings": {
     "adjustments": {
@@ -1494,6 +1578,27 @@
       "saved": "已儲存的鏡頭",
       "title": "我的鏡頭"
     },
+    "modelLibrary": {
+      "addButton": "加入",
+      "addDescription": "指向 .onnx 檔案的直接連結。下載並驗證後將加入對應的下拉選單。",
+      "addNamePlaceholder": "顯示名稱",
+      "addTitle": "透過 URL 加入模型",
+      "browseButton": "選擇檔案…",
+      "delete": "從磁碟刪除",
+      "description": "下載精選 AI 模型、刪除不用的模型，或透過直接連結加入自己的模型。",
+      "download": "下載",
+      "installedTitle": "可用模型",
+      "needsConversion": "將自動轉換",
+      "noResults": "找不到 ONNX 模型——請嘗試其他關鍵字。",
+      "searchPlaceholder": "在 Hugging Face 上搜尋模型…",
+      "taskMask": "遮罩",
+      "title": "模型庫",
+      "engineTitle": "AI 引擎",
+      "engineDesc": "用於修復及生成式填充/擴展。一次性安裝（約 2 GB）。",
+      "engineInstalled": "已安裝",
+      "engineInstall": "安裝引擎",
+      "engineInstalling": "安裝中..."
+    },
     "processing": {
       "ai": {
         "cloud": {
@@ -1544,6 +1649,18 @@
           "cpu": "CPU"
         },
         "title": "生成式 AI"
+      },
+      "aiModels": {
+        "deblur": "去模糊",
+        "depth": "深度估計",
+        "description": "選擇每個 AI 功能使用的本機模型。將資訊清單檔案放入 models/manifests 資料夾即可加入自訂模型。",
+        "foreground": "前景遮罩",
+        "inpaint": "物件移除（影像修復）",
+        "restore": "修復",
+        "sky": "天空遮罩",
+        "subject": "主體遮罩",
+        "title": "本機 AI 模型",
+        "upscale": "放大"
       },
       "backend": "處理後端",
       "backendDesc": "選擇圖形 API。推薦使用「自動」。在某些系統上可能解決崩潰問題。",

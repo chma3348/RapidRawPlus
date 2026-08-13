@@ -65,6 +65,17 @@ export default function DetailsPanel({
             {t('adjustments.details.presence')}
           </Text>
           <Slider
+            label={t('adjustments.details.texture')}
+            max={100}
+            min={-100}
+            onChange={(e: any) =>
+              setAdjustments((prev: any) => ({ ...prev, texture: parseFloat(e.target.value) }))
+            }
+            step={1}
+            value={adjustments.texture ?? 0}
+            onDragStateChange={onDragStateChange}
+          />
+          <Slider
             label={t('adjustments.details.clarity')}
             max={100}
             min={-100}

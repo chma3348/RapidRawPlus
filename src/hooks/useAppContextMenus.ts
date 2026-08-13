@@ -30,6 +30,10 @@ import {
   Gauge,
   Grip,
   Film,
+  Sparkles,
+  Focus,
+  Wand2,
+  Expand,
   Home,
   Plane,
   Mountain,
@@ -216,6 +220,76 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
                     targetPaths: [selectedImage.path],
                     progressMessage: null,
                     isRaw: selectedImage?.isRaw || false,
+                  },
+                });
+              },
+            },
+            {
+              label: t('contextMenus.editor.upscale'),
+              icon: Sparkles,
+              onClick: () => {
+                setUI({
+                  enhanceModalState: {
+                    isOpen: true,
+                    isProcessing: false,
+                    previewBase64: null,
+                    error: null,
+                    targetPaths: [selectedImage.path],
+                    progressMessage: null,
+                    isRaw: selectedImage?.isRaw || false,
+                    task: 'upscale',
+                  },
+                });
+              },
+            },
+            {
+              label: t('contextMenus.editor.deblur'),
+              icon: Focus,
+              onClick: () => {
+                setUI({
+                  enhanceModalState: {
+                    isOpen: true,
+                    isProcessing: false,
+                    previewBase64: null,
+                    error: null,
+                    targetPaths: [selectedImage.path],
+                    progressMessage: null,
+                    isRaw: selectedImage?.isRaw || false,
+                    task: 'deblur',
+                  },
+                });
+              },
+            },
+            {
+              label: t('contextMenus.editor.restore'),
+              icon: Wand2,
+              onClick: () => {
+                setUI({
+                  enhanceModalState: {
+                    isOpen: true,
+                    isProcessing: false,
+                    previewBase64: null,
+                    error: null,
+                    targetPaths: [selectedImage.path],
+                    progressMessage: null,
+                    isRaw: selectedImage?.isRaw || false,
+                    task: 'restore',
+                  },
+                });
+              },
+            },
+            {
+              label: t('contextMenus.editor.expand'),
+              icon: Expand,
+              onClick: () => {
+                setUI({
+                  expandModalState: {
+                    isOpen: true,
+                    isProcessing: false,
+                    variants: [],
+                    error: null,
+                    targetPaths: [selectedImage.path],
+                    progressMessage: null,
                   },
                 });
               },

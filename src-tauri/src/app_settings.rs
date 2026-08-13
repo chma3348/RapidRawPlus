@@ -434,6 +434,10 @@ pub struct AppSettings {
     pub language: Option<String>,
     #[serde(default)]
     pub folder_tree_sort: Option<FolderTreeSort>,
+    #[serde(default)]
+    pub preferred_models: Option<HashMap<String, String>>,
+    #[serde(default)]
+    pub model_catalog_url: Option<String>,
 }
 
 impl Default for AppSettings {
@@ -520,6 +524,8 @@ impl Default for AppSettings {
             exif_overlay: Some("off".to_string()),
             language: Some("en".to_string()),
             folder_tree_sort: Some(FolderTreeSort::default()),
+            preferred_models: None,
+            model_catalog_url: None,
         }
     }
 }

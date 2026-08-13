@@ -1,6 +1,7 @@
 import { useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useUIStore } from '../store/useUIStore';
+import { useEditorStore } from '../store/useEditorStore';
 import { Invokes } from '../components/ui/AppProperties';
 
 export function useProductivityActions(refreshImageList: () => Promise<void>) {
@@ -135,6 +136,99 @@ export function useProductivityActions(refreshImageList: () => Promise<void>) {
     return savedPath;
   }, [refreshImageList]);
 
+  const handleApplyEnhance = useCallback(async (strength: number, outputScale: number, chainStep: number = 0) => {
+    const { enhanceModalState } = useUIStore.getState();
+    if (enhanceModalState.targetPaths.length === 0) return;
+
+    setUI((state) => ({
+      enhanceModalState: {
+        ...state.enhanceModalState,
+        isProcessing: true,
+        error: null,
+        previewBase64: null,
+        progressMessage: 'Starting engine...',
+      },
+    }));
+
+    try {
+      const { selectedImage, adjustments } = useEditorStore.getState();
+      await invoke(Invokes.ApplyEnhancement, {
+        path: enhanceModalState.targetPaths[0],
+        task: enhanceModalState.task,
+        strength,
+        outputScale,
+        chainStep,
+        // Chained passes work on the previous result, which already has
+        // the edits baked in.
+        jsAdjustments:
+          chainStep === 0 && selectedImage?.path === enhanceModalState.targetPaths[0] ? adjustments : null,
+      });
+    } catch (err) {
+      setUI((state) => ({
+        enhanceModalState: { ...state.enhanceModalState, isProcessing: false, error: String(err) },
+      }));
+    }
+  }, [setUI]);
+
+  const handleSaveEnhancedImage = useCallback(async (): Promise<string> => {
+    const { enhanceModalState } = useUIStore.getState();
+    if (enhanceModalState.targetPaths.length === 0) throw new Error('No target path');
+    const savedPath = await invoke<string>(Invokes.SaveEnhancedImage, {
+      originalPathStr: enhanceModalState.targetPaths[0],
+      task: enhanceModalState.task,
+    });
+    await refreshImageList();
+    return savedPath;
+  }, [refreshImageList]);
+
+  const handleApplyExpansion = useCallback(
+    async (left: number, top: number, right: number, bottom: number) => {
+      const { expandModalState } = useUIStore.getState();
+      if (expandModalState.targetPaths.length === 0) return;
+
+      setUI((state) => ({
+        expandModalState: {
+          ...state.expandModalState,
+          isProcessing: true,
+          error: null,
+          variants: [],
+          progressMessage: 'Starting engine...',
+        },
+      }));
+
+      try {
+        const { selectedImage, adjustments } = useEditorStore.getState();
+        await invoke(Invokes.ApplyExpansion, {
+          path: expandModalState.targetPaths[0],
+          left,
+          top,
+          right,
+          bottom,
+          jsAdjustments: selectedImage?.path === expandModalState.targetPaths[0] ? adjustments : null,
+        });
+      } catch (err) {
+        setUI((state) => ({
+          expandModalState: { ...state.expandModalState, isProcessing: false, error: String(err) },
+        }));
+      }
+    },
+    [setUI],
+  );
+
+  const handleSaveExpandedImage = useCallback(
+    async (variantIndex: number): Promise<string> => {
+      const { expandModalState } = useUIStore.getState();
+      if (expandModalState.targetPaths.length === 0) throw new Error('No target path');
+      const savedPath = await invoke<string>(Invokes.SaveExpandedImage, {
+        originalPathStr: expandModalState.targetPaths[0],
+        variantIndex,
+      });
+      await refreshImageList();
+      return savedPath;
+    },
+    [refreshImageList],
+  );
+
   const handleSaveCollage = useCallback(
     async (base64Data: string, firstPath: string): Promise<string> => {
       try {
@@ -157,6 +251,10 @@ export function useProductivityActions(refreshImageList: () => Promise<void>) {
     handleApplyDenoise,
     handleBatchDenoise,
     handleSaveDenoisedImage,
+    handleApplyEnhance,
+    handleSaveEnhancedImage,
+    handleApplyExpansion,
+    handleSaveExpandedImage,
     handleSaveCollage,
   };
 }

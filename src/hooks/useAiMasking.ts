@@ -107,6 +107,58 @@ export function useAiMasking() {
     [setAdjustments, setEditor],
   );
 
+  const handleSpotEnhance = useCallback(
+    async (patchId: string, task: string, strength: number) => {
+      const { selectedImage, adjustments, isGeneratingAi, patchesSentToBackend } = useEditorStore.getState();
+      if (!selectedImage?.path || isGeneratingAi) return;
+
+      const patch: AiPatch | undefined = adjustments.aiPatches.find((p: AiPatch) => p.id === patchId);
+      if (!patch) return;
+
+      setAdjustments((prev: Adjustments) => ({
+        ...prev,
+        aiPatches: prev.aiPatches.map((p: AiPatch) => (p.id === patchId ? { ...p, isLoading: true } : p)),
+      }));
+      setEditor({ isGeneratingAi: true });
+
+      try {
+        const newPatchDataJson: any = await invoke(Invokes.InvokeSpotEnhanceWithMaskDef, {
+          currentAdjustments: adjustments,
+          patchDefinition: { ...patch },
+          path: selectedImage.path,
+          task,
+          strength,
+        });
+        const newPatchData = JSON.parse(newPatchDataJson);
+        patchesSentToBackend.delete(patchId);
+
+        setAdjustments((prev: Adjustments) => ({
+          ...prev,
+          aiPatches: prev.aiPatches.map((p: AiPatch) =>
+            p.id === patchId
+              ? {
+                  ...p,
+                  patchData: newPatchData,
+                  isLoading: false,
+                  name: `Spot ${task}`,
+                }
+              : p,
+          ),
+        }));
+        setEditor({ activeAiPatchContainerId: null, activeAiSubMaskId: null });
+      } catch (err) {
+        toast.error(`Spot Enhance Failed: ${err}`);
+        setAdjustments((prev: Adjustments) => ({
+          ...prev,
+          aiPatches: prev.aiPatches.map((p: AiPatch) => (p.id === patchId ? { ...p, isLoading: false } : p)),
+        }));
+      } finally {
+        setEditor({ isGeneratingAi: false });
+      }
+    },
+    [setAdjustments, setEditor],
+  );
+
   const handleQuickErase = useCallback(
     async (subMaskId: string | null, startPoint: Coord, endPoint: Coord) => {
       const { selectedImage, adjustments, isGeneratingAi, patchesSentToBackend } = useEditorStore.getState();
@@ -377,6 +429,7 @@ export function useAiMasking() {
   return {
     updateSubMask,
     handleGenerativeReplace,
+    handleSpotEnhance,
     handleQuickErase,
     handleDeleteMaskContainer,
     handleDeleteAiPatch,

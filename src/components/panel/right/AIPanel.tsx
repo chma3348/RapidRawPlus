@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import { v4 as uuidv4 } from 'uuid';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
@@ -29,6 +30,7 @@ import {
   Trash2,
   Wand2,
   Send,
+  Sparkles,
   FolderOpen,
   SquaresIntersect,
 } from 'lucide-react';
@@ -53,8 +55,10 @@ import {
   getSubMaskName,
 } from './Masks';
 import { Adjustments, AiPatch } from '../../../utils/adjustments';
-import { OPTION_SEPARATOR } from '../../ui/AppProperties';
+import { Invokes, OPTION_SEPARATOR } from '../../ui/AppProperties';
 import { createSubMask } from '../../../utils/maskUtils';
+import ModelPicker, { ModelTaskType } from '../../ui/ModelPicker';
+import Dropdown from '../../ui/Dropdown';
 import Text from '../../ui/Text';
 import { TEXT_COLOR_KEYS, TextColors, TextVariants, TextWeights } from '../../../types/typography';
 import { useUser, useAuth } from '@clerk/react';
@@ -291,7 +295,7 @@ export default function AIPanel() {
   const setCustomEscapeHandler = useUIStore((s) => s.setCustomEscapeHandler);
 
   const { setAdjustments } = useEditorActions();
-  const { handleGenerativeReplace, handleDeleteAiPatch, handleGenerateAiForegroundMask } = useAiMasking();
+  const { handleGenerativeReplace, handleSpotEnhance, handleDeleteAiPatch, handleGenerateAiForegroundMask } = useAiMasking();
   const appSettings = useSettingsStore((s) => s.appSettings);
   const aiProvider = appSettings?.aiProvider || 'cpu';
 
@@ -362,6 +366,7 @@ export default function AIPanel() {
 
   const [collapsibleState, setCollapsibleState] = useState({
     generative: true,
+    spotEnhance: false,
     properties: true,
   });
 
@@ -1097,6 +1102,7 @@ export default function AIPanel() {
                   isGeneratingAi={isGeneratingAi}
                   isGeneratingAiMask={isGeneratingAiMask}
                   onGenerativeReplace={handleGenerativeReplace}
+                  onSpotEnhance={handleSpotEnhance}
                   collapsibleState={collapsibleState}
                   setCollapsibleState={setCollapsibleState}
                   isGenerativeAvailable={isGenerativeAvailable}
@@ -1713,16 +1719,43 @@ function SettingsPanel({
   isGeneratingAi,
   isGeneratingAiMask: _isGeneratingAiMask,
   onGenerativeReplace,
+  onSpotEnhance,
   collapsibleState,
   setCollapsibleState,
   isGenerativeAvailable,
 }: any) {
   const { t } = useTranslation();
+  const { appSettings, handleSettingsChange } = useSettingsStore();
   const isActive = !!container;
   const isComponentMode = !!activeSubMask;
   const displayContainer = container || PLACEHOLDER_PATCH;
   const [prompt, setPrompt] = useState(displayContainer.prompt || '');
   const [useFastInpaint, setUseFastInpaint] = useState(!isGenerativeAvailable);
+  const [inpaintModels, setInpaintModels] = useState<Array<any>>([]);
+  const [spotTask, setSpotTask] = useState<'deblur' | 'restore' | 'upscale'>('deblur');
+  const [spotStrength, setSpotStrength] = useState(70);
+
+  useEffect(() => {
+    invoke(Invokes.ListRegisteredModels, { taskType: 'inpaint' })
+      .then((m: any) => setInpaintModels(m || []))
+      .catch(() => setInpaintModels([]));
+  }, []);
+
+  // Mirror ModelPicker's fallback so this matches what actually runs.
+  const selectedInpaintId =
+    inpaintModels.some((m) => m.id === appSettings?.preferredModels?.inpaint && m.available)
+      ? appSettings?.preferredModels?.inpaint
+      : inpaintModels.find((m) => m.available)?.id;
+  const selectedInpaint = inpaintModels.find((m) => m.id === selectedInpaintId);
+  const isEngineFill = selectedInpaint?.params?.engine === 'comfy';
+
+  const handleInpaintModelChange = (modelId: string) => {
+    if (!appSettings) return;
+    handleSettingsChange({
+      ...appSettings,
+      preferredModels: { ...(appSettings.preferredModels || {}), inpaint: modelId },
+    });
+  };
   const prevContainerId = useRef<string | null>(null);
 
   useEffect(() => {
@@ -1798,20 +1831,33 @@ function SettingsPanel({
           </Text>
 
           <div>
-            <Switch
-              checked={useFastInpaint}
-              disabled={!isGenerativeAvailable}
-              label={t('editor.ai.settings.useBasicInpaint')}
-              onChange={setUseFastInpaint}
-              tooltip={
-                !isGenerativeAvailable
-                  ? t('editor.ai.settings.basicInpaintTooltipDisabled')
-                  : t('editor.ai.settings.basicInpaintTooltipEnabled')
-              }
-            />
+            <div className="mb-3">
+              <Text variant={TextVariants.small} weight={TextWeights.medium} className="mb-1 block">
+                {t('modelRegistry.model')}
+              </Text>
+              <ModelPicker
+                taskType={ModelTaskType.Inpaint}
+                value={appSettings?.preferredModels?.inpaint ?? null}
+                onChange={handleInpaintModelChange}
+              />
+            </div>
+
+            {!isEngineFill && (
+              <Switch
+                checked={useFastInpaint}
+                disabled={!isGenerativeAvailable}
+                label={t('editor.ai.settings.useBasicInpaint')}
+                onChange={setUseFastInpaint}
+                tooltip={
+                  !isGenerativeAvailable
+                    ? t('editor.ai.settings.basicInpaintTooltipDisabled')
+                    : t('editor.ai.settings.basicInpaintTooltipEnabled')
+                }
+              />
+            )}
 
             <AnimatePresence>
-              {!useFastInpaint && (
+              {(isEngineFill || !useFastInpaint) && (
                 <motion.div
                   animate={{ opacity: 1, height: 'auto', marginTop: '0.75rem' }}
                   className="overflow-hidden"
@@ -1853,9 +1899,86 @@ function SettingsPanel({
             <span className="ml-2">
               {isGeneratingAi || displayContainer.isLoading
                 ? t('editor.ai.settings.generating')
-                : useFastInpaint
-                  ? t('editor.ai.settings.inpaintSelectionButton')
-                  : t('editor.ai.settings.generateWithAiButton')}
+                : isEngineFill
+                  ? prompt.trim()
+                    ? t('editor.ai.settings.generateWithAiButton')
+                    : t('editor.ai.settings.inpaintSelectionButton')
+                  : useFastInpaint
+                    ? t('editor.ai.settings.inpaintSelectionButton')
+                    : t('editor.ai.settings.generateWithAiButton')}
+            </span>
+          </Button>
+        </div>
+      </CollapsibleSection>
+
+      <CollapsibleSection
+        title={t('editor.ai.settings.spotEnhanceTitle')}
+        isOpen={collapsibleState.spotEnhance}
+        onToggle={() => handleToggleSection('spotEnhance')}
+        canToggleVisibility={false}
+        isContentVisible={true}
+      >
+        <div className="space-y-4 pt-2">
+          <Text variant={TextVariants.small}>{t('editor.ai.settings.spotEnhanceDesc')}</Text>
+          <div>
+            <Text variant={TextVariants.small} weight={TextWeights.medium} className="mb-1 block">
+              {t('editor.ai.settings.spotEnhanceMode')}
+            </Text>
+            <Dropdown
+              options={[
+                { label: t('editor.ai.settings.spotSharpen'), value: 'upscale' },
+                { label: t('settings.processing.aiModels.deblur'), value: 'deblur' },
+                { label: t('settings.processing.aiModels.restore'), value: 'restore' },
+              ]}
+              value={spotTask}
+              onChange={(v: any) => setSpotTask(v)}
+            />
+          </div>
+          <div>
+            <Text variant={TextVariants.small} weight={TextWeights.medium} className="mb-1 block">
+              {t('modelRegistry.model')}
+            </Text>
+            <ModelPicker
+              taskType={
+                spotTask === 'deblur'
+                  ? ModelTaskType.Deblur
+                  : spotTask === 'restore'
+                    ? ModelTaskType.Restore
+                    : ModelTaskType.Upscale
+              }
+              value={appSettings?.preferredModels?.[spotTask] ?? null}
+              onChange={(modelId: string) => {
+                if (!appSettings) return;
+                handleSettingsChange({
+                  ...appSettings,
+                  preferredModels: { ...(appSettings.preferredModels || {}), [spotTask]: modelId },
+                });
+              }}
+            />
+          </div>
+          <Slider
+            label={t('modals.enhance.strengthLabel')}
+            value={spotStrength}
+            min={10}
+            max={100}
+            step={5}
+            defaultValue={70}
+            onChange={(e: any) => setSpotStrength(Number(e.target.value))}
+          />
+          <Button
+            className="w-full"
+            disabled={isGeneratingAi || displayContainer.isLoading || displayContainer.subMasks.length === 0}
+            onClick={() => container && onSpotEnhance(container.id, spotTask, spotStrength / 100)}
+          >
+            {isGeneratingAi || displayContainer.isLoading ? (
+              <Loader2 size={16} className="animate-spin" />
+            ) : (
+              <Sparkles size={16} />
+            )}
+            <span className="ml-2">
+              {isGeneratingAi || displayContainer.isLoading
+                ? t('editor.ai.settings.generating')
+                : t('editor.ai.settings.spotEnhanceButton')}
             </span>
           </Button>
         </div>

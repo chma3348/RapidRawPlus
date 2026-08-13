@@ -166,6 +166,190 @@ fn classify_raw_develop_error(path: &str, err: anyhow::Error) -> anyhow::Error {
     err
 }
 
+/// IEEE 754 binary16 -> f32. Written out rather than pulling in a crate;
+/// covers subnormals and inf/NaN so odd samples can't corrupt a decode.
+pub fn half_to_f32(h: u16) -> f32 {
+    let sign = ((h as u32) & 0x8000) << 16;
+    let exp = (h >> 10) & 0x1f;
+    let mant = (h & 0x03ff) as u32;
+    let bits = match exp {
+        0 => {
+            if mant == 0 {
+                sign
+            } else {
+                // Subnormal: normalize into an f32 normal.
+                let mut m = mant;
+                let mut shift: i32 = -1;
+                while m & 0x400 == 0 {
+                    m <<= 1;
+                    shift += 1;
+                }
+                let new_exp = (127 - 15 - shift) as u32;
+                sign | (new_exp << 23) | ((m & 0x3ff) << 13)
+            }
+        }
+        0x1f => sign | (0xff << 23) | (mant << 13),
+        _ => sign | ((exp as u32 + 127 - 15) << 23) | (mant << 13),
+    };
+    f32::from_bits(bits)
+}
+
+/// Rewrites a 16-bit half-float TIFF's SampleFormat tag to "unsigned int"
+/// so the standard decoder will hand back the raw sample bits, which we
+/// then reinterpret as halves. The `image` crate supports 32-bit float
+/// TIFFs but not 16-bit halves, which is what video tools export.
+fn patch_half_float_tiff(bytes: &[u8]) -> Option<Vec<u8>> {
+    if bytes.len() < 8 {
+        return None;
+    }
+    let big = match &bytes[0..2] {
+        b"MM" => true,
+        b"II" => false,
+        _ => return None,
+    };
+    let u16_at = |b: &[u8], i: usize| -> Option<u16> {
+        let s: [u8; 2] = b.get(i..i + 2)?.try_into().ok()?;
+        Some(if big { u16::from_be_bytes(s) } else { u16::from_le_bytes(s) })
+    };
+    let u32_at = |b: &[u8], i: usize| -> Option<u32> {
+        let s: [u8; 4] = b.get(i..i + 4)?.try_into().ok()?;
+        Some(if big { u32::from_be_bytes(s) } else { u32::from_le_bytes(s) })
+    };
+    if u16_at(bytes, 2)? != 42 {
+        return None;
+    }
+
+    let ifd = u32_at(bytes, 4)? as usize;
+    let count = u16_at(bytes, ifd)? as usize;
+
+    // Locate the value slots for BitsPerSample (258) and SampleFormat (339).
+    let mut bits_ok = false;
+    let mut sample_slots: Option<(usize, usize)> = None; // (offset, count)
+    for i in 0..count {
+        let entry = ifd.checked_add(2 + i * 12)?;
+        let tag = u16_at(bytes, entry)?;
+        if tag != 258 && tag != 339 {
+            continue;
+        }
+        let typ = u16_at(bytes, entry + 2)?;
+        let n = u32_at(bytes, entry + 4)? as usize;
+        if typ != 3 || n == 0 || n > 8 {
+            return None; // only SHORT arrays are expected here
+        }
+        let slot = if n * 2 > 4 {
+            u32_at(bytes, entry + 8)? as usize
+        } else {
+            entry + 8
+        };
+        let mut vals = Vec::with_capacity(n);
+        for k in 0..n {
+            vals.push(u16_at(bytes, slot + k * 2)?);
+        }
+        if tag == 258 {
+            bits_ok = vals.iter().all(|v| *v == 16);
+        } else {
+            if !vals.iter().all(|v| *v == 3) {
+                return None; // not IEEE float samples
+            }
+            sample_slots = Some((slot, n));
+        }
+    }
+
+    let (slot, n) = sample_slots?;
+    if !bits_ok {
+        return None;
+    }
+    let mut patched = bytes.to_vec();
+    let one: [u8; 2] = if big { 1u16.to_be_bytes() } else { 1u16.to_le_bytes() };
+    for k in 0..n {
+        let at = slot + k * 2;
+        *patched.get_mut(at)? = one[0];
+        *patched.get_mut(at + 1)? = one[1];
+    }
+    Some(patched)
+}
+
+/// Decodes a 16-bit half-float TIFF at full precision.
+fn decode_half_float_tiff(bytes: &[u8]) -> Option<DynamicImage> {
+    let patched = patch_half_float_tiff(bytes)?;
+    let mut reader = ImageReader::new(Cursor::new(patched.as_slice()))
+        .with_guessed_format()
+        .ok()?;
+    reader.no_limits();
+    let rgb16 = reader.decode().ok()?.to_rgb16();
+    let (w, h) = rgb16.dimensions();
+    let mut out = image::Rgb32FImage::new(w, h);
+    for (dst, src) in out.pixels_mut().zip(rgb16.pixels()) {
+        for c in 0..3 {
+            // Display-referred sources sit in [0,1]; clamp so stray HDR or
+            // negative samples can't destabilize the pipeline.
+            dst[c] = half_to_f32(src[c]).clamp(0.0, 1.0);
+        }
+    }
+    Some(DynamicImage::ImageRgb32F(out))
+}
+
+/// HEIF/HEIC container sniff: ISO-BMFF "ftyp" box with a HEIF brand.
+fn is_heif_container(bytes: &[u8]) -> bool {
+    bytes.len() > 12
+        && &bytes[4..8] == b"ftyp"
+        && matches!(
+            &bytes[8..12],
+            b"heic" | b"heix" | b"hevc" | b"hevx" | b"heim" | b"heis" | b"mif1" | b"msf1"
+        )
+}
+
+/// Decodes HEIC through macOS's own codec (`sips`) since the image crate
+/// has no HEVC decoder. PNG as the intermediate: sips leaves pixels in
+/// stored (un-rotated) orientation and PNG carries no orientation tag, so
+/// the caller's normal EXIF-orientation pass applies exactly once.
+#[cfg(target_os = "macos")]
+fn decode_heic_via_sips(bytes: &[u8]) -> Result<DynamicImage> {
+    use std::sync::atomic::AtomicU64;
+    static HEIC_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let id = format!(
+        "rapidraw_heic_{}_{}",
+        std::process::id(),
+        HEIC_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let dir = std::env::temp_dir();
+    let src = dir.join(format!("{id}.heic"));
+    let dst = dir.join(format!("{id}.png"));
+
+    std::fs::write(&src, bytes).context("Failed to stage HEIC for decoding")?;
+    let output = std::process::Command::new("sips")
+        .args(["-s", "format", "png"])
+        .arg(&src)
+        .arg("--out")
+        .arg(&dst)
+        .output();
+    let _ = std::fs::remove_file(&src);
+    let output = output.context("Failed to run the system HEIC decoder (sips)")?;
+    if !output.status.success() {
+        let _ = std::fs::remove_file(&dst);
+        return Err(anyhow!(
+            "HEIC decode failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let png = std::fs::read(&dst).context("Failed to read decoded HEIC")?;
+    let _ = std::fs::remove_file(&dst);
+
+    let mut reader = ImageReader::new(Cursor::new(png.as_slice()))
+        .with_guessed_format()
+        .context("Failed to read decoded HEIC as PNG")?;
+    reader.no_limits();
+    reader.decode().context("Failed to decode HEIC")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn decode_heic_via_sips(_bytes: &[u8]) -> Result<DynamicImage> {
+    Err(anyhow!(
+        "HEIC files are currently only supported on macOS"
+    ))
+}
+
 pub fn load_image_with_orientation(
     bytes: &[u8],
     cancel_token: Option<(Arc<AtomicUsize>, usize)>,
@@ -180,15 +364,29 @@ pub fn load_image_with_orientation(
     };
 
     let cursor = Cursor::new(bytes);
-    let mut reader = ImageReader::new(cursor.clone())
-        .with_guessed_format()
-        .context("Failed to guess image format")?;
 
-    reader.no_limits();
-
-    check_cancel()?;
-
-    let image = reader.decode().context("Failed to decode image")?;
+    // HEIC can't be decoded by the image crate; go through the system
+    // codec, then fall through to the shared orientation pass below (the
+    // exif crate reads HEIF containers, so rotation comes from the
+    // original bytes like any other format).
+    let image = if is_heif_container(bytes) {
+        check_cancel()?;
+        decode_heic_via_sips(bytes)?
+    } else {
+        let mut reader = ImageReader::new(cursor.clone())
+            .with_guessed_format()
+            .context("Failed to guess image format")?;
+        reader.no_limits();
+        check_cancel()?;
+        match reader.decode() {
+            Ok(img) => img,
+            Err(err) => {
+                check_cancel()?;
+                decode_half_float_tiff(bytes)
+                    .ok_or_else(|| anyhow!("Failed to decode image: {}", err))?
+            }
+        }
+    };
     check_cancel()?;
 
     let oriented_image = {
@@ -283,6 +481,12 @@ pub fn composite_patches_on_image(
                 .context("Failed to generate mask from sub_masks for compositing")?
         };
 
+        // Patches from float/RAW sources are stored gamma-encoded so their
+        // deep-shadow values survive 8-bit storage; decode back to linear
+        // here before compositing onto the linear base image.
+        let gamma_encoded =
+            patch_data.get("encoding").and_then(|v| v.as_str()) == Some("gamma");
+
         let color_b64 = patch_data
             .get("color")
             .and_then(|v| v.as_str())
@@ -312,6 +516,13 @@ pub fn composite_patches_on_image(
 
                     if mask_value > 0 {
                         let patch_pixel = color_image_f32.get_pixel(x as u32, y as u32);
+                        let decode = |v: f32| {
+                            if gamma_encoded {
+                                v.powf(crate::ai_processing::LAMA_GAMMA)
+                            } else {
+                                v
+                            }
+                        };
 
                         let alpha = mask_value as f32 / 255.0;
                         let one_minus_alpha = 1.0 - alpha;
@@ -320,9 +531,9 @@ pub fn composite_patches_on_image(
                         let base_g = row[x * 4 + 1];
                         let base_b = row[x * 4 + 2];
 
-                        row[x * 4] = patch_pixel[0] * alpha + base_r * one_minus_alpha;
-                        row[x * 4 + 1] = patch_pixel[1] * alpha + base_g * one_minus_alpha;
-                        row[x * 4 + 2] = patch_pixel[2] * alpha + base_b * one_minus_alpha;
+                        row[x * 4] = decode(patch_pixel[0]) * alpha + base_r * one_minus_alpha;
+                        row[x * 4 + 1] = decode(patch_pixel[1]) * alpha + base_g * one_minus_alpha;
+                        row[x * 4 + 2] = decode(patch_pixel[2]) * alpha + base_b * one_minus_alpha;
                     }
                 }
             });

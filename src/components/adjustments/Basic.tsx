@@ -216,6 +216,21 @@ export default function BasicAdjustments({
         value={adjustments.contrast}
         onDragStateChange={onDragStateChange}
       />
+      {(adjustments.contrast ?? 0) !== 0 && (
+        <Slider
+          label={t('adjustments.basic.contrastPivot')}
+          max={100}
+          min={0}
+          defaultValue={50}
+          onChange={(e: any) =>
+            setAdjustments((prev: any) => ({ ...prev, contrastPivot: parseFloat(e.target.value) }))
+          }
+          step={1}
+          value={adjustments.contrastPivot ?? 50}
+          fillOrigin="min"
+          onDragStateChange={onDragStateChange}
+        />
+      )}
       <Slider
         label={t('adjustments.basic.highlights')}
         max={100}

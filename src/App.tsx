@@ -334,6 +334,10 @@ function App() {
     handleApplyDenoise,
     handleBatchDenoise,
     handleSaveDenoisedImage,
+    handleApplyEnhance,
+    handleSaveEnhancedImage,
+    handleApplyExpansion,
+    handleSaveExpandedImage,
     handleSaveCollage,
   } = useProductivityActions(handleLibraryRefresh);
 
@@ -723,6 +727,10 @@ function App() {
           handleApplyDenoise={handleApplyDenoise}
           handleBatchDenoise={handleBatchDenoise}
           handleSaveDenoisedImage={handleSaveDenoisedImage}
+          handleApplyEnhance={handleApplyEnhance}
+          handleSaveEnhancedImage={handleSaveEnhancedImage}
+          handleApplyExpansion={handleApplyExpansion}
+          handleSaveExpandedImage={handleSaveExpandedImage}
           handleCreateFolder={handleCreateFolder}
           handleRenameFolder={handleRenameFolder}
           handleSaveRename={handleSaveRename}

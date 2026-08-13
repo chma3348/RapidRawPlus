@@ -4,6 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
 import Slider from '../ui/Slider';
 import ColorWheel from '../ui/ColorWheel';
+import HueCurvesPanel from './HueCurves';
 import { ColorAdjustment, ColorCalibration, HueSatLum, INITIAL_ADJUSTMENTS } from '../../utils/adjustments';
 import { Adjustments, ColorGrading } from '../../utils/adjustments';
 import { AppSettings } from '../ui/AppProperties';
@@ -103,6 +104,55 @@ const ColorSwatch = ({ color, name, isActive, ariaLabel, onClick }: ColorSwatchP
         }}
       />
     </button>
+  );
+};
+
+const LGG_WHEEL_KEYS = ['lift', 'gamma', 'gain', 'offset'] as const;
+
+// Resolve-style primary corrector: four wheels whose chroma pushes a hue
+// cast into a tonal band and whose luminance slider is the master control
+// (lift = blacks, gamma = midtones, gain = highlights, offset = everything).
+const ColorWheelsPanel = ({ adjustments, setAdjustments, onDragStateChange }: ColorPanelProps) => {
+  const { t } = useTranslation();
+  const wheels = adjustments.colorWheels ?? INITIAL_ADJUSTMENTS.colorWheels;
+
+  const handleChange = (key: string, newValue: HueSatLum) => {
+    setAdjustments((prev: Partial<Adjustments>) => ({
+      ...prev,
+      colorWheels: {
+        ...(prev.colorWheels ?? INITIAL_ADJUSTMENTS.colorWheels),
+        [key]: newValue,
+      },
+    }));
+  };
+
+  return (
+    <div className="p-2 bg-bg-tertiary rounded-md">
+      <Text variant={TextVariants.heading} className="mb-3">
+        {t('adjustments.color.wheels.title')}
+      </Text>
+      <div className="grid grid-cols-2 gap-4">
+        {LGG_WHEEL_KEYS.map((key) => (
+          <div key={key} className="min-w-0">
+            <ColorWheel
+              defaultValue={{ hue: 0, saturation: 0, luminance: 0 }}
+              label={
+                key === 'lift'
+                  ? t('adjustments.color.wheels.lift')
+                  : key === 'gamma'
+                    ? t('adjustments.color.wheels.gamma')
+                    : key === 'gain'
+                      ? t('adjustments.color.wheels.gain')
+                      : t('adjustments.color.wheels.offset')
+              }
+              onChange={(val: HueSatLum) => handleChange(key, val)}
+              value={wheels[key]}
+              onDragStateChange={onDragStateChange}
+            />
+          </div>
+        ))}
+      </div>
+    </div>
   );
 };
 
@@ -566,6 +616,15 @@ export default function ColorPanel({
         />
       </div>
 
+      {adjustmentVisibility.colorWheels !== false && (
+        <ColorWheelsPanel
+          adjustments={adjustments}
+          setAdjustments={setAdjustments}
+          appSettings={appSettings}
+          onDragStateChange={onDragStateChange}
+        />
+      )}
+
       <div className="p-2 bg-bg-tertiary rounded-md">
         <Text variant={TextVariants.heading} className="mb-3">
           {t('adjustments.color.colorMixer')}
@@ -613,6 +672,14 @@ export default function ColorPanel({
           onDragStateChange={onDragStateChange}
         />
       </div>
+
+      {!isForMask && adjustmentVisibility.hueCurves !== false && (
+        <HueCurvesPanel
+          adjustments={adjustments}
+          setAdjustments={setAdjustments}
+          onDragStateChange={onDragStateChange}
+        />
+      )}
 
       {!isForMask && adjustmentVisibility.colorCalibration !== false && (
         <ColorCalibrationPanel

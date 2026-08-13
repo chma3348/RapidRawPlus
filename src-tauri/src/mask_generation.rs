@@ -199,6 +199,8 @@ struct ParametricMaskParameters {
     #[serde(default)]
     feather: f32,
     #[serde(default)]
+    clean: f32,
+    #[serde(default)]
     rotation: f32,
     #[serde(default)]
     flip_horizontal: bool,
@@ -220,6 +222,7 @@ impl Default for ParametricMaskParameters {
             tolerance: default_tolerance(),
             grow: 0.0,
             feather: 35.0,
+            clean: 0.0,
             rotation: 0.0,
             flip_horizontal: false,
             flip_vertical: false,
@@ -308,6 +311,25 @@ fn grayscale_erode(image: &GrayImage, k: u8) -> GrayImage {
     }
 
     GrayImage::from_raw(width, height, out).unwrap()
+}
+
+/// Resolve-style "clean": suppresses key speckle by blurring the matte and
+/// re-thresholding with smoothstep — small isolated islands melt away while
+/// solid regions keep firm edges.
+fn apply_matte_clean(mask: &mut GrayImage, clean: f32) {
+    if clean <= 0.5 {
+        return;
+    }
+    let radius = 1.0 + (clean / 100.0) * 5.0;
+    let blurred = image::imageops::blur(mask, radius);
+    let lo = 0.20 + (clean / 100.0) * 0.15;
+    let hi = 1.0 - lo;
+    for (dst, src) in mask.pixels_mut().zip(blurred.pixels()) {
+        let v = src[0] as f32 / 255.0;
+        let t = ((v - lo) / (hi - lo)).clamp(0.0, 1.0);
+        let smooth = t * t * (3.0 - 2.0 * t);
+        dst[0] = (smooth * 255.0) as u8;
+    }
 }
 
 fn apply_grow_and_feather(mask: &mut GrayImage, grow: f32, feather: f32, width: u32, height: u32) {
@@ -1134,6 +1156,7 @@ fn generate_color_bitmap(
         }
     }
 
+    apply_matte_clean(&mut mask, params.clean);
     apply_grow_and_feather(&mut mask, params.grow, params.feather, width, height);
     Some(mask)
 }
@@ -1234,6 +1257,7 @@ fn generate_luminance_bitmap(
         }
     }
 
+    apply_matte_clean(&mut mask, params.clean);
     apply_grow_and_feather(&mut mask, params.grow, params.feather, width, height);
     Some(mask)
 }
@@ -1395,6 +1419,7 @@ pub fn generate_mask_overlay(
     scale: f32,
     crop_offset: (f32, f32),
     mut js_adjustments: Option<serde_json::Value>,
+    matte: Option<bool>,
     state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
     if let Some(ref mut adj) = js_adjustments {
@@ -1424,10 +1449,18 @@ pub fn generate_mask_overlay(
         warped_image.as_deref(),
     ) {
         let mut rgba_mask = RgbaImage::new(width, height);
-        for (x, y, pixel) in gray_mask.enumerate_pixels() {
-            let intensity = pixel[0];
-            let alpha = (intensity as f32 * 0.5) as u8;
-            rgba_mask.put_pixel(x, y, Rgba([255, 0, 0, alpha]));
+        if matte.unwrap_or(false) {
+            // B/W matte view: exactly what the key selects, opaque.
+            for (x, y, pixel) in gray_mask.enumerate_pixels() {
+                let v = pixel[0];
+                rgba_mask.put_pixel(x, y, Rgba([v, v, v, 255]));
+            }
+        } else {
+            for (x, y, pixel) in gray_mask.enumerate_pixels() {
+                let intensity = pixel[0];
+                let alpha = (intensity as f32 * 0.5) as u8;
+                rgba_mask.put_pixel(x, y, Rgba([255, 0, 0, alpha]));
+            }
         }
 
         let mut buf = Cursor::new(Vec::new());

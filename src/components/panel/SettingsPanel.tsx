@@ -28,6 +28,8 @@ import { Show, SignIn, useUser, useAuth, useClerk } from '@clerk/react';
 import Button from '../ui/Button';
 import ConfirmModal from '../modals/ConfirmModal';
 import Dropdown, { OptionItem } from '../ui/Dropdown';
+import ModelLibrary from './ModelLibrary';
+import ModelPicker, { ModelTaskType } from '../ui/ModelPicker';
 import Switch from '../ui/Switch';
 import Input from '../ui/Input';
 import Slider from '../ui/Slider';
@@ -708,6 +710,13 @@ export default function SettingsPanel({
   const handleProviderChange = (provider: string) => {
     setAiProvider(provider);
     onSettingsChange({ ...appSettings, aiProvider: provider });
+  };
+
+  const handlePreferredModelChange = (key: string, modelId: string) => {
+    onSettingsChange({
+      ...appSettings,
+      preferredModels: { ...(appSettings?.preferredModels || {}), [key]: modelId },
+    });
   };
 
   const handlePreviewModeChange = (mode: 'static' | 'dynamic') => {
@@ -2256,6 +2265,75 @@ export default function SettingsPanel({
                       )}
                     </AnimatePresence>
                   </div>
+                </div>
+
+                <div className="p-6 bg-surface rounded-xl shadow-md">
+                  <Text variant={TextVariants.title} color={TextColors.accent} className="mb-8">
+                    {t('settings.processing.aiModels.title')}
+                  </Text>
+                  <Text className="mb-8">{t('settings.processing.aiModels.description')}</Text>
+                  <div className="space-y-8">
+                    {[
+                      { key: 'mask_subject', subtype: 'subject', label: t('settings.processing.aiModels.subject') },
+                      {
+                        key: 'mask_foreground',
+                        subtype: 'foreground',
+                        label: t('settings.processing.aiModels.foreground'),
+                      },
+                      { key: 'mask_sky', subtype: 'sky', label: t('settings.processing.aiModels.sky') },
+                      { key: 'mask_depth', subtype: 'depth', label: t('settings.processing.aiModels.depth') },
+                    ].map(({ key, subtype, label }) => (
+                      <SettingItem key={key} label={label}>
+                        <ModelPicker
+                          taskType={ModelTaskType.Mask}
+                          filter={(m) => m.params?.mask_subtype === subtype}
+                          value={appSettings?.preferredModels?.[key] ?? null}
+                          onChange={(modelId) => handlePreferredModelChange(key, modelId)}
+                          triggerClassName="bg-bg-primary"
+                        />
+                      </SettingItem>
+                    ))}
+                    <SettingItem label={t('settings.processing.aiModels.inpaint')}>
+                      <ModelPicker
+                        taskType={ModelTaskType.Inpaint}
+                        value={appSettings?.preferredModels?.inpaint ?? null}
+                        onChange={(modelId) => handlePreferredModelChange('inpaint', modelId)}
+                        triggerClassName="bg-bg-primary"
+                      />
+                    </SettingItem>
+                    <SettingItem label={t('settings.processing.aiModels.upscale')}>
+                      <ModelPicker
+                        taskType={ModelTaskType.Upscale}
+                        value={appSettings?.preferredModels?.upscale ?? null}
+                        onChange={(modelId) => handlePreferredModelChange('upscale', modelId)}
+                        triggerClassName="bg-bg-primary"
+                      />
+                    </SettingItem>
+                    <SettingItem label={t('settings.processing.aiModels.deblur')}>
+                      <ModelPicker
+                        taskType={ModelTaskType.Deblur}
+                        value={appSettings?.preferredModels?.deblur ?? null}
+                        onChange={(modelId) => handlePreferredModelChange('deblur', modelId)}
+                        triggerClassName="bg-bg-primary"
+                      />
+                    </SettingItem>
+                    <SettingItem label={t('settings.processing.aiModels.restore')}>
+                      <ModelPicker
+                        taskType={ModelTaskType.Restore}
+                        value={appSettings?.preferredModels?.restore ?? null}
+                        onChange={(modelId) => handlePreferredModelChange('restore', modelId)}
+                        triggerClassName="bg-bg-primary"
+                      />
+                    </SettingItem>
+                  </div>
+                </div>
+
+                <div className="p-6 bg-surface rounded-xl shadow-md">
+                  <Text variant={TextVariants.title} color={TextColors.accent} className="mb-8">
+                    {t('settings.modelLibrary.title')}
+                  </Text>
+                  <Text className="mb-6">{t('settings.modelLibrary.description')}</Text>
+                  <ModelLibrary />
                 </div>
 
                 <div className="p-6 bg-surface rounded-xl shadow-md">

@@ -62,6 +62,28 @@ export interface DenoiseModalState {
   isRaw: boolean;
 }
 
+export interface EnhanceModalState {
+  isOpen: boolean;
+  isProcessing: boolean;
+  previewBase64: string | null;
+  originalBase64?: string | null;
+  error: string | null;
+  targetPaths: string[];
+  progressMessage: string | null;
+  isRaw: boolean;
+  task: 'upscale' | 'deblur' | 'restore';
+  resultDims?: { width: number; height: number } | null;
+}
+
+export interface ExpandModalState {
+  isOpen: boolean;
+  isProcessing: boolean;
+  variants: Array<string>;
+  error: string | null;
+  targetPaths: string[];
+  progressMessage: string | null;
+}
+
 export interface NegativeConversionModalState {
   isOpen: boolean;
   targetPaths: Array<string>;
@@ -120,6 +142,8 @@ interface UIState {
   hdrModalState: HdrModalState;
   negativeModalState: NegativeConversionModalState;
   denoiseModalState: DenoiseModalState;
+  enhanceModalState: EnhanceModalState;
+  expandModalState: ExpandModalState;
   cullingModalState: CullingModalState;
   collageModalState: CollageModalState;
 
@@ -190,6 +214,24 @@ export const useUIStore = create<UIState>((set, get) => ({
     targetPaths: [],
     progressMessage: null,
     isRaw: false,
+  },
+  enhanceModalState: {
+    isOpen: false,
+    isProcessing: false,
+    previewBase64: null,
+    error: null,
+    targetPaths: [],
+    progressMessage: null,
+    isRaw: false,
+    task: 'upscale',
+  },
+  expandModalState: {
+    isOpen: false,
+    isProcessing: false,
+    variants: [],
+    error: null,
+    targetPaths: [],
+    progressMessage: null,
   },
   cullingModalState: { isOpen: false, suggestions: null, progress: null, error: null, pathsToCull: [] },
   collageModalState: { isOpen: false, sourceImages: [] },

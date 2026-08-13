@@ -27,7 +27,7 @@ interface DenoiseModalProps {
   targetPaths: string[];
 }
 
-const ImageCompare = ({ original, denoised }: { original: string; denoised: string }) => {
+export const ImageCompare = ({ original, denoised }: { original: string; denoised: string }) => {
   const { t } = useTranslation();
   const [sliderPosition, setSliderPosition] = useState(50);
   const [zoom, setZoom] = useState(1);

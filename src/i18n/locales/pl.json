@@ -15,7 +15,8 @@
       "reset": "Resetuj",
       "shadows": "Cienie",
       "toneMapper": "Mapowanie tonów",
-      "whites": "Biele"
+      "whites": "Biele",
+      "contrastPivot": "Punkt kontrastu"
     },
     "color": {
       "ariaSelectColor": "Wybierz kolor {{name}}",
@@ -63,7 +64,23 @@
       "vibrance": "Jaskrawość",
       "wbPickerTooltip": "Próbnik balansu bieli",
       "wbPickerWgpuDisabled": "Próbnik BB: Wyłącz WGPU w Ustawieniach.",
-      "whiteBalance": "Balans bieli"
+      "whiteBalance": "Balans bieli",
+      "wheels": {
+        "title": "Koła kolorów",
+        "lift": "Lift",
+        "gamma": "Gamma",
+        "gain": "Gain",
+        "offset": "Offset"
+      },
+      "hueCurves": {
+        "title": "Krzywe kolorów",
+        "reset": "Resetuj",
+        "hint": "Kliknij, aby dodać punkt, przeciągnij, aby kształtować, dwuklik usuwa.",
+        "hueHue": "Barwa vs barwa",
+        "hueSat": "Barwa vs nasycenie",
+        "hueLum": "Barwa vs luminancja",
+        "lumSat": "Luminancja vs nasycenie"
+      }
     },
     "curves": {
       "channelTitle": "Kanał {{channel}}",
@@ -108,7 +125,8 @@
       "sharpening": "Wyostrzanie",
       "sharpness": "Ostrość",
       "structure": "Struktura",
-      "threshold": "Próg"
+      "threshold": "Próg",
+      "texture": "Tekstura"
     },
     "effects": {
       "amount": "Ilość",
@@ -177,8 +195,10 @@
       "convertNegative": "Konwertuj negatyw",
       "copyAdjustments": "Kopiuj ustawienia",
       "cullImage": "Selekcja obrazu",
+      "deblur": "Wyostrzanie AI",
       "denoise": "Odszum obraz",
       "editImage": "Edytuj obraz",
+      "expand": "Rozszerzanie AI",
       "exportImage": "Eksportuj obraz",
       "frameImage": "Dodaj ramkę do obrazu",
       "mergeHdr": "Scal do HDR",
@@ -193,9 +213,11 @@
       "ratingLabel_other": "{{count}} Gwiazdek",
       "redo": "Ponów",
       "resetAdjustments": "Resetuj ustawienia",
+      "restore": "Naprawa AI",
       "stitchPanorama": "Złóż panoramę",
       "tagging": "Tagowanie",
-      "undo": "Cofnij"
+      "undo": "Cofnij",
+      "upscale": "Powiększanie AI"
     },
     "folders": {
       "changeIcon": "Zmień ikonę",
@@ -421,7 +443,12 @@
         "placeholder": "np. pole pełne kwiatów",
         "quickEraseDesc": "Wypełnij zaznaczenie, aby usunąć obiekt.",
         "selectionPropertiesTitle": "Właściwości zaznaczenia",
-        "useBasicInpaint": "Użyj podstawowego inpaintingu"
+        "useBasicInpaint": "Użyj podstawowego inpaintingu",
+        "spotEnhanceTitle": "Miejscowa poprawa",
+        "spotEnhanceDesc": "Wyostrza lub odnawia tylko zaznaczony obszar — reszta zdjęcia pozostaje nietknięta.",
+        "spotEnhanceMode": "Tryb",
+        "spotSharpen": "Wyostrz",
+        "spotEnhanceButton": "Popraw zaznaczenie"
       }
     },
     "crop": {
@@ -474,12 +501,12 @@
       },
       "presets": {
         "custom": {
-          "name": "Niestandardowe",
+          "name": "Dokładne proporcje",
           "tooltip": "Wprowadź niestandardowe proporcje"
         },
         "free": {
           "desc": "Kadr swobodny",
-          "name": "Swobodne"
+          "name": "Dowolny (przeciągnij)"
         },
         "original": {
           "desc": "Oryginalne proporcje obrazu",
@@ -532,7 +559,8 @@
         "switchToLandscape": "Zmień na krajobraz",
         "switchToPortrait": "Zmień na portret",
         "transform": "Korekcja perspektywy i keystone"
-      }
+      },
+      "done": "Gotowe"
     },
     "masks": {
       "actions": {
@@ -586,7 +614,9 @@
         "feather": "Wtapianie",
         "globalFeather": "Globalne wtapianie",
         "grow": "Rozszerzanie",
-        "tolerance": "Tolerancja"
+        "tolerance": "Tolerancja",
+        "clean": "Oczyść",
+        "matteView": "Pokaż matę cz-b"
       },
       "patches": {
         "copyName": "{{name}} Kopia",
@@ -1127,7 +1157,9 @@
         "tone": "Tony",
         "transformRotation": "Przekształcanie i Obrót",
         "vignette": "Winieta",
-        "whiteBalance": "Balans bieli"
+        "whiteBalance": "Balans bieli",
+        "colorWheels": "Koła kolorów",
+        "hueCurves": "Krzywe kolorów"
       },
       "includedAdjustments": "Uwzględnione ustawienia",
       "modeMerge": "Scal",
@@ -1214,6 +1246,53 @@
       "strengthLabel": "Siła",
       "titleBatch": "Odszum obrazy",
       "titleSingle": "Odszum obraz"
+    },
+    "enhance": {
+      "btnRetry": "Ponów",
+      "btnSave": "Zapisz",
+      "btnStart": "Start",
+      "cancel": "Anuluj",
+      "clickToPreview": "Kliknij miejsce, aby zobaczyć tam podgląd modelu",
+      "close": "Zamknij",
+      "deblurProgress": "Usuwanie rozmycia…",
+      "descriptionDeblur": "Próbuje zredukować rozmycie lokalnym modelem AI. Wyniki zależą od rodzaju i siły rozmycia.",
+      "descriptionRestore": "Napraw artefakty obrazu lokalnym modelem AI — wybierz model pasujący do problemu: mora ekranu (demoiré) lub ogólny szum i artefakty kompresji.",
+      "descriptionUpscale": "Powiększa obraz 4x lokalnym modelem AI. Duże obrazy są przetwarzane kafelkami, co na CPU może potrwać.",
+      "dragToPreview": "Kliknij lub przeciągnij ramkę, aby zobaczyć podgląd obszaru",
+      "initializing": "Inicjalizacja…",
+      "openInEditor": "Otwórz w edytorze",
+      "outputSizeLabel": "Rozmiar wyjściowy",
+      "previewEnhanced": "Podgląd",
+      "previewNote": "Podgląd wybranego obszaru — »Start« przetwarza całe zdjęcie.",
+      "previewOriginal": "Oryginał",
+      "previewRunning": "Generowanie podglądu…",
+      "processingFailed": "Ulepszanie nie powiodło się",
+      "restoreProgress": "Naprawianie obrazu…",
+      "saveSuccess": "Obraz zapisano obok oryginału.",
+      "speedNotice": "Czas przetwarzania zależy od rozmiaru obrazu i sprzętu.",
+      "strengthLabel": "Siła",
+      "titleDeblur": "Usuwanie rozmycia AI",
+      "titleRestore": "Naprawa AI",
+      "titleUpscale": "Powiększanie AI",
+      "upscaleProgress": "Powiększanie obrazu…",
+      "continueWith": "Kontynuuj z",
+      "chainNote": "Praca na poprzednim wyniku"
+    },
+    "expand": {
+      "btnGenerate": "Generuj",
+      "btnRetry": "Wygeneruj ponownie",
+      "btnSave": "Zapisz",
+      "cancel": "Anuluj",
+      "close": "Zamknij",
+      "dragHint": "Przeciągnij uchwyty na zewnątrz, aby ustawić nową ramkę",
+      "generating": "Generowanie wypełnienia…",
+      "openInEditor": "Otwórz w edytorze",
+      "processingFailed": "Rozszerzanie nie powiodło się",
+      "saveSuccess": "Obraz zapisano obok oryginału.",
+      "variantLabel": "Opcja {{current}} z {{total}}",
+      "targetSize": "Rozmiar docelowy",
+      "output": "Wynik",
+      "guidesTooltip": "Przełącz linie kompozycji"
     },
     "hdr": {
       "cancel": "Anuluj",
@@ -1376,6 +1455,11 @@
       "zoomInTooltip": "Przybliż",
       "zoomOutTooltip": "Oddal"
     }
+  },
+  "modelRegistry": {
+    "model": "Model",
+    "noModels": "Brak dostępnych modeli",
+    "notDownloaded": "nie pobrano"
   },
   "settings": {
     "adjustments": {
@@ -1556,6 +1640,27 @@
       "saved": "Zapisane obiektywy",
       "title": "Moje obiektywy"
     },
+    "modelLibrary": {
+      "addButton": "Dodaj",
+      "addDescription": "Bezpośredni link do pliku .onnx. Zostanie pobrany, zweryfikowany i dodany do odpowiedniej listy.",
+      "addNamePlaceholder": "Nazwa wyświetlana",
+      "addTitle": "Dodaj model z URL",
+      "browseButton": "Wybierz plik…",
+      "delete": "Usuń z dysku",
+      "description": "Pobieraj wyselekcjonowane modele AI, usuwaj nieużywane lub dodawaj własne z bezpośredniego linku.",
+      "download": "Pobierz",
+      "installedTitle": "Dostępne modele",
+      "needsConversion": "zostanie przekonwertowany",
+      "noResults": "Nie znaleziono modeli ONNX — spróbuj innych słów kluczowych.",
+      "searchPlaceholder": "Szukaj modeli na Hugging Face…",
+      "taskMask": "Maskowanie",
+      "title": "Biblioteka modeli",
+      "engineTitle": "Silnik AI",
+      "engineDesc": "Do odnawiania i generatywnego wypełniania/rozszerzania. Jednorazowa instalacja (~2 GB).",
+      "engineInstalled": "Zainstalowany",
+      "engineInstall": "Zainstaluj silnik",
+      "engineInstalling": "Instalowanie..."
+    },
     "processing": {
       "ai": {
         "cloud": {
@@ -1606,6 +1711,18 @@
           "cpu": "CPU"
         },
         "title": "Generatywne AI"
+      },
+      "aiModels": {
+        "deblur": "Usuwanie rozmycia",
+        "depth": "Szacowanie głębi",
+        "description": "Wybierz, który lokalny model obsługuje każdą funkcję AI. Dodaj własne modele, umieszczając plik manifestu w folderze models/manifests.",
+        "foreground": "Maska pierwszego planu",
+        "inpaint": "Usuwanie obiektów (inpainting)",
+        "restore": "Naprawa",
+        "sky": "Maska nieba",
+        "subject": "Maska obiektu",
+        "title": "Lokalne modele AI",
+        "upscale": "Powiększanie"
       },
       "backend": "Backend przetwarzania",
       "backendDesc": "Wybierz interfejs API grafiki. 'Auto' jest zalecane. Może rozwiązać problemy z zawieszaniem się na niektórych systemach.",

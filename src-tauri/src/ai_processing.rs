@@ -18,24 +18,28 @@ use tauri::Manager;
 use tokenizers::Tokenizer;
 use tokio::sync::Mutex as TokioMutex;
 
-const ENCODER_URL: &str = "https://huggingface.co/CyberTimon/RapidRAW-Models/resolve/main/sam_vit_b_01ec64_encoder.onnx?download=true";
-const DECODER_URL: &str = "https://huggingface.co/CyberTimon/RapidRAW-Models/resolve/main/sam_vit_b_01ec64_decoder.onnx?download=true";
-const ENCODER_FILENAME: &str = "sam_vit_b_01ec64_encoder.onnx";
-const DECODER_FILENAME: &str = "sam_vit_b_01ec64_decoder.onnx";
+pub(crate) const ENCODER_URL: &str = "https://huggingface.co/CyberTimon/RapidRAW-Models/resolve/main/sam_vit_b_01ec64_encoder.onnx?download=true";
+pub(crate) const DECODER_URL: &str = "https://huggingface.co/CyberTimon/RapidRAW-Models/resolve/main/sam_vit_b_01ec64_decoder.onnx?download=true";
+pub(crate) const ENCODER_FILENAME: &str = "sam_vit_b_01ec64_encoder.onnx";
+pub(crate) const DECODER_FILENAME: &str = "sam_vit_b_01ec64_decoder.onnx";
 const SAM_INPUT_SIZE: u32 = 1024;
-const ENCODER_SHA256: &str = "16ab73d9c824886f0de2938c19df22fb9ec3deebfd0de58e65177e479213d7d1";
-const DECODER_SHA256: &str = "85d0d672cf5b7fe763edcde429e5533e62f674af4b15c7d688b7673b0ef00bf7";
+pub(crate) const ENCODER_SHA256: &str =
+    "16ab73d9c824886f0de2938c19df22fb9ec3deebfd0de58e65177e479213d7d1";
+pub(crate) const DECODER_SHA256: &str =
+    "85d0d672cf5b7fe763edcde429e5533e62f674af4b15c7d688b7673b0ef00bf7";
 
-const U2NETP_URL: &str =
+pub(crate) const U2NETP_URL: &str =
     "https://huggingface.co/CyberTimon/RapidRAW-Models/resolve/main/u2net.onnx?download=true";
-const U2NETP_FILENAME: &str = "u2net.onnx";
+pub(crate) const U2NETP_FILENAME: &str = "u2net.onnx";
 const U2NETP_INPUT_SIZE: u32 = 320;
-const U2NETP_SHA256: &str = "8d10d2f3bb75ae3b6d527c77944fc5e7dcd94b29809d47a739a7a728a912b491";
+pub(crate) const U2NETP_SHA256: &str =
+    "8d10d2f3bb75ae3b6d527c77944fc5e7dcd94b29809d47a739a7a728a912b491";
 
-const SKYSEG_URL: &str = "https://huggingface.co/CyberTimon/RapidRAW-Models/resolve/main/skyseg-u2net.onnx?download=true";
-const SKYSEG_FILENAME: &str = "skyseg_u2net.onnx";
+pub(crate) const SKYSEG_URL: &str = "https://huggingface.co/CyberTimon/RapidRAW-Models/resolve/main/skyseg-u2net.onnx?download=true";
+pub(crate) const SKYSEG_FILENAME: &str = "skyseg_u2net.onnx";
 const SKYSEG_INPUT_SIZE: u32 = 320;
-const SKYSEG_SHA256: &str = "ab9c34c64c3d821220a2886a4a06da4642ffa14d5b30e8d5339056a089aa1d39";
+pub(crate) const SKYSEG_SHA256: &str =
+    "ab9c34c64c3d821220a2886a4a06da4642ffa14d5b30e8d5339056a089aa1d39";
 
 const CLIP_MODEL_URL: &str =
     "https://huggingface.co/CyberTimon/RapidRAW-Models/resolve/main/clip_model.onnx?download=true";
@@ -48,23 +52,17 @@ const DENOISE_URL: &str = "https://huggingface.co/CyberTimon/RapidRAW-Models/res
 const DENOISE_FILENAME: &str = "nind_denoise_utnet_684.onnx";
 const DENOISE_SHA256: &str = "ee3586279d514df557ff3f7dec6df37fafc51ba5d3a3435b2cc9ac2d9017e7fe";
 
-const LAMA_URL: &str =
+pub(crate) const LAMA_URL: &str =
     "https://huggingface.co/CyberTimon/RapidRAW-Models/resolve/main/lama_fp16.onnx?download=true";
-const LAMA_FILENAME: &str = "lama_fp16.onnx";
-const LAMA_SHA256: &str = "2d6be6277c400d6f1b91819737f7c3da935e5c63d1b521d393be1196a2bfa82c";
+pub(crate) const LAMA_FILENAME: &str = "lama_fp16.onnx";
+pub(crate) const LAMA_SHA256: &str =
+    "2d6be6277c400d6f1b91819737f7c3da935e5c63d1b521d393be1196a2bfa82c";
 
-const DEPTH_URL: &str = "https://huggingface.co/CyberTimon/RapidRAW-Models/resolve/main/depth_anything_v2_vits.onnx?download=true";
-const DEPTH_FILENAME: &str = "depth_anything_v2_vits.onnx";
+pub(crate) const DEPTH_URL: &str = "https://huggingface.co/CyberTimon/RapidRAW-Models/resolve/main/depth_anything_v2_vits.onnx?download=true";
+pub(crate) const DEPTH_FILENAME: &str = "depth_anything_v2_vits.onnx";
 const DEPTH_INPUT_SIZE: u32 = 518;
-const DEPTH_SHA256: &str = "d2b11a11c1d4a12b47608fa65a17ee9a4c605b55ee1730c8e3b526304f2562be";
-
-pub struct AiModels {
-    pub sam_encoder: Mutex<Session>,
-    pub sam_decoder: Mutex<Session>,
-    pub u2netp: Mutex<Session>,
-    pub sky_seg: Mutex<Session>,
-    pub depth_anything: Mutex<Session>,
-}
+pub(crate) const DEPTH_SHA256: &str =
+    "d2b11a11c1d4a12b47608fa65a17ee9a4c605b55ee1730c8e3b526304f2562be";
 
 pub struct ClipModels {
     pub model: Mutex<Session>,
@@ -86,12 +84,30 @@ pub struct CachedDepthMap {
 }
 
 pub struct AiState {
-    pub models: Option<Arc<AiModels>>,
     pub denoise_model: Option<Arc<Mutex<Session>>>,
     pub clip_models: Option<Arc<ClipModels>>,
-    pub lama_model: Option<Arc<Mutex<Session>>>,
     pub embeddings: Option<ImageEmbeddings>,
     pub depth_map: Option<CachedDepthMap>,
+}
+
+impl AiState {
+    fn empty() -> Self {
+        AiState {
+            denoise_model: None,
+            clip_models: None,
+            embeddings: None,
+            depth_map: None,
+        }
+    }
+}
+
+/// Makes sure `AiState` exists so callers can cache embeddings/depth maps
+/// without going through one of the `get_or_init_*` model loaders first.
+pub fn ensure_ai_state(ai_state_mutex: &Mutex<Option<AiState>>) {
+    let mut lock = ai_state_mutex.lock().unwrap();
+    if lock.is_none() {
+        *lock = Some(AiState::empty());
+    }
 }
 
 fn edt_1d(f: &mut [f32], v: &mut [usize], z: &mut [f32], d: &mut [f32]) {
@@ -162,7 +178,7 @@ fn edt_2d(grid: &[bool], width: usize, height: usize) -> Vec<f32> {
     f.into_iter().map(|v| v.sqrt()).collect()
 }
 
-fn get_models_dir(app_handle: &tauri::AppHandle) -> Result<PathBuf> {
+pub fn get_models_dir(app_handle: &tauri::AppHandle) -> Result<PathBuf> {
     let models_dir = app_handle.path().app_data_dir()?.join("models");
     if !models_dir.exists() {
         fs::create_dir_all(&models_dir)?;
@@ -197,7 +213,7 @@ fn verify_sha256(path: &Path, expected_hash: &str) -> Result<bool> {
     Ok(hex_hash == expected_hash)
 }
 
-async fn download_and_verify_model(
+pub(crate) async fn download_and_verify_model(
     app_handle: &tauri::AppHandle,
     models_dir: &Path,
     filename: &str,
@@ -225,120 +241,6 @@ async fn download_and_verify_model(
         }
     }
     Ok(())
-}
-
-pub async fn get_or_init_ai_models(
-    app_handle: &tauri::AppHandle,
-    ai_state_mutex: &Mutex<Option<AiState>>,
-    ai_init_lock: &TokioMutex<()>,
-) -> Result<Arc<AiModels>> {
-    if let Some(models) = ai_state_mutex
-        .lock()
-        .unwrap()
-        .as_ref()
-        .and_then(|state| state.models.clone())
-    {
-        return Ok(models);
-    }
-
-    let _guard = ai_init_lock.lock().await;
-
-    if let Some(models) = ai_state_mutex
-        .lock()
-        .unwrap()
-        .as_ref()
-        .and_then(|state| state.models.clone())
-    {
-        return Ok(models);
-    }
-
-    let models_dir = get_models_dir(app_handle)?;
-
-    download_and_verify_model(
-        app_handle,
-        &models_dir,
-        ENCODER_FILENAME,
-        ENCODER_URL,
-        ENCODER_SHA256,
-        "SAM Encoder",
-    )
-    .await?;
-    download_and_verify_model(
-        app_handle,
-        &models_dir,
-        DECODER_FILENAME,
-        DECODER_URL,
-        DECODER_SHA256,
-        "SAM Decoder",
-    )
-    .await?;
-    download_and_verify_model(
-        app_handle,
-        &models_dir,
-        U2NETP_FILENAME,
-        U2NETP_URL,
-        U2NETP_SHA256,
-        "Foreground Model",
-    )
-    .await?;
-    download_and_verify_model(
-        app_handle,
-        &models_dir,
-        SKYSEG_FILENAME,
-        SKYSEG_URL,
-        SKYSEG_SHA256,
-        "Sky Model",
-    )
-    .await?;
-    download_and_verify_model(
-        app_handle,
-        &models_dir,
-        DEPTH_FILENAME,
-        DEPTH_URL,
-        DEPTH_SHA256,
-        "Depth Model",
-    )
-    .await?;
-
-    let _ = ort::init().with_name("AI").commit();
-
-    let encoder_path = models_dir.join(ENCODER_FILENAME);
-    let decoder_path = models_dir.join(DECODER_FILENAME);
-    let u2netp_path = models_dir.join(U2NETP_FILENAME);
-    let sky_seg_path = models_dir.join(SKYSEG_FILENAME);
-    let depth_path = models_dir.join(DEPTH_FILENAME);
-
-    let sam_encoder = Session::builder()?.commit_from_file(encoder_path)?;
-    let sam_decoder = Session::builder()?.commit_from_file(decoder_path)?;
-    let u2netp = Session::builder()?.commit_from_file(u2netp_path)?;
-    let sky_seg = Session::builder()?.commit_from_file(sky_seg_path)?;
-    let depth_anything = Session::builder()?.commit_from_file(depth_path)?;
-
-    crate::register_exit_handler();
-
-    let models = Arc::new(AiModels {
-        sam_encoder: Mutex::new(sam_encoder),
-        sam_decoder: Mutex::new(sam_decoder),
-        u2netp: Mutex::new(u2netp),
-        sky_seg: Mutex::new(sky_seg),
-        depth_anything: Mutex::new(depth_anything),
-    });
-
-    let mut ai_state_lock = ai_state_mutex.lock().unwrap();
-    if let Some(state) = ai_state_lock.as_mut() {
-        state.models = Some(models.clone());
-    } else {
-        *ai_state_lock = Some(AiState {
-            models: Some(models.clone()),
-            denoise_model: None,
-            clip_models: None,
-            lama_model: None,
-            embeddings: None,
-            depth_map: None,
-        });
-    }
-
-    Ok(models)
 }
 
 pub async fn get_or_init_denoise_model(
@@ -389,12 +291,8 @@ pub async fn get_or_init_denoise_model(
         state.denoise_model = Some(denoise_model.clone());
     } else {
         *ai_state_lock = Some(AiState {
-            models: None,
             denoise_model: Some(denoise_model.clone()),
-            clip_models: None,
-            lama_model: None,
-            embeddings: None,
-            depth_map: None,
+            ..AiState::empty()
         });
     }
 
@@ -460,77 +358,14 @@ pub async fn get_or_init_clip_models(
         state.clip_models = Some(clip_models.clone());
     } else {
         *ai_state_lock = Some(AiState {
-            models: None,
-            denoise_model: None,
             clip_models: Some(clip_models.clone()),
-            lama_model: None,
-            embeddings: None,
-            depth_map: None,
+            ..AiState::empty()
         });
     }
 
     Ok(clip_models)
 }
 
-pub async fn get_or_init_lama_model(
-    app_handle: &tauri::AppHandle,
-    ai_state_mutex: &Mutex<Option<AiState>>,
-    ai_init_lock: &TokioMutex<()>,
-) -> Result<Arc<Mutex<Session>>> {
-    if let Some(lama_model) = ai_state_mutex
-        .lock()
-        .unwrap()
-        .as_ref()
-        .and_then(|state| state.lama_model.clone())
-    {
-        return Ok(lama_model);
-    }
-
-    let _guard = ai_init_lock.lock().await;
-
-    if let Some(lama_model) = ai_state_mutex
-        .lock()
-        .unwrap()
-        .as_ref()
-        .and_then(|state| state.lama_model.clone())
-    {
-        return Ok(lama_model);
-    }
-
-    let models_dir = get_models_dir(app_handle)?;
-    download_and_verify_model(
-        app_handle,
-        &models_dir,
-        LAMA_FILENAME,
-        LAMA_URL,
-        LAMA_SHA256,
-        "Inpainting Model",
-    )
-    .await?;
-
-    let _ = ort::init().with_name("AI-Inpainting").commit();
-    let model_path = models_dir.join(LAMA_FILENAME);
-    let session = Session::builder()?.commit_from_file(model_path)?;
-    let lama_model = Arc::new(Mutex::new(session));
-
-    crate::register_exit_handler();
-
-    let mut ai_state_lock = ai_state_mutex.lock().unwrap();
-    if let Some(state) = ai_state_lock.as_mut() {
-        state.lama_model = Some(lama_model.clone());
-    } else {
-        *ai_state_lock = Some(AiState {
-            models: None,
-            denoise_model: None,
-            clip_models: None,
-            lama_model: Some(lama_model.clone()),
-            embeddings: None,
-            depth_map: None,
-        });
-    }
-
-    Ok(lama_model)
-}
 
 #[derive(Clone, Copy)]
 struct TileParams {
@@ -778,11 +613,33 @@ pub fn run_ai_denoise(
     Ok(DynamicImage::ImageRgb32F(out_img_buffer))
 }
 
+pub const LAMA_GAMMA: f32 = 2.4;
+
+pub(crate) fn gamma_encode_rgba8(image: &DynamicImage) -> RgbaImage {
+    let f32_img = image.to_rgba32f();
+    let mut out = RgbaImage::new(f32_img.width(), f32_img.height());
+    for (x, y, p) in f32_img.enumerate_pixels() {
+        let e = |v: f32| (v.clamp(0.0, 1.0).powf(1.0 / LAMA_GAMMA) * 255.0).round() as u8;
+        out.put_pixel(x, y, Rgba([e(p[0]), e(p[1]), e(p[2]), 255]));
+    }
+    out
+}
+
+/// Inpaints the masked region. Returns the composited image and whether it
+/// is gamma-encoded (`true` for float/RAW sources): linear deep-shadow
+/// values are unrepresentable in 8 bits, and the model was trained on
+/// display-encoded photos, so float sources are processed and returned in
+/// gamma space. Callers must decode (v^2.4) when compositing onto linear
+/// data.
 pub fn run_lama_inpainting(
     image: &DynamicImage,
     mask: &GrayImage,
     lama_session: &Mutex<Session>,
-) -> Result<RgbaImage> {
+) -> Result<(RgbaImage, bool)> {
+    let is_linear = matches!(
+        image,
+        DynamicImage::ImageRgb32F(_) | DynamicImage::ImageRgba32F(_)
+    );
     let (w, h) = image.dimensions();
 
     let (mut min_x, mut min_y) = (w, h);
@@ -800,7 +657,11 @@ pub fn run_lama_inpainting(
     }
 
     if !has_mask {
-        return Ok(image.to_rgba8());
+        return Ok(if is_linear {
+            (gamma_encode_rgba8(image), true)
+        } else {
+            (image.to_rgba8(), false)
+        });
     }
 
     let mask_w = max_x - min_x + 1;
@@ -848,6 +709,89 @@ pub fn run_lama_inpainting(
     }
     let tensor_dim = tensor_dim.max(align) as usize;
 
+    // Build the inference input in f32, straight from the float source when
+    // available (RAW files) so deep-shadow detail survives.
+    let mut inf_f32: Rgb32FImage = match image {
+        DynamicImage::ImageRgb32F(f32_img) => {
+            let crop = imageops::crop_imm(f32_img, x0, y0, crop_w, crop_h).to_image();
+            imageops::resize(&crop, fw, fh, FilterType::Lanczos3)
+        }
+        _ => {
+            let mut out = Rgb32FImage::new(fw, fh);
+            for (x, y, p) in out.enumerate_pixels_mut() {
+                let s = inf_img.get_pixel(x, y);
+                p.0 = [
+                    s[0] as f32 / 255.0,
+                    s[1] as f32 / 255.0,
+                    s[2] as f32 / 255.0,
+                ];
+            }
+            out
+        }
+    };
+
+    // Linear RAW data goes to the model gamma-encoded — that's the space it
+    // was trained on, and it is what makes deep shadows visible to it.
+    if is_linear {
+        for p in inf_f32.pixels_mut() {
+            for c in 0..3 {
+                p[c] = p[c].clamp(0.0, 1.0).powf(1.0 / LAMA_GAMMA);
+            }
+        }
+    }
+
+    // Very dark regions (e.g. night shots edited brighter in the app) all
+    // collapse to near-black for the model, so its fill looks like a no-op
+    // once the user's exposure boost is applied. Normalize the mask's local
+    // neighborhood into a visible range for inference and scale the fill
+    // back afterwards — effectively inpainting in the viewing exposure.
+    // The statistic is a high percentile of the context *near* the mask;
+    // the crop's far corners may contain unrelated bright content that
+    // must not suppress the gain.
+    let (mut bx0, mut by0, mut bx1, mut by1) = (fw, fh, 0u32, 0u32);
+    for (x, y, m) in inf_mask.enumerate_pixels() {
+        if m[0] > 0 {
+            bx0 = bx0.min(x);
+            by0 = by0.min(y);
+            bx1 = bx1.max(x);
+            by1 = by1.max(y);
+        }
+    }
+    let margin_x = (bx1.saturating_sub(bx0) / 4).clamp(12, 48);
+    let margin_y = (by1.saturating_sub(by0) / 4).clamp(12, 48);
+    let nx0 = bx0.saturating_sub(margin_x);
+    let ny0 = by0.saturating_sub(margin_y);
+    let nx1 = (bx1 + margin_x).min(fw.saturating_sub(1));
+    let ny1 = (by1 + margin_y).min(fh.saturating_sub(1));
+
+    let mut context: Vec<f32> = Vec::new();
+    for y in ny0..=ny1 {
+        for x in nx0..=nx1 {
+            if inf_mask.get_pixel(x, y)[0] == 0 {
+                let p = inf_f32.get_pixel(x, y);
+                context.push(p[0].max(p[1]).max(p[2]));
+            }
+        }
+    }
+    context.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    // Median: the fill must match the *typical* immediate surroundings; a
+    // single bright object at the ring's edge must not veto the gain.
+    let typical = context
+        .get(context.len() / 2)
+        .copied()
+        .unwrap_or(1.0)
+        .max(1e-4);
+    let gain = if typical < 0.35 { (0.6 / typical).min(64.0) } else { 1.0 };
+    log::info!(
+        "lama: crop {}x{}, inference {}x{}, context median {:.4}, gain {:.2}",
+        crop_w,
+        crop_h,
+        fw,
+        fh,
+        typical,
+        gain
+    );
+
     let mut img_tensor = Array::<f32, _>::zeros((1, 3, tensor_dim, tensor_dim));
     let mut msk_tensor = Array::<f32, _>::zeros((1, 1, tensor_dim, tensor_dim));
 
@@ -856,12 +800,12 @@ pub fn run_lama_inpainting(
             let sx = (x as u32).min(fw.saturating_sub(1));
             let sy = (y as u32).min(fh.saturating_sub(1));
 
-            let p = inf_img.get_pixel(sx, sy);
+            let p = inf_f32.get_pixel(sx, sy);
             let m = inf_mask.get_pixel(sx, sy)[0];
 
-            img_tensor[[0, 0, y, x]] = p[0] as f32 / 255.0;
-            img_tensor[[0, 1, y, x]] = p[1] as f32 / 255.0;
-            img_tensor[[0, 2, y, x]] = p[2] as f32 / 255.0;
+            img_tensor[[0, 0, y, x]] = (p[0] * gain).clamp(0.0, 1.0);
+            img_tensor[[0, 1, y, x]] = (p[1] * gain).clamp(0.0, 1.0);
+            img_tensor[[0, 2, y, x]] = (p[2] * gain).clamp(0.0, 1.0);
             msk_tensor[[0, 0, y, x]] = if m > 0 { 1.0 } else { 0.0 };
         }
     }
@@ -875,12 +819,28 @@ pub fn run_lama_inpainting(
         outputs[0].try_extract_array::<f32>()?.to_owned()
     };
 
+    let mut masked_out_sum = 0.0f64;
+    let mut masked_out_n = 0u64;
+    for (x, y, m) in inf_mask.enumerate_pixels() {
+        if m[0] > 0 {
+            masked_out_sum += output_tensor[[0, 0, y as usize, x as usize]] as f64;
+            masked_out_n += 1;
+        }
+    }
+    log::info!(
+        "lama: gain {:.2}, model fill mean {:.3}/255 in mask",
+        gain,
+        masked_out_sum / masked_out_n.max(1) as f64
+    );
+
     let mut result_inf = RgbaImage::new(fw, fh);
     for y in 0..fh {
         for x in 0..fw {
-            let r = output_tensor[[0, 0, y as usize, x as usize]].clamp(0.0, 255.0) as u8;
-            let g = output_tensor[[0, 1, y as usize, x as usize]].clamp(0.0, 255.0) as u8;
-            let b = output_tensor[[0, 2, y as usize, x as usize]].clamp(0.0, 255.0) as u8;
+            // The model outputs 0..255; undo the inference gain so the fill
+            // matches the source's real (possibly very dark) exposure.
+            let r = (output_tensor[[0, 0, y as usize, x as usize]] / gain).clamp(0.0, 255.0) as u8;
+            let g = (output_tensor[[0, 1, y as usize, x as usize]] / gain).clamp(0.0, 255.0) as u8;
+            let b = (output_tensor[[0, 2, y as usize, x as usize]] / gain).clamp(0.0, 255.0) as u8;
             result_inf.put_pixel(x, y, Rgba([r, g, b, 255]));
         }
     }
@@ -891,7 +851,13 @@ pub fn run_lama_inpainting(
         result_inf
     };
 
-    let mut final_image = image.to_rgba8();
+    // The composite canvas matches the space the fill was produced in:
+    // gamma-encoded for float sources, plain 8-bit otherwise.
+    let mut final_image = if is_linear {
+        gamma_encode_rgba8(image)
+    } else {
+        image.to_rgba8()
+    };
 
     for y in 0..crop_h {
         for x in 0..crop_w {
@@ -912,7 +878,7 @@ pub fn run_lama_inpainting(
         }
     }
 
-    Ok(final_image)
+    Ok((final_image, is_linear))
 }
 
 pub fn generate_image_embeddings(

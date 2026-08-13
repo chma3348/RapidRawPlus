@@ -1,5 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
+  "productName": "RapidRAW+",
   "identifier": "io.github.CyberTimon.RapidRAW",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -12,7 +13,7 @@
       {
         "label": "main",
         "create": false,
-        "title": "RapidRAW",
+        "title": "RapidRAW+",
         "width": 1280,
         "height": 720,
         "minWidth": 800,
@@ -23,15 +24,26 @@
     ],
     "security": {
       "csp": null,
-      "capabilities": ["default"]
+      "capabilities": [
+        "default"
+      ]
     },
     "macOSPrivateApi": true
   },
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
-    "resources": ["resources", "lensfun_db"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": [
+      "resources",
+      "lensfun_db"
+    ],
     "category": "Photography",
     "fileAssociations": [
       {

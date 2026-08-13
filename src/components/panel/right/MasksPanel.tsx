@@ -105,6 +105,7 @@ const SUB_MASK_CONFIG: Record<Mask, any> = {
   [Mask.Color]: {
     parameters: [
       { key: 'tolerance', min: 1, max: 100, step: 1, defaultValue: 20 },
+      { key: 'clean', min: 0, max: 100, step: 1, defaultValue: 0 },
       { key: 'grow', min: -100, max: 100, step: 1, defaultValue: 0 },
       { key: 'feather', min: 0, max: 100, step: 1, defaultValue: 35 },
     ],
@@ -112,6 +113,7 @@ const SUB_MASK_CONFIG: Record<Mask, any> = {
   [Mask.Luminance]: {
     parameters: [
       { key: 'tolerance', min: 1, max: 100, step: 1, defaultValue: 20 },
+      { key: 'clean', min: 0, max: 100, step: 1, defaultValue: 0 },
       { key: 'grow', min: -100, max: 100, step: 1, defaultValue: 0 },
       { key: 'feather', min: 0, max: 100, step: 1, defaultValue: 35 },
     ],
@@ -2271,6 +2273,7 @@ function SettingsPanel({
   const subMaskConfig = activeSubMask ? SUB_MASK_CONFIG[activeSubMask.type] || {} : {};
   const isAiMask = activeSubMask && ['ai-subject', 'ai-foreground', 'ai-sky', 'ai-depth'].includes(activeSubMask.type);
   const isComponentMode = !!activeSubMask;
+  const maskMatteView = useEditorStore((st) => st.maskMatteView);
 
   const setMaskContainerAdjustments = (updater: any) => {
     if (!isActive) return;
@@ -2496,6 +2499,12 @@ function SettingsPanel({
                   onDragStateChange={onDragStateChange}
                 />
               ))}
+
+              <Switch
+                checked={maskMatteView}
+                label={t('editor.masks.params.matteView')}
+                onChange={(v: boolean) => useEditorStore.getState().setMaskMatteView(v)}
+              />
 
               {subMaskConfig.showBrushTools &&
                 brushSettings &&

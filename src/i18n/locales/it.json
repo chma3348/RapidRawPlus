@@ -15,7 +15,8 @@
       "reset": "Ripristina",
       "shadows": "Ombre",
       "toneMapper": "Tone Mapper",
-      "whites": "Bianchi"
+      "whites": "Bianchi",
+      "contrastPivot": "Pivot contrasto"
     },
     "color": {
       "ariaSelectColor": "Seleziona il colore {{name}}",
@@ -63,7 +64,23 @@
       "vibrance": "Vividezza",
       "wbPickerTooltip": "Selettore Bilanciamento del Bianco",
       "wbPickerWgpuDisabled": "Selettore BB: Disabilita WGPU nelle Impostazioni.",
-      "whiteBalance": "Bilanciamento del Bianco"
+      "whiteBalance": "Bilanciamento del Bianco",
+      "wheels": {
+        "title": "Ruote colore",
+        "lift": "Lift",
+        "gamma": "Gamma",
+        "gain": "Gain",
+        "offset": "Offset"
+      },
+      "hueCurves": {
+        "title": "Curve colore",
+        "reset": "Ripristina",
+        "hint": "Clic per aggiungere un punto, trascina per modellare, doppio clic per rimuovere.",
+        "hueHue": "Tinta vs tinta",
+        "hueSat": "Tinta vs saturazione",
+        "hueLum": "Tinta vs luminanza",
+        "lumSat": "Luminanza vs saturazione"
+      }
     },
     "curves": {
       "channelTitle": "Canale {{channel}}",
@@ -108,7 +125,8 @@
       "sharpening": "Aumento Nitidezza",
       "sharpness": "Nitidezza",
       "structure": "Struttura",
-      "threshold": "Soglia"
+      "threshold": "Soglia",
+      "texture": "Trama"
     },
     "effects": {
       "amount": "Quantità",
@@ -177,8 +195,10 @@
       "convertNegative": "Converti Negativo",
       "copyAdjustments": "Copia Regolazioni",
       "cullImage": "Seleziona Immagine",
+      "deblur": "Nitidezza IA",
       "denoise": "Riduci Rumore Immagine",
       "editImage": "Modifica Immagine",
+      "expand": "Espansione IA",
       "exportImage": "Esporta Immagine",
       "frameImage": "Incornicia Immagine",
       "mergeHdr": "Unisci in HDR",
@@ -191,9 +211,11 @@
       "ratingLabel_other": "{{count}} Stelle",
       "redo": "Ripeti",
       "resetAdjustments": "Ripristina Regolazioni",
+      "restore": "Restauro IA",
       "stitchPanorama": "Unisci Panorama",
       "tagging": "Tagging",
-      "undo": "Annulla"
+      "undo": "Annulla",
+      "upscale": "Upscaling IA"
     },
     "folders": {
       "changeIcon": "Cambia Icona",
@@ -385,7 +407,12 @@
         "placeholder": "es. un campo di fiori",
         "quickEraseDesc": "Riempi la selezione per rimuovere l'oggetto.",
         "selectionPropertiesTitle": "Proprietà Selezione",
-        "useBasicInpaint": "Usa inpainting semplice"
+        "useBasicInpaint": "Usa inpainting semplice",
+        "spotEnhanceTitle": "Miglioramento localizzato",
+        "spotEnhanceDesc": "Nitidezza o restauro solo sull'area selezionata — il resto resta intatto.",
+        "spotEnhanceMode": "Modalità",
+        "spotSharpen": "Nitidezza",
+        "spotEnhanceButton": "Migliora selezione"
       }
     },
     "crop": {
@@ -438,12 +465,12 @@
       },
       "presets": {
         "custom": {
-          "name": "Personalizzato",
+          "name": "Rapporto esatto",
           "tooltip": "Inserisci proporzioni personalizzate"
         },
         "free": {
           "desc": "Ritaglio libero",
-          "name": "Libero"
+          "name": "Libero (trascina)"
         },
         "original": {
           "desc": "Proporzioni originali immagine",
@@ -496,7 +523,8 @@
         "switchToLandscape": "Passa a paesaggio",
         "switchToPortrait": "Passa a ritratto",
         "transform": "Correzione prospettiva e distorsione trapezoidale"
-      }
+      },
+      "done": "Fatto"
     },
     "masks": {
       "actions": {
@@ -550,7 +578,9 @@
         "feather": "Sfumatura",
         "globalFeather": "Sfumatura Globale",
         "grow": "Espandi",
-        "tolerance": "Tolleranza"
+        "tolerance": "Tolleranza",
+        "clean": "Pulisci",
+        "matteView": "Mostra matte B/N"
       },
       "patches": {
         "copyName": "{{name}} Copia",
@@ -1083,7 +1113,9 @@
         "tone": "Tono",
         "transformRotation": "Trasformazione e Rotazione",
         "vignette": "Vignettatura",
-        "whiteBalance": "Bilanciamento del Bianco"
+        "whiteBalance": "Bilanciamento del Bianco",
+        "colorWheels": "Ruote colore",
+        "hueCurves": "Curve colore"
       },
       "includedAdjustments": "Regolazioni Incluse",
       "modeMerge": "Unisci",
@@ -1166,6 +1198,53 @@
       "strengthLabel": "Intensità",
       "titleBatch": "Riduci Rumore Immagini",
       "titleSingle": "Riduci Rumore Immagine"
+    },
+    "enhance": {
+      "btnRetry": "Riprova",
+      "btnSave": "Salva",
+      "btnStart": "Avvia",
+      "cancel": "Annulla",
+      "clickToPreview": "Clicca un punto per vedere l'anteprima del modello",
+      "close": "Chiudi",
+      "deblurProgress": "Riduzione sfocatura in corso…",
+      "descriptionDeblur": "Tenta di ridurre la sfocatura con un modello IA locale. I risultati variano in base al tipo e all'intensità della sfocatura.",
+      "descriptionRestore": "Ripara gli artefatti dell'immagine con un modello IA locale: scegli il modello adatto al problema, moiré dello schermo (demoiré) o rumore e artefatti di compressione.",
+      "descriptionUpscale": "Ingrandisce questa immagine di 4x con un modello IA locale. Le immagini grandi vengono elaborate a riquadri e possono richiedere tempo su CPU.",
+      "dragToPreview": "Clicca o trascina un riquadro per l'anteprima di quell'area",
+      "initializing": "Inizializzazione…",
+      "openInEditor": "Apri nell'editor",
+      "outputSizeLabel": "Dimensione output",
+      "previewEnhanced": "Anteprima",
+      "previewNote": "Anteprima dell'area scelta — «Avvia» elabora l'intera foto.",
+      "previewOriginal": "Originale",
+      "previewRunning": "Generazione anteprima…",
+      "processingFailed": "Miglioramento non riuscito",
+      "restoreProgress": "Restauro in corso…",
+      "saveSuccess": "Immagine salvata accanto all'originale.",
+      "speedNotice": "Il tempo di elaborazione dipende dalle dimensioni dell'immagine e dall'hardware.",
+      "strengthLabel": "Intensità",
+      "titleDeblur": "Riduzione sfocatura IA",
+      "titleRestore": "Restauro IA",
+      "titleUpscale": "Upscaling IA",
+      "upscaleProgress": "Ingrandimento in corso…",
+      "continueWith": "Continua con",
+      "chainNote": "Si lavora sul risultato precedente"
+    },
+    "expand": {
+      "btnGenerate": "Genera",
+      "btnRetry": "Rigenera",
+      "btnSave": "Salva",
+      "cancel": "Annulla",
+      "close": "Chiudi",
+      "dragHint": "Trascina le maniglie verso l'esterno per definire la nuova cornice",
+      "generating": "Generazione riempimento…",
+      "openInEditor": "Apri nell'editor",
+      "processingFailed": "Espansione non riuscita",
+      "saveSuccess": "Immagine salvata accanto all'originale.",
+      "variantLabel": "Opzione {{current}} di {{total}}",
+      "targetSize": "Dimensione finale",
+      "output": "Uscita",
+      "guidesTooltip": "Mostra/nascondi le guide di composizione"
     },
     "hdr": {
       "cancel": "Annulla",
@@ -1320,6 +1399,11 @@
       "zoomInTooltip": "Ingrandisci",
       "zoomOutTooltip": "Riduci"
     }
+  },
+  "modelRegistry": {
+    "model": "Modello",
+    "noModels": "Nessun modello disponibile",
+    "notDownloaded": "non scaricato"
   },
   "settings": {
     "adjustments": {
@@ -1494,6 +1578,27 @@
       "saved": "Obiettivi Salvati",
       "title": "I Miei Obiettivi"
     },
+    "modelLibrary": {
+      "addButton": "Aggiungi",
+      "addDescription": "Link diretto a un file .onnx. Verrà scaricato, verificato e aggiunto al menu corrispondente.",
+      "addNamePlaceholder": "Nome visualizzato",
+      "addTitle": "Aggiungi modello da URL",
+      "browseButton": "Scegli file…",
+      "delete": "Rimuovi dal disco",
+      "description": "Scarica modelli IA curati, rimuovi quelli inutilizzati o aggiungi i tuoi da un link diretto.",
+      "download": "Scarica",
+      "installedTitle": "Modelli disponibili",
+      "needsConversion": "verrà convertito",
+      "noResults": "Nessun modello ONNX trovato — prova altre parole chiave.",
+      "searchPlaceholder": "Cerca modelli su Hugging Face…",
+      "taskMask": "Mascheratura",
+      "title": "Libreria modelli",
+      "engineTitle": "Motore IA",
+      "engineDesc": "Per il restauro e il riempimento/espansione generativi. Installazione una tantum (~2 GB).",
+      "engineInstalled": "Installato",
+      "engineInstall": "Installa motore",
+      "engineInstalling": "Installazione..."
+    },
     "processing": {
       "ai": {
         "cloud": {
@@ -1544,6 +1649,18 @@
           "cpu": "CPU"
         },
         "title": "AI Generativa"
+      },
+      "aiModels": {
+        "deblur": "Riduzione sfocatura",
+        "depth": "Stima della profondità",
+        "description": "Scegli quale modello locale esegue ogni funzione IA. Aggiungi i tuoi modelli inserendo un file manifest nella cartella models/manifests.",
+        "foreground": "Maschera primo piano",
+        "inpaint": "Rimozione oggetti (inpainting)",
+        "restore": "Restauro",
+        "sky": "Maschera cielo",
+        "subject": "Maschera soggetto",
+        "title": "Modelli IA locali",
+        "upscale": "Upscaling"
       },
       "backend": "Backend di Elaborazione",
       "backendDesc": "Seleziona l'API grafica. 'Auto' è consigliata. Potrebbe risolvere i crash su alcuni sistemi.",

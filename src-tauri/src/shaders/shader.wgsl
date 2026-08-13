@@ -115,6 +115,25 @@ struct GlobalAdjustments {
     halation_amount: f32,
     flare_amount: f32,
     sharpness_threshold: f32,
+
+    // Resolve-style primary wheels: xyz = per-channel, w = master.
+    cw_lift: vec4<f32>,
+    cw_gamma: vec4<f32>,
+    cw_gain: vec4<f32>,
+    cw_offset: vec4<f32>,
+    contrast_pivot: f32,
+    texture_amount: f32,
+    _pad_pro1: f32,
+    _pad_pro2: f32,
+    // Hue/luma curves (x normalized 0..1, y = signed delta -1..1).
+    hue_hue_curve: array<Point, 16>,
+    hue_sat_curve: array<Point, 16>,
+    hue_lum_curve: array<Point, 16>,
+    lum_sat_curve: array<Point, 16>,
+    hue_hue_count: u32,
+    hue_sat_count: u32,
+    hue_lum_count: u32,
+    lum_sat_count: u32,
 }
 
 struct MaskAdjustments {
@@ -167,6 +186,16 @@ struct MaskAdjustments {
     _pad_end5: f32,
     _pad_end6: f32,
     _pad_end7: f32,
+
+    cw_lift: vec4<f32>,
+    cw_gamma: vec4<f32>,
+    cw_gain: vec4<f32>,
+    cw_offset: vec4<f32>,
+    // Pivot is a signed delta for masks (global holds the absolute pivot).
+    contrast_pivot: f32,
+    texture_amount: f32,
+    _pad_pro3: f32,
+    _pad_pro4: f32,
 }
 
 struct AllAdjustments {
@@ -377,6 +406,100 @@ fn apply_curve(val: f32, points: array<Point, 16>, count: u32) -> f32 {
     return local_points[count - 1u].y / 255.0;
 }
 
+// Resolve-style primary corrector. Neutral at all zeros. Operates in
+// perceptual (gamma 2.2) space so the wheels feel like a grading panel:
+// offset shifts everything, gain pivots at black, lift pivots at white,
+// gamma bends midtones.
+fn apply_color_wheels(
+    color: vec3<f32>,
+    lift: vec4<f32>,
+    gamma: vec4<f32>,
+    gain: vec4<f32>,
+    offset: vec4<f32>
+) -> vec3<f32> {
+    let wheel_activity = dot(abs(lift), vec4<f32>(1.0)) + dot(abs(gamma), vec4<f32>(1.0))
+        + dot(abs(gain), vec4<f32>(1.0)) + dot(abs(offset), vec4<f32>(1.0));
+    if (wheel_activity < 0.0001) { return color; }
+
+    let g_exp = 1.0 / 2.2;
+    var v = pow(max(color, vec3<f32>(0.0)), vec3<f32>(g_exp));
+
+    let o = (offset.xyz + vec3<f32>(offset.w)) * 0.3;
+    let gn = vec3<f32>(1.0) + (gain.xyz + vec3<f32>(gain.w));
+    let l = (lift.xyz + vec3<f32>(lift.w)) * 0.3;
+    let gm = gamma.xyz + vec3<f32>(gamma.w);
+
+    v = v + o;
+    v = v * max(gn, vec3<f32>(0.0));
+    v = v + l * (vec3<f32>(1.0) - v);
+    let exponent = vec3<f32>(1.0) / max(vec3<f32>(1.0) + gm, vec3<f32>(0.05));
+    v = pow(max(v, vec3<f32>(0.0)), exponent);
+
+    return pow(v, vec3<f32>(2.2));
+}
+
+// Evaluates a delta curve (x 0..1 -> y -1..1) with smoothstep-blended
+// segments. Outside the outermost points the edge value holds. Wrap for
+// hue-domain curves is handled by phantom points baked on the CPU side.
+fn eval_delta_curve(points: array<Point, 16>, count: u32, x: f32) -> f32 {
+    if (count == 0u) { return 0.0; }
+    if (count == 1u) { return points[0].y; }
+    var pts = points;
+    if (x <= pts[0].x) { return pts[0].y; }
+    if (x >= pts[count - 1u].x) { return pts[count - 1u].y; }
+    for (var i = 1u; i < count; i = i + 1u) {
+        if (x <= pts[i].x) {
+            let span = max(pts[i].x - pts[i - 1u].x, 0.0001);
+            let t = (x - pts[i - 1u].x) / span;
+            let ts = t * t * (3.0 - 2.0 * t);
+            return mix(pts[i - 1u].y, pts[i].y, ts);
+        }
+    }
+    return pts[count - 1u].y;
+}
+
+// Resolve-style custom color curves: Hue vs Hue / Sat / Luma, Luma vs Sat.
+fn apply_hue_curves(color: vec3<f32>) -> vec3<f32> {
+    let g = adjustments.global;
+    if (g.hue_hue_count == 0u && g.hue_sat_count == 0u
+        && g.hue_lum_count == 0u && g.lum_sat_count == 0u) {
+        return color;
+    }
+
+    let perceptual = pow(max(color, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.2));
+    var hsv = rgb_to_hsv(clamp(perceptual, vec3<f32>(0.0), vec3<f32>(1.0)));
+
+    let h_norm = hsv.x; // rgb_to_hsv returns hue in 0..1
+
+    if (g.hue_hue_count > 0u) {
+        // ±60° of shift at full deflection.
+        let dh = eval_delta_curve(g.hue_hue_curve, g.hue_hue_count, h_norm) * (60.0 / 360.0);
+        hsv.x = fract(hsv.x + dh + 1.0);
+    }
+    if (g.hue_sat_count > 0u) {
+        let ds = eval_delta_curve(g.hue_sat_curve, g.hue_sat_count, h_norm);
+        hsv.y = clamp(hsv.y * (1.0 + ds), 0.0, 1.0);
+    }
+    if (g.hue_lum_count > 0u) {
+        let dl = eval_delta_curve(g.hue_lum_curve, g.hue_lum_count, h_norm) * 0.6;
+        hsv.z = clamp(hsv.z * (1.0 + dl), 0.0, 1.0);
+    }
+    if (g.lum_sat_count > 0u) {
+        let dls = eval_delta_curve(g.lum_sat_curve, g.lum_sat_count, hsv.z);
+        hsv.y = clamp(hsv.y * (1.0 + dls), 0.0, 1.0);
+    }
+
+    let adjusted = hsv_to_rgb(hsv);
+    // Weight by saturation so near-neutrals aren't destabilized by hue ops.
+    let sat_guard = smoothstep(0.02, 0.12, hsv.y);
+    var guard = sat_guard;
+    if (g.lum_sat_count > 0u || g.hue_lum_count > 0u) {
+        guard = max(guard, 0.6);
+    }
+    let result = mix(perceptual, adjusted, guard);
+    return pow(max(result, vec3<f32>(0.0)), vec3<f32>(2.2));
+}
+
 fn apply_tonal_adjustments(
     color: vec3<f32>,
     blurred_color_input_space: vec3<f32>,
@@ -384,7 +507,8 @@ fn apply_tonal_adjustments(
     con: f32,
     sh: f32,
     wh: f32,
-    bl: f32
+    bl: f32,
+    pivot: f32
 ) -> vec3<f32> {
     var rgb = color;
 
@@ -454,9 +578,12 @@ fn apply_tonal_adjustments(
         let perceptual = pow(safe_rgb, vec3<f32>(1.0 / g));
         let clamped_perceptual = clamp(perceptual, vec3<f32>(0.0), vec3<f32>(1.0));
         let strength = pow(2.0, con * 1.25);
-        let condition = clamped_perceptual < vec3<f32>(0.5);
-        let high_part = 1.0 - 0.5 * pow(2.0 * (1.0 - clamped_perceptual), vec3<f32>(strength));
-        let low_part = 0.5 * pow(2.0 * clamped_perceptual, vec3<f32>(strength));
+        // S-curve around a movable pivot (Resolve-style): p=0.5 reproduces
+        // the classic symmetric curve.
+        let p = clamp(pivot, 0.05, 0.95);
+        let condition = clamped_perceptual < vec3<f32>(p);
+        let high_part = vec3<f32>(1.0) - (1.0 - p) * pow((vec3<f32>(1.0) - clamped_perceptual) / (1.0 - p), vec3<f32>(strength));
+        let low_part = p * pow(clamped_perceptual / p, vec3<f32>(strength));
         let curved_perceptual = select(high_part, low_part, condition);
         let contrast_adjusted_rgb = pow(curved_perceptual, vec3<f32>(g));
         let mix_factor = smoothstep(vec3<f32>(1.0), vec3<f32>(1.01), safe_rgb);
@@ -1332,7 +1459,7 @@ fn apply_glow_bloom(
 
     blurred_linear = apply_linear_exposure(blurred_linear, exp);
     blurred_linear = apply_filmic_exposure(blurred_linear, bright);
-    blurred_linear = apply_tonal_adjustments(blurred_linear, blurred_color_input_space, is_raw, 0.0, 0.0, wh, 0.0);
+    blurred_linear = apply_tonal_adjustments(blurred_linear, blurred_color_input_space, is_raw, 0.0, 0.0, wh, 0.0, 0.5);
 
     let linear_luma = get_luma(max(blurred_linear, vec3<f32>(0.0)));
 
@@ -1400,7 +1527,7 @@ fn apply_halation(
 
     blurred_linear = apply_linear_exposure(blurred_linear, exp);
     blurred_linear = apply_filmic_exposure(blurred_linear, bright);
-    blurred_linear = apply_tonal_adjustments(blurred_linear, blurred_color_input_space, is_raw, 0.0, 0.0, wh, 0.0);
+    blurred_linear = apply_tonal_adjustments(blurred_linear, blurred_color_input_space, is_raw, 0.0, 0.0, wh, 0.0, 0.5);
 
     let linear_luma = get_luma(max(blurred_linear, vec3<f32>(0.0)));
 
@@ -1487,6 +1614,12 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     var t_flare = adjustments.global.flare_amount;
     var t_sharpness = adjustments.global.sharpness;
     var t_hue = adjustments.global.hue;
+    var t_texture = adjustments.global.texture_amount;
+    var t_pivot = adjustments.global.contrast_pivot;
+    var t_cw_lift = adjustments.global.cw_lift;
+    var t_cw_gamma = adjustments.global.cw_gamma;
+    var t_cw_gain = adjustments.global.cw_gain;
+    var t_cw_offset = adjustments.global.cw_offset;
 
     var h0_h = adjustments.global.hsl[0].hue; var h0_s = adjustments.global.hsl[0].saturation; var h0_l = adjustments.global.hsl[0].luminance;
     var h1_h = adjustments.global.hsl[1].hue; var h1_s = adjustments.global.hsl[1].saturation; var h1_l = adjustments.global.hsl[1].luminance;
@@ -1525,6 +1658,12 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             t_halation += m.halation_amount * influence;
             t_flare += m.flare_amount * influence;
             t_hue += m.hue * influence;
+            t_texture += m.texture_amount * influence;
+            t_pivot += m.contrast_pivot * influence;
+            t_cw_lift += m.cw_lift * influence;
+            t_cw_gamma += m.cw_gamma * influence;
+            t_cw_gain += m.cw_gain * influence;
+            t_cw_offset += m.cw_offset * influence;
 
             h0_h += m.hsl[0].hue * influence; h0_s += m.hsl[0].saturation * influence; h0_l += m.hsl[0].luminance * influence;
             h1_h += m.hsl[1].hue * influence; h1_s += m.hsl[1].saturation * influence; h1_l += m.hsl[1].luminance * influence;
@@ -1577,6 +1716,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     locally_contrasted_rgb += sharpness_delta;
 
+    // Texture: mid-fine detail band (Lightroom-style) — local contrast
+    // against the small-radius blur, gentler than sharpening, no threshold.
+    locally_contrasted_rgb = apply_local_contrast(locally_contrasted_rgb, sharpness_blurred, t_texture * 0.75, is_raw, 1u, 0.0);
     locally_contrasted_rgb = apply_local_contrast(locally_contrasted_rgb, clarity_blurred, t_clarity, is_raw, 1u, 0.0);
     locally_contrasted_rgb = apply_local_contrast(locally_contrasted_rgb, structure_blurred, t_structure, is_raw, 1u, 0.0);
     locally_contrasted_rgb = apply_centre_local_contrast(locally_contrasted_rgb, adjustments.global.centre, absolute_coord_i, clarity_blurred, is_raw);
@@ -1614,12 +1756,14 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     var composite_rgb_linear = apply_dehaze(processed_rgb, structure_blurred, is_raw, t_dehaze);
     composite_rgb_linear = apply_centre_tonal_and_color(composite_rgb_linear, adjustments.global.centre, absolute_coord_i);
     composite_rgb_linear = apply_white_balance(composite_rgb_linear, t_temperature, t_tint);
+    composite_rgb_linear = apply_color_wheels(composite_rgb_linear, t_cw_lift, t_cw_gamma, t_cw_gain, t_cw_offset);
     composite_rgb_linear = apply_filmic_exposure(composite_rgb_linear, t_brightness);
-    composite_rgb_linear = apply_tonal_adjustments(composite_rgb_linear, tonal_blurred, is_raw, t_contrast, t_shadows, t_whites, t_blacks);
+    composite_rgb_linear = apply_tonal_adjustments(composite_rgb_linear, tonal_blurred, is_raw, t_contrast, t_shadows, t_whites, t_blacks, t_pivot);
     composite_rgb_linear = apply_highlights_adjustment(composite_rgb_linear, tonal_blurred, is_raw, t_highlights);
     composite_rgb_linear = apply_color_calibration(composite_rgb_linear, adjustments.global.color_calibration);
     composite_rgb_linear = apply_hsl_panel(composite_rgb_linear, final_hsl, absolute_coord_i);
     composite_rgb_linear = apply_hue_shift(composite_rgb_linear, t_hue);
+    composite_rgb_linear = apply_hue_curves(composite_rgb_linear);
     composite_rgb_linear = apply_creative_color(composite_rgb_linear, t_saturation, t_vibrance);
 
     composite_rgb_linear = apply_color_grading(

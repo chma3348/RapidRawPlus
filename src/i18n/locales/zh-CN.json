@@ -15,7 +15,8 @@
       "reset": "重置",
       "shadows": "阴影",
       "toneMapper": "色调映射",
-      "whites": "白色"
+      "whites": "白色",
+      "contrastPivot": "对比度轴心"
     },
     "color": {
       "ariaSelectColor": "选择 {{name}} 颜色",
@@ -63,7 +64,23 @@
       "vibrance": "鲜艳度",
       "wbPickerTooltip": "白平衡选取器",
       "wbPickerWgpuDisabled": "白平衡选取器：请在设置中禁用 WGPU。",
-      "whiteBalance": "白平衡"
+      "whiteBalance": "白平衡",
+      "wheels": {
+        "title": "色轮",
+        "lift": "暗部 (Lift)",
+        "gamma": "中间调 (Gamma)",
+        "gain": "亮部 (Gain)",
+        "offset": "整体 (Offset)"
+      },
+      "hueCurves": {
+        "title": "色彩曲线",
+        "reset": "重置",
+        "hint": "单击添加控制点，拖动调整，双击删除。",
+        "hueHue": "色相 vs 色相",
+        "hueSat": "色相 vs 饱和度",
+        "hueLum": "色相 vs 明亮度",
+        "lumSat": "明亮度 vs 饱和度"
+      }
     },
     "curves": {
       "channelTitle": "{{channel}} 通道",
@@ -108,7 +125,8 @@
       "sharpening": "锐化",
       "sharpness": "锐度",
       "structure": "结构",
-      "threshold": "阈值"
+      "threshold": "阈值",
+      "texture": "纹理"
     },
     "effects": {
       "amount": "数量",
@@ -177,8 +195,10 @@
       "convertNegative": "转换负片",
       "copyAdjustments": "复制调整",
       "cullImage": "筛选图像",
+      "deblur": "AI 去模糊",
       "denoise": "降噪图像",
       "editImage": "编辑图像",
+      "expand": "AI 扩展",
       "exportImage": "导出图像",
       "frameImage": "装裱图像",
       "mergeHdr": "合并为 HDR",
@@ -191,9 +211,11 @@
       "ratingLabel_other": "{{count}} 星",
       "redo": "重做",
       "resetAdjustments": "重置调整",
+      "restore": "AI 修复",
       "stitchPanorama": "拼接全景图",
       "tagging": "标签",
-      "undo": "撤销"
+      "undo": "撤销",
+      "upscale": "AI 放大"
     },
     "folders": {
       "changeIcon": "更换图标",
@@ -385,7 +407,12 @@
         "placeholder": "例如，一片花海",
         "quickEraseDesc": "填充选区以移除对象。",
         "selectionPropertiesTitle": "选区属性",
-        "useBasicInpaint": "使用基础图像修复"
+        "useBasicInpaint": "使用基础图像修复",
+        "spotEnhanceTitle": "局部增强",
+        "spotEnhanceDesc": "仅锐化或修复涂抹的区域，照片其余部分保持不变。",
+        "spotEnhanceMode": "模式",
+        "spotSharpen": "锐化",
+        "spotEnhanceButton": "增强所选区域"
       }
     },
     "crop": {
@@ -438,12 +465,12 @@
       },
       "presets": {
         "custom": {
-          "name": "自定义",
+          "name": "精确比例",
           "tooltip": "输入自定义宽高比"
         },
         "free": {
           "desc": "自由裁剪",
-          "name": "自由"
+          "name": "自由（拖动）"
         },
         "original": {
           "desc": "原始图像宽高比",
@@ -496,7 +523,8 @@
         "switchToLandscape": "切换为横向",
         "switchToPortrait": "切换为纵向",
         "transform": "透视和梯形校正"
-      }
+      },
+      "done": "完成"
     },
     "masks": {
       "actions": {
@@ -550,7 +578,9 @@
         "feather": "羽化",
         "globalFeather": "全局羽化",
         "grow": "扩展",
-        "tolerance": "容差"
+        "tolerance": "容差",
+        "clean": "净化",
+        "matteView": "显示黑白蒙版"
       },
       "patches": {
         "copyName": "{{name}} 副本",
@@ -1083,7 +1113,9 @@
         "tone": "色调",
         "transformRotation": "变换与旋转",
         "vignette": "暗角",
-        "whiteBalance": "白平衡"
+        "whiteBalance": "白平衡",
+        "colorWheels": "色轮",
+        "hueCurves": "色彩曲线"
       },
       "includedAdjustments": "包含的调整",
       "modeMerge": "合并",
@@ -1166,6 +1198,53 @@
       "strengthLabel": "强度",
       "titleBatch": "降噪图像",
       "titleSingle": "降噪图像"
+    },
+    "enhance": {
+      "btnRetry": "重试",
+      "btnSave": "保存",
+      "btnStart": "开始",
+      "cancel": "取消",
+      "clickToPreview": "点击任意位置预览模型效果",
+      "close": "关闭",
+      "deblurProgress": "正在去模糊…",
+      "descriptionDeblur": "尝试使用本地 AI 模型减少模糊。效果因模糊类型和强度而异。",
+      "descriptionRestore": "使用本地 AI 模型修复图像瑕疵——根据问题选择模型：屏幕摩尔纹（去摩尔纹）或一般噪点与压缩伪影。",
+      "descriptionUpscale": "使用本地 AI 模型将图像放大 4 倍。大图像会按图块处理，在 CPU 上可能需要一些时间。",
+      "dragToPreview": "点击或框选区域进行预览",
+      "initializing": "正在初始化…",
+      "openInEditor": "在编辑器中打开",
+      "outputSizeLabel": "输出尺寸",
+      "previewEnhanced": "预览",
+      "previewNote": "所选区域的预览——“开始”将处理整张照片。",
+      "previewOriginal": "原图",
+      "previewRunning": "正在生成预览…",
+      "processingFailed": "处理失败",
+      "restoreProgress": "正在修复图像…",
+      "saveSuccess": "图像已保存在原图旁。",
+      "speedNotice": "处理时间取决于图像大小和硬件。",
+      "strengthLabel": "强度",
+      "titleDeblur": "AI 去模糊",
+      "titleRestore": "AI 修复",
+      "titleUpscale": "AI 放大",
+      "upscaleProgress": "正在放大图像…",
+      "continueWith": "继续使用",
+      "chainNote": "正在基于上一次结果处理"
+    },
+    "expand": {
+      "btnGenerate": "生成",
+      "btnRetry": "重新生成",
+      "btnSave": "保存",
+      "cancel": "取消",
+      "close": "关闭",
+      "dragHint": "向外拖动手柄以设置新的画框",
+      "generating": "正在生成填充…",
+      "openInEditor": "在编辑器中打开",
+      "processingFailed": "扩展失败",
+      "saveSuccess": "图像已保存在原图旁。",
+      "variantLabel": "选项 {{current}}/{{total}}",
+      "targetSize": "目标尺寸",
+      "output": "输出",
+      "guidesTooltip": "切换构图参考线"
     },
     "hdr": {
       "cancel": "取消",
@@ -1320,6 +1399,11 @@
       "zoomInTooltip": "放大",
       "zoomOutTooltip": "缩小"
     }
+  },
+  "modelRegistry": {
+    "model": "模型",
+    "noModels": "没有可用的模型",
+    "notDownloaded": "未下载"
   },
   "settings": {
     "adjustments": {
@@ -1494,6 +1578,27 @@
       "saved": "已保存的镜头",
       "title": "我的镜头"
     },
+    "modelLibrary": {
+      "addButton": "添加",
+      "addDescription": "指向 .onnx 文件的直链。下载并校验后将添加到对应的下拉菜单。",
+      "addNamePlaceholder": "显示名称",
+      "addTitle": "通过 URL 添加模型",
+      "browseButton": "选择文件…",
+      "delete": "从磁盘删除",
+      "description": "下载精选 AI 模型、删除不用的模型，或通过直链添加自己的模型。",
+      "download": "下载",
+      "installedTitle": "可用模型",
+      "needsConversion": "将自动转换",
+      "noResults": "未找到 ONNX 模型——请尝试其他关键词。",
+      "searchPlaceholder": "在 Hugging Face 上搜索模型…",
+      "taskMask": "蒙版",
+      "title": "模型库",
+      "engineTitle": "AI 引擎",
+      "engineDesc": "用于修复及生成式填充/扩展。一次性安装（约 2 GB）。",
+      "engineInstalled": "已安装",
+      "engineInstall": "安装引擎",
+      "engineInstalling": "安装中..."
+    },
     "processing": {
       "ai": {
         "cloud": {
@@ -1544,6 +1649,18 @@
           "cpu": "CPU"
         },
         "title": "生成式 AI"
+      },
+      "aiModels": {
+        "deblur": "去模糊",
+        "depth": "深度估计",
+        "description": "选择每个 AI 功能使用的本地模型。将清单文件放入 models/manifests 文件夹即可添加自定义模型。",
+        "foreground": "前景蒙版",
+        "inpaint": "对象移除（图像修复）",
+        "restore": "修复",
+        "sky": "天空蒙版",
+        "subject": "主体蒙版",
+        "title": "本地 AI 模型",
+        "upscale": "放大"
       },
       "backend": "处理后端",
       "backendDesc": "选择图形 API。推荐使用「自动」。在某些系统上可能解决崩溃问题。",

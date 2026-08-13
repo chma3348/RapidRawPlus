@@ -35,6 +35,7 @@ export enum Invokes {
   ApplyAdjustmentsToPaths = 'apply_adjustments_to_paths',
   ApplyAutoAdjustmentsToPaths = 'apply_auto_adjustments_to_paths',
   ApplyDenoising = 'apply_denoising',
+  ApplyEnhancement = 'apply_enhancement',
   CalculateAutoAdjustments = 'calculate_auto_adjustments',
   CancelExport = 'cancel_export',
   CheckAIConnectorStatus = 'check_ai_connector_status',
@@ -72,8 +73,10 @@ export enum Invokes {
   ImportFiles = 'import_files',
   InvokeGenerativeReplace = 'invoke_generative_replace',
   InvokeGenerativeReplaseWithMaskDef = 'invoke_generative_replace_with_mask_def',
+  InvokeSpotEnhanceWithMaskDef = 'invoke_spot_enhance_with_mask_def',
   ListImagesInDir = 'list_images_in_dir',
   ListImagesRecursive = 'list_images_recursive',
+  ListRegisteredModels = 'list_registered_models',
   LoadImage = 'load_image',
   LoadMetadata = 'load_metadata',
   LoadPresets = 'load_presets',
@@ -83,10 +86,12 @@ export enum Invokes {
   RemoveTagForPaths = 'remove_tag_for_paths',
   RenameFiles = 'rename_files',
   RenameFolder = 'rename_folder',
+  RescanModelRegistry = 'rescan_model_registry',
   ResetAdjustmentsForPaths = 'reset_adjustments_for_paths',
   SaveMetadataAndUpdateThumbnail = 'save_metadata_and_update_thumbnail',
   SaveCollage = 'save_collage',
   SaveDenoisedImage = 'save_denoised_image',
+  SaveEnhancedImage = 'save_enhanced_image',
   SavePanorama = 'save_panorama',
   SaveHdr = 'save_hdr',
   SavePresets = 'save_presets',
@@ -98,6 +103,7 @@ export enum Invokes {
   StitchPanorama = 'stitch_panorama',
   MergeHdr = 'merge_hdr',
   TestAIConnectorConnection = 'test_ai_connector_connection',
+  TestModelRoundTrip = 'test_model_round_trip',
   UpdateWgpuTransform = 'update_wgpu_transform',
   UpdateExifFields = 'update_exif_fields',
   FetchCommunityPresets = 'fetch_community_presets',
@@ -107,6 +113,19 @@ export enum Invokes {
   GetAlbums = 'get_albums',
   SaveAlbums = 'save_albums',
   AddToAlbum = 'add_to_album',
+  AddModelFromFile = 'add_model_from_file',
+  AddModelFromUrl = 'add_model_from_url',
+  InstallRemoteModel = 'install_remote_model',
+  PreviewEnhancement = 'preview_enhancement',
+  GetEnhancementOverview = 'get_enhancement_overview',
+  ApplyExpansion = 'apply_expansion',
+  SaveExpandedImage = 'save_expanded_image',
+  SearchRemoteModels = 'search_remote_models',
+  GetEngineStatus = 'get_engine_status',
+  InstallAiEngine = 'install_ai_engine',
+  GetModelLibrary = 'get_model_library',
+  DownloadLibraryModel = 'download_library_model',
+  DeleteLibraryModel = 'delete_library_model',
   GetAlbumImages = 'get_album_images',
 }
 
@@ -210,6 +229,8 @@ export interface AppSettings {
   exifOverlay?: ExifOverlay;
   language?: string;
   folderTreeSort?: FolderTreeSort;
+  preferredModels?: Record<string, string>;
+  modelCatalogUrl?: string;
 }
 
 export interface BrushSettings {

@@ -104,6 +104,7 @@ export default function Editor({ onBackToLibrary, onContextMenu, transformWrappe
   const brushSettings = useEditorStore((s) => s.brushSettings);
   const activeMaskContainerId = useEditorStore((s) => s.activeMaskContainerId);
   const activeMaskId = useEditorStore((s) => s.activeMaskId);
+  const maskMatteView = useEditorStore((s) => s.maskMatteView);
   const activeAiPatchContainerId = useEditorStore((s) => s.activeAiPatchContainerId);
   const activeAiSubMaskId = useEditorStore((s) => s.activeAiSubMaskId);
   const isMaskControlHovered = useEditorStore((s) => s.isMaskControlHovered);
@@ -1039,6 +1040,7 @@ export default function Editor({ onBackToLibrary, onContextMenu, transformWrappe
         scale: renderSize.scale,
         width: Math.round(renderSize.width),
         jsAdjustments: strippedAdjustments,
+        matte: useEditorStore.getState().maskMatteView,
       });
 
       if (dataUrl) {
@@ -1375,6 +1377,7 @@ export default function Editor({ onBackToLibrary, onContextMenu, transformWrappe
     activeMaskContainerId,
     activeAiPatchContainerId,
     imageRenderSize,
+    maskMatteView,
   ]);
 
   useEffect(() => {

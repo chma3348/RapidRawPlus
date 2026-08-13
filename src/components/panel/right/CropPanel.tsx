@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Aperture,
+  Check,
   FlipHorizontal,
   FlipVertical,
   Grid3x3,
@@ -15,7 +16,7 @@ import {
 import { useTranslation } from 'react-i18next';
 import { Adjustments, INITIAL_ADJUSTMENTS } from '../../../utils/adjustments';
 import clsx from 'clsx';
-import { Orientation } from '../../ui/AppProperties';
+import { Orientation, Panel } from '../../ui/AppProperties';
 import TransformModal from '../../modals/TransformModal';
 import LensCorrectionModal from '../../modals/LensCorrectionModal';
 import { motion } from 'framer-motion';
@@ -23,6 +24,7 @@ import Text from '../../ui/Text';
 import Slider from '../../ui/Slider';
 import { TEXT_COLOR_KEYS, TextColors, TextVariants, TextWeights } from '../../../types/typography';
 import { useEditorStore } from '../../../store/useEditorStore';
+import { useUIStore } from '../../../store/useUIStore';
 import { useEditorActions } from '../../../hooks/useEditorActions';
 
 const BASE_RATIO = 1.618;
@@ -275,6 +277,17 @@ export default function CropPanel() {
       }
     }
   };
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Enter') return;
+      const tag = (document.activeElement?.tagName || '').toUpperCase();
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      useUIStore.getState().setRightPanel(Panel.Adjustments);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
   const handleCustomInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') {
@@ -715,6 +728,17 @@ export default function CropPanel() {
                 </motion.div>
               </div>
             </div>
+
+            {/* Explicit closure: the crop applies live while editing, but
+                without this the tool just stays open and it is easy to
+                doubt anything happened. */}
+            <button
+              onClick={() => useUIStore.getState().setRightPanel(Panel.Adjustments)}
+              className="w-full mt-6 py-2.5 rounded-lg bg-accent text-button-text font-semibold shadow-shiny hover:scale-[1.01] active:scale-[.98] transition-transform flex items-center justify-center gap-2"
+            >
+              <Check size={16} />
+              {t('editor.crop.done')}
+            </button>
           </>
         ) : (
           <Text

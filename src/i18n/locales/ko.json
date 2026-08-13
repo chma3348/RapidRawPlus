@@ -15,7 +15,8 @@
       "reset": "초기화",
       "shadows": "섀도우",
       "toneMapper": "톤 매퍼",
-      "whites": "화이트"
+      "whites": "화이트",
+      "contrastPivot": "대비 피벗"
     },
     "color": {
       "ariaSelectColor": "{{name}} 색상 선택",
@@ -63,7 +64,23 @@
       "vibrance": "생동감",
       "wbPickerTooltip": "화이트 밸런스 피커",
       "wbPickerWgpuDisabled": "WB 피커: 설정에서 WGPU를 비활성화하세요.",
-      "whiteBalance": "화이트 밸런스"
+      "whiteBalance": "화이트 밸런스",
+      "wheels": {
+        "title": "컬러 휠",
+        "lift": "리프트",
+        "gamma": "감마",
+        "gain": "게인",
+        "offset": "오프셋"
+      },
+      "hueCurves": {
+        "title": "컬러 커브",
+        "reset": "재설정",
+        "hint": "클릭해 점 추가, 드래그로 조정, 더블클릭으로 제거.",
+        "hueHue": "색조 vs 색조",
+        "hueSat": "색조 vs 채도",
+        "hueLum": "색조 vs 휘도",
+        "lumSat": "휘도 vs 채도"
+      }
     },
     "curves": {
       "channelTitle": "{{channel}} 채널",
@@ -108,7 +125,8 @@
       "sharpening": "선명도 향상",
       "sharpness": "선명도",
       "structure": "구조",
-      "threshold": "임계값"
+      "threshold": "임계값",
+      "texture": "텍스처"
     },
     "effects": {
       "amount": "양",
@@ -177,8 +195,10 @@
       "convertNegative": "네거티브 변환",
       "copyAdjustments": "조정값 복사",
       "cullImage": "이미지 선별",
+      "deblur": "AI 블러 제거",
       "denoise": "이미지 노이즈 제거",
       "editImage": "이미지 편집",
+      "expand": "AI 확장",
       "exportImage": "이미지 내보내기",
       "frameImage": "이미지 프레임",
       "mergeHdr": "HDR로 병합",
@@ -191,9 +211,11 @@
       "ratingLabel_other": "{{count}}점",
       "redo": "다시 실행",
       "resetAdjustments": "조정값 초기화",
+      "restore": "AI 복원",
       "stitchPanorama": "파노라마 스티칭",
       "tagging": "태그 지정",
-      "undo": "실행 취소"
+      "undo": "실행 취소",
+      "upscale": "AI 업스케일"
     },
     "folders": {
       "changeIcon": "아이콘 변경",
@@ -385,7 +407,12 @@
         "placeholder": "예: 꽃밭",
         "quickEraseDesc": "선택 영역을 채워 객체를 제거합니다.",
         "selectionPropertiesTitle": "선택 영역 속성",
-        "useBasicInpaint": "기본 인페인팅 사용"
+        "useBasicInpaint": "기본 인페인팅 사용",
+        "spotEnhanceTitle": "부분 보정",
+        "spotEnhanceDesc": "브러시로 칠한 영역만 선명하게 하거나 복원합니다. 나머지는 그대로 유지됩니다.",
+        "spotEnhanceMode": "모드",
+        "spotSharpen": "선명하게",
+        "spotEnhanceButton": "선택 영역 보정"
       }
     },
     "crop": {
@@ -438,12 +465,12 @@
       },
       "presets": {
         "custom": {
-          "name": "사용자 지정",
+          "name": "정확한 비율",
           "tooltip": "사용자 지정 종횡비 입력"
         },
         "free": {
           "desc": "자유형 자르기",
-          "name": "자유"
+          "name": "자유 (드래그)"
         },
         "original": {
           "desc": "원본 이미지 종횡비",
@@ -496,7 +523,8 @@
         "switchToLandscape": "가로로 전환",
         "switchToPortrait": "세로로 전환",
         "transform": "원근 및 키스톤 보정"
-      }
+      },
+      "done": "완료"
     },
     "masks": {
       "actions": {
@@ -550,7 +578,9 @@
         "feather": "페더",
         "globalFeather": "전체 페더",
         "grow": "확장",
-        "tolerance": "허용 오차"
+        "tolerance": "허용 오차",
+        "clean": "정리",
+        "matteView": "흑백 매트 보기"
       },
       "patches": {
         "copyName": "{{name}} 복사본",
@@ -1083,7 +1113,9 @@
         "tone": "톤",
         "transformRotation": "변형 및 회전",
         "vignette": "비네트",
-        "whiteBalance": "화이트 밸런스"
+        "whiteBalance": "화이트 밸런스",
+        "colorWheels": "컬러 휠",
+        "hueCurves": "컬러 커브"
       },
       "includedAdjustments": "포함된 조정값",
       "modeMerge": "병합",
@@ -1166,6 +1198,53 @@
       "strengthLabel": "강도",
       "titleBatch": "이미지 노이즈 제거",
       "titleSingle": "이미지 노이즈 제거"
+    },
+    "enhance": {
+      "btnRetry": "다시 시도",
+      "btnSave": "저장",
+      "btnStart": "시작",
+      "cancel": "취소",
+      "clickToPreview": "지점을 클릭하면 해당 부분을 미리 볼 수 있습니다",
+      "close": "닫기",
+      "deblurProgress": "블러 제거 중…",
+      "descriptionDeblur": "로컬 AI 모델로 블러 감소를 시도합니다. 결과는 블러의 종류와 강도에 따라 다릅니다.",
+      "descriptionRestore": "로컬 AI 모델로 이미지 아티팩트를 복원합니다. 문제에 맞는 모델을 선택하세요: 화면 모아레(디모아레) 또는 일반 노이즈·압축 아티팩트.",
+      "descriptionUpscale": "로컬 AI 모델로 이미지를 4배 확대합니다. 큰 이미지는 타일 단위로 처리되어 CPU에서는 시간이 걸릴 수 있습니다.",
+      "dragToPreview": "클릭하거나 드래그하여 해당 영역을 미리 보세요",
+      "initializing": "초기화 중…",
+      "openInEditor": "편집기에서 열기",
+      "outputSizeLabel": "출력 크기",
+      "previewEnhanced": "미리보기",
+      "previewNote": "선택 영역의 미리보기입니다. '시작'을 누르면 전체 사진을 처리합니다.",
+      "previewOriginal": "원본",
+      "previewRunning": "미리보기 생성 중…",
+      "processingFailed": "처리 실패",
+      "restoreProgress": "이미지 복원 중…",
+      "saveSuccess": "원본 옆에 저장되었습니다.",
+      "speedNotice": "처리 시간은 이미지 크기와 하드웨어에 따라 다릅니다.",
+      "strengthLabel": "강도",
+      "titleDeblur": "AI 블러 제거",
+      "titleRestore": "AI 복원",
+      "titleUpscale": "AI 업스케일링",
+      "upscaleProgress": "업스케일링 중…",
+      "continueWith": "이어서 실행:",
+      "chainNote": "이전 결과를 입력으로 사용 중"
+    },
+    "expand": {
+      "btnGenerate": "생성",
+      "btnRetry": "다시 생성",
+      "btnSave": "저장",
+      "cancel": "취소",
+      "close": "닫기",
+      "dragHint": "핸들을 바깥쪽으로 드래그하여 새 프레임을 설정하세요",
+      "generating": "채우기 생성 중…",
+      "openInEditor": "편집기에서 열기",
+      "processingFailed": "확장 실패",
+      "saveSuccess": "원본 옆에 저장되었습니다.",
+      "variantLabel": "옵션 {{current}} / {{total}}",
+      "targetSize": "목표 크기",
+      "output": "출력",
+      "guidesTooltip": "구도 가이드 표시 전환"
     },
     "hdr": {
       "cancel": "취소",
@@ -1320,6 +1399,11 @@
       "zoomInTooltip": "확대",
       "zoomOutTooltip": "축소"
     }
+  },
+  "modelRegistry": {
+    "model": "모델",
+    "noModels": "사용 가능한 모델 없음",
+    "notDownloaded": "다운로드되지 않음"
   },
   "settings": {
     "adjustments": {
@@ -1494,6 +1578,27 @@
       "saved": "저장된 렌즈",
       "title": "내 렌즈"
     },
+    "modelLibrary": {
+      "addButton": "추가",
+      "addDescription": ".onnx 파일 직접 링크. 다운로드 및 검증 후 해당 드롭다운에 추가됩니다.",
+      "addNamePlaceholder": "표시 이름",
+      "addTitle": "URL로 모델 추가",
+      "browseButton": "파일 선택…",
+      "delete": "디스크에서 제거",
+      "description": "엄선된 AI 모델을 다운로드하고, 사용하지 않는 모델을 제거하거나, 직접 링크로 나만의 모델을 추가하세요.",
+      "download": "다운로드",
+      "installedTitle": "사용 가능한 모델",
+      "needsConversion": "변환됨",
+      "noResults": "ONNX 모델을 찾을 수 없습니다. 다른 키워드를 시도해 보세요.",
+      "searchPlaceholder": "Hugging Face에서 모델 검색…",
+      "taskMask": "마스킹",
+      "title": "모델 라이브러리",
+      "engineTitle": "AI 엔진",
+      "engineDesc": "복원 및 생성형 채우기/확장에 필요. 최초 1회 약 2GB 설치.",
+      "engineInstalled": "설치됨",
+      "engineInstall": "엔진 설치",
+      "engineInstalling": "설치 중..."
+    },
     "processing": {
       "ai": {
         "cloud": {
@@ -1544,6 +1649,18 @@
           "cpu": "CPU"
         },
         "title": "생성형 AI"
+      },
+      "aiModels": {
+        "deblur": "블러 제거",
+        "depth": "깊이 추정",
+        "description": "각 AI 기능에 사용할 온디바이스 모델을 선택하세요. models/manifests 폴더에 매니페스트 파일을 넣으면 사용자 모델을 추가할 수 있습니다.",
+        "foreground": "전경 마스크",
+        "inpaint": "개체 제거(인페인팅)",
+        "restore": "복원",
+        "sky": "하늘 마스크",
+        "subject": "피사체 마스크",
+        "title": "로컬 AI 모델",
+        "upscale": "업스케일링"
       },
       "backend": "처리 백엔드",
       "backendDesc": "그래픽 API를 선택합니다. 'Auto'를 권장합니다. 일부 시스템의 충돌을 해결할 수 있습니다.",

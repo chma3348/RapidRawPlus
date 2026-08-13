@@ -217,6 +217,72 @@ export function useTauriListeners({
           }));
         }
       }),
+      listen('enhance-progress', (event: any) => {
+        if (isEffectActive)
+          useUIStore.getState().setUI((state) => ({
+            enhanceModalState: { ...state.enhanceModalState, progressMessage: event.payload as string },
+          }));
+      }),
+      listen('enhance-complete', (event: any) => {
+        if (isEffectActive) {
+          const payload = event.payload;
+          useUIStore.getState().setUI((state) => ({
+            enhanceModalState: {
+              ...state.enhanceModalState,
+              isProcessing: false,
+              previewBase64: payload?.enhanced ?? null,
+              originalBase64: payload?.original ?? null,
+              resultDims:
+                payload?.width && payload?.height
+                  ? { width: payload.width, height: payload.height }
+                  : null,
+              progressMessage: null,
+            },
+          }));
+        }
+      }),
+      listen('enhance-error', (event: any) => {
+        if (isEffectActive) {
+          useUIStore.getState().setUI((state) => ({
+            enhanceModalState: {
+              ...state.enhanceModalState,
+              isProcessing: false,
+              error: String(event.payload),
+              progressMessage: null,
+            },
+          }));
+        }
+      }),
+      listen('expand-progress', (event: any) => {
+        if (isEffectActive)
+          useUIStore.getState().setUI((state) => ({
+            expandModalState: { ...state.expandModalState, progressMessage: event.payload as string },
+          }));
+      }),
+      listen('expand-complete', (event: any) => {
+        if (isEffectActive) {
+          useUIStore.getState().setUI((state) => ({
+            expandModalState: {
+              ...state.expandModalState,
+              isProcessing: false,
+              variants: event.payload?.variants ?? [],
+              progressMessage: null,
+            },
+          }));
+        }
+      }),
+      listen('expand-error', (event: any) => {
+        if (isEffectActive) {
+          useUIStore.getState().setUI((state) => ({
+            expandModalState: {
+              ...state.expandModalState,
+              isProcessing: false,
+              error: String(event.payload),
+              progressMessage: null,
+            },
+          }));
+        }
+      }),
       listen('wgpu-frame-ready', (event: any) => {
         if (isEffectActive && event.payload?.path === useEditorStore.getState().selectedImage?.path) {
           useEditorStore.getState().setEditor({ hasRenderedFirstFrame: true });

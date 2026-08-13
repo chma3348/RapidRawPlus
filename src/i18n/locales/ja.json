@@ -15,7 +15,8 @@
       "reset": "リセット",
       "shadows": "シャドウ",
       "toneMapper": "トーンマッパー",
-      "whites": "白レベル"
+      "whites": "白レベル",
+      "contrastPivot": "コントラスト基準点"
     },
     "color": {
       "ariaSelectColor": "{{name}}色を選択",
@@ -63,7 +64,23 @@
       "vibrance": "自然な彩度",
       "wbPickerTooltip": "ホワイトバランススポイト",
       "wbPickerWgpuDisabled": "WBスポイト: 設定でWGPUを無効にしてください。",
-      "whiteBalance": "ホワイトバランス"
+      "whiteBalance": "ホワイトバランス",
+      "wheels": {
+        "title": "カラーホイール",
+        "lift": "リフト",
+        "gamma": "ガンマ",
+        "gain": "ゲイン",
+        "offset": "オフセット"
+      },
+      "hueCurves": {
+        "title": "カラーカーブ",
+        "reset": "リセット",
+        "hint": "クリックで点を追加、ドラッグで調整、ダブルクリックで削除。",
+        "hueHue": "色相 vs 色相",
+        "hueSat": "色相 vs 彩度",
+        "hueLum": "色相 vs 輝度",
+        "lumSat": "輝度 vs 彩度"
+      }
     },
     "curves": {
       "channelTitle": "{{channel}} チャンネル",
@@ -108,7 +125,8 @@
       "sharpening": "シャープ",
       "sharpness": "シャープネス",
       "structure": "構造",
-      "threshold": "しきい値"
+      "threshold": "しきい値",
+      "texture": "テクスチャ"
     },
     "effects": {
       "amount": "適用量",
@@ -177,8 +195,10 @@
       "convertNegative": "ネガ反転",
       "copyAdjustments": "補正設定をコピー",
       "cullImage": "画像を選別",
+      "deblur": "AIぼかし除去",
       "denoise": "ノイズ低減を実行",
       "editImage": "画像を編集",
+      "expand": "AI拡張",
       "exportImage": "画像を書き出し",
       "frameImage": "画像にフレームを追加",
       "mergeHdr": "HDRに統合",
@@ -191,9 +211,11 @@
       "ratingLabel_other": "{{count}} つ星",
       "redo": "やり直し",
       "resetAdjustments": "補正設定をリセット",
+      "restore": "AI修復",
       "stitchPanorama": "パノラマ写真を作成",
       "tagging": "タグ付け",
-      "undo": "元に戻す"
+      "undo": "元に戻す",
+      "upscale": "AIアップスケール"
     },
     "folders": {
       "changeIcon": "アイコンを変更",
@@ -385,7 +407,12 @@
         "placeholder": "例: お花畑",
         "quickEraseDesc": "選択範囲を塗りつぶしてオブジェクトを削除します。",
         "selectionPropertiesTitle": "選択範囲のプロパティ",
-        "useBasicInpaint": "簡易インペインティングを使用"
+        "useBasicInpaint": "簡易インペインティングを使用",
+        "spotEnhanceTitle": "スポット補正",
+        "spotEnhanceDesc": "ブラシで塗った範囲だけをシャープ化・修復します。他の部分は変更されません。",
+        "spotEnhanceMode": "モード",
+        "spotSharpen": "シャープ化",
+        "spotEnhanceButton": "選択範囲を補正"
       }
     },
     "crop": {
@@ -438,12 +465,12 @@
       },
       "presets": {
         "custom": {
-          "name": "カスタム",
+          "name": "正確な比率",
           "tooltip": "カスタムのアスペクト比を入力"
         },
         "free": {
           "desc": "自由な切り抜き",
-          "name": "自由"
+          "name": "自由（ドラッグ）"
         },
         "original": {
           "desc": "オリジナル画像のアスペクト比",
@@ -496,7 +523,8 @@
         "switchToLandscape": "横向きに切り替え",
         "switchToPortrait": "縦向きに切り替え",
         "transform": "遠近歪みとあおり補正"
-      }
+      },
+      "done": "完了"
     },
     "masks": {
       "actions": {
@@ -550,7 +578,9 @@
         "feather": "ぼかし",
         "globalFeather": "全体のぼかし",
         "grow": "拡張",
-        "tolerance": "Tolerance"
+        "tolerance": "Tolerance",
+        "clean": "クリーン",
+        "matteView": "白黒マットを表示"
       },
       "patches": {
         "copyName": "{{name}} のコピー",
@@ -1082,7 +1112,9 @@
         "tone": "トーン",
         "transformRotation": "変形と回転",
         "vignette": "周辺光量補正",
-        "whiteBalance": "ホワイトバランス"
+        "whiteBalance": "ホワイトバランス",
+        "colorWheels": "カラーホイール",
+        "hueCurves": "カラーカーブ"
       },
       "includedAdjustments": "対象の補正項目",
       "modeMerge": "マージ",
@@ -1165,6 +1197,53 @@
       "strengthLabel": "適用量",
       "titleBatch": "画像を一括ノイズ低減",
       "titleSingle": "画像のノイズ低減"
+    },
+    "enhance": {
+      "btnRetry": "再試行",
+      "btnSave": "保存",
+      "btnStart": "開始",
+      "cancel": "キャンセル",
+      "clickToPreview": "クリックした箇所でモデルをプレビュー",
+      "close": "閉じる",
+      "deblurProgress": "ぼかし除去中…",
+      "descriptionDeblur": "ローカルAIモデルでぼかしの軽減を試みます。結果はぼかしの種類と強さによって異なります。",
+      "descriptionRestore": "ローカルAIモデルで画像のアーティファクトを修復します。問題に合ったモデルを選んでください：画面のモアレ（デモアレ）、または一般的なノイズ・圧縮アーティファクト。",
+      "descriptionUpscale": "ローカルAIモデルで画像を4倍に拡大します。大きな画像はタイル単位で処理されるため、CPUでは時間がかかることがあります。",
+      "dragToPreview": "クリックまたはドラッグで範囲を選んでプレビュー",
+      "initializing": "初期化中…",
+      "openInEditor": "エディターで開く",
+      "outputSizeLabel": "出力サイズ",
+      "previewEnhanced": "プレビュー",
+      "previewNote": "選択箇所のプレビューです。「開始」で写真全体を処理します。",
+      "previewOriginal": "元画像",
+      "previewRunning": "プレビューを生成中…",
+      "processingFailed": "処理に失敗しました",
+      "restoreProgress": "画像を修復中…",
+      "saveSuccess": "元の画像の隣に保存しました。",
+      "speedNotice": "処理時間は画像サイズとハードウェアに依存します。",
+      "strengthLabel": "強度",
+      "titleDeblur": "AIぼかし除去",
+      "titleRestore": "AI修復",
+      "titleUpscale": "AIアップスケーリング",
+      "upscaleProgress": "アップスケーリング中…",
+      "continueWith": "続けて実行:",
+      "chainNote": "前回の結果を入力として使用中"
+    },
+    "expand": {
+      "btnGenerate": "生成",
+      "btnRetry": "再生成",
+      "btnSave": "保存",
+      "cancel": "キャンセル",
+      "close": "閉じる",
+      "dragHint": "ハンドルを外側にドラッグして新しいフレームを設定",
+      "generating": "塗りつぶしを生成中…",
+      "openInEditor": "エディターで開く",
+      "processingFailed": "拡張に失敗しました",
+      "saveSuccess": "元の画像の隣に保存しました。",
+      "variantLabel": "オプション {{current}} / {{total}}",
+      "targetSize": "目標サイズ",
+      "output": "出力",
+      "guidesTooltip": "構図ガイドの表示切替"
     },
     "hdr": {
       "cancel": "キャンセル",
@@ -1319,6 +1398,11 @@
       "zoomInTooltip": "拡大",
       "zoomOutTooltip": "縮小"
     }
+  },
+  "modelRegistry": {
+    "model": "モデル",
+    "noModels": "利用可能なモデルがありません",
+    "notDownloaded": "未ダウンロード"
   },
   "settings": {
     "adjustments": {
@@ -1493,6 +1577,27 @@
       "saved": "登録されたレンズ",
       "title": "マイレンズ"
     },
+    "modelLibrary": {
+      "addButton": "追加",
+      "addDescription": ".onnxファイルへの直接リンク。ダウンロード・検証後、対応するドロップダウンに追加されます。",
+      "addNamePlaceholder": "表示名",
+      "addTitle": "URLからモデルを追加",
+      "browseButton": "ファイルを選択…",
+      "delete": "ディスクから削除",
+      "description": "厳選されたAIモデルをダウンロード、不要なものを削除、または直接リンクから独自のモデルを追加できます。",
+      "download": "ダウンロード",
+      "installedTitle": "利用可能なモデル",
+      "needsConversion": "変換されます",
+      "noResults": "ONNXモデルが見つかりません。別のキーワードをお試しください。",
+      "searchPlaceholder": "Hugging Faceでモデルを検索…",
+      "taskMask": "マスク",
+      "title": "モデルライブラリ",
+      "engineTitle": "AIエンジン",
+      "engineDesc": "修復と生成塗りつぶし/拡張に必要。初回のみ約2GBのインストール。",
+      "engineInstalled": "インストール済み",
+      "engineInstall": "エンジンをインストール",
+      "engineInstalling": "インストール中..."
+    },
     "processing": {
       "ai": {
         "cloud": {
@@ -1543,6 +1648,18 @@
           "cpu": "CPU"
         },
         "title": "生成AI"
+      },
+      "aiModels": {
+        "deblur": "ぼかし除去",
+        "depth": "深度推定",
+        "description": "各AI機能で使用するオンデバイスモデルを選択します。models/manifests フォルダーにマニフェストファイルを置くと独自のモデルを追加できます。",
+        "foreground": "前景マスク",
+        "inpaint": "オブジェクト除去（インペインティング）",
+        "restore": "修復",
+        "sky": "空マスク",
+        "subject": "被写体マスク",
+        "title": "ローカルAIモデル",
+        "upscale": "アップスケーリング"
       },
       "backend": "処理バックエンド",
       "backendDesc": "グラフィックスAPIを選択します。「自動」を推奨します。一部のシステムでのクラッシュを回避できる場合があります。",
