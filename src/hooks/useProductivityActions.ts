@@ -136,19 +136,24 @@ export function useProductivityActions(refreshImageList: () => Promise<void>) {
     return savedPath;
   }, [refreshImageList]);
 
-  const handleApplyEnhance = useCallback(async (strength: number, outputScale: number, chainStep: number = 0, texture: number = 0, grain: number = 0) => {
+  const handleApplyEnhance = useCallback(async (strength: number, outputScale: number, chainStep: number = 0, texture: number = 0, grain: number = 0, quiet: boolean = false) => {
     const { enhanceModalState } = useUIStore.getState();
     if (enhanceModalState.targetPaths.length === 0) return;
 
-    setUI((state) => ({
-      enhanceModalState: {
-        ...state.enhanceModalState,
-        isProcessing: true,
-        error: null,
-        previewBase64: null,
-        progressMessage: 'Starting engine...',
-      },
-    }));
+    // Quiet mode = live slider updates: re-blend the cached result in the
+    // background and let enhance-complete swap the image in place — no
+    // processing screen, and the backend refuses to start a model run.
+    if (!quiet) {
+      setUI((state) => ({
+        enhanceModalState: {
+          ...state.enhanceModalState,
+          isProcessing: true,
+          error: null,
+          previewBase64: null,
+          progressMessage: 'Starting engine...',
+        },
+      }));
+    }
 
     try {
       const { selectedImage, adjustments } = useEditorStore.getState();
@@ -160,15 +165,18 @@ export function useProductivityActions(refreshImageList: () => Promise<void>) {
         grain,
         outputScale,
         chainStep,
+        reblendOnly: quiet,
         // Chained passes work on the previous result, which already has
         // the edits baked in.
         jsAdjustments:
           chainStep === 0 && selectedImage?.path === enhanceModalState.targetPaths[0] ? adjustments : null,
       });
     } catch (err) {
-      setUI((state) => ({
-        enhanceModalState: { ...state.enhanceModalState, isProcessing: false, error: String(err) },
-      }));
+      if (!quiet) {
+        setUI((state) => ({
+          enhanceModalState: { ...state.enhanceModalState, isProcessing: false, error: String(err) },
+        }));
+      }
     }
   }, [setUI]);
 

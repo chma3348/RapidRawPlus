@@ -682,6 +682,7 @@ pub async fn apply_enhancement(
     grain: Option<f32>,
     output_scale: Option<u32>,
     chain_step: Option<u32>,
+    reblend_only: Option<bool>,
     js_adjustments: Option<serde_json::Value>,
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
@@ -776,6 +777,14 @@ pub async fn apply_enhancement(
         if hit {
             return Ok(());
         }
+    }
+
+    // Live slider updates re-blend ONLY: on a cold cache they must never
+    // kick off a multi-minute model run from a slider drag — do nothing
+    // and let the user start a real run explicitly.
+    if reblend_only.unwrap_or(false) {
+        log::info!("[enhance] reblend-only requested but cache is cold — ignoring");
+        return Ok(());
     }
 
     // Chained passes feed on the previous step's result (so restore →

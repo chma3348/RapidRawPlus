@@ -67,7 +67,14 @@ const PreviewCompare = ({ original, enhanced }: { original: string; enhanced: st
 interface EnhanceModalProps {
   isOpen: boolean;
   onClose(): void;
-  onEnhance(strength: number, outputScale: number, chainStep: number, texture: number, grain: number): void;
+  onEnhance(
+    strength: number,
+    outputScale: number,
+    chainStep: number,
+    texture: number,
+    grain: number,
+    quiet?: boolean,
+  ): Promise<void> | void;
   onSave(): Promise<string>;
   onOpenFile(path: string): void;
   error: string | null;
@@ -280,6 +287,37 @@ export default function EnhanceModal({
     if (!previewData || !lastRegion.current || isProcessing) return;
     const r = lastRegion.current;
     const timer = setTimeout(() => runPreview(r.x, r.y, r.size), 350);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [strength, texture, grain]);
+
+  // Sliders also drive the FULL result live once a run exists: quiet
+  // re-blend of the cached raw output (backend refuses to start a model
+  // run in this mode, so a drag can never trigger a multi-minute job).
+  // One request in flight at a time; a change during flight re-fires with
+  // the latest values afterwards.
+  const quietBusy = useRef(false);
+  const quietPending = useRef(false);
+  const latestSettings = useRef({ strength, texture, grain, effectiveScale, chainStep });
+  latestSettings.current = { strength, texture, grain, effectiveScale, chainStep };
+  useEffect(() => {
+    if (!previewBase64 || isProcessing || isSaving) return;
+    const timer = setTimeout(async () => {
+      if (quietBusy.current) {
+        quietPending.current = true;
+        return;
+      }
+      quietBusy.current = true;
+      try {
+        do {
+          quietPending.current = false;
+          const s = latestSettings.current;
+          await onEnhance(s.strength / 100, s.effectiveScale, s.chainStep, s.texture / 100, s.grain / 100, true);
+        } while (quietPending.current);
+      } finally {
+        quietBusy.current = false;
+      }
+    }, 500);
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [strength, texture, grain]);
