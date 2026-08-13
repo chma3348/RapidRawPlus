@@ -99,6 +99,14 @@ const SUB_MASK_CONFIG: any = {
       { key: 'feather', min: 0, max: 100, step: 1, defaultValue: 25 },
     ],
   },
+  [Mask.Color]: {
+    parameters: [
+      { key: 'tolerance', min: 1, max: 100, step: 1, defaultValue: 20 },
+      { key: 'clean', min: 0, max: 100, step: 1, defaultValue: 0 },
+      { key: 'grow', min: -100, max: 100, step: 1, defaultValue: 10 },
+      { key: 'feather', min: 0, max: 100, step: 1, defaultValue: 25 },
+    ],
+  },
   [Mask.Clipped]: {
     parameters: [
       { key: 'whiteThreshold', min: 50, max: 100, step: 1, defaultValue: 98 },
@@ -512,6 +520,16 @@ export default function AIPanel() {
       subMask.parameters.centerY = -10000;
       subMask.parameters.radiusX = 0;
       subMask.parameters.radiusY = 0;
+    }
+    if (type === Mask.Color) {
+      if (!subMask.parameters) subMask.parameters = {} as any;
+      Object.assign(subMask.parameters as any, {
+        isInitialDraw: true,
+        targetX: -10000,
+        targetY: -10000,
+        tolerance: 20,
+        feather: 25,
+      });
     }
     if (type === Mask.Clipped) {
       if (!subMask.parameters) subMask.parameters = {} as any;

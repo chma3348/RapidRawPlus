@@ -14,6 +14,7 @@ import {
   Sun,
   Highlighter,
   Contrast,
+  Pipette,
 } from 'lucide-react';
 import i18n from 'i18next';
 
@@ -172,6 +173,12 @@ export const AI_PANEL_CREATION_TYPES: Array<MaskType> = [
     icon: Contrast,
     name: 'Reconstruct',
     type: Mask.Clipped,
+  },
+  {
+    disabled: false,
+    icon: Pipette,
+    name: 'Color',
+    type: Mask.Color,
   },
   {
     disabled: false,
