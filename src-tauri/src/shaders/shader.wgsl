@@ -134,6 +134,13 @@ struct GlobalAdjustments {
     hue_sat_count: u32,
     hue_lum_count: u32,
     lum_sat_count: u32,
+
+    // Rendering process version: 1 = classic per-channel RGB math,
+    // 2 = Oklab hue-stable tonal core + gamut safety.
+    process_version: u32,
+    _pad_pv1: f32,
+    _pad_pv2: f32,
+    _pad_pv3: f32,
 }
 
 struct MaskAdjustments {
@@ -404,6 +411,78 @@ fn apply_curve(val: f32, points: array<Point, 16>, count: u32) -> f32 {
         }
     }
     return local_points[count - 1u].y / 255.0;
+}
+
+// ---------- v2 rendering core: perceptual color math ----------
+
+fn cbrt_safe(x: f32) -> f32 {
+    return sign(x) * pow(abs(x), 1.0 / 3.0);
+}
+
+// Linear sRGB -> Oklab (Björn Ottosson's matrices). Hue-linear: moving L
+// leaves (a, b) — and therefore hue — untouched.
+fn linear_to_oklab(c: vec3<f32>) -> vec3<f32> {
+    let l = 0.4122214708 * c.r + 0.5363325363 * c.g + 0.0514459929 * c.b;
+    let m = 0.2119034982 * c.r + 0.6806995451 * c.g + 0.1073969566 * c.b;
+    let s = 0.0883024619 * c.r + 0.2817188376 * c.g + 0.6299787005 * c.b;
+    let l_ = cbrt_safe(l);
+    let m_ = cbrt_safe(m);
+    let s_ = cbrt_safe(s);
+    return vec3<f32>(
+        0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_,
+        1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_,
+        0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_,
+    );
+}
+
+fn oklab_to_linear(c: vec3<f32>) -> vec3<f32> {
+    let l_ = c.x + 0.3963377774 * c.y + 0.2158037573 * c.z;
+    let m_ = c.x - 0.1055613458 * c.y - 0.0638541728 * c.z;
+    let s_ = c.x - 0.0894841775 * c.y - 1.2914855480 * c.z;
+    let l = l_ * l_ * l_;
+    let m = m_ * m_ * m_;
+    let s = s_ * s_ * s_;
+    return vec3<f32>(
+        4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+        -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+        -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s,
+    );
+}
+
+// Soft gamut safety: pulls negative (out-of-gamut) channels back toward
+// neutral just enough, preserving hue direction — removes neon-edge and
+// blocked-color artifacts after strong grades.
+fn compress_gamut_soft(rgb: vec3<f32>) -> vec3<f32> {
+    let l = max(get_luma(rgb), 0.0001);
+    let min_c = min(rgb.r, min(rgb.g, rgb.b));
+    if (min_c >= 0.0) { return rgb; }
+    let t = min_c / (min_c - l);
+    return mix(rgb, vec3<f32>(l), clamp(t, 0.0, 1.0));
+}
+
+fn hable(x: vec3<f32>) -> vec3<f32> {
+    let a = 0.15; let b = 0.50; let c = 0.10; let d = 0.20; let e = 0.02; let f = 0.30;
+    return ((x * (a * x + vec3<f32>(c * b)) + vec3<f32>(d * e))
+        / (x * (a * x + vec3<f32>(b)) + vec3<f32>(d * f))) - vec3<f32>(e / f);
+}
+
+fn hable1(x: f32) -> f32 {
+    let a = 0.15; let b = 0.50; let c = 0.10; let d = 0.20; let e = 0.02; let f = 0.30;
+    return ((x * (a * x + c * b) + d * e) / (x * (a * x + b) + d * f)) - e / f;
+}
+
+// Filmic display transform: luminance-driven shoulder keeps chroma through
+// the mids, blending to per-channel compression near the top so highlights
+// take the classic graceful path to white instead of clipping.
+fn tonemap_filmic(rgb_in: vec3<f32>) -> vec3<f32> {
+    let rgb = max(rgb_in, vec3<f32>(0.0));
+    let white = hable1(4.0);
+    let l = get_luma(rgb);
+    let l_tm = hable1(l * 1.6) / white;
+    let chroma_preserving = rgb * (l_tm / max(l, 0.0001));
+    let per_channel = hable(rgb * 1.6) / vec3<f32>(white);
+    let w = smoothstep(0.5, 1.0, l_tm);
+    return clamp(mix(chroma_preserving, per_channel, w), vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
 // Resolve-style primary corrector. Neutral at all zeros. Operates in

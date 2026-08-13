@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "cci-site",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "http.server", "8741", "--directory", "/Users/chrismanning/Desktop/WebSites/CCi Web 2019"],
+      "port": 8741
+    }
+  ]
+}
