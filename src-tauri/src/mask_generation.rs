@@ -709,8 +709,22 @@ fn generate_brush_bitmap(
     let params: BrushMaskParameters =
         serde_json::from_value(params_value.clone()).unwrap_or_default();
     let mut final_mask = GrayImage::new(width, height);
+    apply_brush_lines(&mut final_mask, &params.lines, scale, crop_offset);
+    final_mask
+}
 
-    for line in &params.lines {
+/// Blends brush strokes into an existing mask in place: brush strokes add
+/// (screen blend), eraser strokes subtract. Starting from a non-empty mask
+/// makes this the refine step for parametric selections (e.g. clipped).
+fn apply_brush_lines(
+    final_mask: &mut GrayImage,
+    lines: &[BrushLine],
+    scale: f32,
+    crop_offset: (f32, f32),
+) {
+    let (width, height) = final_mask.dimensions();
+
+    for line in lines {
         if line.points.is_empty() {
             continue;
         }
@@ -762,8 +776,6 @@ fn generate_brush_bitmap(
             }
         }
     }
-
-    final_mask
 }
 
 fn generate_flow_bitmap(
@@ -1314,7 +1326,9 @@ fn generate_clipped_bitmap(
         .black_threshold
         .filter(|t| *t > 0.5)
         .map(|t| (t / 100.0).clamp(0.0, 0.5));
-    if white_t.is_none() && black_t.is_none() {
+    let refine: BrushMaskParameters =
+        serde_json::from_value(params_value.clone()).unwrap_or_default();
+    if white_t.is_none() && black_t.is_none() && refine.lines.is_empty() {
         return None;
     }
 
@@ -1388,6 +1402,14 @@ fn generate_clipped_bitmap(
 
     apply_matte_clean(&mut mask, params.clean);
     apply_grow_and_feather(&mut mask, params.grow, params.feather, width, height);
+
+    // Refine strokes run LAST — after thresholds, clean, grow, feather — so
+    // a hand-erased region stays erased when the sliders move, and painted
+    // additions aren't eaten by clean.
+    if !refine.lines.is_empty() {
+        apply_brush_lines(&mut mask, &refine.lines, scale, crop_offset);
+    }
+
     Some(mask)
 }
 
@@ -1850,5 +1872,45 @@ mod color_select_tests {
     #[test]
     fn hue_distance_wraps() {
         assert!((hue_dist_deg(350.0, 10.0) - 20.0).abs() < 1e-4);
+    }
+
+    /// Refine strokes must have final say over the threshold selection:
+    /// an eraser stroke clears clipped pixels, a brush stroke adds
+    /// unclipped ones, and untouched clipped pixels stay selected.
+    #[test]
+    fn clipped_refine_strokes_have_final_say() {
+        // Left half pure white (clipped), right half mid-gray.
+        let mut img = image::RgbaImage::new(64, 64);
+        for (x, _y, p) in img.enumerate_pixels_mut() {
+            let v = if x < 32 { 255 } else { 128 };
+            *p = image::Rgba([v, v, v, 255]);
+        }
+        let warped = image::DynamicImage::ImageRgba8(img);
+
+        let line = |tool: &str, x: f64| {
+            serde_json::json!({
+                "tool": tool,
+                "brushSize": 12.0,
+                "feather": 0.0,
+                "points": [ {"x": x, "y": 8.0}, {"x": x, "y": 24.0} ],
+            })
+        };
+        let params = serde_json::json!({
+            "whiteThreshold": 98.0,
+            "blackThreshold": 0.0,
+            "feather": 0.0,
+            "grow": 0.0,
+            "clean": 0.0,
+            // Eraser inside the white half, brush inside the gray half.
+            "lines": [ line("eraser", 10.0), line("brush", 50.0) ],
+        });
+
+        let mask = generate_clipped_bitmap(&params, 64, 64, 1.0, (0.0, 0.0), Some(&warped))
+            .expect("mask should generate");
+
+        assert!(mask.get_pixel(10, 16)[0] < 10, "erased white must clear");
+        assert!(mask.get_pixel(50, 16)[0] > 200, "painted gray must add");
+        assert!(mask.get_pixel(10, 55)[0] > 200, "untouched white stays selected");
+        assert!(mask.get_pixel(50, 55)[0] < 10, "untouched gray stays unselected");
     }
 }

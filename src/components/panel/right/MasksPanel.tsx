@@ -123,6 +123,8 @@ const SUB_MASK_CONFIG: Record<Mask, any> = {
     parameters: [{ key: 'feather', min: 0, max: 100, step: 1, defaultValue: 15 }],
   },
   [Mask.Clipped]: {
+    // Refine brush: paint adds to the clipped selection, eraser removes.
+    showBrushTools: true,
     parameters: [
       { key: 'whiteThreshold', min: 50, max: 100, step: 1, defaultValue: 98 },
       { key: 'blackThreshold', min: 0, max: 50, step: 1, defaultValue: 2 },

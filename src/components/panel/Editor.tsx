@@ -610,6 +610,7 @@ export default function Editor({ onBackToLibrary, onContextMenu, transformWrappe
         activeSubMask?.type === Mask.AiSubject ||
         activeSubMask?.type === Mask.Color ||
         activeSubMask?.type === Mask.Luminance ||
+        activeSubMask?.type === Mask.Clipped ||
         activeSubMask?.parameters?.isInitialDraw)) ||
     (isAiEditing &&
       (activeSubMask?.type === Mask.Brush ||
@@ -619,6 +620,7 @@ export default function Editor({ onBackToLibrary, onContextMenu, transformWrappe
         activeSubMask?.type === Mask.QuickEraser ||
         activeSubMask?.type === Mask.Color ||
         activeSubMask?.type === Mask.Luminance ||
+        activeSubMask?.type === Mask.Clipped ||
         activeSubMask?.parameters?.isInitialDraw)) ||
     isWbPickerActive ||
     isMixerPickerActive;

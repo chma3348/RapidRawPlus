@@ -1259,7 +1259,12 @@ const ImageCanvas = memo(
 
     const isBrushActive =
       (isMasking || isAiEditing) &&
-      (activeSubMask?.type === Mask.Brush || activeSubMask?.type === Mask.Flow || activeSubMask?.type === Mask.AiPaint);
+      (activeSubMask?.type === Mask.Brush ||
+        activeSubMask?.type === Mask.Flow ||
+        activeSubMask?.type === Mask.AiPaint ||
+        // Clipped has no click interaction of its own, so the brush is
+        // always live on it: refine strokes add/erase from the selection.
+        activeSubMask?.type === Mask.Clipped);
     const activeLineFlow = activeSubMask?.type === Mask.Flow ? (activeSubMask?.parameters?.flow ?? 10) : undefined;
     const brushCursorPreview = useMemo(() => {
       const radius = Math.max(0.1, brushStageSize / 2);
