@@ -616,6 +616,12 @@
         "addToCurrent": "将 {{name}} 添加到当前蒙版或创建新蒙版（右键单击）",
         "createNew": "创建新 {{name}} 蒙版",
         "showMore": "显示更多蒙版类型"
+      },
+      "colorSelect": {
+        "hint": "点击照片取色；Shift+点击可添加多个取样。也可以在下方选择色带。",
+        "sample": "取样",
+        "removeSample": "删除取样",
+        "swatchTooltip": "选择此色带"
       }
     },
     "metadata": {

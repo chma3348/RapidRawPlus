@@ -616,6 +616,12 @@
         "addToCurrent": "Adicionar {{name}} à Máscara Atual ou Criar Nova (Botão Direito)",
         "createNew": "Criar Nova Máscara de {{name}}",
         "showMore": "Mostrar Mais Tipos de Máscara"
+      },
+      "colorSelect": {
+        "hint": "Clique na foto para amostrar uma cor; Shift+clique adiciona amostras. Ou escolha uma faixa de cor abaixo.",
+        "sample": "Amostra",
+        "removeSample": "Remover amostra",
+        "swatchTooltip": "Selecionar esta faixa de cor"
       }
     },
     "metadata": {

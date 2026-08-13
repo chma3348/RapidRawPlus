@@ -616,6 +616,12 @@
         "addToCurrent": "Add {{name}} to Current Mask or Create New (Right-click)",
         "createNew": "Create New {{name}} Mask",
         "showMore": "Show More Mask Types"
+      },
+      "colorSelect": {
+        "hint": "Click the photo to sample a color; Shift-click adds samples. Or pick a color band below.",
+        "sample": "Sample",
+        "removeSample": "Remove sample",
+        "swatchTooltip": "Select this color band"
       }
     },
     "metadata": {

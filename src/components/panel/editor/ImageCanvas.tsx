@@ -964,6 +964,26 @@ const MaskOverlay = memo(
       );
     }
 
+    if (subMask.type === Mask.Color && Array.isArray(p.samples) && p.samples.length > 0) {
+      return (
+        <>
+          {p.samples.map((sp: any, i: number) => (
+            <Circle
+              key={i}
+              x={(sp.x - cropX) * scale}
+              y={(sp.y - cropY) * scale}
+              radius={5}
+              stroke={isSelected ? '#0ea5e9' : 'white'}
+              strokeWidth={2}
+              listening={false}
+              shadowColor="black"
+              shadowBlur={2}
+              shadowOpacity={0.8}
+            />
+          ))}
+        </>
+      );
+    }
     if (subMask.type === Mask.Color || subMask.type === Mask.Luminance) {
       const { targetX, targetY } = p;
       if (targetX !== undefined && targetX >= 0 && targetY !== undefined && targetY >= 0) {
@@ -1476,6 +1496,16 @@ const ImageCanvas = memo(
           const y = pos.y / scale + cropY;
 
           let newParams = { ...activeSubMask.parameters };
+          if (activeSubMask.type === Mask.Color) {
+            const prior = Array.isArray(newParams.samples) ? newParams.samples : [];
+            const shift = !!(e.evt && (e.evt as MouseEvent).shiftKey);
+            // Shift-click appends (max 5) — Lightroom-style multi-sample;
+            // plain click starts a fresh selection. Sampling a color also
+            // leaves swatch mode.
+            newParams.samples = shift ? [...prior, { x, y }].slice(-5) : [{ x, y }];
+            delete newParams.swatchHue;
+            delete newParams.swatchWidth;
+          }
           newParams.targetX = x;
           newParams.targetY = y;
           newParams.rotation = adjustments.rotation || 0;

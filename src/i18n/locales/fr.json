@@ -616,6 +616,12 @@
         "addToCurrent": "Ajouter {{name}} au masque actuel ou en créer un nouveau (Clic-droit)",
         "createNew": "Créer un nouveau masque {{name}}",
         "showMore": "Afficher plus de types de masques"
+      },
+      "colorSelect": {
+        "hint": "Cliquez sur la photo pour échantillonner une couleur ; Maj+clic en ajoute. Ou choisissez une bande de couleur ci-dessous.",
+        "sample": "Échantillon",
+        "removeSample": "Retirer l'échantillon",
+        "swatchTooltip": "Sélectionner cette bande de couleur"
       }
     },
     "metadata": {

@@ -616,6 +616,12 @@
         "addToCurrent": "{{name}}을(를) 현재 마스크에 추가하거나 새로 만들기 (우클릭)",
         "createNew": "새 {{name}} 마스크 만들기",
         "showMore": "더 많은 마스크 유형 표시"
+      },
+      "colorSelect": {
+        "hint": "사진을 클릭해 색을 샘플링하세요. Shift+클릭으로 추가. 아래 색상 밴드도 선택 가능.",
+        "sample": "샘플",
+        "removeSample": "샘플 제거",
+        "swatchTooltip": "이 색상 밴드 선택"
       }
     },
     "metadata": {

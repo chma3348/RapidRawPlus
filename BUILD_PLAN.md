@@ -19,14 +19,14 @@ Nothing gets added or dropped from this list silently.
       (add/subtract/intersect), so it hones the combined shape.
 - [x] Old sidecars unaffected (serde defaults = neutral).
 
-## Phase 3 — Lightroom-class color select (both interactions)
-- [ ] Eyedropper: click the image to sample the target color.
-- [ ] Shift-click adds up to 5 samples, shown as removable chips.
-- [ ] Swatch row: 8 preset hue chips (same bands as HSL mixer) as
+## Phase 3 — Lightroom-class color select (both interactions) — SHIPPED
+- [x] Eyedropper: click the image to sample the target color.
+- [x] Shift-click adds up to 5 samples, shown as removable chips.
+- [x] Swatch row: 8 preset hue chips (same bands as HSL mixer) as
       one-click generic selections.
-- [ ] Matching runs in hue/sat-weighted space (luminance de-weighted) so
+- [x] Matching runs in hue/sat-weighted space (luminance de-weighted) so
       one object is selectable across its shading.
-- [ ] Works with existing tolerance / clean / grow / feather and the B/W
+- [x] Works with existing tolerance / clean / grow / feather and the B/W
       matte view.
 
 ## Phase 4 — Clipped-pixel selection + AI Reconstruct

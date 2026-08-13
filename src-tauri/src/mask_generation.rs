@@ -192,6 +192,23 @@ struct FlowMaskParameters {
     lines: Vec<FlowLine>,
 }
 
+#[derive(serde::Deserialize, Clone, Copy, Debug)]
+struct ColorSamplePoint {
+    x: f64,
+    y: f64,
+}
+
+#[derive(serde::Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+struct ParametricExtras {
+    #[serde(default)]
+    samples: Vec<ColorSamplePoint>,
+    #[serde(default)]
+    swatch_hue: Option<f32>,
+    #[serde(default)]
+    swatch_width: Option<f32>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 struct ParametricMaskParameters {
@@ -1064,6 +1081,41 @@ fn generate_ai_subject_bitmap(
     Some(mask)
 }
 
+fn rgb_to_hsv_f(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let d = max - min;
+    let v = max;
+    let s = if max > 0.0 { d / max } else { 0.0 };
+    let h = if d < 1e-6 {
+        0.0
+    } else if (max - r).abs() < 1e-6 {
+        60.0 * (((g - b) / d).rem_euclid(6.0))
+    } else if (max - g).abs() < 1e-6 {
+        60.0 * ((b - r) / d + 2.0)
+    } else {
+        60.0 * ((r - g) / d + 4.0)
+    };
+    (h, s, v)
+}
+
+fn hue_dist_deg(a: f32, b: f32) -> f32 {
+    let d = (a - b).abs() % 360.0;
+    d.min(360.0 - d)
+}
+
+/// Perceptual color-key distance: hue dominates (gated by saturation so
+/// near-neutrals don't get phantom hues), saturation matters, luminance is
+/// deliberately de-weighted so one object stays selectable across its
+/// shading — the property that makes Lightroom's color range feel right.
+fn color_key_distance(px: (f32, f32, f32), r: (f32, f32, f32)) -> f32 {
+    let sat_gate = px.1.min(r.1).min(0.6) / 0.6;
+    let dh = (hue_dist_deg(px.0, r.0) / 180.0) * (0.35 + 1.35 * sat_gate);
+    let ds = (px.1 - r.1).abs() * 0.55;
+    let dv = (px.2 - r.2).abs() * 0.22;
+    (dh * dh + ds * ds + dv * dv).sqrt()
+}
+
 fn generate_color_bitmap(
     params_value: &Value,
     width: u32,
@@ -1078,14 +1130,45 @@ fn generate_color_bitmap(
 
     let target_x = params.target_x.round() as i32;
     let target_y = params.target_y.round() as i32;
-    if target_x < 0 || target_y < 0 || target_x >= full_w as i32 || target_y >= full_h as i32 {
-        return None;
-    }
 
-    let ref_pixel = warped.get_pixel(target_x as u32, target_y as u32);
-    let ref_r = ref_pixel[0] as f32;
-    let ref_g = ref_pixel[1] as f32;
-    let ref_b = ref_pixel[2] as f32;
+    let extras: ParametricExtras =
+        serde_json::from_value(params_value.clone()).unwrap_or_default();
+
+    // Reference set: swatch band, multi-sample chips, or the classic
+    // single click point.
+    let swatch = extras.swatch_hue.map(|h| (h, extras.swatch_width.unwrap_or(45.0)));
+    let mut refs: Vec<(f32, f32, f32)> = Vec::new();
+    if swatch.is_none() {
+        let mut pts: Vec<(i64, i64)> = extras
+            .samples
+            .iter()
+            .map(|p| (p.x.round() as i64, p.y.round() as i64))
+            .collect();
+        if pts.is_empty() {
+            // Classic single-click mode requires a valid click point.
+            if target_x < 0
+                || target_y < 0
+                || target_x >= full_w as i32
+                || target_y >= full_h as i32
+            {
+                return None;
+            }
+            pts.push((target_x as i64, target_y as i64));
+        }
+        for (sx, sy) in pts {
+            if sx >= 0 && sy >= 0 && (sx as u32) < full_w && (sy as u32) < full_h {
+                let p = warped.get_pixel(sx as u32, sy as u32);
+                refs.push(rgb_to_hsv_f(
+                    p[0] as f32 / 255.0,
+                    p[1] as f32 / 255.0,
+                    p[2] as f32 / 255.0,
+                ));
+            }
+        }
+        if refs.is_empty() {
+            return None;
+        }
+    }
 
     let mut mask = GrayImage::new(width, height);
 
@@ -1104,7 +1187,6 @@ fn generate_color_bitmap(
     let center_x = scaled_coarse_rotated_w / 2.0;
     let center_y = scaled_coarse_rotated_h / 2.0;
 
-    let tolerance_sq = (params.tolerance * 2.55).max(1.0).powi(2) * 3.0;
     let inv_scale = 1.0 / scale;
 
     for y_out in 0..height {
@@ -1148,13 +1230,31 @@ fn generate_color_bitmap(
 
                 if x_src < full_w && y_src < full_h {
                     let pixel = warped.get_pixel(x_src, y_src);
-                    let dist_sq = (pixel[0] as f32 - ref_r).powi(2)
-                        + (pixel[1] as f32 - ref_g).powi(2)
-                        + (pixel[2] as f32 - ref_b).powi(2);
-
-                    if dist_sq <= tolerance_sq {
-                        let intensity = 1.0 - (dist_sq.sqrt() / tolerance_sq.sqrt());
-                        mask.put_pixel(x_out, y_out, Luma([(intensity * 255.0) as u8]));
+                    let px = rgb_to_hsv_f(
+                        pixel[0] as f32 / 255.0,
+                        pixel[1] as f32 / 255.0,
+                        pixel[2] as f32 / 255.0,
+                    );
+                    let alpha = if let Some((hue, width_deg)) = swatch {
+                        // Generic hue-band selection: membership by hue
+                        // distance, gated so near-neutrals and near-black
+                        // stay out.
+                        let band = width_deg * (0.5 + params.tolerance / 60.0);
+                        let norm = hue_dist_deg(px.0, hue) / band.max(1.0);
+                        let hue_w = 1.0 - ((norm - 0.7) / 0.3).clamp(0.0, 1.0);
+                        let sat_w = ((px.1 - 0.10) / 0.20).clamp(0.0, 1.0);
+                        let val_w = ((px.2 - 0.04) / 0.06).clamp(0.0, 1.0);
+                        hue_w * sat_w * val_w
+                    } else {
+                        let d = refs
+                            .iter()
+                            .map(|r| color_key_distance(px, *r))
+                            .fold(f32::MAX, f32::min);
+                        let t = 0.05 + (params.tolerance / 100.0) * 0.85;
+                        1.0 - ((d - t * 0.5) / (t * 0.5)).clamp(0.0, 1.0)
+                    };
+                    if alpha > 0.003 {
+                        mask.put_pixel(x_out, y_out, Luma([(alpha * 255.0) as u8]));
                     }
                 }
             }
@@ -1550,4 +1650,39 @@ pub fn get_cached_or_generate_mask(
     }
 
     generated
+}
+
+
+#[cfg(test)]
+mod color_select_tests {
+    use super::*;
+
+    #[test]
+    fn same_hue_across_shading_beats_different_hue() {
+        // A red jacket in sun vs shade (same hue, very different lightness)
+        // must be CLOSER than red vs orange at identical lightness.
+        let red_sun = rgb_to_hsv_f(0.85, 0.15, 0.12);
+        let red_shade = rgb_to_hsv_f(0.35, 0.06, 0.05);
+        let orange_sun = rgb_to_hsv_f(0.85, 0.5, 0.1);
+
+        let same_object = color_key_distance(red_shade, red_sun);
+        let different_color = color_key_distance(orange_sun, red_sun);
+        assert!(
+            same_object < different_color,
+            "shading ({same_object:.3}) must matter less than hue ({different_color:.3})"
+        );
+    }
+
+    #[test]
+    fn neutrals_do_not_match_saturated_refs() {
+        let gray = rgb_to_hsv_f(0.5, 0.5, 0.5);
+        let red = rgb_to_hsv_f(0.8, 0.2, 0.2);
+        let d = color_key_distance(gray, red);
+        assert!(d > 0.3, "gray should stay far from a red key (d={d:.3})");
+    }
+
+    #[test]
+    fn hue_distance_wraps() {
+        assert!((hue_dist_deg(350.0, 10.0) - 20.0).abs() < 1e-4);
+    }
 }

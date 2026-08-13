@@ -2512,6 +2512,65 @@ function SettingsPanel({
                 />
               )}
 
+              {activeSubMask.type === Mask.Color && (
+                <div className="space-y-2">
+                  <Text variant={TextVariants.small} className="opacity-70">
+                    {t('editor.masks.colorSelect.hint')}
+                  </Text>
+                  {Array.isArray(activeSubMask.parameters?.samples) &&
+                    activeSubMask.parameters.samples.length > 0 && (
+                      <div className="flex flex-wrap gap-1">
+                        {activeSubMask.parameters.samples.map((_sp: any, i: number) => (
+                          <button
+                            key={i}
+                            onClick={() =>
+                              handleSubMaskParametersChange({
+                                samples: activeSubMask.parameters.samples.filter(
+                                  (_: any, j: number) => j !== i,
+                                ),
+                              } as any)
+                            }
+                            className="px-2 py-0.5 rounded text-xs bg-card-active text-text-primary hover:bg-red-500/40 transition-colors"
+                            data-tooltip={t('editor.masks.colorSelect.removeSample')}
+                          >
+                            {t('editor.masks.colorSelect.sample')} {i + 1} ×
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  <div className="flex items-center gap-1">
+                    {[
+                      { hue: 358, width: 35, c: '#f87171' },
+                      { hue: 25, width: 45, c: '#fb923c' },
+                      { hue: 60, width: 40, c: '#facc15' },
+                      { hue: 115, width: 90, c: '#4ade80' },
+                      { hue: 180, width: 60, c: '#2dd4bf' },
+                      { hue: 225, width: 60, c: '#60a5fa' },
+                      { hue: 280, width: 55, c: '#a78bfa' },
+                      { hue: 330, width: 50, c: '#f472b6' },
+                    ].map((sw) => (
+                      <button
+                        key={sw.hue}
+                        onClick={() =>
+                          handleSubMaskParametersChange({
+                            swatchHue: sw.hue,
+                            swatchWidth: sw.width,
+                            samples: [],
+                          } as any)
+                        }
+                        className={`w-5 h-5 rounded-full border-2 transition-transform hover:scale-110 ${
+                          activeSubMask.parameters?.swatchHue === sw.hue
+                            ? 'border-white'
+                            : 'border-transparent'
+                        }`}
+                        style={{ backgroundColor: sw.c }}
+                        data-tooltip={t('editor.masks.colorSelect.swatchTooltip')}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {subMaskConfig.parameters?.map((param: any) => (
                 <Slider
                   key={param.key}

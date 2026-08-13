@@ -654,6 +654,12 @@
         "addToCurrent": "Dodaj {{name}} do bieżącej maski lub utwórz nową (Prawy przycisk)",
         "createNew": "Utwórz nową maskę {{name}}",
         "showMore": "Pokaż więcej typów masek"
+      },
+      "colorSelect": {
+        "hint": "Kliknij zdjęcie, aby pobrać kolor; Shift+klik dodaje próbki. Albo wybierz pasmo koloru poniżej.",
+        "sample": "Próbka",
+        "removeSample": "Usuń próbkę",
+        "swatchTooltip": "Wybierz to pasmo koloru"
       }
     },
     "metadata": {

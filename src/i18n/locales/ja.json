@@ -616,6 +616,12 @@
         "addToCurrent": "{{name}}を現在のマスクに追加、または新規作成 (右クリック)",
         "createNew": "新規の {{name}} マスクを作成",
         "showMore": "他のマスクタイプを表示"
+      },
+      "colorSelect": {
+        "hint": "写真をクリックして色を採取。Shift+クリックで追加。下の色帯からも選べます。",
+        "sample": "サンプル",
+        "removeSample": "サンプルを削除",
+        "swatchTooltip": "この色帯を選択"
       }
     },
     "metadata": {

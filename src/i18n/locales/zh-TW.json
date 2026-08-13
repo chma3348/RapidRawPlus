@@ -616,6 +616,12 @@
         "addToCurrent": "將 {{name}} 新增到當前遮色片或建立新遮色片（右鍵單擊）",
         "createNew": "建立新 {{name}} 遮色片",
         "showMore": "顯示更多遮色片型別"
+      },
+      "colorSelect": {
+        "hint": "點擊照片取色；Shift+點擊可新增多個取樣。也可以在下方選擇色帶。",
+        "sample": "取樣",
+        "removeSample": "刪除取樣",
+        "swatchTooltip": "選擇此色帶"
       }
     },
     "metadata": {
