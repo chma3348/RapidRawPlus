@@ -557,7 +557,7 @@ fn blend_result(
         // measured deficit is ~0 and the slider read as dead. The slider
         // therefore guarantees a floor of film-look grain scaled by its
         // position, and the match only ever raises that.
-        const GRAIN_FLOOR: f32 = 0.02;
+        const GRAIN_FLOOR: f32 = 0.03;
         let sigma_add = (deficit.max(GRAIN_FLOOR) * grain).min(0.06);
         log::info!(
             "[enhance] grain: sigma_ref={:.5} sigma_out={:.5} adding sigma={:.5} (ratio {:.2})",
@@ -566,13 +566,12 @@ fn blend_result(
         if sigma_add > 1e-4 {
             let amplitude = sigma_add / 0.408;
             let row = (target_w * 3) as usize;
-            // Grain lives at the ORIGINAL's pixel scale: sampled from a
-            // native-resolution noise grid, so on upscaled results it has
-            // the same coarseness as the original's own noise — and stays
-            // visible at fit-to-screen zoom exactly as much as that noise
-            // would. Single-pixel grain on a 2x image averages away on
-            // screen, which made this slider look dead.
-            let inv_ratio = 1.0 / scale_ratio;
+            // Grain cells are at least 2px (and follow the resize ratio
+            // beyond that): single-pixel grain averages away the moment
+            // the photo is viewed below 100% zoom, which made this slider
+            // look dead on full renders. 2px cells read as film grain at
+            // 1:1 and stay perceptible at fit-to-screen.
+            let inv_ratio = 1.0 / scale_ratio.max(2.0);
             use rayon::prelude::*;
             enhanced
                 .par_chunks_mut(row)
@@ -691,10 +690,21 @@ pub async fn apply_enhancement(
     // Instant retry: if the last run was this exact photo/model/edits, the
     // raw model output is still in memory — a new strength or output size
     // is just a re-blend, not a multi-minute re-run.
+    let is_engine_model =
+        model.manifest.params.get("engine").and_then(|v| v.as_str()) == Some("comfy");
+    // For engine models the output scale changes the RUN itself (the input
+    // is pre-upscaled), not just the delivery blend — so it must key the
+    // cache, or a 1x→2x retry would silently return the cached 1x result.
+    let engine_scale = if is_engine_model {
+        output_scale.unwrap_or(1).clamp(1, 2)
+    } else {
+        1
+    };
     let cache_key = format!(
-        "{}|c{}",
+        "{}|c{}|s{}",
         enhancement_cache_key(&path, &task, &model.manifest.id, js_adjustments.as_ref()),
-        chain_step
+        chain_step,
+        engine_scale
     );
     {
         let raw_handle = state.enhancement_raw.clone();
@@ -786,12 +796,13 @@ pub async fn apply_enhancement(
 
     // Generative-engine models run through the managed ComfyUI process
     // instead of the in-process ONNX pipeline.
-    if model.manifest.params.get("engine").and_then(|v| v.as_str()) == Some("comfy") {
+    if is_engine_model {
         return run_comfy_enhancement(
             model,
             strength.unwrap_or(1.0),
             texture.unwrap_or(0.0),
             grain.unwrap_or(0.0),
+            engine_scale,
             rgb_input,
             cache_key,
             app_handle,
@@ -960,6 +971,7 @@ pub async fn preview_enhancement(
     strength: Option<f32>,
     texture: Option<f32>,
     grain: Option<f32>,
+    output_scale: Option<u32>,
     js_adjustments: Option<serde_json::Value>,
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
@@ -987,12 +999,14 @@ pub async fn preview_enhancement(
 
     // Region-specific cache key: same photo/model/edits/region → the raw
     // crop output is still valid, only the blend settings changed.
+    let engine_scale = output_scale.unwrap_or(1).clamp(1, 2);
     let preview_key = format!(
-        "{}|{:x}|{:x}|{:x}",
+        "{}|{:x}|{:x}|{:x}|s{}",
         enhancement_cache_key(&path, &task, &model.manifest.id, js_adjustments.as_ref()),
         center_x.to_bits(),
         center_y.to_bits(),
-        region_size.map(|v| v.to_bits()).unwrap_or(0)
+        region_size.map(|v| v.to_bits()).unwrap_or(0),
+        engine_scale
     );
     {
         let cache = state.enhancement_preview_raw.clone();
@@ -1023,6 +1037,7 @@ pub async fn preview_enhancement(
             strength_v,
             texture_v,
             grain_v,
+            engine_scale,
             preview_key,
             js_adjustments,
             app_handle,
@@ -1092,6 +1107,7 @@ async fn preview_comfy_enhancement(
     strength: f32,
     texture: f32,
     grain: f32,
+    output_scale: u32,
     preview_key: String,
     js_adjustments: Option<serde_json::Value>,
     app_handle: tauri::AppHandle,
@@ -1104,6 +1120,12 @@ async fn preview_comfy_enhancement(
     let (source_path, _) = parse_virtual_path(&path);
     let path_str = source_path.to_string_lossy().to_string();
     let rgb_input = enhancement_input(&path_str, js_adjustments.as_ref(), &state, &app_handle)?;
+    let resolution = model
+        .manifest
+        .params
+        .get("resolution")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1080) as u32;
     let (crop, engine_short_edge, crop_png) = tokio::task::spawn_blocking(move || {
         let (w, h) = rgb_input.dimensions();
         let crop_size = match region_size {
@@ -1117,8 +1139,19 @@ async fn preview_comfy_enhancement(
         let x0 = cx.saturating_sub(crop_w / 2).min(w - crop_w);
         let y0 = cy.saturating_sub(crop_h / 2).min(h - crop_h);
         let crop = image::imageops::crop_imm(&rgb_input, x0, y0, crop_w, crop_h).to_image();
-        // 2x the crop, on a 16-aligned grid the engine tolerates.
-        let target = (crop.width().min(crop.height()) * 2).clamp(128, 1024);
+        // Run the crop at the SAME effective scale the full render would
+        // use (align_for_engine on the whole photo), so what the preview
+        // shows — including how much detail the model invents and how the
+        // texture/grain sliders behave on it — matches the full result. A
+        // fixed 2x here made previews systematically overpromise.
+        let full_short = w.min(h).max(1);
+        let full_target =
+            (((full_short.clamp(resolution, 1536) * output_scale.clamp(1, 2)).min(2048)) / 16)
+                .max(1)
+                * 16;
+        let full_ratio = full_target as f32 / full_short as f32;
+        let target =
+            ((crop.width().min(crop.height()) as f32 * full_ratio) as u32).clamp(64, 1024);
         let aligned = align_for_engine(&crop, target, target);
         let mut buf = Cursor::new(Vec::new());
         DynamicImage::ImageRgb32F(aligned.clone())
@@ -1188,6 +1221,7 @@ async fn run_comfy_enhancement(
     strength: f32,
     texture: f32,
     grain: f32,
+    output_scale: u32,
     rgb: Rgb32FImage,
     cache_key: String,
     app_handle: tauri::AppHandle,
@@ -1203,7 +1237,12 @@ async fn run_comfy_enhancement(
     let (rgb_input, input_png, engine_short_edge) = tokio::task::spawn_blocking(move || {
         // The engine's short-edge target is a *minimum*: photos larger than
         // it are processed at (capped) native size rather than downscaled.
-        let aligned = align_for_engine(&rgb, resolution, 1536);
+        // At output_scale 2 the input is pre-upscaled so the engine runs
+        // in its detail-inventing regime — the reconstruction mode for
+        // pixelated/low-res sources (capped for VRAM/runtime sanity).
+        let short = rgb.width().min(rgb.height()).max(1);
+        let target_short = (short.clamp(resolution, 1536) * output_scale.clamp(1, 2)).min(2048);
+        let aligned = align_for_engine(&rgb, target_short, target_short);
         let short_edge = aligned.width().min(aligned.height());
         let mut buf = Cursor::new(Vec::new());
         DynamicImage::ImageRgb32F(aligned)

@@ -1230,6 +1230,8 @@
       "initializing": "Initializing…",
       "openInEditor": "Open in Editor",
       "outputSizeLabel": "Output size",
+      "restoreScale2x": "2x rebuild",
+      "restoreScaleTooltip": "2x pre-upscales the photo so the AI reconstructs detail — best for pixelated or low-res sources (slower)",
       "previewAreaBtn": "◀ Preview area",
       "backToResultBtn": "◀ Back to result",
       "previewEnhanced": "Preview",

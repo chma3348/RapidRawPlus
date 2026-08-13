@@ -121,6 +121,12 @@ export default function EnhanceModal({
     return Number.isFinite(saved) && saved >= 0 && saved <= 100 ? saved : 50;
   });
   const [outputScale, setOutputScale] = useState(2);
+  // Restore at 2x pre-upscales the input so the engine runs in its
+  // detail-inventing regime — the reconstruction mode for low-res photos.
+  const [restoreScale, setRestoreScale] = useState(() => {
+    const saved = Number(localStorage.getItem('rapidraw-restore-scale'));
+    return saved === 2 ? 2 : 1;
+  });
   const [previewData, setPreviewData] = useState<PreviewData | null>(null);
   const [isPreviewing, setIsPreviewing] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
@@ -213,11 +219,13 @@ export default function EnhanceModal({
     setSaveError(null);
   };
 
+  const effectiveScale = task === 'upscale' ? outputScale : task === 'restore' ? restoreScale : 1;
+
   const handleRun = () => {
     setSavedPath(null);
     setSaveError(null);
     setShowPreviewArea(false);
-    onEnhance(strength / 100, task === 'upscale' ? outputScale : 1, chainStep, texture / 100, grain / 100);
+    onEnhance(strength / 100, effectiveScale, chainStep, texture / 100, grain / 100);
   };
 
   // Promote the current result to the working input and switch task —
@@ -255,6 +263,7 @@ export default function EnhanceModal({
         strength: strength / 100,
         texture: texture / 100,
         grain: grain / 100,
+        outputScale: effectiveScale,
         jsAdjustments: selectedImage?.path === targetPaths[0] ? adjustments : null,
       });
       setPreviewData(data);
@@ -641,6 +650,31 @@ export default function EnhanceModal({
                   value={outputScale}
                   onChange={(v: number) => {
                     setOutputScale(v);
+                    markDirty();
+                  }}
+                />
+              </div>
+            )}
+            {task === 'restore' && (
+              <div
+                className="flex flex-col gap-1 w-[130px] mt-2 shrink-0"
+                data-tooltip={t('modals.enhance.restoreScaleTooltip')}
+              >
+                <Text variant={TextVariants.body} weight={TextWeights.medium}>
+                  {t('modals.enhance.outputSizeLabel')}
+                </Text>
+                <Dropdown
+                  options={[
+                    { label: '1x', value: 1 },
+                    { label: t('modals.enhance.restoreScale2x'), value: 2 },
+                  ]}
+                  value={restoreScale}
+                  onChange={(v: number) => {
+                    setRestoreScale(v);
+                    localStorage.setItem('rapidraw-restore-scale', String(v));
+                    // The scale changes the model run itself, so any
+                    // existing preview no longer predicts the result.
+                    setPreviewData(null);
                     markDirty();
                   }}
                 />
