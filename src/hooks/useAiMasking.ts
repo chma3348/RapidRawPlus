@@ -1,4 +1,4 @@
-import { useCallback, useEffect } from 'react';
+import { useRef, useCallback, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'react-toastify';
 import { useEditorStore } from '../store/useEditorStore';
@@ -317,7 +317,18 @@ export function useAiMasking() {
     }
   };
 
-  const handleGenerateAiPaintMask = async (subMaskId: string, lines: any[]) => {
+  const paintDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handleGenerateAiPaintMask = (subMaskId: string, lines: any[]) => {
+    // Debounced: painting several strokes in a row batches into ONE SAM
+    // run 600ms after the last release, instead of pausing between each.
+    if (paintDebounceRef.current) clearTimeout(paintDebounceRef.current);
+    paintDebounceRef.current = setTimeout(() => {
+      void runAiPaintGeneration(subMaskId, lines);
+    }, 600);
+  };
+
+  const runAiPaintGeneration = async (subMaskId: string, lines: any[]) => {
     const { selectedImage, adjustments, patchesSentToBackend } = useEditorStore.getState();
     if (!selectedImage?.path) return;
     setEditor({ isGeneratingAiMask: true });

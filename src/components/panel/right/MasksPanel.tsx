@@ -2477,7 +2477,6 @@ function SettingsPanel({
             }
             step={1}
             fillOrigin="min"
-            onDragStateChange={onDragStateChange}
           />
 
           {!isComponentMode && (
@@ -2490,7 +2489,6 @@ function SettingsPanel({
                 value={displayContainer.grow ?? 0}
                 onChange={(e: any) => handleMaskPropertyChange('grow', Number(e.target.value))}
                 step={1}
-                onDragStateChange={onDragStateChange}
               />
               <Slider
                 defaultValue={0}
@@ -2501,7 +2499,6 @@ function SettingsPanel({
                 onChange={(e: any) => handleMaskPropertyChange('feather', Number(e.target.value))}
                 step={1}
                 fillOrigin="min"
-                onDragStateChange={onDragStateChange}
               />
             </>
           )}
@@ -2611,7 +2608,6 @@ function SettingsPanel({
                     handleSubMaskParametersChange({ [param.key]: parseFloat(e.target.value) / (param.multiplier || 1) })
                   }
                   {...(param.key !== 'grow' && { fillOrigin: 'min' })}
-                  onDragStateChange={onDragStateChange}
                 />
               ))}
 

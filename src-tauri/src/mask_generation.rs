@@ -225,7 +225,11 @@ struct ClippedExtras {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 struct ParametricMaskParameters {
+    // Off-screen default: parametric masks that never receive a click
+    // (clipped, swatch color) must still deserialize.
+    #[serde(default = "default_offscreen")]
     target_x: f64,
+    #[serde(default = "default_offscreen")]
     target_y: f64,
     #[serde(default = "default_tolerance")]
     tolerance: f32,
@@ -243,6 +247,10 @@ struct ParametricMaskParameters {
     flip_vertical: bool,
     #[serde(default)]
     orientation_steps: u8,
+}
+
+fn default_offscreen() -> f64 {
+    -10000.0
 }
 
 fn default_tolerance() -> f32 {
@@ -1296,8 +1304,16 @@ fn generate_clipped_bitmap(
     let warped = warped_image?;
     let (full_w, full_h) = warped.dimensions();
 
-    let white_t = extras.white_threshold.map(|t| (t / 100.0).clamp(0.5, 1.0));
-    let black_t = extras.black_threshold.map(|t| (t / 100.0).clamp(0.0, 0.5));
+    // Slider extremes disable a side: white at 100 = whites off,
+    // black at 0 = blacks off — giving white-only / black-only / both.
+    let white_t = extras
+        .white_threshold
+        .filter(|t| *t < 99.5)
+        .map(|t| (t / 100.0).clamp(0.5, 1.0));
+    let black_t = extras
+        .black_threshold
+        .filter(|t| *t > 0.5)
+        .map(|t| (t / 100.0).clamp(0.0, 0.5));
     if white_t.is_none() && black_t.is_none() {
         return None;
     }
@@ -1549,8 +1565,29 @@ fn generate_sub_mask_bitmap(
             crop_offset,
             warped_image,
         ),
-        "ai-subject" | "ai-paint" => {
+        "ai-subject" => {
             generate_ai_subject_bitmap(&sub_mask.parameters, width, height, scale, crop_offset)
+        }
+        // AI Paint: before SAM returns (or if it fails) the raw strokes
+        // render as a brush mask, so painting has live visual feedback.
+        "ai-paint" => {
+            let has_result = sub_mask
+                .parameters
+                .get("maskDataBase64")
+                .and_then(|v| v.as_str())
+                .map(|s| !s.is_empty())
+                .unwrap_or(false);
+            if has_result {
+                generate_ai_subject_bitmap(&sub_mask.parameters, width, height, scale, crop_offset)
+            } else {
+                Some(generate_brush_bitmap(
+                    &sub_mask.parameters,
+                    width,
+                    height,
+                    scale,
+                    crop_offset,
+                ))
+            }
         }
         "ai-foreground" => {
             generate_ai_foreground_bitmap(&sub_mask.parameters, width, height, scale, crop_offset)
@@ -1622,7 +1659,15 @@ pub fn generate_mask_bitmap(
     }
 
     if mask_def.grow != 0.0 || mask_def.feather != 0.0 {
-        apply_grow_and_feather(&mut final_mask, mask_def.grow, mask_def.feather, width, height);
+        // Container-level honing works on whole objects, so it gets 3x the
+        // per-component range to be visibly effective.
+        apply_grow_and_feather(
+            &mut final_mask,
+            mask_def.grow * 3.0,
+            mask_def.feather * 3.0,
+            width,
+            height,
+        );
     }
 
     if mask_def.invert {

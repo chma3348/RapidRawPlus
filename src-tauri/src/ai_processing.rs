@@ -1213,8 +1213,10 @@ pub fn run_sam_decoder_with_paint(
     let point_labels: Vec<f32> = vec![1.0; point_coords.len()];
 
     // Low-res prior on the SAM 256x256 mask grid (which spans the padded
-    // 1024 input square): painted -> +6 logits, everything else -> -6.
-    let mut mask_input_flat = vec![-6.0f32; 256 * 256];
+    // 1024 input square): painted -> +4 logits, everything else NEUTRAL
+    // (0) — a negative prior forbids SAM from completing the subject
+    // beyond the rough paint, which is the whole point of refinement.
+    let mut mask_input_flat = vec![0.0f32; 256 * 256];
     for gy in 0..256usize {
         for gx in 0..256usize {
             let sam_x = (gx as f64 + 0.5) * 4.0;
@@ -1224,7 +1226,7 @@ pub fn run_sam_decoder_with_paint(
             if ox < orig_width as f64 && oy < orig_height as f64 {
                 let px = paint.get_pixel(ox as u32, oy as u32)[0];
                 if px > 127 {
-                    mask_input_flat[gy * 256 + gx] = 6.0;
+                    mask_input_flat[gy * 256 + gx] = 4.0;
                 }
             }
         }

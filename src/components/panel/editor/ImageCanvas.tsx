@@ -2412,7 +2412,9 @@ const ImageCanvas = memo(
               {displayedMaskUrl && (
                 <img
                   alt="Mask Overlay"
-                  className="absolute object-contain pointer-events-none"
+                  className={`absolute object-contain pointer-events-none ${
+                    activeSubMask?.type === Mask.Clipped ? 'animate-pulse' : ''
+                  }`}
                   src={displayedMaskUrl}
                   style={{
                     height: `${imageRenderSize.height}px`,
