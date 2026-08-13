@@ -439,8 +439,35 @@ fn finish_enhancement(
     grain: f32,
     app_handle: &AppHandle,
 ) -> Result<DynamicImage, String> {
+    let _ = app_handle.emit("enhance-progress", "Applying settings...");
+    let enhanced = blend_result(raw, original, target_w, target_h, strength, texture, grain);
+
+    let _ = app_handle.emit("enhance-progress", "Generating previews...");
+    let out_dynamic = DynamicImage::ImageRgb32F(enhanced);
+    let payload = serde_json::json!({
+        "enhanced": encode_preview(&out_dynamic)?,
+        "original": encode_preview(&DynamicImage::ImageRgb32F(original.clone()))?,
+        "width": target_w,
+        "height": target_h,
+    });
+    let _ = app_handle.emit("enhance-complete", &payload);
+    Ok(out_dynamic)
+}
+
+/// The settings core shared by full runs and crop previews: resize the raw
+/// model output to the target dims, swap in the original's fine-detail
+/// layer at `texture`, crossfade with the original at `strength`, close
+/// any remaining grain deficit at `grain`. Pure — no events.
+fn blend_result(
+    raw: &Rgb32FImage,
+    original: &Rgb32FImage,
+    target_w: u32,
+    target_h: u32,
+    strength: f32,
+    texture: f32,
+    grain: f32,
+) -> Rgb32FImage {
     let mut enhanced = if raw.dimensions() != (target_w, target_h) {
-        let _ = app_handle.emit("enhance-progress", "Resizing output...");
         image::imageops::resize(raw, target_w, target_h, image::imageops::FilterType::Lanczos3)
     } else {
         raw.clone()
@@ -471,7 +498,6 @@ fn finish_enhancement(
     // micro-texture (pores, hair, grain) along with the noise; this puts
     // the real texture back without undoing the repair.
     if texture > 0.0 {
-        let _ = app_handle.emit("enhance-progress", "Restoring original texture...");
         let reference = reference.as_ref().unwrap();
         let sigma = (target_w.min(target_h) as f32 / 1200.0).clamp(1.2, 3.5);
         let enhanced_low = image::imageops::fast_blur(&enhanced, sigma);
@@ -492,7 +518,6 @@ fn finish_enhancement(
     }
 
     if strength < 1.0 {
-        let _ = app_handle.emit("enhance-progress", "Blending with original...");
         let reference = reference.as_ref().unwrap();
         for (out_p, ref_p) in enhanced.pixels_mut().zip(reference.pixels()) {
             for c in 0..3 {
@@ -513,7 +538,6 @@ fn finish_enhancement(
         let deficit = (sigma_ref * sigma_ref - sigma_out * sigma_out).max(0.0).sqrt();
         let sigma_add = (deficit * grain).min(0.06);
         if sigma_add > 1e-4 {
-            let _ = app_handle.emit("enhance-progress", "Matching grain...");
             let amplitude = sigma_add / 0.408;
             let row = (target_w * 3) as usize;
             use rayon::prelude::*;
@@ -539,16 +563,7 @@ fn finish_enhancement(
         }
     }
 
-    let _ = app_handle.emit("enhance-progress", "Generating previews...");
-    let out_dynamic = DynamicImage::ImageRgb32F(enhanced);
-    let payload = serde_json::json!({
-        "enhanced": encode_preview(&out_dynamic)?,
-        "original": encode_preview(&DynamicImage::ImageRgb32F(original.clone()))?,
-        "width": target_w,
-        "height": target_h,
-    });
-    let _ = app_handle.emit("enhance-complete", &payload);
-    Ok(out_dynamic)
+    enhanced
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -653,9 +668,22 @@ pub async fn apply_enhancement(
         let handle = app_handle.clone();
         let hit = tokio::task::spawn_blocking(move || -> Result<bool, String> {
             let guard = raw_handle.lock().unwrap();
-            let Some(cached) = guard.as_ref().filter(|c| c.key == key) else {
+            // Diagnostics on stderr: retries MUST hit this cache — a miss
+            // here means a multi-minute re-run, so log exactly why.
+            let Some(cached) = guard.as_ref() else {
+                eprintln!("[enhance] retry cache MISS: no cached raw output yet");
                 return Ok(false);
             };
+            if cached.key != key {
+                eprintln!(
+                    "[enhance] retry cache MISS: inputs changed\n  cached: {}\n  wanted: {}",
+                    cached.key, key
+                );
+                return Ok(false);
+            }
+            eprintln!(
+                "[enhance] retry cache HIT — re-blending (strength {strength_v}, texture {texture_v}, grain {grain_v})"
+            );
             let _ = handle.emit("enhance-progress", "Applying new settings...");
             let (w, h) = cached.original.dimensions();
             let target_scale = output_scale_v
@@ -834,11 +862,30 @@ pub async fn get_enhancement_overview(
     .map_err(|e| format!("Overview task failed: {}", e))?
 }
 
+/// Blends a preview crop at the requested settings and packages the reply.
+fn preview_payload(
+    raw: &Rgb32FImage,
+    original: &Rgb32FImage,
+    scale: u32,
+    strength: f32,
+    texture: f32,
+    grain: f32,
+) -> Result<serde_json::Value, String> {
+    let (rw, rh) = raw.dimensions();
+    let blended = blend_result(raw, original, rw, rh, strength, texture, grain);
+    Ok(serde_json::json!({
+        "original": encode_crop_png(original)?,
+        "enhanced": encode_crop_png(&blended)?,
+        "scale": scale,
+    }))
+}
+
 /// Runs the selected model on a crop around (`center_x`, `center_y`) with a
 /// selectable size (`region_size`, normalized to the image's short side) so
-/// the user can judge a model before committing to a full run. Returns the
-/// raw model output at strength 1 — the frontend blends live against the
-/// original for the strength slider.
+/// the user can judge a model before committing to a full run. The crop's
+/// raw model output is cached, so re-calling with only different
+/// strength/texture/grain re-blends in milliseconds — this is what lets
+/// the preview box track the sliders live.
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn preview_enhancement(
@@ -847,6 +894,9 @@ pub async fn preview_enhancement(
     center_x: f32,
     center_y: f32,
     region_size: Option<f32>,
+    strength: Option<f32>,
+    texture: Option<f32>,
+    grain: Option<f32>,
     js_adjustments: Option<serde_json::Value>,
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
@@ -864,6 +914,37 @@ pub async fn preview_enhancement(
             .await
             .map_err(|e| e.to_string())?;
 
+    let strength_v = strength.unwrap_or(1.0);
+    let texture_v = texture.unwrap_or(0.0);
+    let grain_v = grain.unwrap_or(0.0);
+
+    // Region-specific cache key: same photo/model/edits/region → the raw
+    // crop output is still valid, only the blend settings changed.
+    let preview_key = format!(
+        "{}|{:x}|{:x}|{:x}",
+        enhancement_cache_key(&path, &task, &model.manifest.id, js_adjustments.as_ref()),
+        center_x.to_bits(),
+        center_y.to_bits(),
+        region_size.map(|v| v.to_bits()).unwrap_or(0)
+    );
+    {
+        let cache = state.enhancement_preview_raw.clone();
+        let key = preview_key.clone();
+        let cached_reply = tokio::task::spawn_blocking(move || {
+            let guard = cache.lock().unwrap();
+            guard.as_ref().filter(|c| c.key == key).map(|c| {
+                eprintln!("[enhance] preview cache HIT — re-blending crop");
+                preview_payload(&c.raw, &c.original, 0, strength_v, texture_v, grain_v)
+            })
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        if let Some(reply) = cached_reply {
+            return reply;
+        }
+    }
+    eprintln!("[enhance] preview cache MISS — running model on crop");
+
     // Generative-engine models: preview the crop through the engine.
     if model.manifest.params.get("engine").and_then(|v| v.as_str()) == Some("comfy") {
         return preview_comfy_enhancement(
@@ -872,6 +953,10 @@ pub async fn preview_enhancement(
             center_x,
             center_y,
             region_size,
+            strength_v,
+            texture_v,
+            grain_v,
+            preview_key,
             js_adjustments,
             app_handle,
             state,
@@ -888,6 +973,7 @@ pub async fn preview_enhancement(
     let path_str = source_path.to_string_lossy().to_string();
     let rgb_input = enhancement_input(&path_str, js_adjustments.as_ref(), &state, &app_handle)?;
 
+    let preview_cache = state.enhancement_preview_raw.clone();
     tokio::task::spawn_blocking(move || {
         let (w, h) = rgb_input.dimensions();
 
@@ -915,11 +1001,13 @@ pub async fn preview_enhancement(
         )
         .map_err(|e| e.to_string())?;
 
-        Ok(serde_json::json!({
-            "original": encode_crop_png(&crop)?,
-            "enhanced": encode_crop_png(&enhanced)?,
-            "scale": params.scale,
-        }))
+        let reply = preview_payload(&enhanced, &crop, params.scale, strength_v, texture_v, grain_v);
+        *preview_cache.lock().unwrap() = Some(crate::app_state::PreviewRaw {
+            key: preview_key,
+            raw: enhanced,
+            original: crop,
+        });
+        reply
     })
     .await
     .map_err(|e| format!("Preview task failed: {}", e))?
@@ -927,12 +1015,17 @@ pub async fn preview_enhancement(
 
 /// Crop preview for engine models: run the small crop through SeedVR2 at a
 /// modest target so it returns in seconds.
+#[allow(clippy::too_many_arguments)]
 async fn preview_comfy_enhancement(
     model: crate::model_registry::RegisteredModel,
     path: String,
     center_x: f32,
     center_y: f32,
     region_size: Option<f32>,
+    strength: f32,
+    texture: f32,
+    grain: f32,
+    preview_key: String,
     js_adjustments: Option<serde_json::Value>,
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
@@ -990,11 +1083,13 @@ async fn preview_comfy_enhancement(
     let enhanced = image::load_from_memory(&result_png)
         .map_err(|e| e.to_string())?
         .to_rgb32f();
-    Ok(serde_json::json!({
-        "original": encode_crop_png(&crop)?,
-        "enhanced": encode_crop_png(&enhanced)?,
-        "scale": 2,
-    }))
+    let reply = preview_payload(&enhanced, &crop, 2, strength, texture, grain);
+    *state.enhancement_preview_raw.lock().unwrap() = Some(crate::app_state::PreviewRaw {
+        key: preview_key,
+        raw: enhanced,
+        original: crop,
+    });
+    reply
 }
 
 
@@ -1200,5 +1295,48 @@ mod authentic_texture_tests {
 
         let flat = Rgb32FImage::from_pixel(64, 64, Rgb([0.5f32, 0.5, 0.5]));
         assert!(estimate_fine_noise(&flat) < 1e-4);
+    }
+
+    fn test_pair() -> (Rgb32FImage, Rgb32FImage) {
+        // "Raw" = smooth gradient (a model's over-clean output); "original"
+        // = the same gradient with noise, so texture and grain both engage.
+        let mut raw = Rgb32FImage::new(96, 64);
+        for (x, y, p) in raw.enumerate_pixels_mut() {
+            let v = (x as f32 / 95.0) * 0.8 + (y as f32 / 63.0) * 0.1;
+            *p = Rgb([v, v * 0.9, v * 0.8]);
+        }
+        let mut original = raw.clone();
+        for (i, p) in original.pixels_mut().enumerate() {
+            let n = grain_noise(i as u32) * 0.05;
+            for c in 0..3 {
+                p[c] = (p[c] + n).max(0.0);
+            }
+        }
+        (raw, original)
+    }
+
+    /// Strength 1 + texture 0 + grain 0 must be byte-identical to the raw
+    /// model output — the new sliders can't perturb old behavior at rest.
+    #[test]
+    fn neutral_settings_are_identity() {
+        let (raw, original) = test_pair();
+        let out = blend_result(&raw, &original, 96, 64, 1.0, 0.0, 0.0);
+        assert_eq!(out.as_raw(), raw.as_raw());
+    }
+
+    /// Same inputs + same settings must give the identical result — this is
+    /// what makes "preview crop" and "retry" trustworthy: what you saw is
+    /// what you get, every time.
+    #[test]
+    fn blend_is_deterministic_and_settings_change_output() {
+        let (raw, original) = test_pair();
+        let a = blend_result(&raw, &original, 96, 64, 0.7, 0.5, 1.0);
+        let b = blend_result(&raw, &original, 96, 64, 0.7, 0.5, 1.0);
+        assert_eq!(a.as_raw(), b.as_raw(), "same settings must reproduce exactly");
+
+        let c = blend_result(&raw, &original, 96, 64, 0.7, 0.9, 1.0);
+        assert_ne!(a.as_raw(), c.as_raw(), "changing texture must change the result");
+        let d = blend_result(&raw, &original, 96, 64, 0.4, 0.5, 1.0);
+        assert_ne!(a.as_raw(), d.as_raw(), "changing strength must change the result");
     }
 }

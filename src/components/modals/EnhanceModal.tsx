@@ -22,8 +22,9 @@ interface PreviewData {
 }
 
 /** Zoomed crop compare: left of the divider is the original, right is the
- * model output blended at the current strength (opacity ≈ blend). */
-const PreviewCompare = ({ original, enhanced, strength }: { original: string; enhanced: string; strength: number }) => {
+ * model output blended at the current settings (blend done backend-side,
+ * so strength/texture/grain all show truthfully). */
+const PreviewCompare = ({ original, enhanced }: { original: string; enhanced: string }) => {
   const { t } = useTranslation();
   const [pos, setPos] = useState(50);
   return (
@@ -31,14 +32,7 @@ const PreviewCompare = ({ original, enhanced, strength }: { original: string; en
       <div className="relative aspect-square rounded-lg overflow-hidden border border-border-color bg-black select-none">
         <img src={original} alt="" className="absolute inset-0 w-full h-full object-cover" draggable={false} />
         <div className="absolute inset-0" style={{ clipPath: `inset(0 0 0 ${pos}%)` }}>
-          <img src={original} alt="" className="absolute inset-0 w-full h-full object-cover" draggable={false} />
-          <img
-            src={enhanced}
-            alt=""
-            className="absolute inset-0 w-full h-full object-cover"
-            style={{ opacity: strength / 100 }}
-            draggable={false}
-          />
+          <img src={enhanced} alt="" className="absolute inset-0 w-full h-full object-cover" draggable={false} />
         </div>
         <div className="absolute top-0 bottom-0 w-0.5 bg-white/80 pointer-events-none" style={{ left: `${pos}%` }} />
         <Text
@@ -134,7 +128,10 @@ export default function EnhanceModal({
   const [marquee, setMarquee] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
   const [chainStep, setChainStep] = useState(0);
   const [chainSource, setChainSource] = useState<string | null>(null);
+  // Flip back to the click-to-preview screen even after a full render.
+  const [showPreviewArea, setShowPreviewArea] = useState(false);
   const dragStart = useRef<{ x: number; y: number } | null>(null);
+  const lastRegion = useRef<{ x: number; y: number; size?: number } | null>(null);
   const mouseDownTarget = useRef<EventTarget | null>(null);
 
   const taskType =
@@ -176,6 +173,8 @@ export default function EnhanceModal({
         setMarquee(null);
         setChainStep(0);
         setChainSource(null);
+        setShowPreviewArea(false);
+        lastRegion.current = null;
       }, 300);
       return () => clearTimeout(timer);
     }
@@ -217,6 +216,7 @@ export default function EnhanceModal({
   const handleRun = () => {
     setSavedPath(null);
     setSaveError(null);
+    setShowPreviewArea(false);
     onEnhance(strength / 100, task === 'upscale' ? outputScale : 1, chainStep, texture / 100, grain / 100);
   };
 
@@ -227,6 +227,8 @@ export default function EnhanceModal({
     setChainSource(previewBase64);
     setPreviewData(null);
     setSavedPath(null);
+    setShowPreviewArea(false);
+    lastRegion.current = null;
     useUIStore.getState().setUI((state) => ({
       enhanceModalState: {
         ...state.enhanceModalState,
@@ -239,6 +241,7 @@ export default function EnhanceModal({
 
   const runPreview = async (centerX: number, centerY: number, regionSize?: number) => {
     if (isPreviewing || targetPaths.length === 0) return;
+    lastRegion.current = { x: centerX, y: centerY, size: regionSize };
     setIsPreviewing(true);
     setPreviewError(null);
     try {
@@ -249,6 +252,9 @@ export default function EnhanceModal({
         centerX,
         centerY,
         regionSize: regionSize ?? null,
+        strength: strength / 100,
+        texture: texture / 100,
+        grain: grain / 100,
         jsAdjustments: selectedImage?.path === targetPaths[0] ? adjustments : null,
       });
       setPreviewData(data);
@@ -258,6 +264,16 @@ export default function EnhanceModal({
       setIsPreviewing(false);
     }
   };
+
+  // Sliders drive the preview crop live: the crop's raw model output is
+  // cached backend-side, so this re-blend returns in milliseconds.
+  useEffect(() => {
+    if (!previewData || !lastRegion.current || isProcessing) return;
+    const r = lastRegion.current;
+    const timer = setTimeout(() => runPreview(r.x, r.y, r.size), 350);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [strength, texture, grain]);
 
   const overviewImgRef = useRef<HTMLImageElement>(null);
 
@@ -364,10 +380,18 @@ export default function EnhanceModal({
       );
     }
 
-    if (previewBase64 && originalBase64 && !isProcessing) {
+    if (previewBase64 && originalBase64 && !isProcessing && !showPreviewArea) {
       return (
         <div className="w-full h-[500px] relative">
           <ImageCompare original={originalBase64} denoised={previewBase64} />
+          {chainStep === 0 && (
+            <button
+              onClick={() => setShowPreviewArea(true)}
+              className="absolute top-2 left-2 bg-black/60 hover:bg-black/80 text-white text-xs px-2 py-1 rounded-md transition-colors"
+            >
+              {t('modals.enhance.previewAreaBtn')}
+            </button>
+          )}
           {resultDims && (
             <div className="absolute top-2 right-2 pointer-events-none">
               <Text
@@ -512,6 +536,14 @@ export default function EnhanceModal({
                 className="w-full h-full object-contain cursor-crosshair"
                 draggable={false}
               />
+              {previewBase64 && (
+                <button
+                  onClick={() => setShowPreviewArea(false)}
+                  className="absolute top-2 left-2 bg-black/60 hover:bg-black/80 text-white text-xs px-2 py-1 rounded-md transition-colors"
+                >
+                  {t('modals.enhance.backToResultBtn')}
+                </button>
+              )}
               {marquee && (
                 <div
                   className="absolute border-2 border-accent bg-accent/20 pointer-events-none"
@@ -546,11 +578,7 @@ export default function EnhanceModal({
             </div>
           ) : previewData ? (
             <>
-              <PreviewCompare
-                original={previewData.original}
-                enhanced={previewData.enhanced}
-                strength={strength}
-              />
+              <PreviewCompare original={previewData.original} enhanced={previewData.enhanced} />
               <Text variant={TextVariants.small} className="mt-2 text-center opacity-70">
                 {t('modals.enhance.previewNote')}
               </Text>

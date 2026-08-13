@@ -2176,6 +2176,7 @@ pub fn run() {
             denoise_result: Arc::new(Mutex::new(None)),
             enhancement_result: Arc::new(Mutex::new(None)),
             enhancement_raw: Arc::new(Mutex::new(None)),
+            enhancement_preview_raw: Arc::new(Mutex::new(None)),
             enhancement_chain_input: Arc::new(Mutex::new(None)),
             expansion_results: Arc::new(Mutex::new(Vec::new())),
             indexing_task_handle: Mutex::new(None),

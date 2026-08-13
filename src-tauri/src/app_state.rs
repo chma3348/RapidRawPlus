@@ -114,6 +114,15 @@ pub struct EnhancementRaw {
     pub native_scale: u32,
 }
 
+/// Raw model output for the last PREVIEW crop, so moving the strength /
+/// texture / grain sliders re-blends the crop in milliseconds instead of
+/// re-running the model on it.
+pub struct PreviewRaw {
+    pub key: String,
+    pub raw: image::Rgb32FImage,
+    pub original: image::Rgb32FImage,
+}
+
 pub struct AppState {
     pub window_setup_complete: AtomicBool,
     pub gpu_crash_flag_path: Mutex<Option<PathBuf>>,
@@ -134,6 +143,7 @@ pub struct AppState {
     /// different strength/output size re-blend instantly instead of
     /// re-running the model.
     pub enhancement_raw: Arc<Mutex<Option<EnhancementRaw>>>,
+    pub enhancement_preview_raw: Arc<Mutex<Option<PreviewRaw>>>,
     /// Input image pinned per chain step: retries within a step must feed
     /// on the PREVIOUS step's result, not the step's own output (which has
     /// already replaced `enhancement_result` by then).

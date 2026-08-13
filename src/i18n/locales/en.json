@@ -1230,6 +1230,8 @@
       "initializing": "Initializing…",
       "openInEditor": "Open in Editor",
       "outputSizeLabel": "Output size",
+      "previewAreaBtn": "◀ Preview area",
+      "backToResultBtn": "◀ Back to result",
       "previewEnhanced": "Preview",
       "previewNote": "Preview of the selected area — Start processes the full photo.",
       "previewOriginal": "Original",
