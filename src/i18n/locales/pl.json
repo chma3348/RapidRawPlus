@@ -10,13 +10,18 @@
         "agx": "AgX",
         "agxDesc": "Mapowanie tonów w stylu filmowym",
         "basic": "Podstawowe",
-        "basicDesc": "Standardowe mapowanie tonów"
+        "basicDesc": "Standardowe mapowanie tonów",
+        "filmic": "Filmowy",
+        "filmicDesc": "Miękkie wygaszanie świateł z płynnym przejściem do bieli — najbliżej DaVinci Resolve."
       },
       "reset": "Resetuj",
       "shadows": "Cienie",
       "toneMapper": "Mapowanie tonów",
       "whites": "Biele",
-      "contrastPivot": "Punkt kontrastu"
+      "contrastPivot": "Punkt kontrastu",
+      "renderingEngine": "Renderowanie",
+      "renderingClassic": "Klasyczne",
+      "renderingRefined": "Ulepszone"
     },
     "color": {
       "ariaSelectColor": "Wybierz kolor {{name}}",

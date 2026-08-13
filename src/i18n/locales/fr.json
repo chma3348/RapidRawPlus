@@ -10,13 +10,18 @@
         "agx": "AgX",
         "agxDesc": "Mappage des tons type film",
         "basic": "Standard",
-        "basicDesc": "Mappage des tons standard"
+        "basicDesc": "Mappage des tons standard",
+        "filmic": "Filmique",
+        "filmicDesc": "Roll-off doux des hautes lumières avec transition élégante vers le blanc — au plus près de DaVinci Resolve."
       },
       "reset": "Réinitialiser",
       "shadows": "Ombres",
       "toneMapper": "Mappeur de tons",
       "whites": "Blancs",
-      "contrastPivot": "Pivot de contraste"
+      "contrastPivot": "Pivot de contraste",
+      "renderingEngine": "Rendu",
+      "renderingClassic": "Classique",
+      "renderingRefined": "Raffiné"
     },
     "color": {
       "ariaSelectColor": "Sélectionner la couleur {{name}}",

@@ -22,7 +22,7 @@ pub mod expansion;
 mod export_processing;
 mod file_management;
 mod formats;
-mod gpu_processing;
+pub mod gpu_processing;
 pub mod image_loader;
 pub mod image_processing;
 mod lens_correction;

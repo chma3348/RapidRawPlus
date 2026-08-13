@@ -10,13 +10,18 @@
         "agx": "AgX",
         "agxDesc": "Кинематографическое тональное отображение",
         "basic": "Стандартное",
-        "basicDesc": "Стандартное тональное отображение"
+        "basicDesc": "Стандартное тональное отображение",
+        "filmic": "Филмик",
+        "filmicDesc": "Мягкий спад светов с плавным переходом в белый — ближе всего к DaVinci Resolve."
       },
       "reset": "Сбросить",
       "shadows": "Тени",
       "toneMapper": "Тональное отображение",
       "whites": "Светлые тона",
-      "contrastPivot": "Опорная точка контраста"
+      "contrastPivot": "Опорная точка контраста",
+      "renderingEngine": "Рендеринг",
+      "renderingClassic": "Классический",
+      "renderingRefined": "Улучшенный"
     },
     "color": {
       "ariaSelectColor": "Выбрать цвет: {{name}}",

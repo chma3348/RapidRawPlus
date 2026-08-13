@@ -10,13 +10,18 @@
         "agx": "AgX",
         "agxDesc": "Tonemapping stile pellicola",
         "basic": "Base",
-        "basicDesc": "Tonemapping Standard"
+        "basicDesc": "Tonemapping Standard",
+        "filmic": "Filmico",
+        "filmicDesc": "Morbido roll-off delle alte luci con transizione elegante al bianco — il più vicino a DaVinci Resolve."
       },
       "reset": "Ripristina",
       "shadows": "Ombre",
       "toneMapper": "Tone Mapper",
       "whites": "Bianchi",
-      "contrastPivot": "Pivot contrasto"
+      "contrastPivot": "Pivot contrasto",
+      "renderingEngine": "Rendering",
+      "renderingClassic": "Classico",
+      "renderingRefined": "Raffinato"
     },
     "color": {
       "ariaSelectColor": "Seleziona il colore {{name}}",

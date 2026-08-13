@@ -216,7 +216,8 @@ export interface Adjustments {
   structure: number;
   temperature: number;
   tint: number;
-  toneMapper: 'agx' | 'basic';
+  toneMapper: 'agx' | 'basic' | 'filmic';
+  processVersion?: number;
   transformDistortion: number;
   transformVertical: number;
   transformHorizontal: number;
@@ -542,6 +543,7 @@ export const INITIAL_ADJUSTMENTS: Adjustments = {
   lutSize: 0,
   masks: [],
   orientationSteps: 0,
+  processVersion: 2,
   rotation: 0,
   saturation: 0,
   sectionVisibility: {
@@ -699,6 +701,9 @@ export const normalizeLoadedAdjustments = (loadedAdjustments: Adjustments): any 
     },
     sharpnessThreshold: loadedAdjustments.sharpnessThreshold ?? INITIAL_ADJUSTMENTS.sharpnessThreshold,
     contrastPivot: loadedAdjustments.contrastPivot ?? INITIAL_ADJUSTMENTS.contrastPivot,
+    // Old sidecars predate the v2 engine: keep them on classic rendering
+    // so their appearance never silently changes.
+    processVersion: loadedAdjustments.processVersion ?? 1,
     texture: loadedAdjustments.texture ?? INITIAL_ADJUSTMENTS.texture,
     colorWheels: loadedAdjustments.colorWheels ?? INITIAL_ADJUSTMENTS.colorWheels,
     hueCurves: loadedAdjustments.hueCurves ?? INITIAL_ADJUSTMENTS.hueCurves,
@@ -714,7 +719,7 @@ export const ADJUSTMENT_GROUPS: Record<string, AdjustmentGroup[]> = {
   basic: [
     {
       label: 'modals.copyPaste.groups.exposureToneMapper',
-      keys: [BasicAdjustment.Exposure, 'toneMapper'],
+      keys: [BasicAdjustment.Exposure, 'toneMapper', 'processVersion'],
     },
     {
       label: 'modals.copyPaste.groups.tone',
@@ -836,6 +841,7 @@ export const ADJUSTMENT_SECTIONS: Sections = {
     BasicAdjustment.Exposure,
     'toneMapper',
     'contrastPivot',
+    'processVersion',
   ],
   curves: ['curves', 'pointCurves', 'parametricCurve', 'curveMode'],
   color: [

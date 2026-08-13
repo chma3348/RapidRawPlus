@@ -1356,6 +1356,12 @@ pub struct GlobalAdjustments {
     pub hue_sat_count: u32,
     pub hue_lum_count: u32,
     pub lum_sat_count: u32,
+
+    // 1 = classic per-channel math, 2 = Oklab hue-stable core.
+    pub process_version: u32,
+    pub _pad_pv1: f32,
+    pub _pad_pv2: f32,
+    pub _pad_pv3: f32,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, Pod, Zeroable, Default)]
@@ -2186,8 +2192,11 @@ fn get_global_adjustments_from_json(
         has_lut,
         lut_intensity,
 
-        tonemapper_mode: tonemapper_override
-            .unwrap_or_else(|| if tone_mapper == "agx" { 1 } else { 0 }),
+        tonemapper_mode: tonemapper_override.unwrap_or_else(|| match tone_mapper {
+            "agx" => 1,
+            "filmic" => 2,
+            _ => 0,
+        }),
         _pad_lut2: 0.0,
         _pad_lut3: 0.0,
         _pad_lut4: 0.0,
@@ -2284,6 +2293,13 @@ fn get_global_adjustments_from_json(
         hue_sat_count: hs_n,
         hue_lum_count: hl_n,
         lum_sat_count: ls_n,
+
+        // Missing on old sidecars -> classic rendering, so existing edits
+        // keep their exact appearance.
+        process_version: js_adjustments["processVersion"].as_u64().unwrap_or(1) as u32,
+        _pad_pv1: 0.0,
+        _pad_pv2: 0.0,
+        _pad_pv3: 0.0,
     }
 }
 

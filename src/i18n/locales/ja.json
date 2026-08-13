@@ -10,13 +10,18 @@
         "agx": "AgX",
         "agxDesc": "フィルム調トーンマッピング",
         "basic": "標準",
-        "basicDesc": "標準トーンマッピング"
+        "basicDesc": "標準トーンマッピング",
+        "filmic": "フィルミック",
+        "filmicDesc": "ハイライトを滑らかにロールオフし、自然に白へ移行 — DaVinci Resolve に最も近い描写。"
       },
       "reset": "リセット",
       "shadows": "シャドウ",
       "toneMapper": "トーンマッパー",
       "whites": "白レベル",
-      "contrastPivot": "コントラスト基準点"
+      "contrastPivot": "コントラスト基準点",
+      "renderingEngine": "レンダリング",
+      "renderingClassic": "クラシック",
+      "renderingRefined": "洗練"
     },
     "color": {
       "ariaSelectColor": "{{name}}色を選択",

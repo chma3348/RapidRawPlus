@@ -10,13 +10,18 @@
         "agx": "AgX",
         "agxDesc": "電影感色調映射",
         "basic": "基礎",
-        "basicDesc": "標準色調映射"
+        "basicDesc": "標準色調映射",
+        "filmic": "膠片",
+        "filmicDesc": "高光柔和滾降並優雅過渡到白色 — 最接近 DaVinci Resolve 的效果。"
       },
       "reset": "重置",
       "shadows": "陰影",
       "toneMapper": "色調映射",
       "whites": "白色",
-      "contrastPivot": "對比度軸心"
+      "contrastPivot": "對比度軸心",
+      "renderingEngine": "渲染引擎",
+      "renderingClassic": "經典",
+      "renderingRefined": "精細"
     },
     "color": {
       "ariaSelectColor": "選擇 {{name}} 顏色",

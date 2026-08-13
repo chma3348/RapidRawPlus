@@ -579,6 +579,59 @@ fn apply_hue_curves(color: vec3<f32>) -> vec3<f32> {
     return pow(max(result, vec3<f32>(0.0)), vec3<f32>(2.2));
 }
 
+// v2 tonal core: all tone moves ride Oklab lightness, so contrast and
+// shadow/black/white recovery cannot skew hue — the property that makes
+// graded footage look "clean" instead of "crunchy".
+fn apply_tonal_adjustments_v2(
+    color: vec3<f32>,
+    con: f32,
+    sh: f32,
+    wh: f32,
+    bl: f32,
+    pivot: f32
+) -> vec3<f32> {
+    if (con == 0.0 && sh == 0.0 && wh == 0.0 && bl == 0.0) { return color; }
+
+    var lab = linear_to_oklab(max(color, vec3<f32>(0.0)));
+    var l_ok = lab.x;
+    let l_clamped = clamp(l_ok, 0.0, 1.0);
+
+    // Whites: linear headroom expansion, same intent as v1.
+    var l_new = l_ok;
+    if (wh != 0.0) {
+        l_new = l_new / max(1.0 - wh * 0.22, 0.01);
+    }
+
+    // Shadows / blacks: smooth zone-weighted lifts on lightness.
+    if (sh != 0.0 || bl != 0.0) {
+        let t = clamp(l_new, 0.0, 1.0);
+        let shadow_lift = sh * 0.55 * t * pow(max(1.0 - t, 0.0), 3.0);
+        let black_lift = bl * 0.45 * t * pow(max(1.0 - t, 0.0), 8.0);
+        l_new = max(l_new + shadow_lift + black_lift, 0.0);
+    }
+
+    // Contrast: pivoted S-curve directly on perceptual lightness.
+    if (con != 0.0) {
+        let p = clamp(pivot, 0.05, 0.95);
+        let strength = pow(2.0, con * 1.1);
+        let x = clamp(l_new, 0.0, 1.0);
+        var curved: f32;
+        if (x < p) {
+            curved = p * pow(x / p, strength);
+        } else {
+            curved = 1.0 - (1.0 - p) * pow((1.0 - x) / (1.0 - p), strength);
+        }
+        // Values above 1 (RAW headroom) keep their offset.
+        l_new = curved + max(l_new - 1.0, 0.0);
+    }
+
+    lab.x = l_new;
+    var out = oklab_to_linear(lab);
+    // Oklab round trips can produce tiny negatives on saturated colors.
+    out = compress_gamut_soft(out);
+    return out;
+}
+
 fn apply_tonal_adjustments(
     color: vec3<f32>,
     blurred_color_input_space: vec3<f32>,
@@ -589,6 +642,9 @@ fn apply_tonal_adjustments(
     bl: f32,
     pivot: f32
 ) -> vec3<f32> {
+    if (adjustments.global.process_version >= 2u) {
+        return apply_tonal_adjustments_v2(color, con, sh, wh, bl, pivot);
+    }
     var rgb = color;
 
     var blurred_linear: vec3<f32>;
@@ -678,6 +734,23 @@ fn apply_highlights_adjustment(
     highlights_adj: f32
 ) -> vec3<f32> {
     if (highlights_adj == 0.0) { return color_in; }
+    if (adjustments.global.process_version >= 2u) {
+        var lab = linear_to_oklab(max(color_in, vec3<f32>(0.0)));
+        let t = clamp(lab.x, 0.0, 1.0);
+        let mask = smoothstep(0.55, 0.95, t);
+        if (highlights_adj < 0.0) {
+            // Recovery: compress bright lightness downward, harder with L.
+            let compress = -highlights_adj * 0.6 * mask;
+            lab.x = lab.x - compress * (lab.x - 0.55);
+            // Pull back a little chroma too: recovered skies stay believable.
+            let cs = 1.0 - (-highlights_adj) * 0.15 * mask;
+            lab.y *= cs;
+            lab.z *= cs;
+        } else {
+            lab.x = lab.x + highlights_adj * 0.5 * mask * (1.15 - t);
+        }
+        return compress_gamut_soft(oklab_to_linear(lab));
+    }
 
     let pixel_luma = get_luma(max(color_in, vec3<f32>(0.0)));
     let safe_pixel_luma = max(pixel_luma, 0.0001);
@@ -801,6 +874,29 @@ fn apply_white_balance(color: vec3<f32>, temp: f32, tnt: f32) -> vec3<f32> {
 }
 
 fn apply_creative_color(color: vec3<f32>, sat: f32, vib: f32) -> vec3<f32> {
+    if (adjustments.global.process_version >= 2u) {
+        if (sat == 0.0 && vib == 0.0) { return color; }
+        var lab = linear_to_oklab(max(color, vec3<f32>(0.0)));
+        let chroma = sqrt(lab.y * lab.y + lab.z * lab.z);
+        var scale_c = 1.0 + sat;
+        if (vib != 0.0 && chroma > 0.0005) {
+            // Vibrance: boosts muted colors more, with a skin guard
+            // (Oklab skin hues sit around a≈+0.06..0.12, b≈+0.03..0.09).
+            let sat_mask = 1.0 - smoothstep(0.08, 0.22, chroma);
+            let hue_angle = atan2(lab.z, lab.y);
+            let skin_dist = abs(hue_angle - 0.55);
+            let skin_guard = mix(1.0, 0.5, smoothstep(0.5, 0.15, skin_dist));
+            if (vib > 0.0) {
+                scale_c *= 1.0 + vib * sat_mask * skin_guard * 2.0;
+            } else {
+                let desat_mask = 1.0 - smoothstep(0.05, 0.25, chroma);
+                scale_c *= 1.0 + vib * desat_mask;
+            }
+        }
+        lab.y *= max(scale_c, 0.0);
+        lab.z *= max(scale_c, 0.0);
+        return compress_gamut_soft(oklab_to_linear(lab));
+    }
     var processed = color;
     let luma = get_luma(processed);
 
@@ -1886,8 +1982,15 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         }
     }
 
+    if (adjustments.global.process_version >= 2u) {
+        composite_rgb_linear = compress_gamut_soft(composite_rgb_linear);
+    }
+
     var base_srgb: vec3<f32>;
-    if (adjustments.global.tonemapper_mode == 1u) {
+    if (adjustments.global.tonemapper_mode == 2u) {
+        // Filmic: soft shoulder + path-to-white instead of a hard clip.
+        base_srgb = linear_to_srgb(tonemap_filmic(composite_rgb_linear));
+    } else if (adjustments.global.tonemapper_mode == 1u) {
         base_srgb = agx_full_transform(composite_rgb_linear);
     } else if (is_raw == 1u) {
         var srgb_emulated = linear_to_srgb(composite_rgb_linear);

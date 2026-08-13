@@ -10,13 +10,18 @@
         "agx": "AgX",
         "agxDesc": "필름 같은 톤 매핑",
         "basic": "기본",
-        "basicDesc": "표준 톤 매핑"
+        "basicDesc": "표준 톤 매핑",
+        "filmic": "필르믹",
+        "filmicDesc": "하이라이트를 부드럽게 롤오프하며 자연스럽게 흰색으로 전환 — DaVinci Resolve에 가장 가까운 표현."
       },
       "reset": "초기화",
       "shadows": "섀도우",
       "toneMapper": "톤 매퍼",
       "whites": "화이트",
-      "contrastPivot": "대비 피벗"
+      "contrastPivot": "대비 피벗",
+      "renderingEngine": "렌더링",
+      "renderingClassic": "클래식",
+      "renderingRefined": "개선"
     },
     "color": {
       "ariaSelectColor": "{{name}} 색상 선택",

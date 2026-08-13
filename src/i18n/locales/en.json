@@ -10,13 +10,18 @@
         "agx": "AgX",
         "agxDesc": "Film-like Tonemapping",
         "basic": "Basic",
-        "basicDesc": "Standard Tonemapping"
+        "basicDesc": "Standard Tonemapping",
+        "filmic": "Filmic",
+        "filmicDesc": "Soft highlight rolloff with a graceful path to white — closest to DaVinci Resolve."
       },
       "reset": "Reset",
       "shadows": "Shadows",
       "toneMapper": "Tone Mapper",
       "whites": "Whites",
-      "contrastPivot": "Contrast Pivot"
+      "contrastPivot": "Contrast Pivot",
+      "renderingEngine": "Rendering",
+      "renderingClassic": "Classic",
+      "renderingRefined": "Refined"
     },
     "color": {
       "ariaSelectColor": "Select {{name}} color",

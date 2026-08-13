@@ -10,13 +10,18 @@
         "agx": "AgX",
         "agxDesc": "Filmähnliches Tonemapping",
         "basic": "Standard",
-        "basicDesc": "Standard-Tonemapping"
+        "basicDesc": "Standard-Tonemapping",
+        "filmic": "Filmisch",
+        "filmicDesc": "Weiches Lichter-Rolloff mit sanftem Übergang zu Weiß — am nächsten an DaVinci Resolve."
       },
       "reset": "Zurücksetzen",
       "shadows": "Tiefen",
       "toneMapper": "Tonemapper",
       "whites": "Weiß",
-      "contrastPivot": "Kontrast-Pivot"
+      "contrastPivot": "Kontrast-Pivot",
+      "renderingEngine": "Rendering",
+      "renderingClassic": "Klassisch",
+      "renderingRefined": "Verfeinert"
     },
     "color": {
       "ariaSelectColor": "{{name}}-Farbe auswählen",

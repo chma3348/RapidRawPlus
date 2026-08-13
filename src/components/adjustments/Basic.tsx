@@ -1,6 +1,8 @@
 import { motion } from 'framer-motion';
 import clsx from 'clsx';
 import Slider from '../ui/Slider';
+import Text from '../ui/Text';
+import { TextVariants } from '../../types/typography';
 import { Adjustments, BasicAdjustment } from '../../utils/adjustments';
 import { useEffect, useRef, useState, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -44,6 +46,11 @@ const ToneMapperSwitch = ({
         id: 'agx',
         label: t('adjustments.basic.mappers.agx'),
         title: t('adjustments.basic.mappers.agxDesc'),
+      },
+      {
+        id: 'filmic',
+        label: t('adjustments.basic.mappers.filmic'),
+        title: t('adjustments.basic.mappers.filmicDesc'),
       },
     ],
     [t],
@@ -171,7 +178,7 @@ export default function BasicAdjustments({
   const handleToneMapperChange = (mapper: string) => {
     setAdjustments((prev: Partial<Adjustments>) => ({
       ...prev,
-      toneMapper: mapper as 'basic' | 'agx',
+      toneMapper: mapper as 'basic' | 'agx' | 'filmic',
     }));
   };
 
@@ -190,13 +197,42 @@ export default function BasicAdjustments({
           onDragStateChange={onDragStateChange}
         />
       ) : (
-        <ToneMapperSwitch
-          selectedMapper={adjustments.toneMapper || 'agx'}
-          onMapperChange={handleToneMapperChange}
-          evShiftValue={adjustments.exposure}
-          onEvShiftChange={(value) => handleAdjustmentChange(BasicAdjustment.Exposure, value)}
-          onDragStateChange={onDragStateChange}
-        />
+        <>
+          <ToneMapperSwitch
+            selectedMapper={adjustments.toneMapper || 'agx'}
+            onMapperChange={handleToneMapperChange}
+            evShiftValue={adjustments.exposure}
+            onEvShiftChange={(value) => handleAdjustmentChange(BasicAdjustment.Exposure, value)}
+            onDragStateChange={onDragStateChange}
+          />
+          <div className="flex items-center justify-between mt-2 mb-1 px-1">
+            <Text variant={TextVariants.small} className="opacity-80">
+              {t('adjustments.basic.renderingEngine')}
+            </Text>
+            <div className="flex gap-1">
+              <button
+                onClick={() => setAdjustments((prev: any) => ({ ...prev, processVersion: 1 }))}
+                className={`px-2 py-0.5 rounded text-xs transition-colors ${
+                  (adjustments.processVersion ?? 2) === 1
+                    ? 'bg-accent text-button-text'
+                    : 'bg-bg-primary text-text-secondary hover:bg-card-active'
+                }`}
+              >
+                {t('adjustments.basic.renderingClassic')}
+              </button>
+              <button
+                onClick={() => setAdjustments((prev: any) => ({ ...prev, processVersion: 2 }))}
+                className={`px-2 py-0.5 rounded text-xs transition-colors ${
+                  (adjustments.processVersion ?? 2) === 2
+                    ? 'bg-accent text-button-text'
+                    : 'bg-bg-primary text-text-secondary hover:bg-card-active'
+                }`}
+              >
+                {t('adjustments.basic.renderingRefined')}
+              </button>
+            </div>
+          </div>
+        </>
       )}
       <Slider
         label={t('adjustments.basic.exposure')}
