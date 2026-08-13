@@ -552,15 +552,33 @@ fn blend_result(
         let sigma_ref = estimate_fine_noise(original);
         let sigma_out = estimate_fine_noise(&enhanced);
         let deficit = (sigma_ref * sigma_ref - sigma_out * sigma_out).max(0.0).sqrt();
-        let sigma_add = (deficit * grain).min(0.06);
+        // Matching alone almost never fires in practice: degraded JPEGs
+        // carry BLOCK artifacts (8px scale) rather than fine noise, so the
+        // measured deficit is ~0 and the slider read as dead. The slider
+        // therefore guarantees a floor of film-look grain scaled by its
+        // position, and the match only ever raises that.
+        const GRAIN_FLOOR: f32 = 0.02;
+        let sigma_add = (deficit.max(GRAIN_FLOOR) * grain).min(0.06);
+        log::info!(
+            "[enhance] grain: sigma_ref={:.5} sigma_out={:.5} adding sigma={:.5} (ratio {:.2})",
+            sigma_ref, sigma_out, sigma_add, scale_ratio
+        );
         if sigma_add > 1e-4 {
             let amplitude = sigma_add / 0.408;
             let row = (target_w * 3) as usize;
+            // Grain lives at the ORIGINAL's pixel scale: sampled from a
+            // native-resolution noise grid, so on upscaled results it has
+            // the same coarseness as the original's own noise — and stays
+            // visible at fit-to-screen zoom exactly as much as that noise
+            // would. Single-pixel grain on a 2x image averages away on
+            // screen, which made this slider look dead.
+            let inv_ratio = 1.0 / scale_ratio;
             use rayon::prelude::*;
             enhanced
                 .par_chunks_mut(row)
                 .enumerate()
                 .for_each(|(y, e_row)| {
+                    let ny = ((y as f32 * inv_ratio) as u32).min(oh.saturating_sub(1));
                     for px in 0..(e_row.len() / 3) {
                         let l = 0.2126 * e_row[px * 3]
                             + 0.7152 * e_row[px * 3 + 1]
@@ -568,7 +586,8 @@ fn blend_result(
                         // Film-like: strongest in midtones, present but
                         // subdued in deep shadows and near white.
                         let weight = 0.35 + 0.65 * (4.0 * l * (1.0 - l)).clamp(0.0, 1.0);
-                        let n = grain_noise((y as u32).wrapping_mul(target_w).wrapping_add(px as u32))
+                        let nx = ((px as f32 * inv_ratio) as u32).min(ow.saturating_sub(1));
+                        let n = grain_noise(ny.wrapping_mul(ow).wrapping_add(nx))
                             * amplitude
                             * weight;
                         for c in 0..3 {
