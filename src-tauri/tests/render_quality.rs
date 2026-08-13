@@ -360,4 +360,68 @@ fn v2_contrast_is_hue_stable_and_filmic_rolls_off() {
         c2 > 0.02,
         "recovered disc still gray (chroma {c2:.4})"
     );
+
+    // ---- 4. shadow lift strength + detail preservation ----
+    // Left half: deep-shadow checkerboard (0.035 / 0.09 linear). Shadows
+    // +100 must (a) actually lift it, (b) keep the checker contrast — the
+    // "pulls detail out" property — and beat v1 on lift.
+    let mut shscene = vec![0f32; (RW * RH * 4) as usize];
+    for y in 0..RH {
+        for x in 0..RW {
+            let i = ((y * RW + x) * 4) as usize;
+            let v = if x < RW / 2 {
+                if ((x / 8) + (y / 8)) % 2 == 0 { 0.035 } else { 0.09 }
+            } else {
+                0.5
+            };
+            shscene[i] = v;
+            shscene[i + 1] = v;
+            shscene[i + 2] = v;
+            shscene[i + 3] = 1.0;
+        }
+    }
+    // Sample two adjacent cell centers well inside the dark half.
+    let dark_cell = (36usize, 132usize); // (x, y) in a 0.035 cell region
+    let lite_cell = (44usize, 132usize);
+    let sample_lin = |out: &[u8], x: usize, y: usize| -> f32 {
+        let i = (y * RW as usize + x) * 4;
+        srgb_to_linear1(out[i] as f32 / 255.0)
+    };
+    let shadows_run = |pv: u32, amount: f32| -> (f32, f32) {
+        let mut adj = AllAdjustments::default();
+        adj.global.is_raw_image = 1;
+        adj.global.process_version = pv;
+        adj.global.shadows = amount;
+        adj.global.contrast_pivot = 0.5;
+        adj.global.tonemapper_mode = 0;
+        let out = render_sized(&recovery_processor, &rdevice, &rqueue, &shscene, adj, RW, RH);
+        (
+            sample_lin(&out, dark_cell.0, dark_cell.1),
+            sample_lin(&out, lite_cell.0, lite_cell.1),
+        )
+    };
+    let (d0, l0) = shadows_run(2, 0.0);
+    let (d1, l1) = shadows_run(1, 1.0);
+    let (d2, l2) = shadows_run(2, 1.0);
+    let mean0 = (d0 + l0) / 2.0;
+    let lift_v1 = (d1 + l1) / 2.0 / mean0.max(1e-5);
+    let lift_v2 = (d2 + l2) / 2.0 / mean0.max(1e-5);
+    let contrast = |d: f32, l: f32| (l - d) / (l + d).max(1e-5);
+    let c_in = contrast(d0, l0);
+    let c_v2 = contrast(d2, l2);
+    println!(
+        "shadow lift: v1 {lift_v1:.2}x, v2 {lift_v2:.2}x | checker contrast in {c_in:.3} -> v2 {c_v2:.3}"
+    );
+    assert!(
+        lift_v2 > 1.6,
+        "v2 shadows too weak: only {lift_v2:.2}x lift at +100"
+    );
+    assert!(
+        lift_v2 > lift_v1 * 1.25,
+        "v2 ({lift_v2:.2}x) should clearly out-lift v1 ({lift_v1:.2}x)"
+    );
+    assert!(
+        c_v2 > c_in * 0.7,
+        "v2 lift crushed the checker detail: contrast {c_in:.3} -> {c_v2:.3}"
+    );
 }

@@ -584,6 +584,8 @@ fn apply_hue_curves(color: vec3<f32>) -> vec3<f32> {
 // graded footage look "clean" instead of "crunchy".
 fn apply_tonal_adjustments_v2(
     color: vec3<f32>,
+    neighborhood_input_space: vec3<f32>,
+    is_raw: u32,
     con: f32,
     sh: f32,
     wh: f32,
@@ -596,18 +598,40 @@ fn apply_tonal_adjustments_v2(
     var l_ok = lab.x;
     let l_clamped = clamp(l_ok, 0.0, 1.0);
 
+    // Local tone mapping driver: the NEIGHBORHOOD's lightness decides how
+    // much a zone moves, so texture inside a lifted region rides along
+    // and detail survives (the Lightroom/Resolve trick). A dash of the
+    // pixel's own lightness guards halos at strong zone boundaries.
+    var neighborhood_linear: vec3<f32>;
+    if (is_raw == 1u) {
+        neighborhood_linear = neighborhood_input_space;
+    } else {
+        neighborhood_linear = srgb_to_linear(neighborhood_input_space);
+    }
+    let l_base = clamp(linear_to_oklab(max(neighborhood_linear, vec3<f32>(0.0))).x, 0.0, 1.0);
+    let driver = mix(l_clamped, l_base, 0.75);
+
     // Whites: linear headroom expansion, same intent as v1.
     var l_new = l_ok;
     if (wh != 0.0) {
         l_new = l_new / max(1.0 - wh * 0.22, 0.01);
     }
 
-    // Shadows / blacks: smooth zone-weighted lifts on lightness.
+    // Shadows / blacks: exposure-style gain, zone-weighted by the driver.
+    // Multiplicative on L (not additive) so intra-zone ratios — the
+    // detail — are preserved exactly.
     if (sh != 0.0 || bl != 0.0) {
-        let t = clamp(l_new, 0.0, 1.0);
-        let shadow_lift = sh * 0.55 * t * pow(max(1.0 - t, 0.0), 3.0);
-        let black_lift = bl * 0.45 * t * pow(max(1.0 - t, 0.0), 8.0);
-        l_new = max(l_new + shadow_lift + black_lift, 0.0);
+        let shadow_zone = 1.0 - smoothstep(0.0, 0.62, driver);
+        let black_zone = 1.0 - smoothstep(0.0, 0.28, driver);
+        let stops = sh * 1.6 * shadow_zone + bl * 0.9 * black_zone;
+        if (stops != 0.0) {
+            l_new = l_new * pow(2.0, stops * 0.9);
+            // Lifted shadows read slightly desaturated at constant (a,b);
+            // nudge chroma with the lift like film does.
+            let chroma_boost = 1.0 + max(stops, 0.0) * 0.12;
+            lab.y *= chroma_boost;
+            lab.z *= chroma_boost;
+        }
     }
 
     // Contrast: pivoted S-curve directly on perceptual lightness.
@@ -635,6 +659,7 @@ fn apply_tonal_adjustments_v2(
 fn apply_tonal_adjustments(
     color: vec3<f32>,
     blurred_color_input_space: vec3<f32>,
+    neighborhood_input_space: vec3<f32>,
     is_raw: u32,
     con: f32,
     sh: f32,
@@ -643,7 +668,7 @@ fn apply_tonal_adjustments(
     pivot: f32
 ) -> vec3<f32> {
     if (adjustments.global.process_version >= 2u) {
-        return apply_tonal_adjustments_v2(color, con, sh, wh, bl, pivot);
+        return apply_tonal_adjustments_v2(color, neighborhood_input_space, is_raw, con, sh, wh, bl, pivot);
     }
     var rgb = color;
 
@@ -740,10 +765,20 @@ fn apply_highlights_adjustment(
         let t = clamp(lab.x, 0.0, 1.0);
         // Wide, smooth zone weight: the blotch-maker was a steep mask edge
         // meeting clipped, chroma-less pixels.
-        let mask = smoothstep(0.45, 1.0, t);
+        // Zone weight from the NEIGHBORHOOD, so compression is locally
+        // uniform and texture inside bright regions survives.
+        var nb_linear: vec3<f32>;
+        if (is_raw == 1u) {
+            nb_linear = neighborhood_input_space;
+        } else {
+            nb_linear = srgb_to_linear(neighborhood_input_space);
+        }
+        let l_base_h = clamp(linear_to_oklab(max(nb_linear, vec3<f32>(0.0))).x, 0.0, 1.2);
+        let driver_h = mix(t, l_base_h, 0.75);
+        let mask = smoothstep(0.45, 1.0, driver_h);
         if (highlights_adj < 0.0) {
-            let compress = -highlights_adj * 0.55 * mask;
-            lab.x = lab.x - compress * (lab.x - 0.45);
+            let stops = highlights_adj * 1.1 * mask;
+            lab.x = lab.x * pow(2.0, stops * 0.8);
 
             // Clipped pixels carry no color of their own — when pulled
             // down they'd surface as gray/white blotches. Reconstruct
@@ -1656,7 +1691,7 @@ fn apply_glow_bloom(
 
     blurred_linear = apply_linear_exposure(blurred_linear, exp);
     blurred_linear = apply_filmic_exposure(blurred_linear, bright);
-    blurred_linear = apply_tonal_adjustments(blurred_linear, blurred_color_input_space, is_raw, 0.0, 0.0, wh, 0.0, 0.5);
+    blurred_linear = apply_tonal_adjustments(blurred_linear, blurred_color_input_space, blurred_color_input_space, is_raw, 0.0, 0.0, wh, 0.0, 0.5);
 
     let linear_luma = get_luma(max(blurred_linear, vec3<f32>(0.0)));
 
@@ -1724,7 +1759,7 @@ fn apply_halation(
 
     blurred_linear = apply_linear_exposure(blurred_linear, exp);
     blurred_linear = apply_filmic_exposure(blurred_linear, bright);
-    blurred_linear = apply_tonal_adjustments(blurred_linear, blurred_color_input_space, is_raw, 0.0, 0.0, wh, 0.0, 0.5);
+    blurred_linear = apply_tonal_adjustments(blurred_linear, blurred_color_input_space, blurred_color_input_space, is_raw, 0.0, 0.0, wh, 0.0, 0.5);
 
     let linear_luma = get_luma(max(blurred_linear, vec3<f32>(0.0)));
 
@@ -1955,7 +1990,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     composite_rgb_linear = apply_white_balance(composite_rgb_linear, t_temperature, t_tint);
     composite_rgb_linear = apply_color_wheels(composite_rgb_linear, t_cw_lift, t_cw_gamma, t_cw_gain, t_cw_offset);
     composite_rgb_linear = apply_filmic_exposure(composite_rgb_linear, t_brightness);
-    composite_rgb_linear = apply_tonal_adjustments(composite_rgb_linear, tonal_blurred, is_raw, t_contrast, t_shadows, t_whites, t_blacks, t_pivot);
+    composite_rgb_linear = apply_tonal_adjustments(composite_rgb_linear, tonal_blurred, structure_blurred, is_raw, t_contrast, t_shadows, t_whites, t_blacks, t_pivot);
     composite_rgb_linear = apply_highlights_adjustment(composite_rgb_linear, tonal_blurred, structure_blurred, is_raw, t_highlights);
     composite_rgb_linear = apply_color_calibration(composite_rgb_linear, adjustments.global.color_calibration);
     composite_rgb_linear = apply_hsl_panel(composite_rgb_linear, final_hsl, absolute_coord_i);
