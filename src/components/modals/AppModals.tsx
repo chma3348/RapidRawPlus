@@ -34,7 +34,13 @@ export interface AppModalsProps {
   handleApplyDenoise: (intensity: number, method: 'ai' | 'bm3d') => Promise<void>;
   handleBatchDenoise: (intensity: number, method: 'ai' | 'bm3d', paths: string[]) => Promise<string[]>;
   handleSaveDenoisedImage: () => Promise<string>;
-  handleApplyEnhance: (strength: number, outputScale: number) => Promise<void>;
+  handleApplyEnhance: (
+    strength: number,
+    outputScale: number,
+    chainStep?: number,
+    texture?: number,
+    grain?: number,
+  ) => Promise<void>;
   handleSaveEnhancedImage: () => Promise<string>;
   handleApplyExpansion: (left: number, top: number, right: number, bottom: number) => Promise<void>;
   handleSaveExpandedImage: (variantIndex: number) => Promise<string>;

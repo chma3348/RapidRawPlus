@@ -477,7 +477,18 @@ fn blend_result(
     let texture = texture.clamp(0.0, 1.0);
     let grain = grain.clamp(0.0, 1.0);
 
-    let reference = if strength < 1.0 || texture > 0.0 || grain > 0.0 {
+    // When the result is LARGER than the original (upscales, engine 2x
+    // previews), the original's fine texture and noise land at a coarser
+    // pixel scale after resizing to target dims. Every fine-detail
+    // operation below must widen its band by this ratio, or it looks for
+    // texture at a scale where an upscaled image has none — which silently
+    // turns the Texture and Match grain sliders into no-ops.
+    let (ow, oh) = original.dimensions();
+    let scale_ratio = (target_w as f32 / ow.max(1) as f32)
+        .max(target_h as f32 / oh.max(1) as f32)
+        .max(1.0);
+
+    let reference = if strength < 1.0 || texture > 0.0 {
         Some(if original.dimensions() == (target_w, target_h) {
             original.clone()
         } else {
@@ -499,7 +510,9 @@ fn blend_result(
     // the real texture back without undoing the repair.
     if texture > 0.0 {
         let reference = reference.as_ref().unwrap();
-        let sigma = (target_w.min(target_h) as f32 / 1200.0).clamp(1.2, 3.5);
+        // Band sized from the ORIGINAL's resolution, widened by the resize
+        // ratio so it captures the original's real texture at target scale.
+        let sigma = (ow.min(oh) as f32 / 1200.0).clamp(1.2, 3.5) * scale_ratio;
         let enhanced_low = image::imageops::fast_blur(&enhanced, sigma);
         let reference_low = image::imageops::fast_blur(reference, sigma);
         let row = (target_w * 3) as usize;
@@ -532,8 +545,11 @@ fn blend_result(
     // result is already at least as grainy — this only restores the
     // photo's noise signature, it doesn't stylize.
     if grain > 0.0 {
-        let reference = reference.as_ref().unwrap();
-        let sigma_ref = estimate_fine_noise(reference);
+        // Measure the original's noise at its NATIVE size — after
+        // upscaling, its noise moves to a coarser scale and the fine-noise
+        // estimator reads near zero, which zeroed the deficit and made
+        // Match grain a silent no-op on upscaled results.
+        let sigma_ref = estimate_fine_noise(original);
         let sigma_out = estimate_fine_noise(&enhanced);
         let deficit = (sigma_ref * sigma_ref - sigma_out * sigma_out).max(0.0).sqrt();
         let sigma_add = (deficit * grain).min(0.06);
@@ -643,6 +659,10 @@ pub async fn apply_enhancement(
         _ => return Err(format!("'{}' is not an enhancement task", task)),
     };
     let chain_step = chain_step.unwrap_or(0);
+    log::info!(
+        "[enhance] apply: task={} strength={:?} texture={:?} grain={:?} scale={:?} chain={}",
+        task, strength, texture, grain, output_scale, chain_step
+    );
 
     let (registry, model) =
         resolve_and_prepare(&app_handle, &state.model_registry, task_type, &task, |_| true)
@@ -671,17 +691,17 @@ pub async fn apply_enhancement(
             // Diagnostics on stderr: retries MUST hit this cache — a miss
             // here means a multi-minute re-run, so log exactly why.
             let Some(cached) = guard.as_ref() else {
-                eprintln!("[enhance] retry cache MISS: no cached raw output yet");
+                log::info!("[enhance] retry cache MISS: no cached raw output yet");
                 return Ok(false);
             };
             if cached.key != key {
-                eprintln!(
+                log::info!(
                     "[enhance] retry cache MISS: inputs changed\n  cached: {}\n  wanted: {}",
                     cached.key, key
                 );
                 return Ok(false);
             }
-            eprintln!(
+            log::info!(
                 "[enhance] retry cache HIT — re-blending (strength {strength_v}, texture {texture_v}, grain {grain_v})"
             );
             let _ = handle.emit("enhance-progress", "Applying new settings...");
@@ -872,6 +892,30 @@ fn preview_payload(
     grain: f32,
 ) -> Result<serde_json::Value, String> {
     let (rw, rh) = raw.dimensions();
+
+    // Diagnostic: how much did the model actually change this crop? If
+    // this is ~0, every blend setting is mixing two identical images and
+    // the sliders CANNOT produce a visible difference — the problem is the
+    // model run, not the blending.
+    {
+        let reference = if original.dimensions() == (rw, rh) {
+            original.clone()
+        } else {
+            image::imageops::resize(original, rw, rh, image::imageops::FilterType::Lanczos3)
+        };
+        let sum: f64 = raw
+            .as_raw()
+            .iter()
+            .zip(reference.as_raw().iter())
+            .map(|(a, b)| (a - b).abs() as f64)
+            .sum();
+        let mean = sum / raw.as_raw().len().max(1) as f64;
+        log::info!(
+            "[enhance] crop model delta: mean|raw-original| = {:.5} ({}x{})",
+            mean, rw, rh
+        );
+    }
+
     let blended = blend_result(raw, original, rw, rh, strength, texture, grain);
     Ok(serde_json::json!({
         "original": encode_crop_png(original)?,
@@ -917,6 +961,10 @@ pub async fn preview_enhancement(
     let strength_v = strength.unwrap_or(1.0);
     let texture_v = texture.unwrap_or(0.0);
     let grain_v = grain.unwrap_or(0.0);
+    log::info!(
+        "[enhance] preview: task={} strength={:?} texture={:?} grain={:?} center=({:.3},{:.3}) region={:?}",
+        task, strength, texture, grain, center_x, center_y, region_size
+    );
 
     // Region-specific cache key: same photo/model/edits/region → the raw
     // crop output is still valid, only the blend settings changed.
@@ -933,7 +981,7 @@ pub async fn preview_enhancement(
         let cached_reply = tokio::task::spawn_blocking(move || {
             let guard = cache.lock().unwrap();
             guard.as_ref().filter(|c| c.key == key).map(|c| {
-                eprintln!("[enhance] preview cache HIT — re-blending crop");
+                log::info!("[enhance] preview cache HIT — re-blending crop");
                 preview_payload(&c.raw, &c.original, 0, strength_v, texture_v, grain_v)
             })
         })
@@ -943,7 +991,7 @@ pub async fn preview_enhancement(
             return reply;
         }
     }
-    eprintln!("[enhance] preview cache MISS — running model on crop");
+    log::info!("[enhance] preview cache MISS — running model on crop");
 
     // Generative-engine models: preview the crop through the engine.
     if model.manifest.params.get("engine").and_then(|v| v.as_str()) == Some("comfy") {
@@ -1338,5 +1386,43 @@ mod authentic_texture_tests {
         assert_ne!(a.as_raw(), c.as_raw(), "changing texture must change the result");
         let d = blend_result(&raw, &original, 96, 64, 0.4, 0.5, 1.0);
         assert_ne!(a.as_raw(), d.as_raw(), "changing strength must change the result");
+    }
+
+    fn mean_abs_diff(a: &Rgb32FImage, b: &Rgb32FImage) -> f32 {
+        let sum: f32 = a
+            .as_raw()
+            .iter()
+            .zip(b.as_raw().iter())
+            .map(|(x, y)| (x - y).abs())
+            .sum();
+        sum / a.as_raw().len() as f32
+    }
+
+    /// The bug the user actually hit: when the model output is LARGER than
+    /// the original (engine 2x previews, upscales), the original's texture
+    /// and noise sit at a coarser pixel scale after resizing — a
+    /// fixed-scale fine-detail band reads them as empty, silently turning
+    /// Texture and Match grain into no-ops. Both must visibly bite on a 2x
+    /// result.
+    #[test]
+    fn texture_and_grain_bite_on_upscaled_results() {
+        let (raw, original) = test_pair();
+        // Model output at 2x the original's size, clean (no noise).
+        let raw_up = image::imageops::resize(&raw, 192, 128, image::imageops::FilterType::Lanczos3);
+
+        let base = blend_result(&raw_up, &original, 192, 128, 1.0, 0.0, 0.0);
+        let textured = blend_result(&raw_up, &original, 192, 128, 1.0, 1.0, 0.0);
+        assert!(
+            mean_abs_diff(&base, &textured) > 0.003,
+            "texture must transfer the original's detail onto a 2x result (diff {})",
+            mean_abs_diff(&base, &textured)
+        );
+
+        let grained = blend_result(&raw_up, &original, 192, 128, 1.0, 0.0, 1.0);
+        assert!(
+            mean_abs_diff(&base, &grained) > 0.003,
+            "grain match must close the noise gap on a 2x result (diff {})",
+            mean_abs_diff(&base, &grained)
+        );
     }
 }
