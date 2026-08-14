@@ -394,7 +394,9 @@ export default function AIPanel() {
 
   const [collapsibleState, setCollapsibleState] = useState({
     generative: true,
-    spotEnhance: false,
+    // Open by default: collapsed, the region-enhance tool (the right
+    // instrument for washed-out areas) was effectively invisible.
+    spotEnhance: true,
     properties: true,
   });
 

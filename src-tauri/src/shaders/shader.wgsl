@@ -614,10 +614,16 @@ fn apply_point_colors(color: vec3<f32>) -> vec3<f32> {
         return color;
     }
 
-    let perceptual = pow(max(color, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.2));
-    var hsv = rgb_to_hsv(clamp(perceptual, vec3<f32>(0.0), vec3<f32>(1.0)));
+    // HDR-safe: normalize by the max component so nothing is CLAMPED away
+    // before tone mapping — a lossy round-trip here reads as a global
+    // white-balance/exposure shift the moment any chip exists.
+    let safe = max(color, vec3<f32>(0.0));
+    let norm = max(max(safe.r, max(safe.g, safe.b)), 1.0);
+    let perceptual = pow(safe / norm, vec3<f32>(1.0 / 2.2));
+    var hsv = rgb_to_hsv(perceptual);
     let px_hue_deg = hsv.x * 360.0;
 
+    var applied = 0.0;
     for (var i = 0; i < 4; i = i + 1) {
         if (g.point_color_meta[i].y <= 0.5) { continue; }
         let chip = g.point_colors[i];
@@ -628,13 +634,17 @@ fn apply_point_colors(color: vec3<f32>) -> vec3<f32> {
         // the range edge; near-neutral pixels are guarded like hue curves.
         let w = (1.0 - smoothstep(range * 0.4, range, dh)) * smoothstep(0.02, 0.12, hsv.y);
         if (w <= 0.001) { continue; }
+        applied = max(applied, w);
         hsv.x = fract(hsv.x + (chip.y / 360.0) * w + 1.0);
         hsv.y = clamp(hsv.y * (1.0 + chip.z * w), 0.0, 1.0);
         hsv.z = clamp(hsv.z * (1.0 + chip.w * w), 0.0, 1.0);
     }
+    if (applied <= 0.001) {
+        return color;
+    }
 
-    let adjusted = hsv_to_rgb(hsv);
-    return pow(max(adjusted, vec3<f32>(0.0)), vec3<f32>(2.2));
+    let adjusted = pow(max(hsv_to_rgb(hsv), vec3<f32>(0.0)), vec3<f32>(2.2)) * norm;
+    return mix(color, adjusted, smoothstep(0.0, 0.05, applied));
 }
 
 // v2 tonal core: all tone moves ride Oklab lightness, so contrast and
