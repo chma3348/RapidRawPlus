@@ -184,6 +184,37 @@ export function useAiMasking() {
     [setAdjustments, setEditor],
   );
 
+  // Live re-blend of a rendered spot patch from the backend's cached raw
+  // region — instant, no model re-run.
+  const handleRespotEnhance = useCallback(
+    async (patchId: string, strength: number, texture: number, grain: number) => {
+      const { adjustments, patchesSentToBackend } = useEditorStore.getState();
+      const patch: AiPatch | undefined = adjustments.aiPatches.find((p: AiPatch) => p.id === patchId);
+      if (!patch || !patch.patchData) return;
+      try {
+        const newPatchDataJson: any = await invoke(Invokes.RespotEnhance, {
+          patchId,
+          strength,
+          texture,
+          grain,
+        });
+        const newPatchData = JSON.parse(newPatchDataJson);
+        patchesSentToBackend.delete(patchId);
+        setAdjustments((prev: Adjustments) => ({
+          ...prev,
+          aiPatches: prev.aiPatches.map((p: AiPatch) =>
+            p.id === patchId ? { ...p, patchData: newPatchData } : p,
+          ),
+        }));
+      } catch (err) {
+        // Cache expired (app restart or a newer spot run) — quiet log; the
+        // user can re-run Enhance for a fresh raw.
+        console.error('[spot] re-blend unavailable:', err);
+      }
+    },
+    [setAdjustments],
+  );
+
   const handleQuickErase = useCallback(
     async (subMaskId: string | null, startPoint: Coord, endPoint: Coord) => {
       const { selectedImage, adjustments, isGeneratingAi, patchesSentToBackend } = useEditorStore.getState();
