@@ -606,7 +606,11 @@ fn apply_hue_curves(color: vec3<f32>) -> vec3<f32> {
 // Point Color: precise H/S/L edits in a narrow window around each picked
 // hue — the "edit exactly THIS color" tool, leaving all other colors and
 // the preset mixer bands untouched.
-fn apply_point_colors(color: vec3<f32>) -> vec3<f32> {
+fn apply_point_colors(
+    color: vec3<f32>,
+    blurred_input_space: vec3<f32>,
+    is_raw: u32,
+) -> vec3<f32> {
     let g = adjustments.global;
     var any_active = false;
     for (var i = 0; i < 4; i = i + 1) {
@@ -623,23 +627,36 @@ fn apply_point_colors(color: vec3<f32>) -> vec3<f32> {
     let norm = max(max(safe.r, max(safe.g, safe.b)), 1.0);
     let perceptual = pow(safe / norm, vec3<f32>(1.0 / 2.2));
     var hsv = rgb_to_hsv(perceptual);
-    // rgb_to_hsv returns hue in DEGREES already.
-    let px_hue_deg = hsv.x;
+
+    // WINDOW MEMBERSHIP comes from the smoothed neighborhood (3.5px blur),
+    // not the pixel itself: per-pixel noise — which dominates saturation on
+    // pale washed areas — otherwise flickers pixels in and out of the
+    // window, and a luminance shift then multiplies neighbors differently
+    // (reads as instant pixelation). The EDIT still applies to the pixel's
+    // own value; only the gate is smooth.
+    var gate_linear: vec3<f32>;
+    if (is_raw == 1u) {
+        gate_linear = max(blurred_input_space, vec3<f32>(0.0));
+    } else {
+        gate_linear = srgb_to_linear(max(blurred_input_space, vec3<f32>(0.0)));
+    }
+    let gate_norm = max(max(gate_linear.r, max(gate_linear.g, gate_linear.b)), 1.0);
+    let gate_hsv = rgb_to_hsv(pow(gate_linear / gate_norm, vec3<f32>(1.0 / 2.2)));
 
     var applied = 0.0;
     for (var i = 0; i < 4; i = i + 1) {
         if (g.point_color_meta[i].y <= 0.5) { continue; }
         let chip = g.point_colors[i];
         let range = max(g.point_color_meta[i].x, 4.0);
-        var dh = abs(px_hue_deg - chip.x);
+        var dh = abs(gate_hsv.x - chip.x);
         dh = min(dh, 360.0 - dh);
         // Full-color window: hue proximity AND sat/val proximity to the
         // SAMPLED color — a pick means "this color", not "every pixel with
         // this hue" (which is the entire frame on a wash-tinted photo).
         let w_hue = 1.0 - smoothstep(range * 0.4, range, dh);
-        let w_sat = 1.0 - smoothstep(0.18, 0.42, abs(hsv.y - g.point_color_meta[i].z));
-        let w_val = 1.0 - smoothstep(0.22, 0.48, abs(hsv.z - g.point_color_meta[i].w));
-        let w = w_hue * w_sat * w_val * smoothstep(0.02, 0.12, hsv.y);
+        let w_sat = 1.0 - smoothstep(0.18, 0.42, abs(gate_hsv.y - g.point_color_meta[i].z));
+        let w_val = 1.0 - smoothstep(0.22, 0.48, abs(gate_hsv.z - g.point_color_meta[i].w));
+        let w = w_hue * w_sat * w_val * smoothstep(0.015, 0.06, gate_hsv.y);
         if (w <= 0.001) { continue; }
         applied = max(applied, w);
         hsv.x = (hsv.x + chip.y * w + 360.0) % 360.0;
@@ -2090,7 +2107,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     composite_rgb_linear = apply_hsl_panel(composite_rgb_linear, final_hsl, absolute_coord_i);
     composite_rgb_linear = apply_hue_shift(composite_rgb_linear, t_hue);
     composite_rgb_linear = apply_hue_curves(composite_rgb_linear);
-    composite_rgb_linear = apply_point_colors(composite_rgb_linear);
+    composite_rgb_linear = apply_point_colors(composite_rgb_linear, tonal_blurred, is_raw);
     composite_rgb_linear = apply_creative_color(composite_rgb_linear, t_saturation, t_vibrance);
     composite_rgb_linear = apply_film_saturation(composite_rgb_linear, adjustments.global.film_saturation);
 
