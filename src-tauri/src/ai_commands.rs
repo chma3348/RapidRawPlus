@@ -756,6 +756,128 @@ fn component_crop_mask(
     out
 }
 
+/// Median |4-neighbor Laplacian| of luma over pixels where `region` is
+/// true — the fill-patch counterpart of the enhance dialog's fine-noise
+/// estimator, restricted to a masked region.
+fn region_fine_noise(img: &RgbaImage, region: &GrayImage, want_inside: bool) -> f32 {
+    let (w, h) = img.dimensions();
+    if w < 4 || h < 4 {
+        return 0.0;
+    }
+    let luma = |x: u32, y: u32| {
+        let p = img.get_pixel(x, y);
+        (0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32) / 255.0
+    };
+    let mut vals: Vec<f32> = Vec::new();
+    for y in 1..h - 1 {
+        for x in 1..w - 1 {
+            let inside = region.get_pixel(x, y)[0] > 127;
+            if inside != want_inside {
+                continue;
+            }
+            let lap =
+                luma(x, y) - (luma(x - 1, y) + luma(x + 1, y) + luma(x, y - 1) + luma(x, y + 1)) * 0.25;
+            vals.push(lap.abs());
+        }
+    }
+    if vals.len() < 32 {
+        return 0.0;
+    }
+    let mid = vals.len() / 2;
+    vals.select_nth_unstable_by(mid, |a, b| a.total_cmp(b));
+    vals[mid] * 1.4826 / 1.118
+}
+
+/// Mean RGB over pixels where `region` matches `want_inside`.
+fn region_mean(img: &RgbaImage, region: &GrayImage, want_inside: bool) -> Option<[f32; 3]> {
+    let mut sum = [0f64; 3];
+    let mut count = 0u64;
+    for (x, y, p) in img.enumerate_pixels() {
+        let inside = region.get_pixel(x, y)[0] > 127;
+        if inside != want_inside {
+            continue;
+        }
+        for c in 0..3 {
+            sum[c] += p[c] as f64;
+        }
+        count += 1;
+    }
+    if count < 32 {
+        return None;
+    }
+    Some([
+        (sum[0] / count as f64) as f32,
+        (sum[1] / count as f64) as f32,
+        (sum[2] / count as f64) as f32,
+    ])
+}
+
+/// Makes a fill patch carry its surroundings' FINISH: aligns the patch's
+/// tone to the ring of original pixels just outside the mask, then closes
+/// the fine-noise gap with neutral grain. Inpainted content is otherwise
+/// smoother and slightly off-tone versus its neighborhood — the eye reads
+/// that as a blotch "placed in" even when the content is plausible.
+/// `tone_strength` is 1.0 for prompt-less fills (pure removal/reconstruct)
+/// and gentle for prompted ones, where the new content is INTENDED to
+/// differ from its surroundings.
+fn harmonize_patch(
+    original_crop: &RgbaImage,
+    filled_crop: &mut RgbaImage,
+    crop_mask: &GrayImage,
+    tone_strength: f32,
+) {
+    // Ring: just outside the mask. Inner band: just inside its edge.
+    let ring_zone = dilate_mask(crop_mask, 16);
+    let mut ring = GrayImage::new(crop_mask.width(), crop_mask.height());
+    for (x, y, p) in ring_zone.enumerate_pixels() {
+        if p[0] > 127 && crop_mask.get_pixel(x, y)[0] <= 127 {
+            ring.put_pixel(x, y, image::Luma([255]));
+        }
+    }
+
+    // Tone: shift the filled area so its mean matches the ring's, capped
+    // so a legitimately different fill can't be washed out.
+    if tone_strength > 0.0
+        && let (Some(ring_mean), Some(fill_mean)) = (
+            region_mean(original_crop, &ring, true),
+            region_mean(filled_crop, crop_mask, true),
+        )
+    {
+        const MAX_SHIFT: f32 = 14.0;
+        let shift: Vec<f32> = (0..3)
+            .map(|c| ((ring_mean[c] - fill_mean[c]) * tone_strength).clamp(-MAX_SHIFT, MAX_SHIFT))
+            .collect();
+        for (x, y, p) in filled_crop.enumerate_pixels_mut() {
+            if crop_mask.get_pixel(x, y)[0] > 0 {
+                for c in 0..3 {
+                    p[c] = (p[c] as f32 + shift[c]).clamp(0.0, 255.0) as u8;
+                }
+            }
+        }
+    }
+
+    // Grain: measure the surroundings' fine noise on the ORIGINAL pixels
+    // and the fill's on the FILLED pixels; add the deficit inside the
+    // mask (deterministic hash noise, same generator as the enhance
+    // dialog's grain match).
+    let sigma_ring = region_fine_noise(original_crop, &ring, true);
+    let sigma_fill = region_fine_noise(filled_crop, crop_mask, true);
+    let deficit = (sigma_ring * sigma_ring - sigma_fill * sigma_fill).max(0.0).sqrt();
+    let sigma_add = deficit.min(0.05);
+    if sigma_add > 1e-3 {
+        let amplitude = sigma_add / 0.408 * 255.0;
+        let w = filled_crop.width();
+        for (x, y, p) in filled_crop.enumerate_pixels_mut() {
+            if crop_mask.get_pixel(x, y)[0] > 0 {
+                let n = crate::enhancement::grain_noise(y.wrapping_mul(w).wrapping_add(x)) * amplitude;
+                for c in 0..3 {
+                    p[c] = (p[c] as f32 + n).clamp(0.0, 255.0) as u8;
+                }
+            }
+        }
+    }
+}
+
 /// Soft-blends a filled crop back into the full image.
 fn blend_patch_into(
     encoded_full: &mut RgbaImage,
@@ -860,11 +982,13 @@ async fn run_engine_inpaint_patch(
         let crop_mask = component_crop_mask(mask, &labels, comp.id, x0, y0, crop_w, crop_h);
         let crop_mask = dilate_mask(&crop_mask, (span / 8).clamp(4, 12));
 
-        if let Ok((healed, _)) = ai_processing::run_lama_inpainting(
-            &DynamicImage::ImageRgba8(crop_img),
+        if let Ok((mut healed, _)) = ai_processing::run_lama_inpainting(
+            &DynamicImage::ImageRgba8(crop_img.clone()),
             &crop_mask,
             session,
         ) {
+            // Spot heals are always pure removal: full-strength tone match.
+            harmonize_patch(&crop_img, &mut healed, &crop_mask, 1.0);
             blend_patch_into(&mut encoded_full, &healed, &crop_mask, x0, y0);
         }
     }
@@ -888,6 +1012,9 @@ async fn run_engine_inpaint_patch(
         // otherwise stay visible AND anchor the model to repaint the object.
         let grow = (crop_w.max(crop_h) / 60).clamp(12, 32);
         let crop_mask = dilate_mask(&crop_mask, grow);
+        // Ring stats must come from pre-fill pixels (the prefill below
+        // rewrites the masked interior).
+        let original_crop = crop_img.clone();
 
         // The sampler keeps a low-frequency imprint of whatever occupies
         // the masked area, so the SDXL tiers get a LaMa prefill as a
@@ -920,8 +1047,12 @@ async fn run_engine_inpaint_patch(
         let filled = image::load_from_memory(&fill_png)
             .map_err(|e| e.to_string())?
             .to_rgba8();
-        let filled_crop =
+        let mut filled_crop =
             image::imageops::resize(&filled, crop_w, crop_h, image::imageops::FilterType::Lanczos3);
+        // Prompted fills intentionally differ from their surroundings —
+        // only nudge those; prompt-less removal gets the full match.
+        let tone_strength = if prompt.trim().is_empty() { 1.0 } else { 0.35 };
+        harmonize_patch(&original_crop, &mut filled_crop, &crop_mask, tone_strength);
         blend_patch_into(&mut encoded_full, &filled_crop, &crop_mask, x0, y0);
     }
 
@@ -1430,5 +1561,61 @@ mod fill_component_tests {
         // Labels separate the blobs.
         assert_ne!(labels[25 * 400 + 25], labels[252 * 400 + 352]);
         assert_eq!(labels[0], 0, "background unlabeled");
+    }
+
+    /// The "placed-in blotch" fingerprint is a fill that is brighter/
+    /// off-tone and smoother than its surroundings. Harmonization must
+    /// pull the patch's tone toward the ring and close the noise gap.
+    #[test]
+    fn harmonization_matches_ring_tone_and_noise() {
+        let (w, h) = (200u32, 200u32);
+        // Original: mid-gray with visible noise everywhere.
+        let mut original = RgbaImage::new(w, h);
+        for (i, p) in original.pixels_mut().enumerate() {
+            let n = crate::enhancement::grain_noise(i as u32) * 18.0;
+            let v = (120.0 + n).clamp(0.0, 255.0) as u8;
+            *p = Rgba([v, v, v, 255]);
+        }
+        // Mask: centered 60x60 blob.
+        let mut mask = GrayImage::new(w, h);
+        for y in 70..130 {
+            for x in 70..130 {
+                mask.put_pixel(x, y, image::Luma([255]));
+            }
+        }
+        // Fill: perfectly smooth and 10 levels too bright inside the mask.
+        let mut filled = original.clone();
+        for y in 70..130 {
+            for x in 70..130 {
+                filled.put_pixel(x, y, Rgba([130, 130, 130, 255]));
+            }
+        }
+
+        let noise_before = region_fine_noise(&filled, &mask, true);
+        harmonize_patch(&original, &mut filled, &mask, 1.0);
+
+        let ring_zone = dilate_mask(&mask, 16);
+        let mut ring = GrayImage::new(w, h);
+        for (x, y, p) in ring_zone.enumerate_pixels() {
+            if p[0] > 127 && mask.get_pixel(x, y)[0] <= 127 {
+                ring.put_pixel(x, y, image::Luma([255]));
+            }
+        }
+        let ring_mean = region_mean(&original, &ring, true).unwrap();
+        let fill_mean = region_mean(&filled, &mask, true).unwrap();
+        assert!(
+            (fill_mean[0] - ring_mean[0]).abs() < 3.0,
+            "fill mean {} must land near ring mean {}",
+            fill_mean[0],
+            ring_mean[0]
+        );
+
+        let noise_after = region_fine_noise(&filled, &mask, true);
+        let ring_noise = region_fine_noise(&original, &ring, true);
+        assert!(noise_before < ring_noise * 0.2, "test setup: fill starts smooth");
+        assert!(
+            noise_after > ring_noise * 0.5,
+            "fill noise {noise_after:.4} must approach ring noise {ring_noise:.4}"
+        );
     }
 }

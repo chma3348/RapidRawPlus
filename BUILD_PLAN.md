@@ -58,13 +58,13 @@ Nothing gets added or dropped from this list silently.
 Order: fix first, then features. Each phase: tests, commit + push,
 rebuild + install at phase end. Nothing added or dropped silently.
 
-## Phase H — Fill patch harmonization (fix)
-- [ ] Every fill patch (LaMa spot or diffusion blob) is tone-matched to
+## Phase H — Fill patch harmonization (fix) — SHIPPED
+- [x] Every fill patch (LaMa spot or diffusion blob) is tone-matched to
       the ring of original pixels around it (boundary means aligned;
       full strength for prompt-less fills, gentle for prompted ones).
-- [ ] Every fill patch is grain-matched to its surroundings (same
+- [x] Every fill patch is grain-matched to its surroundings (same
       estimator/synth approach as the enhance dialog).
-- [ ] Unit tests: harmonization pulls a bright smooth patch to ring tone
+- [x] Unit tests: harmonization pulls a bright smooth patch to ring tone
       and ring noise level.
 
 ## Phase I — Film look pack (+ Sat vs Sat)

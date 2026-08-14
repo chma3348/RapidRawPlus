@@ -410,7 +410,7 @@ fn estimate_fine_noise(img: &Rgb32FImage) -> f32 {
 
 /// Deterministic per-pixel noise in (-1, 1) with ~0.408 std (triangular):
 /// hash-based so retries are reproducible (no RNG state).
-fn grain_noise(i: u32) -> f32 {
+pub(crate) fn grain_noise(i: u32) -> f32 {
     let hash = |mut x: u32| -> u32 {
         x = (x ^ 61) ^ (x >> 16);
         x = x.wrapping_mul(9);
