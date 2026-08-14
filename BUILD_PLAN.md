@@ -52,3 +52,42 @@ Nothing gets added or dropped from this list silently.
       LaMa). No more whole-image bounding boxes from scattered masks.
 - [x] Verify: cargo tests incl. new component/key tests, TS 120, build,
       install, commit + push.
+
+# Build plan: Resolve-class round (agreed 2026-08-13)
+
+Order: fix first, then features. Each phase: tests, commit + push,
+rebuild + install at phase end. Nothing added or dropped silently.
+
+## Phase H — Fill patch harmonization (fix)
+- [ ] Every fill patch (LaMa spot or diffusion blob) is tone-matched to
+      the ring of original pixels around it (boundary means aligned;
+      full strength for prompt-less fills, gentle for prompted ones).
+- [ ] Every fill patch is grain-matched to its surroundings (same
+      estimator/synth approach as the enhance dialog).
+- [ ] Unit tests: harmonization pulls a bright smooth patch to ring tone
+      and ring noise level.
+
+## Phase I — Film look pack (+ Sat vs Sat)
+- [ ] GPU bright-pass blur prepass (thresholded highlights, wide blur).
+- [ ] Halation: warm red-weighted spill around bright highlights.
+- [ ] Glow: neutral soft bloom with adjustable knee.
+- [ ] Film saturation: eases saturation out of deep shadows and near
+      white (density-style response).
+- [ ] Sat vs Sat curve tab in the curves panel.
+- [ ] All v2-engine; shader layout probe updated for new bindings.
+
+## Phase J — HDR zone wheels
+- [ ] Six Oklab-lightness zones (blacks/dark/shadow/light/highlight/
+      specular) with smooth adjustable boundaries.
+- [ ] Per-zone exposure dial + color offset wheel; global panel first.
+
+## Phase K — Skin smoothing (frequency separation)
+- [ ] Per-mask "Smoothing" slider: subtracts the blotch band (between
+      the existing 3.5px and 8px blurs) while fine texture passes.
+
+## Phase L — Clone/heal stamp
+- [ ] Non-AI patch type: alt-click source, brush paints offset-copied
+      pixels with feathered edges + harmonized blend; non-destructive.
+
+## Phase M — Color Warper (own detailed plan before starting)
+- [ ] Oklab chroma-plane mesh warp, interactive wheel UI, shader LUT.
