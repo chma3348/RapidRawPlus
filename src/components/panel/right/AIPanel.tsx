@@ -1842,7 +1842,10 @@ function SettingsPanel({
       activeSubMask.type === Mask.AiSky);
 
   const handleGenerateClick = () => {
-    if (!container) return;
+    if (!container) {
+      console.error('[ai] generate blocked: no active patch container');
+      return;
+    }
     updateContainer(container.id, { prompt });
     onGenerativeReplace(container.id, prompt, useFastInpaint);
   };

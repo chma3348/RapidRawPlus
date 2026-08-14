@@ -53,20 +53,39 @@ export function useAiMasking() {
   const handleGenerativeReplace = useCallback(
     async (patchId: string, prompt: string, useFastInpaint: boolean) => {
       const { selectedImage, adjustments, isGeneratingAi, patchesSentToBackend } = useEditorStore.getState();
-      if (!selectedImage?.path || isGeneratingAi) return;
+      // Every early exit must be LOUD: silent returns here read as "the
+      // button does nothing" (console.error reaches app.log).
+      if (!selectedImage?.path || isGeneratingAi) {
+        console.error('[ai] generate blocked:', {
+          hasImage: !!selectedImage?.path,
+          isGeneratingAi,
+        });
+        if (isGeneratingAi) toast.info('An AI generation is already running.');
+        return;
+      }
 
       const patch: AiPatch | undefined = adjustments.aiPatches.find((p: AiPatch) => p.id === patchId);
-      if (!patch) return;
+      if (!patch) {
+        console.error('[ai] generate blocked: patch not found', patchId);
+        toast.error('The selection could not be found — try re-creating it.');
+        return;
+      }
 
       const patchDefinition = { ...patch, prompt };
-      const token = await getToken();
 
+      // Visible feedback FIRST — the token fetch used to run before any
+      // state change, so a hung auth lookup looked like a dead button.
       setAdjustments((prev: Adjustments) => ({
         ...prev,
         aiPatches: prev.aiPatches.map((p: AiPatch) => (p.id === patchId ? { ...p, isLoading: true, prompt } : p)),
       }));
-
       setEditor({ isGeneratingAi: true });
+
+      // Cloud auth is optional for local fills; never let it hang the run.
+      const token = await Promise.race([
+        getToken(),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 3000)),
+      ]).catch(() => null);
 
       try {
         const newPatchDataJson: any = await invoke(Invokes.InvokeGenerativeReplaseWithMaskDef, {
@@ -93,7 +112,11 @@ export function useAiMasking() {
               : p,
           ),
         }));
-        setEditor({ activeAiPatchContainerId: null, activeAiSubMaskId: null });
+        // Keep the container selected: deselecting grayed the whole
+        // generative section into a pointer-events-none dead zone, so the
+        // next "Inpaint Selection" click silently did nothing. Only the
+        // sub-mask overlay is dismissed to reveal the result.
+        setEditor({ activeAiSubMaskId: null });
       } catch (err) {
         toast.error(`AI Replace Failed: ${err}`);
         setAdjustments((prev: Adjustments) => ({
