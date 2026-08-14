@@ -237,6 +237,8 @@ export function useTauriListeners({
                   ? { width: payload.width, height: payload.height }
                   : null,
               progressMessage: null,
+              // Finished while dismissed → light up the background pill.
+              hasUnseenResult: !state.enhanceModalState.isOpen,
             },
           }));
         }

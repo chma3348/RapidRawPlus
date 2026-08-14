@@ -172,6 +172,32 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
 
       if (!selectedImage) return;
 
+      // Opening an enhance dialog must never destroy a run that's still
+      // going (or a finished-but-unseen result): reopen it instead of
+      // resetting. Only a genuinely idle dialog gets fresh state.
+      const openEnhance = (task: 'upscale' | 'deblur' | 'restore') => {
+        const current = useUIStore.getState().enhanceModalState;
+        if (current.isProcessing || (current.previewBase64 && current.hasUnseenResult)) {
+          setUI((state) => ({
+            enhanceModalState: { ...state.enhanceModalState, isOpen: true, hasUnseenResult: false },
+          }));
+          return;
+        }
+        setUI({
+          enhanceModalState: {
+            isOpen: true,
+            isProcessing: false,
+            previewBase64: null,
+            error: null,
+            targetPaths: [selectedImage.path],
+            progressMessage: null,
+            isRaw: selectedImage?.isRaw || false,
+            task,
+            hasUnseenResult: false,
+          },
+        });
+      };
+
       const canUndo = historyIndex > 0;
       const canRedo = historyIndex < history.length - 1;
       const commonTags = getCommonTags([selectedImage.path]);
@@ -227,56 +253,17 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
             {
               label: t('contextMenus.editor.upscale'),
               icon: Sparkles,
-              onClick: () => {
-                setUI({
-                  enhanceModalState: {
-                    isOpen: true,
-                    isProcessing: false,
-                    previewBase64: null,
-                    error: null,
-                    targetPaths: [selectedImage.path],
-                    progressMessage: null,
-                    isRaw: selectedImage?.isRaw || false,
-                    task: 'upscale',
-                  },
-                });
-              },
+              onClick: () => openEnhance('upscale'),
             },
             {
               label: t('contextMenus.editor.deblur'),
               icon: Focus,
-              onClick: () => {
-                setUI({
-                  enhanceModalState: {
-                    isOpen: true,
-                    isProcessing: false,
-                    previewBase64: null,
-                    error: null,
-                    targetPaths: [selectedImage.path],
-                    progressMessage: null,
-                    isRaw: selectedImage?.isRaw || false,
-                    task: 'deblur',
-                  },
-                });
-              },
+              onClick: () => openEnhance('deblur'),
             },
             {
               label: t('contextMenus.editor.restore'),
               icon: Wand2,
-              onClick: () => {
-                setUI({
-                  enhanceModalState: {
-                    isOpen: true,
-                    isProcessing: false,
-                    previewBase64: null,
-                    error: null,
-                    targetPaths: [selectedImage.path],
-                    progressMessage: null,
-                    isRaw: selectedImage?.isRaw || false,
-                    task: 'restore',
-                  },
-                });
-              },
+              onClick: () => openEnhance('restore'),
             },
             {
               label: t('contextMenus.editor.expand'),

@@ -113,12 +113,12 @@ rebuild + install at phase end. Nothing added or dropped silently.
 - [ ] Core: Oklab chroma-plane mesh warp applied in-shader via a small
       LUT grid; wheel UI with draggable mesh points.
 
-## Round: background AI rendering (agreed 2026-08-13)
-- [ ] Closing/clicking outside the enhance dialog NEVER loses a running
+## Round: background AI rendering (agreed 2026-08-13) — SHIPPED
+- [x] Closing/clicking outside the enhance dialog NEVER loses a running
       job: the run continues, its state survives, and reopening the
       dialog for that photo restores it (running or finished).
-- [ ] A floating indicator appears while a run continues with the dialog
+- [x] A floating indicator appears while a run continues with the dialog
       closed (spinner + progress line); it flips to "result ready" on
       completion and clicking it reopens the dialog.
-- [ ] Opening the enhance dialog while a run is in flight reopens the
+- [x] Opening the enhance dialog while a run is in flight reopens the
       running job instead of resetting state.

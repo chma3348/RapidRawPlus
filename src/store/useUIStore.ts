@@ -73,6 +73,9 @@ export interface EnhanceModalState {
   isRaw: boolean;
   task: 'upscale' | 'deblur' | 'restore';
   resultDims?: { width: number; height: number } | null;
+  // A run finished while the dialog was closed — drives the "result
+  // ready" state of the floating background-run pill.
+  hasUnseenResult?: boolean;
 }
 
 export interface ExpandModalState {
