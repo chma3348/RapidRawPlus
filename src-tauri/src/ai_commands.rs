@@ -658,102 +658,115 @@ fn dilate_mask(mask: &GrayImage, radius: u32) -> GrayImage {
     out
 }
 
-/// Engine-backed removal/replace: crops around the mask, fills it via the
-/// generative engine (in display space), and composites back — mirroring
-/// the LaMa patch contract, including the gamma flag for float sources.
-async fn run_engine_inpaint_patch(
-    source_image: &DynamicImage,
-    mask: &GrayImage,
-    prompt: &str,
-    kind: crate::comfy_engine::FillKind,
-    app_handle: &tauri::AppHandle,
-    state: &tauri::State<'_, AppState>,
-) -> Result<(RgbaImage, bool), String> {
-    let is_linear = matches!(
-        source_image,
-        DynamicImage::ImageRgb32F(_) | DynamicImage::ImageRgba32F(_)
-    );
-    let (w, h) = source_image.dimensions();
+/// A connected blob of mask pixels with its bounding box.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MaskComponent {
+    pub id: u32,
+    pub min_x: u32,
+    pub min_y: u32,
+    pub max_x: u32,
+    pub max_y: u32,
+    pub area: u32,
+}
 
-    let (mut min_x, mut min_y, mut max_x, mut max_y) = (w, h, 0u32, 0u32);
-    for (x, y, p) in mask.enumerate_pixels() {
-        if p[0] > 0 {
-            min_x = min_x.min(x);
-            min_y = min_y.min(y);
-            max_x = max_x.max(x);
-            max_y = max_y.max(y);
+impl MaskComponent {
+    pub fn span(&self) -> u32 {
+        (self.max_x - self.min_x + 1).max(self.max_y - self.min_y + 1)
+    }
+}
+
+/// Labels 8-connected components of mask pixels above `threshold`.
+/// Returns the label map (0 = background, component ids start at 1) and
+/// the component list.
+pub(crate) fn mask_components(
+    mask: &GrayImage,
+    threshold: u8,
+) -> (Vec<u32>, Vec<MaskComponent>) {
+    let (w, h) = mask.dimensions();
+    let (wu, hu) = (w as usize, h as usize);
+    let mut labels = vec![0u32; wu * hu];
+    let mut comps: Vec<MaskComponent> = Vec::new();
+    let mut stack: Vec<(u32, u32)> = Vec::new();
+    let raw = mask.as_raw();
+
+    for sy in 0..h {
+        for sx in 0..w {
+            let idx = sy as usize * wu + sx as usize;
+            if raw[idx] <= threshold || labels[idx] != 0 {
+                continue;
+            }
+            let id = comps.len() as u32 + 1;
+            let mut comp = MaskComponent {
+                id,
+                min_x: sx,
+                min_y: sy,
+                max_x: sx,
+                max_y: sy,
+                area: 0,
+            };
+            labels[idx] = id;
+            stack.push((sx, sy));
+            while let Some((x, y)) = stack.pop() {
+                comp.area += 1;
+                comp.min_x = comp.min_x.min(x);
+                comp.min_y = comp.min_y.min(y);
+                comp.max_x = comp.max_x.max(x);
+                comp.max_y = comp.max_y.max(y);
+                for dy in -1i64..=1 {
+                    for dx in -1i64..=1 {
+                        let (nx, ny) = (x as i64 + dx, y as i64 + dy);
+                        if nx < 0 || ny < 0 || nx >= w as i64 || ny >= h as i64 {
+                            continue;
+                        }
+                        let nidx = ny as usize * wu + nx as usize;
+                        if raw[nidx] > threshold && labels[nidx] == 0 {
+                            labels[nidx] = id;
+                            stack.push((nx as u32, ny as u32));
+                        }
+                    }
+                }
+            }
+            comps.push(comp);
         }
     }
-    let pad_x = 192.max(((max_x - min_x + 1) as f32 * 1.5) as u32);
-    let pad_y = 192.max(((max_y - min_y + 1) as f32 * 1.5) as u32);
-    let x0 = min_x.saturating_sub(pad_x);
-    let y0 = min_y.saturating_sub(pad_y);
-    let x1 = (max_x + pad_x).min(w.saturating_sub(1));
-    let y1 = (max_y + pad_y).min(h.saturating_sub(1));
-    let (crop_w, crop_h) = (x1 - x0 + 1, y1 - y0 + 1);
+    (labels, comps)
+}
 
-    // The engine wants display-referred pixels; float/RAW sources are
-    // linear, so encode (and return the composite in the same space with
-    // the gamma flag, exactly like the LaMa path).
-    let mut encoded_full = if is_linear {
-        ai_processing::gamma_encode_rgba8(source_image)
-    } else {
-        source_image.to_rgba8()
-    };
-    let mut crop_img = image::imageops::crop_imm(&encoded_full, x0, y0, crop_w, crop_h).to_image();
-    let crop_mask = image::imageops::crop_imm(mask, x0, y0, crop_w, crop_h).to_image();
-
-    // Grow the mask: slivers of the object just outside the brush stroke
-    // otherwise stay visible AND anchor the model to repaint the object.
-    let grow = (crop_w.max(crop_h) / 60).clamp(12, 32);
-    let crop_mask = dilate_mask(&crop_mask, grow);
-
-    // The sampler keeps a low-frequency imprint of whatever occupies the
-    // masked area, so the SDXL tiers get a LaMa prefill as a plausible
-    // starting hint in place of the object. Flux conditions on the mask
-    // natively and needs no hint; if LaMa is unavailable we just proceed.
-    if kind != crate::comfy_engine::FillKind::Flux
-        && let Ok((registry, lama)) = resolve_and_prepare(
-            app_handle,
-            &state.model_registry,
-            TaskType::Inpaint,
-            "inpaint",
-            |m| m.params.get("engine").is_none(),
-        )
-        .await
-        && let Ok(session) = registry.get_session(&lama.manifest.id, None)
-        && let Ok((prefill, _)) = ai_processing::run_lama_inpainting(
-            &DynamicImage::ImageRgba8(crop_img.clone()),
-            &crop_mask,
-            &session,
-        )
-    {
-        crop_img = prefill;
-    }
-
-    let (img_png, mask_png, _, _) =
-        crate::expansion::engine_canvas_pngs(&crop_img, &crop_mask)?;
-    let fill_png = crate::comfy_engine::run_generative_fill(
-        app_handle,
-        state,
-        kind,
-        img_png,
-        mask_png,
-        prompt,
-        42,
-        |_| {},
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-
-    let filled = image::load_from_memory(&fill_png)
-        .map_err(|e| e.to_string())?
-        .to_rgba8();
-    let filled_crop =
-        image::imageops::resize(&filled, crop_w, crop_h, image::imageops::FilterType::Lanczos3);
-    let soft_mask = image::imageops::blur(&crop_mask, 4.0);
+/// Extracts one component's mask values for a crop window: pixels keep
+/// their mask value only where the label map says they belong to `comp`.
+fn component_crop_mask(
+    mask: &GrayImage,
+    labels: &[u32],
+    comp_id: u32,
+    x0: u32,
+    y0: u32,
+    crop_w: u32,
+    crop_h: u32,
+) -> GrayImage {
+    let w = mask.width() as usize;
+    let mut out = GrayImage::new(crop_w, crop_h);
     for y in 0..crop_h {
         for x in 0..crop_w {
+            let idx = (y0 + y) as usize * w + (x0 + x) as usize;
+            if labels[idx] == comp_id {
+                out.put_pixel(x, y, image::Luma([mask.get_pixel(x0 + x, y0 + y)[0]]));
+            }
+        }
+    }
+    out
+}
+
+/// Soft-blends a filled crop back into the full image.
+fn blend_patch_into(
+    encoded_full: &mut RgbaImage,
+    filled_crop: &RgbaImage,
+    crop_mask: &GrayImage,
+    x0: u32,
+    y0: u32,
+) {
+    let soft_mask = image::imageops::blur(crop_mask, 4.0);
+    for y in 0..filled_crop.height() {
+        for x in 0..filled_crop.width() {
             let m = soft_mask.get_pixel(x, y)[0];
             if m > 0 {
                 let alpha = m as f32 / 255.0;
@@ -765,6 +778,153 @@ async fn run_engine_inpaint_patch(
             }
         }
     }
+}
+
+/// Engine-backed removal/replace: splits the mask into connected blobs and
+/// fills each in its own tight patch — small blobs heal via LaMa (ideal
+/// for speckle selections), large ones via the generative engine — then
+/// composites back, mirroring the LaMa patch contract including the gamma
+/// flag for float sources. One whole-mask bounding box would balloon to
+/// the entire image for scattered selections (e.g. color keys) and force
+/// the model to repaint everything at reduced resolution.
+async fn run_engine_inpaint_patch(
+    source_image: &DynamicImage,
+    mask: &GrayImage,
+    prompt: &str,
+    kind: crate::comfy_engine::FillKind,
+    app_handle: &tauri::AppHandle,
+    state: &tauri::State<'_, AppState>,
+) -> Result<(RgbaImage, bool), String> {
+    const SPOT_SPAN: u32 = 96;
+    const MAX_DIFFUSION_BLOBS: usize = 6;
+
+    let is_linear = matches!(
+        source_image,
+        DynamicImage::ImageRgb32F(_) | DynamicImage::ImageRgba32F(_)
+    );
+    let (w, h) = source_image.dimensions();
+
+    // The engine wants display-referred pixels; float/RAW sources are
+    // linear, so encode (and return the composite in the same space with
+    // the gamma flag, exactly like the LaMa path).
+    let mut encoded_full = if is_linear {
+        ai_processing::gamma_encode_rgba8(source_image)
+    } else {
+        source_image.to_rgba8()
+    };
+
+    let (labels, mut comps) = mask_components(mask, 127);
+    if comps.is_empty() {
+        return Ok((encoded_full, is_linear));
+    }
+    comps.sort_by_key(|c| std::cmp::Reverse(c.area));
+    let (mut large, mut spots): (Vec<_>, Vec<_>) =
+        comps.into_iter().partition(|c| c.span() > SPOT_SPAN);
+    if large.len() > MAX_DIFFUSION_BLOBS {
+        spots.extend(large.split_off(MAX_DIFFUSION_BLOBS));
+    }
+    log::info!(
+        "[fill] mask split into {} diffusion blob(s) + {} LaMa spot(s)",
+        large.len(),
+        spots.len()
+    );
+
+    // LaMa serves both the spot heals and the SDXL prefill hint.
+    let lama_session = match resolve_and_prepare(
+        app_handle,
+        &state.model_registry,
+        TaskType::Inpaint,
+        "inpaint",
+        |m| m.params.get("engine").is_none(),
+    )
+    .await
+    {
+        Ok((registry, lama)) => registry.get_session(&lama.manifest.id, None).ok(),
+        Err(_) => None,
+    };
+
+    // Spots first, so diffusion patches see healed surroundings.
+    for comp in &spots {
+        let Some(session) = lama_session.as_ref() else {
+            break;
+        };
+        let span = comp.span();
+        let pad = 96.max(span);
+        let x0 = comp.min_x.saturating_sub(pad);
+        let y0 = comp.min_y.saturating_sub(pad);
+        let x1 = (comp.max_x + pad).min(w.saturating_sub(1));
+        let y1 = (comp.max_y + pad).min(h.saturating_sub(1));
+        let (crop_w, crop_h) = (x1 - x0 + 1, y1 - y0 + 1);
+
+        let crop_img = image::imageops::crop_imm(&encoded_full, x0, y0, crop_w, crop_h).to_image();
+        let crop_mask = component_crop_mask(mask, &labels, comp.id, x0, y0, crop_w, crop_h);
+        let crop_mask = dilate_mask(&crop_mask, (span / 8).clamp(4, 12));
+
+        if let Ok((healed, _)) = ai_processing::run_lama_inpainting(
+            &DynamicImage::ImageRgba8(crop_img),
+            &crop_mask,
+            session,
+        ) {
+            blend_patch_into(&mut encoded_full, &healed, &crop_mask, x0, y0);
+        }
+    }
+
+    for comp in &large {
+        let span_x = comp.max_x - comp.min_x + 1;
+        let span_y = comp.max_y - comp.min_y + 1;
+        let pad_x = 192.max((span_x as f32 * 1.5) as u32);
+        let pad_y = 192.max((span_y as f32 * 1.5) as u32);
+        let x0 = comp.min_x.saturating_sub(pad_x);
+        let y0 = comp.min_y.saturating_sub(pad_y);
+        let x1 = (comp.max_x + pad_x).min(w.saturating_sub(1));
+        let y1 = (comp.max_y + pad_y).min(h.saturating_sub(1));
+        let (crop_w, crop_h) = (x1 - x0 + 1, y1 - y0 + 1);
+
+        let mut crop_img =
+            image::imageops::crop_imm(&encoded_full, x0, y0, crop_w, crop_h).to_image();
+        let crop_mask = component_crop_mask(mask, &labels, comp.id, x0, y0, crop_w, crop_h);
+
+        // Grow the mask: slivers of the object just outside the selection
+        // otherwise stay visible AND anchor the model to repaint the object.
+        let grow = (crop_w.max(crop_h) / 60).clamp(12, 32);
+        let crop_mask = dilate_mask(&crop_mask, grow);
+
+        // The sampler keeps a low-frequency imprint of whatever occupies
+        // the masked area, so the SDXL tiers get a LaMa prefill as a
+        // plausible starting hint. Flux conditions on the mask natively.
+        if kind != crate::comfy_engine::FillKind::Flux
+            && let Some(session) = lama_session.as_ref()
+            && let Ok((prefill, _)) = ai_processing::run_lama_inpainting(
+                &DynamicImage::ImageRgba8(crop_img.clone()),
+                &crop_mask,
+                session,
+            )
+        {
+            crop_img = prefill;
+        }
+
+        let (img_png, mask_png, _, _) = crate::expansion::engine_canvas_pngs(&crop_img, &crop_mask)?;
+        let fill_png = crate::comfy_engine::run_generative_fill(
+            app_handle,
+            state,
+            kind,
+            img_png,
+            mask_png,
+            prompt,
+            42,
+            |_| {},
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+        let filled = image::load_from_memory(&fill_png)
+            .map_err(|e| e.to_string())?
+            .to_rgba8();
+        let filled_crop =
+            image::imageops::resize(&filled, crop_w, crop_h, image::imageops::FilterType::Lanczos3);
+        blend_patch_into(&mut encoded_full, &filled_crop, &crop_mask, x0, y0);
+    }
+
     Ok((encoded_full, is_linear))
 }
 
@@ -1235,4 +1395,40 @@ pub async fn invoke_spot_enhance_with_mask_def(
     .await?;
 
     encode_patch_result(&patch_rgba, patch_is_gamma, &mask_bitmap)
+}
+
+#[cfg(test)]
+mod fill_component_tests {
+    use super::*;
+
+    /// Scattered selections must decompose into separate blobs — one box
+    /// around everything is exactly the failure mode that made color-key
+    /// fills repaint the whole photo.
+    #[test]
+    fn scattered_mask_splits_into_components() {
+        let mut mask = GrayImage::new(400, 300);
+        // Big blob: 120x80 at (20,20). Speck: 6x6 at (350,250).
+        for y in 20..100 {
+            for x in 20..140 {
+                mask.put_pixel(x, y, image::Luma([255]));
+            }
+        }
+        for y in 250..256 {
+            for x in 350..356 {
+                mask.put_pixel(x, y, image::Luma([255]));
+            }
+        }
+
+        let (labels, comps) = mask_components(&mask, 127);
+        assert_eq!(comps.len(), 2, "two disjoint blobs expected");
+        let big = comps.iter().max_by_key(|c| c.area).unwrap();
+        let small = comps.iter().min_by_key(|c| c.area).unwrap();
+        assert_eq!((big.min_x, big.min_y, big.max_x, big.max_y), (20, 20, 139, 99));
+        assert_eq!(big.area, 120 * 80);
+        assert!(big.span() > 96, "big blob goes to diffusion");
+        assert!(small.span() <= 96, "speck goes to the LaMa spot path");
+        // Labels separate the blobs.
+        assert_ne!(labels[25 * 400 + 25], labels[252 * 400 + 352]);
+        assert_eq!(labels[0], 0, "background unlabeled");
+    }
 }

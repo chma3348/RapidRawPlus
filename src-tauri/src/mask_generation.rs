@@ -1142,10 +1142,16 @@ fn hue_dist_deg(a: f32, b: f32) -> f32 {
 /// deliberately de-weighted so one object stays selectable across its
 /// shading — the property that makes Lightroom's color range feel right.
 fn color_key_distance(px: (f32, f32, f32), r: (f32, f32, f32)) -> f32 {
+    // Near-neutral references carry no meaningful hue (the hue of an
+    // almost-white pixel is noise), so matching flips to brightness +
+    // saturation as the reference desaturates — that's what "select this
+    // light tone" actually means. Saturated references keep the original
+    // hue-dominant weighting.
+    let neutrality = 1.0 - (r.1 / 0.15).min(1.0);
     let sat_gate = px.1.min(r.1).min(0.6) / 0.6;
-    let dh = (hue_dist_deg(px.0, r.0) / 180.0) * (0.35 + 1.35 * sat_gate);
-    let ds = (px.1 - r.1).abs() * 0.55;
-    let dv = (px.2 - r.2).abs() * 0.22;
+    let dh = (hue_dist_deg(px.0, r.0) / 180.0) * (0.35 + 1.35 * sat_gate) * (1.0 - neutrality);
+    let ds = (px.1 - r.1).abs() * (0.55 + 0.65 * neutrality);
+    let dv = (px.2 - r.2).abs() * (0.22 + 1.0 * neutrality);
     (dh * dh + ds * ds + dv * dv).sqrt()
 }
 
@@ -1867,6 +1873,22 @@ mod color_select_tests {
         let red = rgb_to_hsv_f(0.8, 0.2, 0.2);
         let d = color_key_distance(gray, red);
         assert!(d > 0.3, "gray should stay far from a red key (d={d:.3})");
+    }
+
+    /// A near-white reference ("super light but not white") must select by
+    /// brightness, not by its meaningless hue: same-tone pixels beat pure
+    /// white, mid-gray, and pale-but-saturated pixels.
+    #[test]
+    fn near_white_ref_selects_by_brightness() {
+        let light_ref = rgb_to_hsv_f(0.92, 0.91, 0.90);
+        let same_tone = color_key_distance(rgb_to_hsv_f(0.90, 0.90, 0.89), light_ref);
+        let white = color_key_distance(rgb_to_hsv_f(1.0, 1.0, 1.0), light_ref);
+        let mid_gray = color_key_distance(rgb_to_hsv_f(0.55, 0.55, 0.55), light_ref);
+        let pale_pink = color_key_distance(rgb_to_hsv_f(0.95, 0.72, 0.72), light_ref);
+        assert!(same_tone < white, "same tone ({same_tone:.3}) must beat white ({white:.3})");
+        assert!(same_tone < mid_gray, "same tone must beat mid-gray ({mid_gray:.3})");
+        assert!(same_tone < pale_pink, "same tone must beat pale saturated ({pale_pink:.3})");
+        assert!(mid_gray > 0.3, "mid-gray must fall outside a light-tone key");
     }
 
     #[test]

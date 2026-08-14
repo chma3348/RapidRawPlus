@@ -42,13 +42,13 @@ Nothing gets added or dropped from this list silently.
 - Rebuild RapidRAW+, install, relaunch.
 - Commit + push with the phase name; report acceptance-list status.
 
-## Round: color-select fill quality (agreed 2026-08-13)
-- [ ] Neutral-aware color key: near-neutral references (sat < ~15%)
+## Round: color-select fill quality — SHIPPED
+- [x] Neutral-aware color key: near-neutral references (sat < ~15%)
       match by brightness+saturation instead of hue noise; saturated
       behavior unchanged (existing tests must still pass).
-- [ ] Per-blob filling: the engine fill splits the mask into connected
+- [x] Per-blob filling: the engine fill splits the mask into connected
       components — small blobs heal via LaMa spot passes, large blobs get
       their own tight diffusion patch (cap 6 largest; excess demoted to
       LaMa). No more whole-image bounding boxes from scattered masks.
-- [ ] Verify: cargo tests incl. new component/key tests, TS 120, build,
+- [x] Verify: cargo tests incl. new component/key tests, TS 120, build,
       install, commit + push.
