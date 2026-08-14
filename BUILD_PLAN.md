@@ -67,14 +67,14 @@ rebuild + install at phase end. Nothing added or dropped silently.
 - [x] Unit tests: harmonization pulls a bright smooth patch to ring tone
       and ring noise level.
 
-## Phase I — Film look pack (+ Sat vs Sat)
+## Phase I — Film look pack (+ Sat vs Sat) — SHIPPED (bright-pass prepass deferred: existing threshold architecture + upgrades deliver the look; escalate only if speculars feel dead)
 - [ ] GPU bright-pass blur prepass (thresholded highlights, wide blur).
-- [ ] Halation: warm red-weighted spill around bright highlights.
-- [ ] Glow: neutral soft bloom with adjustable knee.
-- [ ] Film saturation: eases saturation out of deep shadows and near
+- [x] Halation: warm red-weighted spill around bright highlights.
+- [x] Glow: neutral soft bloom with adjustable knee.
+- [x] Film saturation: eases saturation out of deep shadows and near
       white (density-style response).
-- [ ] Sat vs Sat curve tab in the curves panel.
-- [ ] All v2-engine; shader layout probe updated for new bindings.
+- [x] Sat vs Sat curve tab in the curves panel.
+- [x] All v2-engine; shader layout probe updated for new bindings.
 
 ## Phase J — HDR zone wheels
 - [ ] Six Oklab-lightness zones (blacks/dark/shadow/light/highlight/

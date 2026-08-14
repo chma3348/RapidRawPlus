@@ -9,7 +9,7 @@ export interface HueCurvePoint {
   y: number;
 }
 
-type CurveKey = 'hueHue' | 'hueSat' | 'hueLum' | 'lumSat';
+type CurveKey = 'hueHue' | 'hueSat' | 'hueLum' | 'lumSat' | 'satSat';
 
 interface HueCurvesPanelProps {
   adjustments: Partial<Adjustments>;
@@ -26,6 +26,7 @@ const CURVE_TABS: Array<{ key: CurveKey; label: string; xMax: number; hueAxis: b
   { key: 'hueSat', label: 'H/S', xMax: 360, hueAxis: true },
   { key: 'hueLum', label: 'H/L', xMax: 360, hueAxis: true },
   { key: 'lumSat', label: 'L/S', xMax: 100, hueAxis: false },
+  { key: 'satSat', label: 'S/S', xMax: 100, hueAxis: false },
 ];
 
 const toSvgX = (x: number, xMax: number) => PAD + (x / xMax) * (W - 2 * PAD);

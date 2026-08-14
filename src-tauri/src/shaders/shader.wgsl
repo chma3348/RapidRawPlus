@@ -141,6 +141,17 @@ struct GlobalAdjustments {
     _pad_pv1: f32,
     _pad_pv2: f32,
     _pad_pv3: f32,
+
+    // Film pack: density-style saturation response + Sat-vs-Sat curve.
+    film_saturation: f32,
+    _pad_film1: f32,
+    _pad_film2: f32,
+    _pad_film3: f32,
+    sat_sat_curve: array<Point, 16>,
+    sat_sat_count: u32,
+    _pad_ss1: u32,
+    _pad_ss2: u32,
+    _pad_ss3: u32,
 }
 
 struct MaskAdjustments {
@@ -541,7 +552,8 @@ fn eval_delta_curve(points: array<Point, 16>, count: u32, x: f32) -> f32 {
 fn apply_hue_curves(color: vec3<f32>) -> vec3<f32> {
     let g = adjustments.global;
     if (g.hue_hue_count == 0u && g.hue_sat_count == 0u
-        && g.hue_lum_count == 0u && g.lum_sat_count == 0u) {
+        && g.hue_lum_count == 0u && g.lum_sat_count == 0u
+        && g.sat_sat_count == 0u) {
         return color;
     }
 
@@ -566,6 +578,12 @@ fn apply_hue_curves(color: vec3<f32>) -> vec3<f32> {
     if (g.lum_sat_count > 0u) {
         let dls = eval_delta_curve(g.lum_sat_curve, g.lum_sat_count, hsv.z);
         hsv.y = clamp(hsv.y * (1.0 + dls), 0.0, 1.0);
+    }
+    if (g.sat_sat_count > 0u) {
+        // Sat vs Sat: x = the pixel's own saturation — compress loud
+        // colors and lift muted ones on one curve.
+        let dss = eval_delta_curve(g.sat_sat_curve, g.sat_sat_count, hsv.y);
+        hsv.y = clamp(hsv.y * (1.0 + dss), 0.0, 1.0);
     }
 
     let adjusted = hsv_to_rgb(hsv);
@@ -1671,6 +1689,22 @@ fn sample_lut_tetrahedral(uv: vec3<f32>) -> vec3<f32> {
     return res;
 }
 
+// Film-density saturation: print film eases saturation out of deep
+// shadows and near-white instead of holding it constant — a large part of
+// why film renders read as "expensive" while digital saturation reads as
+// loud. Runs in Oklab so the ease never shifts hue.
+fn apply_film_saturation(color: vec3<f32>, amount: f32) -> vec3<f32> {
+    if (amount <= 0.001) {
+        return color;
+    }
+    let lab = linear_to_oklab(max(color, vec3<f32>(0.0)));
+    let l = clamp(lab.x, 0.0, 1.2);
+    let highlight_ease = smoothstep(0.78, 1.05, l);
+    let shadow_ease = 1.0 - smoothstep(0.05, 0.28, l);
+    let desat = clamp((highlight_ease * 0.75 + shadow_ease * 0.55) * amount, 0.0, 0.9);
+    return oklab_to_linear(vec3<f32>(lab.x, lab.yz * (1.0 - desat)));
+}
+
 fn apply_glow_bloom(
     color: vec3<f32>,
     blurred_color_input_space: vec3<f32>,
@@ -1964,8 +1998,11 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         );
     }
     if (t_halation > 0.0) {
+        // Layered falloff: the 8px blur keeps a hot core, the 40px blur
+        // lets the red spill breathe wide like real emulsion halation.
+        let halation_spread = mix(clarity_blurred, structure_blurred, 0.6);
         processed_rgb = apply_halation(
-            processed_rgb, clarity_blurred, t_halation, is_raw,
+            processed_rgb, halation_spread, t_halation, is_raw,
             t_exposure, t_brightness, t_contrast, t_whites
         );
     }
@@ -1997,6 +2034,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     composite_rgb_linear = apply_hue_shift(composite_rgb_linear, t_hue);
     composite_rgb_linear = apply_hue_curves(composite_rgb_linear);
     composite_rgb_linear = apply_creative_color(composite_rgb_linear, t_saturation, t_vibrance);
+    composite_rgb_linear = apply_film_saturation(composite_rgb_linear, adjustments.global.film_saturation);
 
     composite_rgb_linear = apply_color_grading(
         composite_rgb_linear,

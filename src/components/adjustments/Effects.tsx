@@ -78,6 +78,18 @@ export default function EffectsPanel({
 
         {!isForMask && (
           <Slider
+            label={t('adjustments.effects.filmSaturation')}
+            max={100}
+            min={0}
+            onChange={(e: any) => handleAdjustmentChange(CreativeAdjustment.FilmSaturation, e.target.value)}
+            step={1}
+            value={adjustments.filmSaturation ?? 0}
+            onDragStateChange={onDragStateChange}
+          />
+        )}
+
+        {!isForMask && (
+          <Slider
             label={t('adjustments.effects.lightFlares')}
             max={100}
             min={0}

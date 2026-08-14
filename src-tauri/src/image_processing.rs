@@ -1362,6 +1362,18 @@ pub struct GlobalAdjustments {
     pub _pad_pv1: f32,
     pub _pad_pv2: f32,
     pub _pad_pv3: f32,
+
+    // Film pack: density-style saturation response (eases saturation out
+    // of deep shadows and near-white, like print film) + Sat-vs-Sat curve.
+    pub film_saturation: f32,
+    pub _pad_film1: f32,
+    pub _pad_film2: f32,
+    pub _pad_film3: f32,
+    pub sat_sat_curve: [Point; 16],
+    pub sat_sat_count: u32,
+    pub _pad_ss1: u32,
+    pub _pad_ss2: u32,
+    pub _pad_ss3: u32,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, Pod, Zeroable, Default)]
@@ -2091,6 +2103,12 @@ fn get_global_adjustments_from_json(
     let (hs_pts, hs_n) = hue_curve("hueSat", 360.0, true);
     let (hl_pts, hl_n) = hue_curve("hueLum", 360.0, true);
     let (ls_pts, ls_n) = hue_curve("lumSat", 100.0, false);
+    let (ss_pts, ss_n) = hue_curve("satSat", 100.0, false);
+    let film_saturation = if is_visible("effects") {
+        js_adjustments["filmSaturation"].as_f64().unwrap_or(0.0) as f32 / 100.0
+    } else {
+        0.0
+    };
 
     let (has_lut, lut_intensity) = if is_visible("effects") {
         (
@@ -2300,6 +2318,16 @@ fn get_global_adjustments_from_json(
         _pad_pv1: 0.0,
         _pad_pv2: 0.0,
         _pad_pv3: 0.0,
+
+        film_saturation,
+        _pad_film1: 0.0,
+        _pad_film2: 0.0,
+        _pad_film3: 0.0,
+        sat_sat_curve: ss_pts,
+        sat_sat_count: ss_n,
+        _pad_ss1: 0,
+        _pad_ss2: 0,
+        _pad_ss3: 0,
     }
 }
 

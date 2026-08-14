@@ -85,7 +85,8 @@
         "hueHue": "Hue vs Hue",
         "hueSat": "Hue vs Saturation",
         "hueLum": "Hue vs Luminance",
-        "lumSat": "Luminance vs Saturation"
+        "satSat": "Saturation vs Saturation — compress loud colors, lift muted ones",
+      "lumSat": "Luminance vs Saturation"
       }
     },
     "curves": {
@@ -141,6 +142,7 @@
       "glow": "Glow",
       "grain": "Grain",
       "halation": "Halation",
+      "filmSaturation": "Film saturation",
       "lightFlares": "Light Flares",
       "lut": "LUT",
       "midpoint": "Midpoint",
