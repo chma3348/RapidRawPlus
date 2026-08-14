@@ -153,7 +153,7 @@ struct GlobalAdjustments {
     _pad_ss2: u32,
     _pad_ss3: u32,
 
-    // Point Color: [hue_deg, dh_deg, ds, dl] + [range_deg, active, 0, 0].
+    // Point Color: [hue_deg, dh_deg, ds, dl] + [range_deg, active, sat, val].
     point_colors: array<vec4<f32>, 4>,
     point_color_meta: array<vec4<f32>, 4>,
 }
@@ -630,9 +630,13 @@ fn apply_point_colors(color: vec3<f32>) -> vec3<f32> {
         let range = max(g.point_color_meta[i].x, 4.0);
         var dh = abs(px_hue_deg - chip.x);
         dh = min(dh, 360.0 - dh);
-        // Smooth window: full effect at the picked hue, fading to zero at
-        // the range edge; near-neutral pixels are guarded like hue curves.
-        let w = (1.0 - smoothstep(range * 0.4, range, dh)) * smoothstep(0.02, 0.12, hsv.y);
+        // Full-color window: hue proximity AND sat/val proximity to the
+        // SAMPLED color — a pick means "this color", not "every pixel with
+        // this hue" (which is the entire frame on a wash-tinted photo).
+        let w_hue = 1.0 - smoothstep(range * 0.4, range, dh);
+        let w_sat = 1.0 - smoothstep(0.18, 0.42, abs(hsv.y - g.point_color_meta[i].z));
+        let w_val = 1.0 - smoothstep(0.22, 0.48, abs(hsv.z - g.point_color_meta[i].w));
+        let w = w_hue * w_sat * w_val * smoothstep(0.02, 0.12, hsv.y);
         if (w <= 0.001) { continue; }
         applied = max(applied, w);
         hsv.x = fract(hsv.x + (chip.y / 360.0) * w + 1.0);

@@ -69,6 +69,7 @@
       "vibrance": "Vibrance",
       "mixerPickerTooltip": "Click the photo to add that exact color as an editable chip",
       "pointColor": "Point color",
+      "pointRange": "Range",
       "removePointColor": "Remove point color",
       "wbPickerTooltip": "White Balance Picker",
       "wbPickerWgpuDisabled": "WB Picker: Disable WGPU in Settings.",

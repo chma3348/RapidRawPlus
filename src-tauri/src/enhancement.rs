@@ -472,7 +472,7 @@ fn finish_enhancement(
 /// model output to the target dims, swap in the original's fine-detail
 /// layer at `texture`, crossfade with the original at `strength`, close
 /// any remaining grain deficit at `grain`. Pure — no events.
-fn blend_result(
+pub(crate) fn blend_result(
     raw: &Rgb32FImage,
     original: &Rgb32FImage,
     target_w: u32,

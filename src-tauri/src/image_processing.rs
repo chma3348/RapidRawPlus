@@ -2121,11 +2121,15 @@ fn get_global_adjustments_from_json(
                 // Slider ranges are ±100; scale to shader units here so the
                 // WGSL stays unit-clean: hue ±45°, sat ±100%, lum ±60%.
                 pc[i] = [f("hue"), f("hueShift") * 0.45, f("satShift") / 100.0, f("lumShift") / 100.0 * 0.6];
+                // Full-color keying: the sampled sat/val gate the window so
+                // a pick means THAT color, not every pixel sharing its hue —
+                // critical on wash-tinted photos where one hue covers the
+                // whole frame.
                 meta[i] = [
                     entry.get("range").and_then(|v| v.as_f64()).unwrap_or(22.0) as f32,
                     1.0,
-                    0.0,
-                    0.0,
+                    f("sat"),
+                    f("val"),
                 ];
             }
         }

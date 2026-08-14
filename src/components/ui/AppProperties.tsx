@@ -75,6 +75,7 @@ export enum Invokes {
   InvokeGenerativeReplace = 'invoke_generative_replace',
   InvokeGenerativeReplaseWithMaskDef = 'invoke_generative_replace_with_mask_def',
   InvokeSpotEnhanceWithMaskDef = 'invoke_spot_enhance_with_mask_def',
+  RespotEnhance = 'respot_enhance',
   ListImagesInDir = 'list_images_in_dir',
   ListImagesRecursive = 'list_images_recursive',
   ListRegisteredModels = 'list_registered_models',

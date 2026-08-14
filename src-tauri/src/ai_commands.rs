@@ -1373,12 +1373,16 @@ fn encode_patch_result(
 /// Spot enhancement: runs the selected enhancement model (deblur / restore /
 /// upscale-as-sharpen) on a crop around the brushed region only, and
 /// feather-composites the result back — same patch contract as removal.
+#[allow(clippy::too_many_arguments)]
 async fn run_spot_enhance_patch(
     source_image: &DynamicImage,
     mask: &GrayImage,
     task_type: crate::model_registry::TaskType,
     task_key: &str,
     strength: f32,
+    texture: f32,
+    grain: f32,
+    patch_id: &str,
     app_handle: &tauri::AppHandle,
     state: &tauri::State<'_, AppState>,
 ) -> Result<(RgbaImage, bool), String> {
@@ -1496,28 +1500,113 @@ async fn run_spot_enhance_patch(
         image::imageops::resize(&raw, crop_w, crop_h, image::imageops::FilterType::Lanczos3)
     };
 
-    // Strength blend against the untouched crop, then feathered composite
-    // of only the brushed pixels.
-    let strength = strength.clamp(0.0, 1.0);
+    // The full strength/texture/grain blend (same engine as the enhance
+    // dialog), then feathered composite of only the brushed pixels.
     let original_f32: image::Rgb32FImage = DynamicImage::ImageRgba8(crop_img).to_rgb32f();
+    let pristine = encoded_full.clone();
+    let result = composite_spot_blend(
+        &mut encoded_full,
+        &enhanced_f32,
+        &original_f32,
+        &crop_mask,
+        (x0, y0),
+        strength,
+        texture,
+        grain,
+    );
+
+    // Cache the raw region so strength/texture/grain stay editable after
+    // rendering — a re-blend, not a model re-run.
+    *state.spot_raw.lock().unwrap() = Some(crate::app_state::SpotRaw {
+        patch_id: patch_id.to_string(),
+        raw: enhanced_f32,
+        original: original_f32,
+        encoded_full: pristine,
+        crop_mask,
+        crop_origin: (x0, y0),
+        full_mask: mask.clone(),
+        is_linear,
+    });
+
+    Ok((result, is_linear))
+}
+
+/// Blends the spot region at the given settings and composites it into a
+/// copy of `encoded_full`, feathered to the brushed pixels only.
+#[allow(clippy::too_many_arguments)]
+fn composite_spot_blend(
+    encoded_full: &mut RgbaImage,
+    enhanced_f32: &image::Rgb32FImage,
+    original_f32: &image::Rgb32FImage,
+    crop_mask: &GrayImage,
+    origin: (u32, u32),
+    strength: f32,
+    texture: f32,
+    grain: f32,
+) -> RgbaImage {
+    let (crop_w, crop_h) = enhanced_f32.dimensions();
+    let blended = crate::enhancement::blend_result(
+        enhanced_f32,
+        original_f32,
+        crop_w,
+        crop_h,
+        strength,
+        texture,
+        grain,
+    );
     let feather = ((crop_w.max(crop_h) as f32) / 100.0).clamp(3.0, 12.0);
-    let soft_mask = image::imageops::blur(&crop_mask, feather);
+    let soft_mask = image::imageops::blur(crop_mask, feather);
     for y in 0..crop_h {
         for x in 0..crop_w {
             let m = soft_mask.get_pixel(x, y)[0];
             if m > 0 {
-                let alpha = (m as f32 / 255.0) * strength;
-                let e = enhanced_f32.get_pixel(x, y);
+                let alpha = m as f32 / 255.0;
+                let b = blended.get_pixel(x, y);
                 let o = original_f32.get_pixel(x, y);
-                let dst = encoded_full.get_pixel_mut(x0 + x, y0 + y);
+                let dst = encoded_full.get_pixel_mut(origin.0 + x, origin.1 + y);
                 for c in 0..3 {
-                    let v = e[c] * alpha + o[c] * (1.0 - alpha);
+                    let v = b[c] * alpha + o[c] * (1.0 - alpha);
                     dst[c] = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
                 }
             }
         }
     }
-    Ok((encoded_full, is_linear))
+    encoded_full.clone()
+}
+
+/// Re-blends the last spot enhance at new settings from the cached raw
+/// region — instant, no model run. Returns the same patch payload as
+/// `invoke_spot_enhance_with_mask_def`.
+#[tauri::command]
+pub async fn respot_enhance(
+    patch_id: String,
+    strength: Option<f32>,
+    texture: Option<f32>,
+    grain: Option<f32>,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    let spot_handle = state.spot_raw.clone();
+    tokio::task::spawn_blocking(move || {
+        let guard = spot_handle.lock().unwrap();
+        let Some(cache) = guard.as_ref().filter(|c| c.patch_id == patch_id) else {
+            return Err("This edit's raw result is no longer cached — run Enhance again.".to_string());
+        };
+        log::info!("[spot] re-blend patch {} from cache", patch_id);
+        let mut base = cache.encoded_full.clone();
+        let result = composite_spot_blend(
+            &mut base,
+            &cache.raw,
+            &cache.original,
+            &cache.crop_mask,
+            cache.crop_origin,
+            strength.unwrap_or(0.7),
+            texture.unwrap_or(0.0),
+            grain.unwrap_or(0.0),
+        );
+        encode_patch_result(&result, cache.is_linear, &cache.full_mask)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 
@@ -1528,6 +1617,8 @@ pub async fn invoke_spot_enhance_with_mask_def(
     current_adjustments: Value,
     task: String,
     strength: Option<f32>,
+    texture: Option<f32>,
+    grain: Option<f32>,
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
@@ -1599,6 +1690,9 @@ pub async fn invoke_spot_enhance_with_mask_def(
         task_type,
         &task,
         strength.unwrap_or(0.7),
+        texture.unwrap_or(0.0),
+        grain.unwrap_or(0.0),
+        &patch_definition.id,
         &app_handle,
         &state,
     )

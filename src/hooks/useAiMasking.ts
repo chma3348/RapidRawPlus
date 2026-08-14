@@ -131,7 +131,7 @@ export function useAiMasking() {
   );
 
   const handleSpotEnhance = useCallback(
-    async (patchId: string, task: string, strength: number) => {
+    async (patchId: string, task: string, strength: number, texture: number = 0, grain: number = 0) => {
       const { selectedImage, adjustments, isGeneratingAi, patchesSentToBackend } = useEditorStore.getState();
       if (!selectedImage?.path || isGeneratingAi) return;
 
@@ -151,6 +151,8 @@ export function useAiMasking() {
           path: selectedImage.path,
           task,
           strength,
+          texture,
+          grain,
         });
         const newPatchData = JSON.parse(newPatchDataJson);
         patchesSentToBackend.delete(patchId);
@@ -168,7 +170,7 @@ export function useAiMasking() {
               : p,
           ),
         }));
-        setEditor({ activeAiPatchContainerId: null, activeAiSubMaskId: null });
+        setEditor({ activeAiSubMaskId: null });
       } catch (err) {
         toast.error(`Spot Enhance Failed: ${err}`);
         setAdjustments((prev: Adjustments) => ({
@@ -495,6 +497,7 @@ export function useAiMasking() {
     updateSubMask,
     handleGenerativeReplace,
     handleSpotEnhance,
+    handleRespotEnhance,
     handleGenerateAiPaintMask,
     handleQuickErase,
     handleDeleteMaskContainer,

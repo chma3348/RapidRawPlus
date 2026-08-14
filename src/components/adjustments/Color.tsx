@@ -551,7 +551,7 @@ export default function ColorPanel({
   const pointIdx = activeColor.startsWith('point-') ? Number(activeColor.slice(6)) : -1;
   const activePoint = pointIdx >= 0 ? pointColors[pointIdx] : null;
 
-  const handlePointChange = (key: 'hueShift' | 'satShift' | 'lumShift', value: string) => {
+  const handlePointChange = (key: 'hueShift' | 'satShift' | 'lumShift' | 'range', value: string) => {
     setAdjustments((prev: Partial<Adjustments>) => ({
       ...prev,
       pointColors: (prev.pointColors ?? []).map((c, i) =>
@@ -776,6 +776,19 @@ export default function ColorPanel({
           trackClassName={activePoint ? undefined : luminance_slider}
           onDragStateChange={onDragStateChange}
         />
+        {activePoint && (
+          <Slider
+            label={t('adjustments.color.pointRange')}
+            max={60}
+            min={5}
+            onChange={(e: any) => handlePointChange('range', e.target.value)}
+            step={1}
+            defaultValue={22}
+            value={activePoint.range ?? 22}
+            fillOrigin="min"
+            onDragStateChange={onDragStateChange}
+          />
+        )}
       </div>
 
       {!isForMask && adjustmentVisibility.hueCurves !== false && (

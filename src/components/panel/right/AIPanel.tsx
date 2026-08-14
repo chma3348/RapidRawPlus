@@ -323,7 +323,7 @@ export default function AIPanel() {
   const setCustomEscapeHandler = useUIStore((s) => s.setCustomEscapeHandler);
 
   const { setAdjustments } = useEditorActions();
-  const { handleGenerativeReplace, handleSpotEnhance, handleDeleteAiPatch, handleGenerateAiForegroundMask } = useAiMasking();
+  const { handleGenerativeReplace, handleSpotEnhance, handleRespotEnhance, handleDeleteAiPatch, handleGenerateAiForegroundMask } = useAiMasking();
   const appSettings = useSettingsStore((s) => s.appSettings);
   const aiProvider = appSettings?.aiProvider || 'cpu';
 
@@ -1162,6 +1162,7 @@ export default function AIPanel() {
                   isGeneratingAiMask={isGeneratingAiMask}
                   onGenerativeReplace={handleGenerativeReplace}
                   onSpotEnhance={handleSpotEnhance}
+                  onRespotEnhance={handleRespotEnhance}
                   collapsibleState={collapsibleState}
                   setCollapsibleState={setCollapsibleState}
                   isGenerativeAvailable={isGenerativeAvailable}
@@ -1781,6 +1782,7 @@ function SettingsPanel({
   isGeneratingAiMask: _isGeneratingAiMask,
   onGenerativeReplace,
   onSpotEnhance,
+  onRespotEnhance,
   collapsibleState,
   setCollapsibleState,
   isGenerativeAvailable,
@@ -1795,6 +1797,22 @@ function SettingsPanel({
   const [inpaintModels, setInpaintModels] = useState<Array<any>>([]);
   const [spotTask, setSpotTask] = useState<'deblur' | 'restore' | 'upscale'>('deblur');
   const [spotStrength, setSpotStrength] = useState(70);
+  const [spotTexture, setSpotTexture] = useState(40);
+  const [spotGrain, setSpotGrain] = useState(50);
+
+  // Live re-edit of a rendered spot patch: sliders re-blend the cached raw
+  // region backend-side — instant, no model re-run, no glitches.
+  const spotRespotTimer = useRef<any>(null);
+  useEffect(() => {
+    const isSpotPatch = container?.patchData && String(container?.name || '').startsWith('Spot');
+    if (!isSpotPatch || isGeneratingAi || container?.isLoading) return;
+    clearTimeout(spotRespotTimer.current);
+    spotRespotTimer.current = setTimeout(() => {
+      onRespotEnhance?.(container.id, spotStrength / 100, spotTexture / 100, spotGrain / 100);
+    }, 400);
+    return () => clearTimeout(spotRespotTimer.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [spotStrength, spotTexture, spotGrain]);
 
   useEffect(() => {
     invoke(Invokes.ListRegisteredModels, { taskType: 'inpaint' })
@@ -2037,10 +2055,28 @@ function SettingsPanel({
             defaultValue={70}
             onChange={(e: any) => setSpotStrength(Number(e.target.value))}
           />
+          <Slider
+            label={t('modals.enhance.textureLabel')}
+            value={spotTexture}
+            min={0}
+            max={100}
+            step={5}
+            defaultValue={40}
+            onChange={(e: any) => setSpotTexture(Number(e.target.value))}
+          />
+          <Slider
+            label={t('modals.enhance.grainLabel')}
+            value={spotGrain}
+            min={0}
+            max={100}
+            step={5}
+            defaultValue={50}
+            onChange={(e: any) => setSpotGrain(Number(e.target.value))}
+          />
           <Button
             className="w-full"
             disabled={isGeneratingAi || displayContainer.isLoading || displayContainer.subMasks.length === 0}
-            onClick={() => container && onSpotEnhance(container.id, spotTask, spotStrength / 100)}
+            onClick={() => container && onSpotEnhance(container.id, spotTask, spotStrength / 100, spotTexture / 100, spotGrain / 100)}
           >
             {isGeneratingAi || displayContainer.isLoading ? (
               <Loader2 size={16} className="animate-spin" />
@@ -2099,7 +2135,7 @@ function SettingsPanel({
               {subMaskConfig.parameters?.map((param: any) => (
                 <Slider
                   key={param.key}
-                  label={t('editor.ai.params.' + param.key)}
+                  label={t(('editor.ai.params.' + param.key) as any)}
                   min={param.min}
                   max={param.max}
                   step={param.step}

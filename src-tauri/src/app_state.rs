@@ -123,6 +123,22 @@ pub struct PreviewRaw {
     pub original: image::Rgb32FImage,
 }
 
+/// Raw region output of the last SPOT ENHANCE, so its strength / texture /
+/// grain can be re-edited after rendering without re-running the model.
+pub struct SpotRaw {
+    pub patch_id: String,
+    /// Model output at crop dims (f32 [0,1], display-referred).
+    pub raw: image::Rgb32FImage,
+    /// Untouched crop pixels at the same dims.
+    pub original: image::Rgb32FImage,
+    /// Full encoded image WITHOUT the patch composited.
+    pub encoded_full: image::RgbaImage,
+    pub crop_mask: image::GrayImage,
+    pub crop_origin: (u32, u32),
+    pub full_mask: image::GrayImage,
+    pub is_linear: bool,
+}
+
 pub struct AppState {
     pub window_setup_complete: AtomicBool,
     pub gpu_crash_flag_path: Mutex<Option<PathBuf>>,
@@ -144,6 +160,7 @@ pub struct AppState {
     /// re-running the model.
     pub enhancement_raw: Arc<Mutex<Option<EnhancementRaw>>>,
     pub enhancement_preview_raw: Arc<Mutex<Option<PreviewRaw>>>,
+    pub spot_raw: Arc<Mutex<Option<SpotRaw>>>,
     /// Input image pinned per chain step: retries within a step must feed
     /// on the PREVIOUS step's result, not the step's own output (which has
     /// already replaced `enhancement_result` by then).
