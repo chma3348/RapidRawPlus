@@ -656,7 +656,18 @@ fn apply_point_colors(
         let w_hue = 1.0 - smoothstep(range * 0.4, range, dh);
         let w_sat = 1.0 - smoothstep(0.18, 0.42, abs(gate_hsv.y - g.point_color_meta[i].z));
         let w_val = 1.0 - smoothstep(0.22, 0.48, abs(gate_hsv.z - g.point_color_meta[i].w));
-        let w = w_hue * w_sat * w_val * smoothstep(0.015, 0.06, gate_hsv.y);
+        // Near-neutral CHIPS must not gate on hue: hue is numerically
+        // meaningless on pale pixels, so JPEG blocks swing wildly in hue
+        // while looking identical — a hue gate then switches whole blocks
+        // in and out of the window and luminance edits checkerboard them.
+        // A pale pick selects by paleness + brightness alone; the neutral
+        // guard (which exists to PROTECT neutrals from hue ops) also
+        // yields, since a neutral chip is aimed at neutrals on purpose.
+        let hue_conf = smoothstep(0.08, 0.25, g.point_color_meta[i].z);
+        let w = mix(1.0, w_hue, hue_conf)
+            * w_sat
+            * w_val
+            * mix(1.0, smoothstep(0.015, 0.06, gate_hsv.y), hue_conf);
         if (w <= 0.001) { continue; }
         applied = max(applied, w);
         hsv.x = (hsv.x + chip.y * w + 360.0) % 360.0;

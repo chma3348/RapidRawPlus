@@ -481,3 +481,75 @@ fn zero_delta_point_color_is_identity() {
         "zero-delta chip must not change ANY pixel (max channel diff {max_diff})"
     );
 }
+
+/// The user's screenshot: a pale chip's luminance edit checkerboarded a
+/// low-quality JPEG — near-neutral blocks swing wildly in HUE while
+/// looking identical, and a hue gate switched whole blocks in/out of the
+/// window. A pale chip must weight look-alike pale blocks EQUALLY, so a
+/// luminance shift moves them together instead of amplifying their
+/// differences.
+#[test]
+fn pale_chip_luminance_does_not_amplify_blocks() {
+    let Some((device, queue, limits)) = make_device() else {
+        eprintln!("no GPU; skipping");
+        return;
+    };
+    let context = GpuContext {
+        device: Arc::new(device),
+        queue: Arc::new(queue),
+        limits,
+        display: Arc::new(std::sync::Mutex::new(None)),
+    };
+    let device = context.device.clone();
+    let queue = context.queue.clone();
+    let processor = GpuProcessor::new(context, W, H).expect("processor");
+
+    // Two "JPEG blocks": both pale, nearly identical to the eye, but with
+    // hue-noise (left leans warm, right leans cool) — the block structure
+    // of a compressed wash.
+    let mut img = vec![0f32; (W * H * 4) as usize];
+    for y in 0..H {
+        for x in 0..W {
+            let i = ((y * W + x) * 4) as usize;
+            if x < W / 2 {
+                img[i] = 0.62;
+                img[i + 1] = 0.58;
+                img[i + 2] = 0.55; // warm pale, sat ~0.11, hue ~26°
+            } else {
+                img[i] = 0.56;
+                img[i + 1] = 0.58;
+                img[i + 2] = 0.61; // cool pale, sat ~0.08, hue ~216°
+            }
+            img[i + 3] = 1.0;
+        }
+    }
+
+    let mut adj = AllAdjustments::default();
+    adj.global.process_version = 2;
+    let base = render(&processor, &device, &queue, &img, adj);
+
+    // Pale chip (sat 0.10, val 0.78 — the user's actual pick) with a
+    // strong negative luminance shift.
+    adj.global.point_colors[0] = [20.0, 0.0, 0.0, -0.5];
+    adj.global.point_color_meta[0] = [22.0, 1.0, 0.10, 0.78];
+    let shifted = render(&processor, &device, &queue, &img, adj);
+
+    let y_mid = (H / 2) as usize;
+    let luma = |data: &Vec<u8>, x: usize| -> f32 {
+        let i = (y_mid * W as usize + x) * 4;
+        0.2126 * data[i] as f32 + 0.7152 * data[i + 1] as f32 + 0.0722 * data[i + 2] as f32
+    };
+    let (xl, xr) = ((W / 4) as usize, (3 * W / 4) as usize);
+    let drop_left = luma(&base, xl) - luma(&shifted, xl);
+    let drop_right = luma(&base, xr) - luma(&shifted, xr);
+
+    assert!(
+        drop_left > 8.0 && drop_right > 8.0,
+        "the pale chip must affect BOTH look-alike blocks (drops {drop_left:.1}/{drop_right:.1})"
+    );
+    let imbalance = (drop_left - drop_right).abs() / drop_left.max(drop_right);
+    assert!(
+        imbalance < 0.25,
+        "look-alike blocks must move together, not checkerboard (imbalance {imbalance:.2})"
+    );
+}
