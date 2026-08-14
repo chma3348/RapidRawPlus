@@ -914,6 +914,7 @@ async fn run_engine_inpaint_patch(
     mask: &GrayImage,
     prompt: &str,
     kind: crate::comfy_engine::FillKind,
+    lama_only: bool,
     app_handle: &tauri::AppHandle,
     state: &tauri::State<'_, AppState>,
 ) -> Result<(RgbaImage, bool), String> {
@@ -940,13 +941,24 @@ async fn run_engine_inpaint_patch(
         return Ok((encoded_full, is_linear));
     }
     comps.sort_by_key(|c| std::cmp::Reverse(c.area));
-    let (mut large, mut spots): (Vec<_>, Vec<_>) =
-        comps.into_iter().partition(|c| c.span() > SPOT_SPAN);
+    // Diffusion is for SOLID, object-like regions only. A blob that fills
+    // little of its own bounding box is lace (scattered speckle bridged by
+    // dilation, typical of color keys) — a diffusion model would repaint
+    // the whole dilated region with invented content and read as blotches.
+    // LaMa's texture synthesis is the right tool for lace at any size.
+    const MIN_SOLID_DENSITY: f32 = 0.35;
+    let is_solid = |c: &MaskComponent| {
+        let bbox = ((c.max_x - c.min_x + 1) * (c.max_y - c.min_y + 1)).max(1);
+        c.area as f32 / bbox as f32 >= MIN_SOLID_DENSITY
+    };
+    let (mut large, mut spots): (Vec<_>, Vec<_>) = comps
+        .into_iter()
+        .partition(|c| !lama_only && c.span() > SPOT_SPAN && is_solid(c));
     if large.len() > MAX_DIFFUSION_BLOBS {
         spots.extend(large.split_off(MAX_DIFFUSION_BLOBS));
     }
     log::info!(
-        "[fill] mask split into {} diffusion blob(s) + {} LaMa spot(s)",
+        "[fill] mask split into {} solid diffusion blob(s) + {} LaMa region(s)/spot(s)",
         large.len(),
         spots.len()
     );
@@ -1161,16 +1173,23 @@ pub async fn invoke_generative_replace_with_mask_def(
     // Which local inpaint model is selected decides the local paths: the
     // generative engine (SDXL fill) handles both plain removal and
     // prompt-driven replace; LaMa remains the fast texture fill.
-    let engine_model = resolve_and_prepare(
-        &app_handle,
-        &state.model_registry,
-        TaskType::Inpaint,
-        "inpaint",
-        |_| true,
-    )
-    .await
-    .ok()
-    .filter(|(_, m)| m.manifest.params.get("engine").and_then(|v| v.as_str()) == Some("comfy"));
+    // The Fast toggle is the user's word: honor it even when an engine
+    // model is selected (previously the engine silently overrode it and
+    // 'fast' runs took six diffusion round-trips).
+    let engine_model = if use_fast_inpaint {
+        None
+    } else {
+        resolve_and_prepare(
+            &app_handle,
+            &state.model_registry,
+            TaskType::Inpaint,
+            "inpaint",
+            |_| true,
+        )
+        .await
+        .ok()
+        .filter(|(_, m)| m.manifest.params.get("engine").and_then(|v| v.as_str()) == Some("comfy"))
+    };
 
     let (patch_rgba, patch_is_gamma) = if let Some((_, model)) = engine_model {
         let kind = crate::comfy_engine::FillKind::from_params(&model.manifest.params);
@@ -1179,26 +1198,26 @@ pub async fn invoke_generative_replace_with_mask_def(
             &mask_bitmap,
             &patch_definition.prompt,
             kind,
+            false,
             &app_handle,
             &state,
         )
         .await?
     } else if use_fast_inpaint {
-        let (registry, model) = resolve_and_prepare(
+        // Fast mode gets the same per-blob split + harmonization as the
+        // engine path — every blob heals via LaMa. The old whole-mask
+        // single LaMa pass is exactly what produced smeary results on
+        // scattered selections.
+        run_engine_inpaint_patch(
+            &source_image,
+            &mask_bitmap,
+            &patch_definition.prompt,
+            crate::comfy_engine::FillKind::SdxlBase,
+            true,
             &app_handle,
-            &state.model_registry,
-            TaskType::Inpaint,
-            "inpaint",
-            |_| true,
+            &state,
         )
-        .await
-        .map_err(|e| e.to_string())?;
-        let inpaint_session = registry
-            .get_session(&model.manifest.id, None)
-            .map_err(|e| e.to_string())?;
-
-        ai_processing::run_lama_inpainting(&source_image, &mask_bitmap, &inpaint_session)
-            .map_err(|e| e.to_string())?
+        .await?
     } else if settings.ai_provider.as_deref() == Some("cloud")
         && let Some(auth_token) = token
     {
@@ -1580,9 +1599,53 @@ mod fill_component_tests {
         assert_eq!(big.area, 120 * 80);
         assert!(big.span() > 96, "big blob goes to diffusion");
         assert!(small.span() <= 96, "speck goes to the LaMa spot path");
+        // The solid big blob passes the density gate; lace must not.
+        let bbox = (big.max_x - big.min_x + 1) * (big.max_y - big.min_y + 1);
+        assert!(big.area as f32 / bbox as f32 >= 0.35, "solid blob is dense");
         // Labels separate the blobs.
         assert_ne!(labels[25 * 400 + 25], labels[252 * 400 + 352]);
         assert_eq!(labels[0], 0, "background unlabeled");
+    }
+
+    /// A big-but-lacy blob (scattered speckle bridged into one component)
+    /// must fail the solidity gate — diffusion repaints lace as blotches;
+    /// only solid object-like regions earn a diffusion patch.
+    #[test]
+    fn lacy_blob_fails_the_density_gate() {
+        let mut mask = GrayImage::new(400, 400);
+        // Sparse 4px dots on a 16px grid across a 300x300 area, connected
+        // by thin 1px bridges so they form ONE component.
+        for gy in 0..19 {
+            for gx in 0..19 {
+                let (bx, by) = (20 + gx * 15, 20 + gy * 15);
+                for y in by..by + 4 {
+                    for x in bx..bx + 4 {
+                        mask.put_pixel(x, y, image::Luma([255]));
+                    }
+                }
+                // bridge to the right neighbor
+                if gx < 18 {
+                    for x in bx + 4..bx + 15 {
+                        mask.put_pixel(x, by + 1, image::Luma([255]));
+                    }
+                }
+                if gy < 18 && gx == 0 {
+                    for y in by + 4..by + 15 {
+                        mask.put_pixel(bx + 1, y, image::Luma([255]));
+                    }
+                }
+            }
+        }
+        let (_, comps) = mask_components(&mask, 127);
+        assert_eq!(comps.len(), 1, "bridged lace is one component");
+        let c = &comps[0];
+        assert!(c.span() > 96, "it is large");
+        let bbox = (c.max_x - c.min_x + 1) * (c.max_y - c.min_y + 1);
+        assert!(
+            (c.area as f32 / bbox as f32) < 0.35,
+            "lace density {:.2} must fail the solidity gate",
+            c.area as f32 / bbox as f32
+        );
     }
 
     /// The "placed-in blotch" fingerprint is a fill that is brighter/
