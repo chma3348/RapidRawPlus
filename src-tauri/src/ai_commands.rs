@@ -993,7 +993,29 @@ async fn run_engine_inpaint_patch(
         }
     }
 
+    // Size-tiered model routing: tiny blobs already healed via LaMa above;
+    // truly large areas auto-escalate to Flux (the strongest fill tier)
+    // when its weights are installed, regardless of the selected model —
+    // big reconstructions are where workflow quality dominates, and small
+    // ones aren't worth Flux's runtime.
+    const FLUX_SPAN: u32 = 320;
+    let flux_available =
+        crate::comfy_engine::fill_files_present(app_handle, crate::comfy_engine::FillKind::Flux);
+
     for comp in &large {
+        let blob_kind = if comp.span() >= FLUX_SPAN
+            && flux_available
+            && kind != crate::comfy_engine::FillKind::Flux
+        {
+            log::info!(
+                "[fill] blob span {} ≥ {} — escalating to Flux Fill",
+                comp.span(),
+                FLUX_SPAN
+            );
+            crate::comfy_engine::FillKind::Flux
+        } else {
+            kind
+        };
         let span_x = comp.max_x - comp.min_x + 1;
         let span_y = comp.max_y - comp.min_y + 1;
         let pad_x = 192.max((span_x as f32 * 1.5) as u32);
@@ -1019,7 +1041,7 @@ async fn run_engine_inpaint_patch(
         // The sampler keeps a low-frequency imprint of whatever occupies
         // the masked area, so the SDXL tiers get a LaMa prefill as a
         // plausible starting hint. Flux conditions on the mask natively.
-        if kind != crate::comfy_engine::FillKind::Flux
+        if blob_kind != crate::comfy_engine::FillKind::Flux
             && let Some(session) = lama_session.as_ref()
             && let Ok((prefill, _)) = ai_processing::run_lama_inpainting(
                 &DynamicImage::ImageRgba8(crop_img.clone()),
@@ -1034,7 +1056,7 @@ async fn run_engine_inpaint_patch(
         let fill_png = crate::comfy_engine::run_generative_fill(
             app_handle,
             state,
-            kind,
+            blob_kind,
             img_png,
             mask_png,
             prompt,

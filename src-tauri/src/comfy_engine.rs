@@ -411,7 +411,7 @@ impl FillKind {
     }
 }
 
-fn fill_files_present(app_handle: &tauri::AppHandle, kind: FillKind) -> bool {
+pub(crate) fn fill_files_present(app_handle: &tauri::AppHandle, kind: FillKind) -> bool {
     let Ok(dir) = engine_dir(app_handle) else { return false };
     let m = dir.join("ComfyUI/models");
     match kind {
