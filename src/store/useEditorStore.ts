@@ -65,6 +65,9 @@ interface EditorState {
   activeMaskId: string | null;
   activeAiPatchContainerId: string | null;
   activeAiSubMaskId: string | null;
+  // Patch row under the cursor — the red overlay shows on hover instead
+  // of permanently covering the finished edit.
+  hoveredAiPatchId: string | null;
   isMaskControlHovered: boolean;
   isGeneratingAiMask: boolean;
   isGeneratingAi: boolean;
@@ -108,6 +111,7 @@ export const useEditorStore = create<EditorState>((set) => ({
   activeMaskId: null,
   activeAiPatchContainerId: null,
   activeAiSubMaskId: null,
+  hoveredAiPatchId: null,
 
   zoom: 1,
   maskMatteView: false,

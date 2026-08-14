@@ -1407,6 +1407,8 @@ function ContainerRow({
           e.stopPropagation();
           onSelect();
         }}
+        onMouseEnter={() => useEditorStore.getState().setEditor({ hoveredAiPatchId: container.id })}
+        onMouseLeave={() => useEditorStore.getState().setEditor({ hoveredAiPatchId: null })}
         onContextMenu={onContextMenu}
       >
         <Text

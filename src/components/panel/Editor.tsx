@@ -108,6 +108,7 @@ export default function Editor({ onBackToLibrary, onContextMenu, transformWrappe
   const maskMatteView = useEditorStore((s) => s.maskMatteView);
   const activeAiPatchContainerId = useEditorStore((s) => s.activeAiPatchContainerId);
   const activeAiSubMaskId = useEditorStore((s) => s.activeAiSubMaskId);
+  const hoveredAiPatchId = useEditorStore((s) => s.hoveredAiPatchId);
   const isMaskControlHovered = useEditorStore((s) => s.isMaskControlHovered);
   const hasRenderedFirstFrame = useEditorStore((s) => s.hasRenderedFirstFrame);
 
@@ -1367,8 +1368,15 @@ export default function Editor({ onBackToLibrary, onContextMenu, transformWrappe
           adjustments: {},
         };
       }
-    } else if (activeRightPanel === Panel.Ai && activeAiPatchContainerId) {
-      const activePatch = adjustments.aiPatches?.find((p: AiPatch) => p.id === activeAiPatchContainerId);
+    } else if (activeRightPanel === Panel.Ai) {
+      // The red overlay must not sit permanently over a finished edit —
+      // it shows while a selection is being EDITED (sub-mask active) or
+      // while HOVERING a patch row, and stays hidden otherwise so the
+      // actual result is visible.
+      const overlayPatchId = hoveredAiPatchId ?? (activeAiSubMaskId ? activeAiPatchContainerId : null);
+      const activePatch = overlayPatchId
+        ? adjustments.aiPatches?.find((p: AiPatch) => p.id === overlayPatchId)
+        : null;
       if (activePatch) {
         maskDefForOverlay = {
           ...activePatch,
@@ -1386,6 +1394,8 @@ export default function Editor({ onBackToLibrary, onContextMenu, transformWrappe
     activeRightPanel,
     activeMaskContainerId,
     activeAiPatchContainerId,
+    activeAiSubMaskId,
+    hoveredAiPatchId,
     imageRenderSize,
     maskMatteView,
   ]);
