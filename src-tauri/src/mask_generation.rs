@@ -1140,7 +1140,7 @@ fn generate_ai_subject_bitmap(
     Some(mask)
 }
 
-fn rgb_to_hsv_f(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+pub(crate) fn rgb_to_hsv_f(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
     let max = r.max(g).max(b);
     let min = r.min(g).min(b);
     let d = max - min;

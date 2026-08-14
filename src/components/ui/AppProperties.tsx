@@ -119,6 +119,7 @@ export enum Invokes {
   InstallRemoteModel = 'install_remote_model',
   PreviewEnhancement = 'preview_enhancement',
   GetEnhancementOverview = 'get_enhancement_overview',
+  SampleImageColor = 'sample_image_color',
   ApplyExpansion = 'apply_expansion',
   SaveExpandedImage = 'save_expanded_image',
   SearchRemoteModels = 'search_remote_models',

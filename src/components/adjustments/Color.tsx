@@ -519,15 +519,55 @@ export default function ColorPanel({
     }));
   };
 
-  // Adopt a band picked with the eyedropper on the canvas: ImageCanvas
-  // writes the nearest band name to the store; consume and clear it.
-  const mixerTargetBand = useEditorStore((s) => s.mixerTargetBand);
+  // Point Color: an eyedropper pick (sampled backend-side) becomes a chip
+  // holding that EXACT color — its H/S/L sliders edit a narrow window
+  // around the sampled hue, leaving presets and other colors untouched.
+  const mixerPickedColor = useEditorStore((s) => s.mixerPickedColor);
   useEffect(() => {
-    if (mixerTargetBand && !isForMask) {
-      setActiveColor(mixerTargetBand);
-      useEditorStore.getState().setEditor({ mixerTargetBand: null });
+    if (mixerPickedColor && !isForMask) {
+      const priorLen = adjustments.pointColors?.length ?? 0;
+      const newIdx = Math.min(priorLen, 3);
+      setAdjustments((prev: Partial<Adjustments>) => {
+        const list = [...(prev.pointColors ?? [])];
+        if (list.length >= 4) list.shift();
+        list.push({
+          hue: mixerPickedColor.hue,
+          sat: mixerPickedColor.sat,
+          val: mixerPickedColor.val,
+          range: 22,
+          hueShift: 0,
+          satShift: 0,
+          lumShift: 0,
+        });
+        return { ...prev, pointColors: list };
+      });
+      setActiveColor(`point-${newIdx}`);
+      useEditorStore.getState().setEditor({ mixerPickedColor: null });
     }
-  }, [mixerTargetBand, isForMask]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mixerPickedColor, isForMask]);
+
+  const pointColors = adjustments.pointColors ?? [];
+  const pointIdx = activeColor.startsWith('point-') ? Number(activeColor.slice(6)) : -1;
+  const activePoint = pointIdx >= 0 ? pointColors[pointIdx] : null;
+
+  const handlePointChange = (key: 'hueShift' | 'satShift' | 'lumShift', value: string) => {
+    setAdjustments((prev: Partial<Adjustments>) => ({
+      ...prev,
+      pointColors: (prev.pointColors ?? []).map((c, i) =>
+        i === pointIdx ? { ...c, [key]: parseFloat(value) } : c,
+      ),
+    }));
+  };
+
+  const removePoint = (idx: number) => {
+    setAdjustments((prev: Partial<Adjustments>) => ({
+      ...prev,
+      pointColors: (prev.pointColors ?? []).filter((_, i) => i !== idx),
+    }));
+    if (pointIdx === idx) setActiveColor('reds');
+    else if (pointIdx > idx) setActiveColor(`point-${pointIdx - 1}`);
+  };
 
   const hue_slider = `hue-slider-${activeColor}`;
   const saturation_slider = `sat-slider-${activeColor}`;
@@ -669,34 +709,71 @@ export default function ColorPanel({
             />
           ))}
         </div>
+        {!isForMask && pointColors.length > 0 && (
+          <div className="flex items-center gap-3 mb-4 px-1">
+            {pointColors.map((c, i) => (
+              <div key={i} className="relative">
+                <ColorSwatch
+                  color={`hsl(${Math.round(c.hue)}, ${Math.round(Math.min(1, c.sat) * 100)}%, ${Math.round(
+                    Math.max(0.12, Math.min(0.88, c.val * (1 - c.sat / 2))) * 100,
+                  )}%)`}
+                  isActive={activeColor === `point-${i}`}
+                  name={`point-${i}`}
+                  onClick={setActiveColor}
+                  ariaLabel={t('adjustments.color.pointColor')}
+                />
+                <button
+                  onClick={() => removePoint(i)}
+                  className="absolute -top-1.5 -right-1.5 w-3.5 h-3.5 rounded-full bg-bg-primary text-text-secondary hover:text-text-primary text-[9px] leading-none flex items-center justify-center border border-surface"
+                  aria-label={t('adjustments.color.removePointColor')}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+            <Text variant={TextVariants.small} className="opacity-50">
+              {t('adjustments.color.pointColor')}
+            </Text>
+          </div>
+        )}
         <Slider
           label={t('adjustments.color.hue')}
           max={100}
           min={-100}
-          onChange={(e: any) => handleHslChange(ColorAdjustment.Hue, e.target.value)}
+          onChange={(e: any) =>
+            activePoint ? handlePointChange('hueShift', e.target.value) : handleHslChange(ColorAdjustment.Hue, e.target.value)
+          }
           step={1}
-          value={currentHsl.hue}
-          trackClassName={hue_slider}
+          value={activePoint ? activePoint.hueShift : currentHsl.hue}
+          trackClassName={activePoint ? undefined : hue_slider}
           onDragStateChange={onDragStateChange}
         />
         <Slider
           label={t('adjustments.color.saturation')}
           max={100}
           min={-100}
-          onChange={(e: any) => handleHslChange(ColorAdjustment.Saturation, e.target.value)}
+          onChange={(e: any) =>
+            activePoint
+              ? handlePointChange('satShift', e.target.value)
+              : handleHslChange(ColorAdjustment.Saturation, e.target.value)
+          }
           step={1}
-          value={currentHsl.saturation}
-          trackClassName={saturation_slider}
+          value={activePoint ? activePoint.satShift : currentHsl.saturation}
+          trackClassName={activePoint ? undefined : saturation_slider}
           onDragStateChange={onDragStateChange}
         />
         <Slider
           label={t('adjustments.color.luminance')}
           max={100}
           min={-100}
-          onChange={(e: any) => handleHslChange(ColorAdjustment.Luminance, e.target.value)}
+          onChange={(e: any) =>
+            activePoint
+              ? handlePointChange('lumShift', e.target.value)
+              : handleHslChange(ColorAdjustment.Luminance, e.target.value)
+          }
           step={1}
-          value={currentHsl.luminance}
-          trackClassName={luminance_slider}
+          value={activePoint ? activePoint.lumShift : currentHsl.luminance}
+          trackClassName={activePoint ? undefined : luminance_slider}
           onDragStateChange={onDragStateChange}
         />
       </div>

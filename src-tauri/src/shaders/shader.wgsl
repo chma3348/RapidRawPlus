@@ -152,6 +152,10 @@ struct GlobalAdjustments {
     _pad_ss1: u32,
     _pad_ss2: u32,
     _pad_ss3: u32,
+
+    // Point Color: [hue_deg, dh_deg, ds, dl] + [range_deg, active, 0, 0].
+    point_colors: array<vec4<f32>, 4>,
+    point_color_meta: array<vec4<f32>, 4>,
 }
 
 struct MaskAdjustments {
@@ -595,6 +599,42 @@ fn apply_hue_curves(color: vec3<f32>) -> vec3<f32> {
     }
     let result = mix(perceptual, adjusted, guard);
     return pow(max(result, vec3<f32>(0.0)), vec3<f32>(2.2));
+}
+
+// Point Color: precise H/S/L edits in a narrow window around each picked
+// hue — the "edit exactly THIS color" tool, leaving all other colors and
+// the preset mixer bands untouched.
+fn apply_point_colors(color: vec3<f32>) -> vec3<f32> {
+    let g = adjustments.global;
+    var any_active = false;
+    for (var i = 0; i < 4; i = i + 1) {
+        if (g.point_color_meta[i].y > 0.5) { any_active = true; }
+    }
+    if (!any_active) {
+        return color;
+    }
+
+    let perceptual = pow(max(color, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.2));
+    var hsv = rgb_to_hsv(clamp(perceptual, vec3<f32>(0.0), vec3<f32>(1.0)));
+    let px_hue_deg = hsv.x * 360.0;
+
+    for (var i = 0; i < 4; i = i + 1) {
+        if (g.point_color_meta[i].y <= 0.5) { continue; }
+        let chip = g.point_colors[i];
+        let range = max(g.point_color_meta[i].x, 4.0);
+        var dh = abs(px_hue_deg - chip.x);
+        dh = min(dh, 360.0 - dh);
+        // Smooth window: full effect at the picked hue, fading to zero at
+        // the range edge; near-neutral pixels are guarded like hue curves.
+        let w = (1.0 - smoothstep(range * 0.4, range, dh)) * smoothstep(0.02, 0.12, hsv.y);
+        if (w <= 0.001) { continue; }
+        hsv.x = fract(hsv.x + (chip.y / 360.0) * w + 1.0);
+        hsv.y = clamp(hsv.y * (1.0 + chip.z * w), 0.0, 1.0);
+        hsv.z = clamp(hsv.z * (1.0 + chip.w * w), 0.0, 1.0);
+    }
+
+    let adjusted = hsv_to_rgb(hsv);
+    return pow(max(adjusted, vec3<f32>(0.0)), vec3<f32>(2.2));
 }
 
 // v2 tonal core: all tone moves ride Oklab lightness, so contrast and
@@ -2033,6 +2073,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     composite_rgb_linear = apply_hsl_panel(composite_rgb_linear, final_hsl, absolute_coord_i);
     composite_rgb_linear = apply_hue_shift(composite_rgb_linear, t_hue);
     composite_rgb_linear = apply_hue_curves(composite_rgb_linear);
+    composite_rgb_linear = apply_point_colors(composite_rgb_linear);
     composite_rgb_linear = apply_creative_color(composite_rgb_linear, t_saturation, t_vibrance);
     composite_rgb_linear = apply_film_saturation(composite_rgb_linear, adjustments.global.film_saturation);
 

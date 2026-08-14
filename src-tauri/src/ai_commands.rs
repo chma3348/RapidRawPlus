@@ -658,6 +658,44 @@ fn dilate_mask(mask: &GrayImage, radius: u32) -> GrayImage {
     out
 }
 
+/// Samples the displayed photo's color at image coordinates (5x5 mean),
+/// backend-side — the frontend preview is stale or empty under the WGPU
+/// renderer, which made preview-based eyedroppers silently sample garbage.
+/// Returns (hue_deg, saturation, value).
+#[tauri::command]
+pub async fn sample_image_color(
+    x: f64,
+    y: f64,
+    js_adjustments: serde_json::Value,
+    state: tauri::State<'_, AppState>,
+) -> Result<(f32, f32, f32), String> {
+    let img = get_cached_full_warped_image(&state, &js_adjustments)?;
+    let (w, h) = img.dimensions();
+    if w == 0 || h == 0 {
+        return Err("No image loaded".into());
+    }
+    let cx = (x.round() as i64).clamp(0, w as i64 - 1) as u32;
+    let cy = (y.round() as i64).clamp(0, h as i64 - 1) as u32;
+    let (mut r, mut g, mut b, mut n) = (0f64, 0f64, 0f64, 0f64);
+    for dy in -2i64..=2 {
+        for dx in -2i64..=2 {
+            let sx = (cx as i64 + dx).clamp(0, w as i64 - 1) as u32;
+            let sy = (cy as i64 + dy).clamp(0, h as i64 - 1) as u32;
+            let p = img.get_pixel(sx, sy);
+            r += p[0] as f64;
+            g += p[1] as f64;
+            b += p[2] as f64;
+            n += 1.0;
+        }
+    }
+    let (hh, ss, vv) = crate::mask_generation::rgb_to_hsv_f(
+        (r / n / 255.0) as f32,
+        (g / n / 255.0) as f32,
+        (b / n / 255.0) as f32,
+    );
+    Ok((hh, ss, vv))
+}
+
 /// A connected blob of mask pixels with its bounding box.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct MaskComponent {

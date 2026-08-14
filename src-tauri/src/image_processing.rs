@@ -1374,6 +1374,12 @@ pub struct GlobalAdjustments {
     pub _pad_ss1: u32,
     pub _pad_ss2: u32,
     pub _pad_ss3: u32,
+
+    // Point Color: up to 4 picked colors, each editing a narrow hue window
+    // around the exact sampled color. [hue_deg, dh_deg, ds, dl] +
+    // [range_deg, active, 0, 0].
+    pub point_colors: [[f32; 4]; 4],
+    pub point_color_meta: [[f32; 4]; 4],
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, Pod, Zeroable, Default)]
@@ -2104,6 +2110,27 @@ fn get_global_adjustments_from_json(
     let (hl_pts, hl_n) = hue_curve("hueLum", 360.0, true);
     let (ls_pts, ls_n) = hue_curve("lumSat", 100.0, false);
     let (ss_pts, ss_n) = hue_curve("satSat", 100.0, false);
+    let (point_colors, point_color_meta) = {
+        let mut pc = [[0.0f32; 4]; 4];
+        let mut meta = [[0.0f32; 4]; 4];
+        if is_visible("color")
+            && let Some(list) = js_adjustments.get("pointColors").and_then(|v| v.as_array())
+        {
+            for (i, entry) in list.iter().take(4).enumerate() {
+                let f = |k: &str| entry.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                // Slider ranges are ±100; scale to shader units here so the
+                // WGSL stays unit-clean: hue ±45°, sat ±100%, lum ±60%.
+                pc[i] = [f("hue"), f("hueShift") * 0.45, f("satShift") / 100.0, f("lumShift") / 100.0 * 0.6];
+                meta[i] = [
+                    entry.get("range").and_then(|v| v.as_f64()).unwrap_or(22.0) as f32,
+                    1.0,
+                    0.0,
+                    0.0,
+                ];
+            }
+        }
+        (pc, meta)
+    };
     let film_saturation = if is_visible("effects") {
         js_adjustments["filmSaturation"].as_f64().unwrap_or(0.0) as f32 / 100.0
     } else {
@@ -2328,6 +2355,9 @@ fn get_global_adjustments_from_json(
         _pad_ss1: 0,
         _pad_ss2: 0,
         _pad_ss3: 0,
+
+        point_colors,
+        point_color_meta,
     }
 }
 

@@ -63,7 +63,7 @@ interface ImageCanvasProps {
   isWbPickerActive?: boolean;
   onWbPicked?: () => void;
   isMixerPickerActive?: boolean;
-  onMixerBandPicked?: (band: string) => void;
+  onMixerBandPicked?: (hsv: [number, number, number]) => void;
   setAdjustments(fn: (prev: Adjustments) => Adjustments): void;
   overlayMode?: OverlayMode;
   overlayRotation?: number;
@@ -1478,99 +1478,42 @@ const ImageCanvas = memo(
       [isWbPickerActive, finalPreviewUrl, imageRenderSize, onWbPicked, setAdjustments, getCanvasPointer],
     );
 
-    // Color Mixer eyedropper: sample the displayed preview at the click and
-    // report the nearest HSL band. Same sampling approach as the WB picker,
-    // so it works under any renderer.
+    // Color Mixer eyedropper: sample the photo BACKEND-side at the click.
+    // The frontend preview is stale or empty under the WGPU renderer, so
+    // reading its pixels silently sampled garbage (everything keyed red).
     const handleMixerClick = useCallback(
       (e: any) => {
-        if (!isMixerPickerActive || !finalPreviewUrl || !onMixerBandPicked) return;
+        if (!isMixerPickerActive || !onMixerBandPicked) return;
 
         const stage = e.target.getStage();
         const pointerPos = getCanvasPointer(stage);
         if (!pointerPos) return;
 
-        const x = pointerPos.x / imageRenderSize.scale;
-        const y = pointerPos.y / imageRenderSize.scale;
-        const imgLogicalWidth = imageRenderSize.width / imageRenderSize.scale;
-        const imgLogicalHeight = imageRenderSize.height / imageRenderSize.scale;
-        if (x < 0 || x > imgLogicalWidth || y < 0 || y > imgLogicalHeight) return;
+        const { scale } = imageRenderSize;
+        const crop = adjustments.crop;
+        const isPercent = crop?.unit === '%';
+        const cropX = crop ? (isPercent ? (crop.x / 100) * effectiveImageDimensions.width : crop.x) : 0;
+        const cropY = crop ? (isPercent ? (crop.y / 100) * effectiveImageDimensions.height : crop.y) : 0;
+        const x = pointerPos.x / scale + cropX;
+        const y = pointerPos.y / scale + cropY;
 
-        const img = new Image();
-        img.crossOrigin = 'Anonymous';
-        img.src = finalPreviewUrl;
-        img.onload = () => {
-          const radius = 2;
-          const canvas = document.createElement('canvas');
-          const side = radius * 2 + 1;
-          canvas.width = side;
-          canvas.height = side;
-          const ctx = canvas.getContext('2d', { willReadFrequently: true });
-          if (!ctx) return;
-
-          const srcX = Math.floor((x * img.width) / imgLogicalWidth);
-          const srcY = Math.floor((y * img.height) / imgLogicalHeight);
-          const startX = Math.max(0, srcX - radius);
-          const startY = Math.max(0, srcY - radius);
-          const sw = Math.min(img.width, srcX + radius + 1) - startX;
-          const sh = Math.min(img.height, srcY + radius + 1) - startY;
-          if (sw <= 0 || sh <= 0) return;
-
-          ctx.drawImage(img, startX, startY, sw, sh, 0, 0, sw, sh);
-          const data = ctx.getImageData(0, 0, sw, sh).data;
-          let r = 0,
-            g = 0,
-            b = 0,
-            count = 0;
-          for (let i = 0; i < data.length; i += 4) {
-            r += data[i];
-            g += data[i + 1];
-            b += data[i + 2];
-            count++;
-          }
-          if (count === 0) return;
-          r /= count * 255;
-          g /= count * 255;
-          b /= count * 255;
-
-          const max = Math.max(r, g, b);
-          const min = Math.min(r, g, b);
-          const d = max - min;
-          if (d < 0.02) return; // near-neutral: no meaningful band
-          let hue: number;
-          if (max === r) {
-            hue = 60 * (((g - b) / d) % 6);
-          } else if (max === g) {
-            hue = 60 * ((b - r) / d + 2);
-          } else {
-            hue = 60 * ((r - g) / d + 4);
-          }
-          hue = ((hue % 360) + 360) % 360;
-
-          // Same band centers as the mixer's colorHueMap.
-          const bands: Array<[string, number]> = [
-            ['reds', 0],
-            ['oranges', 30],
-            ['yellows', 60],
-            ['greens', 120],
-            ['aquas', 180],
-            ['blues', 240],
-            ['purples', 300],
-            ['magentas', 340],
-          ];
-          let best = bands[0][0];
-          let bestDist = 361;
-          for (const [name, center] of bands) {
-            const diff = Math.abs(hue - center);
-            const dist = Math.min(diff, 360 - diff);
-            if (dist < bestDist) {
-              bestDist = dist;
-              best = name;
-            }
-          }
-          onMixerBandPicked(best);
-        };
+        import('@tauri-apps/api/core').then(({ invoke }) =>
+          invoke('sample_image_color', { x, y, jsAdjustments: adjustments })
+            .then((hsv: any) => {
+              console.error('[mixer-debug] sampled', hsv);
+              onMixerBandPicked(hsv as [number, number, number]);
+            })
+            .catch((err) => console.error('[mixer] sample failed:', err)),
+        );
       },
-      [isMixerPickerActive, finalPreviewUrl, imageRenderSize, onMixerBandPicked, getCanvasPointer],
+      [
+        isMixerPickerActive,
+        imageRenderSize,
+        adjustments,
+        effectiveImageDimensions,
+        onMixerBandPicked,
+        getCanvasPointer,
+      ],
     );
 
     const handleStart = useCallback(

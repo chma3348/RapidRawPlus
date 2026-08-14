@@ -177,6 +177,7 @@ export interface Adjustments {
   grainSize: number;
   halationAmount: number;
   filmSaturation: number;
+  pointColors: Array<{ hue: number; sat: number; val: number; range: number; hueShift: number; satShift: number; lumShift: number }>;
   highlights: number;
   hsl: Hsl;
   hue: number;
@@ -311,6 +312,7 @@ export interface MaskAdjustments {
   glowAmount: number;
   halationAmount: number;
   filmSaturation: number;
+  pointColors: Array<{ hue: number; sat: number; val: number; range: number; hueShift: number; satShift: number; lumShift: number }>;
   highlights: number;
   hsl: Hsl;
   hue: number;
@@ -440,6 +442,7 @@ export const INITIAL_MASK_ADJUSTMENTS: MaskAdjustments = {
   glowAmount: 0,
   halationAmount: 0,
   filmSaturation: 0,
+  pointColors: [],
   highlights: 0,
   hsl: {
     aquas: { hue: 0, saturation: 0, luminance: 0 },
@@ -517,6 +520,7 @@ export const INITIAL_ADJUSTMENTS: Adjustments = {
   grainSize: 25,
   halationAmount: 0,
   filmSaturation: 0,
+  pointColors: [],
   highlights: 0,
   hsl: {
     aquas: { hue: 0, saturation: 0, luminance: 0 },
@@ -672,6 +676,7 @@ export const normalizeLoadedAdjustments = (loadedAdjustments: Adjustments): any 
     glowAmount: loadedAdjustments.glowAmount ?? INITIAL_ADJUSTMENTS.glowAmount,
     halationAmount: loadedAdjustments.halationAmount ?? INITIAL_ADJUSTMENTS.halationAmount,
     filmSaturation: loadedAdjustments.filmSaturation ?? 0,
+    pointColors: loadedAdjustments.pointColors ?? [],
     lensCorrectionMode: loadedAdjustments.lensCorrectionMode || 'manual',
     lensMaker: loadedAdjustments.lensMaker ?? INITIAL_ADJUSTMENTS.lensMaker,
     lensModel: loadedAdjustments.lensModel ?? INITIAL_ADJUSTMENTS.lensModel,

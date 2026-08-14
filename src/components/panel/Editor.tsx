@@ -266,8 +266,8 @@ export default function Editor({ onBackToLibrary, onContextMenu, transformWrappe
 
   const handleWbPicked = useCallback(() => {}, []);
 
-  const handleMixerBandPicked = useCallback((band: string) => {
-    useEditorStore.getState().setEditor({ mixerTargetBand: band });
+  const handleMixerColorPicked = useCallback((hsv: [number, number, number]) => {
+    useEditorStore.getState().setEditor({ mixerPickedColor: { hue: hsv[0], sat: hsv[1], val: hsv[2] } });
   }, []);
 
   useEffect(() => {
@@ -2063,7 +2063,7 @@ export default function Editor({ onBackToLibrary, onContextMenu, transformWrappe
             isWbPickerActive={isWbPickerActive}
             onWbPicked={handleWbPicked}
             isMixerPickerActive={isMixerPickerActive}
-            onMixerBandPicked={handleMixerBandPicked}
+            onMixerBandPicked={handleMixerColorPicked}
             setAdjustments={setAdjustments}
             overlayRotation={overlayRotation}
             overlayMode={overlayMode}
