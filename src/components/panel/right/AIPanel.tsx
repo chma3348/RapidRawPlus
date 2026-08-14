@@ -1825,7 +1825,15 @@ function SettingsPanel({
 
   useEffect(() => {
     if (container) {
-      if (!isGenerativeAvailable) {
+      if (isEngineFill) {
+        // A selected ENGINE fill model (Flux/Fooocus/SDXL via the managed
+        // engine) is the generative path — the hidden Fast toggle must
+        // not stay stranded on true, which silently downgraded every fill
+        // to LaMa once the toggle was honored. Quick-erase patches still
+        // prefer the fast LaMa path.
+        setUseFastInpaint(isQuickErasePatch);
+        prevContainerId.current = container.id;
+      } else if (!isGenerativeAvailable) {
         setUseFastInpaint(true);
       } else if (container.id !== prevContainerId.current) {
         setUseFastInpaint(isQuickErasePatch);
@@ -1834,7 +1842,7 @@ function SettingsPanel({
     } else {
       prevContainerId.current = null;
     }
-  }, [isGenerativeAvailable, container, isQuickErasePatch]);
+  }, [isGenerativeAvailable, isEngineFill, container, isQuickErasePatch]);
 
   const subMaskConfig = activeSubMask ? SUB_MASK_CONFIG[activeSubMask.type] || {} : {};
   const isAiMask =
