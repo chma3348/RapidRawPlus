@@ -1373,7 +1373,10 @@ export default function Editor({ onBackToLibrary, onContextMenu, transformWrappe
       // it shows while a selection is being EDITED (sub-mask active) or
       // while HOVERING a patch row, and stays hidden otherwise so the
       // actual result is visible.
-      const overlayPatchId = hoveredAiPatchId ?? (activeAiSubMaskId ? activeAiPatchContainerId : null);
+      // Active editing ALWAYS wins: a stale hover id (rows can unmount
+      // without firing mouse-leave) must never hijack the overlay while
+      // a selection is being built — that reads as dead eyedropper clicks.
+      const overlayPatchId = activeAiSubMaskId ? activeAiPatchContainerId : hoveredAiPatchId;
       const activePatch = overlayPatchId
         ? adjustments.aiPatches?.find((p: AiPatch) => p.id === overlayPatchId)
         : null;

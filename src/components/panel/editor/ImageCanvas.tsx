@@ -1624,6 +1624,14 @@ const ImageCanvas = memo(
           delete newParams.isInitialDraw;
 
           const activeId = isMasking ? activeMaskId : activeAiSubMaskId;
+          // Diagnostic (reaches app.log): proves the click registered and
+          // which sub-mask received the sample.
+          console.error('[ai-debug] parametric sample registered', {
+            type: activeSubMask.type,
+            id: activeId,
+            x: Math.round(x),
+            y: Math.round(y),
+          });
           updateSubMask(activeId, { parameters: newParams });
           return;
         }
