@@ -386,7 +386,12 @@
       "noImageSelected": "No image selected.",
       "params": {
         "feather": "Feather",
-        "grow": "Grow"
+        "grow": "Grow",
+        "tolerance": "Tolerance",
+        "clean": "Clean",
+        "solidify": "Solidify",
+        "whiteThreshold": "White threshold",
+        "blackThreshold": "Black threshold"
       },
       "patches": {
         "aiEdit": "AI Edit {{count}}",
@@ -587,6 +592,7 @@
         "globalFeather": "Global Feather",
         "grow": "Grow",
         "tolerance": "Tolerance",
+        "solidify": "Solidify",
         "clean": "Clean",
         "matteView": "Show B/W matte",
         "whiteThreshold": "White threshold",

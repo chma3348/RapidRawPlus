@@ -102,7 +102,8 @@ const SUB_MASK_CONFIG: any = {
   [Mask.Color]: {
     parameters: [
       { key: 'tolerance', min: 1, max: 100, step: 1, defaultValue: 20 },
-      { key: 'clean', min: 0, max: 100, step: 1, defaultValue: 0 },
+      { key: 'solidify', min: 0, max: 100, step: 1, defaultValue: 40 },
+      { key: 'clean', min: 0, max: 100, step: 1, defaultValue: 15 },
       { key: 'grow', min: -100, max: 100, step: 1, defaultValue: 10 },
       { key: 'feather', min: 0, max: 100, step: 1, defaultValue: 25 },
     ],
@@ -113,6 +114,7 @@ const SUB_MASK_CONFIG: any = {
     parameters: [
       { key: 'whiteThreshold', min: 50, max: 100, step: 1, defaultValue: 98 },
       { key: 'blackThreshold', min: 0, max: 50, step: 1, defaultValue: 2 },
+      { key: 'solidify', min: 0, max: 100, step: 1, defaultValue: 0 },
       { key: 'clean', min: 0, max: 100, step: 1, defaultValue: 0 },
       { key: 'grow', min: -100, max: 100, step: 1, defaultValue: 0 },
       { key: 'feather', min: 0, max: 100, step: 1, defaultValue: 10 },
@@ -530,6 +532,11 @@ export default function AIPanel() {
         targetX: -10000,
         targetY: -10000,
         tolerance: 20,
+        // Fill selections are region-biased by default: washed-out areas
+        // should key as solid blobs (reconstruct-grade diffusion), not
+        // lace (which routes to texture fill).
+        solidify: 40,
+        clean: 15,
         feather: 25,
       });
     }

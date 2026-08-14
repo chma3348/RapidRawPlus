@@ -105,6 +105,7 @@ const SUB_MASK_CONFIG: Record<Mask, any> = {
   [Mask.Color]: {
     parameters: [
       { key: 'tolerance', min: 1, max: 100, step: 1, defaultValue: 20 },
+      { key: 'solidify', min: 0, max: 100, step: 1, defaultValue: 0 },
       { key: 'clean', min: 0, max: 100, step: 1, defaultValue: 0 },
       { key: 'grow', min: -100, max: 100, step: 1, defaultValue: 0 },
       { key: 'feather', min: 0, max: 100, step: 1, defaultValue: 35 },
@@ -128,6 +129,7 @@ const SUB_MASK_CONFIG: Record<Mask, any> = {
     parameters: [
       { key: 'whiteThreshold', min: 50, max: 100, step: 1, defaultValue: 98 },
       { key: 'blackThreshold', min: 0, max: 50, step: 1, defaultValue: 2 },
+      { key: 'solidify', min: 0, max: 100, step: 1, defaultValue: 0 },
       { key: 'clean', min: 0, max: 100, step: 1, defaultValue: 0 },
       { key: 'grow', min: -100, max: 100, step: 1, defaultValue: 0 },
       { key: 'feather', min: 0, max: 100, step: 1, defaultValue: 10 },

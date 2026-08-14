@@ -234,6 +234,8 @@ struct ParametricMaskParameters {
     #[serde(default = "default_tolerance")]
     tolerance: f32,
     #[serde(default)]
+    solidify: f32,
+    #[serde(default)]
     grow: f32,
     #[serde(default)]
     feather: f32,
@@ -263,6 +265,7 @@ impl Default for ParametricMaskParameters {
             target_x: 0.0,
             target_y: 0.0,
             tolerance: default_tolerance(),
+            solidify: 0.0,
             grow: 0.0,
             feather: 35.0,
             clean: 0.0,
@@ -359,6 +362,29 @@ fn grayscale_erode(image: &GrayImage, k: u8) -> GrayImage {
 /// Resolve-style "clean": suppresses key speckle by blurring the matte and
 /// re-thresholding with smoothstep — small isolated islands melt away while
 /// solid regions keep firm edges.
+/// Morphological close: merges nearby speckle into solid regions and
+/// fills small holes. This is what turns a color key's lace (scattered
+/// partial matches across a washed-out area) into the coherent regions a
+/// reconstruct-grade fill needs — diffusion on lace reads as blotches,
+/// diffusion on solid regions reads as detail.
+fn apply_solidify(mask: &mut GrayImage, solidify: f32, scale: f32) {
+    if solidify <= 0.5 {
+        return;
+    }
+    let r = ((solidify / 100.0) * 18.0 * scale).round().clamp(1.0, 40.0) as u8;
+    let (w, h) = mask.dimensions();
+    // Close = dilate then erode; erode via dilating the inverse.
+    let dilated = grayscale_dilate(mask, r);
+    let mut inverted = GrayImage::new(w, h);
+    for (dst, src) in inverted.pixels_mut().zip(dilated.pixels()) {
+        dst[0] = 255 - src[0];
+    }
+    let eroded_inv = grayscale_dilate(&inverted, r);
+    for (dst, src) in mask.pixels_mut().zip(eroded_inv.pixels()) {
+        dst[0] = 255 - src[0];
+    }
+}
+
 fn apply_matte_clean(mask: &mut GrayImage, clean: f32) {
     if clean <= 0.5 {
         return;
@@ -1300,6 +1326,7 @@ fn generate_color_bitmap(
         }
     }
 
+    apply_solidify(&mut mask, params.solidify, scale);
     apply_matte_clean(&mut mask, params.clean);
     apply_grow_and_feather(&mut mask, params.grow, params.feather, width, height);
     Some(mask)
@@ -1406,6 +1433,7 @@ fn generate_clipped_bitmap(
         }
     }
 
+    apply_solidify(&mut mask, params.solidify, scale);
     apply_matte_clean(&mut mask, params.clean);
     apply_grow_and_feather(&mut mask, params.grow, params.feather, width, height);
 
@@ -1519,6 +1547,7 @@ fn generate_luminance_bitmap(
         }
     }
 
+    apply_solidify(&mut mask, params.solidify, scale);
     apply_matte_clean(&mut mask, params.clean);
     apply_grow_and_feather(&mut mask, params.grow, params.feather, width, height);
     Some(mask)
@@ -1894,6 +1923,34 @@ mod color_select_tests {
     #[test]
     fn hue_distance_wraps() {
         assert!((hue_dist_deg(350.0, 10.0) - 20.0).abs() < 1e-4);
+    }
+
+    /// Solidify must merge a speckle field into one filled region — the
+    /// shape a washed-out area's color key SHOULD have — so the fill
+    /// router sends it to reconstruct-grade diffusion instead of treating
+    /// it as lace.
+    #[test]
+    fn solidify_merges_speckle_into_a_region() {
+        let mut mask = GrayImage::new(200, 200);
+        // 3px dots every 10px across a 100x100 area.
+        for gy in 0..10 {
+            for gx in 0..10 {
+                let (bx, by) = (50 + gx * 10, 50 + gy * 10);
+                for y in by..by + 3 {
+                    for x in bx..bx + 3 {
+                        mask.put_pixel(x, y, Luma([255]));
+                    }
+                }
+            }
+        }
+        let before: u32 = mask.pixels().map(|p| (p[0] > 127) as u32).sum();
+        apply_solidify(&mut mask, 50.0, 1.0);
+        let after: u32 = mask.pixels().map(|p| (p[0] > 127) as u32).sum();
+        assert!(after > before * 5, "speckle must fill into a region ({before} -> {after})");
+        // The interior gap between dots must now be selected.
+        assert!(mask.get_pixel(55, 55)[0] > 127, "inter-dot gap filled");
+        // Far corners stay empty — close must not flood the frame.
+        assert!(mask.get_pixel(5, 5)[0] < 32, "background untouched");
     }
 
     /// Refine strokes must have final say over the threshold selection:
