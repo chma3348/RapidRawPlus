@@ -77,17 +77,48 @@ rebuild + install at phase end. Nothing added or dropped silently.
 - [x] All v2-engine; shader layout probe updated for new bindings.
 
 ## Phase J — HDR zone wheels
-- [ ] Six Oklab-lightness zones (blacks/dark/shadow/light/highlight/
-      specular) with smooth adjustable boundaries.
-- [ ] Per-zone exposure dial + color offset wheel; global panel first.
+- [ ] Backend: six zones from Oklab lightness (blacks/dark/shadow/light/
+      highlight/specular) with smoothstep boundaries; per zone one color
+      offset (wheel hue/sat -> rgb) + one exposure dial, applied in the
+      v2 path after the LGG wheels. Struct fields appended (16-byte
+      groups), layout probe green.
+- [ ] UI: "HDR Wheels" panel in the Color section — 2x3 grid reusing
+      ColorWheel with an exposure slider under each; collapsed default.
+- [ ] GPU render test: specular-zone exposure must raise only the
+      top-end of a ramp; blacks-zone color must not leak past midtones.
+- [ ] Old sidecars unaffected (all zones neutral by default).
 
 ## Phase K — Skin smoothing (frequency separation)
-- [ ] Per-mask "Smoothing" slider: subtracts the blotch band (between
-      the existing 3.5px and 8px blurs) while fine texture passes.
+- [ ] Mask-level "Smoothing" slider: subtracts the blotch band (between
+      the existing 3.5px and 8px blurs) scaled by amount — uneven tone
+      flattens while pores/fine texture pass through untouched. No new
+      GPU passes needed.
+- [ ] UI: slider in the mask adjustments Details group.
+- [ ] GPU render test: mid-frequency blotch amplitude drops, fine
+      checkerboard amplitude survives (>80%).
 
 ## Phase L — Clone/heal stamp
-- [ ] Non-AI patch type: alt-click source, brush paints offset-copied
-      pixels with feathered edges + harmonized blend; non-destructive.
+- [ ] New non-AI patch type "clone": alt-click sets the source anchor,
+      brush strokes copy source-offset pixels with feathered edges;
+      stored non-destructively alongside AI patches; deterministic (no
+      model, no engine).
+- [ ] Patch runs through the same harmonization blend as AI fills.
+- [ ] UI: Clone creation type in the AI panel with brush size/feather;
+      visible source/target indicators on canvas while active.
+- [ ] Unit test: offset copy + feather math on a synthetic image.
 
-## Phase M — Color Warper (own detailed plan before starting)
-- [ ] Oklab chroma-plane mesh warp, interactive wheel UI, shader LUT.
+## Phase M — Color Warper (dedicated round)
+- [ ] Before code: its own detailed plan (mesh resolution, UI
+      interactions, sidecar format) appended here and agreed.
+- [ ] Core: Oklab chroma-plane mesh warp applied in-shader via a small
+      LUT grid; wheel UI with draggable mesh points.
+
+## Round: background AI rendering (agreed 2026-08-13)
+- [ ] Closing/clicking outside the enhance dialog NEVER loses a running
+      job: the run continues, its state survives, and reopening the
+      dialog for that photo restores it (running or finished).
+- [ ] A floating indicator appears while a run continues with the dialog
+      closed (spinner + progress line); it flips to "result ready" on
+      completion and clicking it reopens the dialog.
+- [ ] Opening the enhance dialog while a run is in flight reopens the
+      running job instead of resetting state.
