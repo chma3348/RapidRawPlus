@@ -425,3 +425,59 @@ fn v2_contrast_is_hue_stable_and_filmic_rolls_off() {
         "v2 lift crushed the checker detail: contrast {c_in:.3} -> {c_v2:.3}"
     );
 }
+
+/// A Point Color chip with ZERO deltas must be pixel-invisible — the user
+/// saw a global "white balance" shift the instant a chip was created.
+#[test]
+fn zero_delta_point_color_is_identity() {
+    let Some((device, queue, limits)) = make_device() else {
+        eprintln!("no GPU; skipping");
+        return;
+    };
+    let context = GpuContext {
+        device: Arc::new(device),
+        queue: Arc::new(queue),
+        limits,
+        display: Arc::new(std::sync::Mutex::new(None)),
+    };
+    let device = context.device.clone();
+    let queue = context.queue.clone();
+    let processor = GpuProcessor::new(context, W, H).expect("processor");
+
+    // Gradient spanning warm dark tones (the user's wash palette) through
+    // brights, so chip windows overlap real pixels.
+    let mut img = vec![0f32; (W * H * 4) as usize];
+    for y in 0..H {
+        for x in 0..W {
+            let i = ((y * W + x) * 4) as usize;
+            let t = x as f32 / (W - 1) as f32;
+            let u = y as f32 / (H - 1) as f32;
+            img[i] = 0.05 + 0.6 * t;
+            img[i + 1] = 0.04 + 0.35 * t * u;
+            img[i + 2] = 0.03 + 0.25 * u;
+            img[i + 3] = 1.0;
+        }
+    }
+
+    let mut base_adj = AllAdjustments::default();
+    base_adj.global.process_version = 2;
+    let base = render(&processor, &device, &queue, &img, base_adj);
+
+    let mut chip_adj = base_adj;
+    // Chip at hue 20°, sampled sat 0.5 / val 0.25 — matches the user's
+    // logged picks; all deltas zero.
+    chip_adj.global.point_colors[0] = [20.0, 0.0, 0.0, 0.0];
+    chip_adj.global.point_color_meta[0] = [22.0, 1.0, 0.5, 0.25];
+    let with_chip = render(&processor, &device, &queue, &img, chip_adj);
+
+    let max_diff = base
+        .iter()
+        .zip(with_chip.iter())
+        .map(|(a, b)| (*a as i32 - *b as i32).unsigned_abs())
+        .max()
+        .unwrap_or(0);
+    assert!(
+        max_diff <= 1,
+        "zero-delta chip must not change ANY pixel (max channel diff {max_diff})"
+    );
+}

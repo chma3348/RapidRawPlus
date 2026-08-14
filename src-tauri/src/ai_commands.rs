@@ -1623,6 +1623,10 @@ pub async fn invoke_spot_enhance_with_mask_def(
     state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
     let _ = path;
+    log::info!(
+        "[spot] enhance requested: task={} strength={:?} texture={:?} grain={:?} patch={}",
+        task, strength, texture, grain, patch_definition.id
+    );
     let task_type = match crate::model_registry::TaskType::parse(&task) {
         Some(
             t @ (crate::model_registry::TaskType::Upscale
@@ -1696,7 +1700,8 @@ pub async fn invoke_spot_enhance_with_mask_def(
         &app_handle,
         &state,
     )
-    .await?;
+    .await
+    .inspect_err(|e| log::error!("[spot] enhance FAILED: {}", e))?;
 
     encode_patch_result(&patch_rgba, patch_is_gamma, &mask_bitmap)
 }

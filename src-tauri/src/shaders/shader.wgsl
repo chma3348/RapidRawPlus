@@ -564,12 +564,14 @@ fn apply_hue_curves(color: vec3<f32>) -> vec3<f32> {
     let perceptual = pow(max(color, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.2));
     var hsv = rgb_to_hsv(clamp(perceptual, vec3<f32>(0.0), vec3<f32>(1.0)));
 
-    let h_norm = hsv.x; // rgb_to_hsv returns hue in 0..1
+    // rgb_to_hsv returns hue in DEGREES (0..360) — normalize for the
+    // curve x-axis, and do hue arithmetic in degrees.
+    let h_norm = hsv.x / 360.0;
 
     if (g.hue_hue_count > 0u) {
         // ±60° of shift at full deflection.
-        let dh = eval_delta_curve(g.hue_hue_curve, g.hue_hue_count, h_norm) * (60.0 / 360.0);
-        hsv.x = fract(hsv.x + dh + 1.0);
+        let dh = eval_delta_curve(g.hue_hue_curve, g.hue_hue_count, h_norm) * 60.0;
+        hsv.x = (hsv.x + dh + 360.0) % 360.0;
     }
     if (g.hue_sat_count > 0u) {
         let ds = eval_delta_curve(g.hue_sat_curve, g.hue_sat_count, h_norm);
@@ -621,7 +623,8 @@ fn apply_point_colors(color: vec3<f32>) -> vec3<f32> {
     let norm = max(max(safe.r, max(safe.g, safe.b)), 1.0);
     let perceptual = pow(safe / norm, vec3<f32>(1.0 / 2.2));
     var hsv = rgb_to_hsv(perceptual);
-    let px_hue_deg = hsv.x * 360.0;
+    // rgb_to_hsv returns hue in DEGREES already.
+    let px_hue_deg = hsv.x;
 
     var applied = 0.0;
     for (var i = 0; i < 4; i = i + 1) {
@@ -639,7 +642,7 @@ fn apply_point_colors(color: vec3<f32>) -> vec3<f32> {
         let w = w_hue * w_sat * w_val * smoothstep(0.02, 0.12, hsv.y);
         if (w <= 0.001) { continue; }
         applied = max(applied, w);
-        hsv.x = fract(hsv.x + (chip.y / 360.0) * w + 1.0);
+        hsv.x = (hsv.x + chip.y * w + 360.0) % 360.0;
         hsv.y = clamp(hsv.y * (1.0 + chip.z * w), 0.0, 1.0);
         hsv.z = clamp(hsv.z * (1.0 + chip.w * w), 0.0, 1.0);
     }
