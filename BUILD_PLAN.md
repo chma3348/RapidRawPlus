@@ -122,3 +122,14 @@ rebuild + install at phase end. Nothing added or dropped silently.
       completion and clicking it reopens the dialog.
 - [x] Opening the enhance dialog while a run is in flight reopens the
       running job instead of resetting state.
+
+## Round: Fujifilm film simulations (agreed 2026-08-14) — SHIPPED
+- [x] F-Log2C input transform: linear sRGB -> F-Gamut C -> F-Log2 curve
+      in-shader; film-sim LUTs replace the tone mapping; spec-pinned
+      tests (flog2c.rs) against Fujifilm's published code values.
+- [x] lutInputSpace adjustment ('display'/'flog2c'), auto-inferred from
+      FLog2C_to_* filenames.
+- [x] Managed LUT folder (~/Documents/RapidRAW Models/luts/<pack>/) with
+      per-pack SOURCES.md provenance; official pack copied there; files
+      never committed (Fujifilm copyright). Repo doc: LUTS.md.
+- [x] "Film simulations" preset dropdown in Effects -> LUT.

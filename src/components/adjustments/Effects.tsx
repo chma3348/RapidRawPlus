@@ -1,5 +1,8 @@
+import { useEffect, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import { useTranslation } from 'react-i18next';
 import Slider from '../ui/Slider';
+import Dropdown from '../ui/Dropdown';
 import { Adjustments, Effect, CreativeAdjustment } from '../../utils/adjustments';
 import LUTControl from '../ui/LUTControl';
 import { AppSettings } from '../ui/AppProperties';
@@ -26,6 +29,25 @@ export default function EffectsPanel({
   onDragStateChange,
 }: EffectsPanelProps) {
   const { t } = useTranslation();
+  const [lutPresets, setLutPresets] = useState<Array<any>>([]);
+  useEffect(() => {
+    if (isForMask) return;
+    invoke('list_managed_luts')
+      .then((l: any) => setLutPresets(l || []))
+      .catch(() => setLutPresets([]));
+  }, [isForMask]);
+
+  // Picking a preset loads the cube AND sets its input space, so film-sim
+  // LUTs (F-Log2C) render through the correct transform automatically.
+  const handlePresetSelect = (path: string) => {
+    const preset = lutPresets.find((p) => p.path === path);
+    if (!preset) return;
+    handleLutSelect(preset.path);
+    setAdjustments((prev: Partial<Adjustments>) => ({
+      ...prev,
+      lutInputSpace: preset.inputSpace,
+    }));
+  };
 
   const handleAdjustmentChange = (key: string, value: string) => {
     const numericValue = parseInt(value, 10);
@@ -44,6 +66,7 @@ export default function EffectsPanel({
       lutData: null,
       lutSize: 0,
       lutIntensity: 100,
+      lutInputSpace: 'display',
     }));
   };
 
@@ -107,6 +130,21 @@ export default function EffectsPanel({
             <Text variant={TextVariants.heading} className="mb-2">
               {t('adjustments.effects.lut')}
             </Text>
+            {lutPresets.length > 0 && (
+              <div className="mb-3">
+                <Text variant={TextVariants.small} className="mb-1 block">
+                  {t('adjustments.effects.filmSimulations')}
+                </Text>
+                <Dropdown
+                  options={lutPresets.map((p) => ({
+                    label: p.inputSpace === 'flog2c' ? `${p.name} (Fujifilm)` : p.name,
+                    value: p.path,
+                  }))}
+                  value={adjustments.lutPath || ''}
+                  onChange={(v: string) => handlePresetSelect(v)}
+                />
+              </div>
+            )}
             <LUTControl
               lutPath={adjustments.lutPath || null}
               lutName={adjustments.lutName || null}

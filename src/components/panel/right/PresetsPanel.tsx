@@ -479,7 +479,36 @@ export default function PresetsPanel({ onNavigateToCommunity }: PresetsPanelProp
   const adjustments = useEditorStore((s) => s.adjustments);
   const activePanel = useUIStore((s) => s.activeRightPanel);
   const setEditor = useEditorStore((s) => s.setEditor);
-  const { setAdjustments } = useEditorActions();
+  const { setAdjustments, handleLutSelect } = useEditorActions();
+
+  // Film simulations: managed LUT packs (e.g. the official Fujifilm
+  // F-Log2C cubes) surfaced as one-click looks. Selecting one loads the
+  // cube AND sets its input space so film-sim LUTs render through the
+  // F-Log2C transform (see LUTS.md).
+  const [filmSims, setFilmSims] = useState<Array<any>>([]);
+  const [filmSimsOpen, setFilmSimsOpen] = useState(true);
+  useEffect(() => {
+    invoke('list_managed_luts')
+      .then((l: any) => setFilmSims(l || []))
+      .catch(() => setFilmSims([]));
+  }, []);
+
+  const applyFilmSim = (sim: any) => {
+    handleLutSelect(sim.path);
+    setAdjustments((prev: any) => ({ ...prev, lutInputSpace: sim.inputSpace }));
+  };
+
+  const clearFilmSim = () => {
+    setAdjustments((prev: any) => ({
+      ...prev,
+      lutPath: null,
+      lutName: null,
+      lutData: null,
+      lutSize: 0,
+      lutIntensity: 100,
+      lutInputSpace: 'display',
+    }));
+  };
 
   const {
     addFolder,
@@ -1179,6 +1208,48 @@ export default function PresetsPanel({ onNavigateToCommunity }: PresetsPanelProp
           onContextMenu={handleBackgroundContextMenu}
           ref={setRootNodeRef}
         >
+          {filmSims.length > 0 && (
+            <div className="mb-4">
+              <button
+                className="flex items-center gap-2 w-full text-left mb-2"
+                onClick={() => setFilmSimsOpen((v) => !v)}
+              >
+                <Text variant={TextVariants.heading}>{t('adjustments.effects.filmSimulations')}</Text>
+                <Text variant={TextVariants.small} className="opacity-50">
+                  {filmSimsOpen ? '▾' : '▸'}
+                </Text>
+              </button>
+              {filmSimsOpen && (
+                <div className="space-y-1">
+                  {filmSims.map((sim) => {
+                    const active = adjustments.lutPath === sim.path;
+                    return (
+                      <button
+                        key={sim.path}
+                        onClick={() => applyFilmSim(sim)}
+                        className={`w-full text-left px-3 py-2 rounded-md text-sm transition-colors ${
+                          active
+                            ? 'bg-accent text-button-text'
+                            : 'bg-surface hover:bg-card-active text-text-primary'
+                        }`}
+                      >
+                        {sim.name}
+                        {active && <span className="float-right opacity-70">✓</span>}
+                      </button>
+                    );
+                  })}
+                  {adjustments.lutPath && (
+                    <button
+                      onClick={clearFilmSim}
+                      className="w-full text-left px-3 py-2 rounded-md text-sm text-text-secondary hover:bg-card-active transition-colors"
+                    >
+                      {t('editor.presets.filmSimNone')}
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
           {isLoading && presets.length === 0 && (
             <Text
               as="div"

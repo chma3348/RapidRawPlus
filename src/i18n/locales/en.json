@@ -146,6 +146,7 @@
       "grain": "Grain",
       "halation": "Halation",
       "filmSaturation": "Film saturation",
+      "filmSimulations": "Film simulations",
       "lightFlares": "Light Flares",
       "lut": "LUT",
       "midpoint": "Midpoint",
@@ -725,6 +726,7 @@
         "masks": "Masks"
       },
       "title": "Presets",
+      "filmSimNone": "None (clear film simulation)",
       "tooltips": {
         "explore": "Explore Community Presets",
         "export": "Export all presets to .rrpreset file",

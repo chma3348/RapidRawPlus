@@ -1380,6 +1380,14 @@ pub struct GlobalAdjustments {
     // [range_deg, active, 0, 0].
     pub point_colors: [[f32; 4]; 4],
     pub point_color_meta: [[f32; 4]; 4],
+
+    // 0 = display-referred LUT (classic), 1 = F-Log2C film-sim LUT: the
+    // cube receives the working image encoded as a Fujifilm body would
+    // (F-Gamut C + F-Log2 curve) and its output IS the finished 709 look.
+    pub lut_input_space: u32,
+    pub _pad_lspace1: u32,
+    pub _pad_lspace2: u32,
+    pub _pad_lspace3: u32,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, Pod, Zeroable, Default)]
@@ -2141,6 +2149,13 @@ fn get_global_adjustments_from_json(
         0.0
     };
 
+    let lut_input_space = if is_visible("effects")
+        && js_adjustments["lutInputSpace"].as_str() == Some("flog2c")
+    {
+        1u32
+    } else {
+        0u32
+    };
     let (has_lut, lut_intensity) = if is_visible("effects") {
         (
             if js_adjustments["lutPath"].is_string() {
@@ -2362,6 +2377,11 @@ fn get_global_adjustments_from_json(
 
         point_colors,
         point_color_meta,
+
+        lut_input_space,
+        _pad_lspace1: 0,
+        _pad_lspace2: 0,
+        _pad_lspace3: 0,
     }
 }
 

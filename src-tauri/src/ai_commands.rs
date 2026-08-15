@@ -658,6 +658,61 @@ fn dilate_mask(mask: &GrayImage, radius: u32) -> GrayImage {
     out
 }
 
+/// Lists .cube LUTs from the managed folder
+/// (~/Documents/RapidRAW Models/luts/**), grouped by pack. Input space is
+/// inferred from the filename: Fujifilm's official film-sim cubes are
+/// named `FLog2C_to_*` and expect F-Log2C-encoded input (see each pack's
+/// SOURCES.md for provenance).
+#[tauri::command]
+pub async fn list_managed_luts() -> Result<Vec<serde_json::Value>, String> {
+    let home = std::env::var("HOME").map_err(|e| e.to_string())?;
+    let root = std::path::PathBuf::from(home).join("Documents/RapidRAW Models/luts");
+    let mut out = Vec::new();
+    if !root.is_dir() {
+        return Ok(out);
+    }
+    let packs = std::fs::read_dir(&root).map_err(|e| e.to_string())?;
+    for pack in packs.flatten() {
+        let pack_path = pack.path();
+        if !pack_path.is_dir() {
+            continue;
+        }
+        let pack_name = pack.file_name().to_string_lossy().to_string();
+        let Ok(files) = std::fs::read_dir(&pack_path) else {
+            continue;
+        };
+        let mut entries: Vec<_> = files
+            .flatten()
+            .filter(|f| {
+                f.path()
+                    .extension()
+                    .map(|e| e.to_ascii_lowercase() == "cube")
+                    .unwrap_or(false)
+            })
+            .collect();
+        entries.sort_by_key(|f| f.file_name());
+        for f in entries {
+            let file_name = f.file_name().to_string_lossy().to_string();
+            let is_flog2c = file_name.to_ascii_lowercase().starts_with("flog2c_to_");
+            // Display name: strip the transform prefix and grid suffix.
+            let name = file_name
+                .trim_end_matches(".cube")
+                .trim_start_matches("FLog2C_to_")
+                .split("_65grid")
+                .next()
+                .unwrap_or(&file_name)
+                .replace(['-', '_'], " ");
+            out.push(serde_json::json!({
+                "name": name,
+                "path": f.path().to_string_lossy(),
+                "pack": pack_name,
+                "inputSpace": if is_flog2c { "flog2c" } else { "display" },
+            }));
+        }
+    }
+    Ok(out)
+}
+
 /// Samples the displayed photo's color at image coordinates (5x5 mean),
 /// backend-side — the frontend preview is stale or empty under the WGPU
 /// renderer, which made preview-based eyedroppers silently sample garbage.

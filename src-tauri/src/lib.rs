@@ -13,6 +13,7 @@ mod android_integration;
 mod app_settings;
 mod app_state;
 mod cache_utils;
+mod flog2c;
 pub mod comfy_engine;
 mod culling;
 mod denoising;
@@ -2233,6 +2234,7 @@ pub fn run() {
             ai_commands::generate_ai_paint_mask,
             ai_commands::sample_image_color,
             ai_commands::respot_enhance,
+            ai_commands::list_managed_luts,
             ai_commands::precompute_ai_subject_mask,
             ai_commands::generate_ai_foreground_mask,
             ai_commands::generate_ai_sky_mask,

@@ -156,6 +156,12 @@ struct GlobalAdjustments {
     // Point Color: [hue_deg, dh_deg, ds, dl] + [range_deg, active, sat, val].
     point_colors: array<vec4<f32>, 4>,
     point_color_meta: array<vec4<f32>, 4>,
+
+    // 0 = display-referred LUT, 1 = F-Log2C film-sim LUT.
+    lut_input_space: u32,
+    _pad_lspace1: u32,
+    _pad_lspace2: u32,
+    _pad_lspace3: u32,
 }
 
 struct MaskAdjustments {
@@ -1704,6 +1710,23 @@ fn get_mask_influence(mask_index: u32, coords: vec2<u32>) -> f32 {
     return textureLoad(mask_textures, vec2<i32>(coords), i32(mask_index), 0).r;
 }
 
+// Fujifilm F-Log2 C (constants from the official F-Log2C Data Sheet
+// Ver.1.0; Rust mirror + spec-pinned tests live in flog2c.rs).
+const SRGB_TO_FGAMUT_C = mat3x3<f32>(
+    vec3<f32>(0.51706902, 0.08861716, 0.01775004),
+    vec3<f32>(0.41293468, 0.80926315, 0.10944762),
+    vec3<f32>(0.06999630, 0.10211969, 0.87280234),
+);
+
+fn flog2_encode(x: f32) -> f32 {
+    let t = max(x, 0.0);
+    if (t >= 0.000889) {
+        // c * log10(a*t + b) + d
+        return 0.245281 * log(5.555556 * t + 0.064829) * 0.4342944819 + 0.384316;
+    }
+    return 8.799461 * t + 0.092864;
+}
+
 fn sample_lut_tetrahedral(uv: vec3<f32>) -> vec3<f32> {
     let dims = vec3<f32>(textureDimensions(lut_texture));
     let size = dims - vec3<f32>(1.0);
@@ -2206,7 +2229,22 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 
     if (adjustments.global.has_lut == 1u) {
-        let lut_color = sample_lut_tetrahedral(final_rgb);
+        var lut_color: vec3<f32>;
+        if (adjustments.global.lut_input_space == 1u) {
+            // Film-sim LUT: feed the cube scene-linear pixels encoded
+            // exactly as a Fujifilm body would (F-Gamut C + F-Log2 curve);
+            // its output IS the finished BT.709 film-simulation image —
+            // the LUT replaces our display rendering at full intensity.
+            let fgc = SRGB_TO_FGAMUT_C * max(composite_rgb_linear, vec3<f32>(0.0));
+            let encoded = vec3<f32>(
+                flog2_encode(fgc.r),
+                flog2_encode(fgc.g),
+                flog2_encode(fgc.b),
+            );
+            lut_color = sample_lut_tetrahedral(encoded);
+        } else {
+            lut_color = sample_lut_tetrahedral(final_rgb);
+        }
         final_rgb = mix(final_rgb, lut_color, adjustments.global.lut_intensity);
     }
 
