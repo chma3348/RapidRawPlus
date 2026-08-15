@@ -2182,8 +2182,12 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         // Exposure-style gain in linear light, both directions. Brightening
         // used to BLEND TOWARD WHITE — devignetting painted white mist over
         // the corners instead of pulling the darks up; darkening crushed
-        // linearly to black. ±2.4 stops at full deflection, chroma intact.
-        composite_rgb_linear *= exp2(v_amount * 2.4 * vignette_mask);
+        // linearly to black. Soft-knee response: gentle mid-range for
+        // creative vignettes, ramping to ±4 stops at full deflection —
+        // severe lens vignetting runs 3-4 stops in extreme corners and the
+        // correction must reach that far.
+        let stops = v_amount * (1.6 + 2.4 * abs(v_amount));
+        composite_rgb_linear *= exp2(stops * vignette_mask);
     }
 
     if (adjustments.global.process_version >= 2u) {

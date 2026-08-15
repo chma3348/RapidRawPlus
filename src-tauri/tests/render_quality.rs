@@ -590,22 +590,32 @@ fn devignette_lifts_corners_without_white_mist() {
     adj.global.process_version = 2;
     let base = render(&processor, &device, &queue, &img, adj);
 
-    adj.global.vignette_amount = 1.0;
+    // Working strength: chroma must survive (white mist pushed g/r -> 1;
+    // an exposure gain preserves it up to the tonemapper's shoulder).
+    adj.global.vignette_amount = 0.6;
     adj.global.vignette_midpoint = 0.3;
     adj.global.vignette_feather = 0.5;
     let lifted = render(&processor, &device, &queue, &img, adj);
 
-    // Sample the extreme corner.
     let idx = ((2 * W + 2) * 4) as usize;
     let (r0, g0) = (base[idx] as f32, base[idx + 1] as f32);
     let (r1, g1) = (lifted[idx] as f32, lifted[idx + 1] as f32);
 
     assert!(r1 > r0 + 10.0, "corner must brighten (r {r0} -> {r1})");
-    // White mist pushes g toward r (ratio -> 1). Gain preserves the ratio.
     let ratio0 = g0 / r0.max(1.0);
     let ratio1 = g1 / r1.max(1.0);
     assert!(
         ratio1 < ratio0 + 0.15,
         "corner must stay red, not fade to white (g/r {ratio0:.2} -> {ratio1:.2})"
+    );
+
+    // Full deflection: rescue power — a severely vignetted corner must be
+    // lifted dramatically (~4 stops), not politely.
+    adj.global.vignette_amount = 1.0;
+    let full = render(&processor, &device, &queue, &img, adj);
+    let r_full = full[idx] as f32;
+    assert!(
+        r_full > r1 + 20.0,
+        "full deflection must lift far beyond working strength (r {r1} -> {r_full})"
     );
 }
