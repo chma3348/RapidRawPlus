@@ -2198,6 +2198,15 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         // correction must reach that far.
         let stops = v_amount * (1.6 + 2.4 * abs(v_amount));
         composite_rgb_linear *= exp2(stops * vignette_mask);
+        // Crushed-black rescue: multiplication cannot lift corners the
+        // camera clipped to ~0 (16x of nothing is nothing — measured:
+        // display 1 -> 12 at full gain). A small black-floor lift, ramping
+        // in only at high slider positions, recovers them the way phone
+        // devignette tools do. amount^2 keeps the mid-range physically
+        // clean.
+        if (v_amount > 0.0) {
+            composite_rgb_linear += vec3<f32>(v_amount * v_amount * 0.05 * vignette_mask);
+        }
     }
 
     if (adjustments.global.process_version >= 2u) {

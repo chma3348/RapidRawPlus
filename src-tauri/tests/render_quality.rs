@@ -602,11 +602,16 @@ fn devignette_lifts_corners_without_white_mist() {
     let (r1, g1) = (lifted[idx] as f32, lifted[idx + 1] as f32);
 
     assert!(r1 > r0 + 10.0, "corner must brighten (r {r0} -> {r1})");
+    // Contract: the corner stays predominantly RED. A small neutral
+    // floor-lift is deliberate (it's what recovers camera-crushed black
+    // corners — measured 1 -> 60 instead of 1 -> 12), but the white-mist
+    // bug blended toward solid white (display g/r ~0.9). The threshold
+    // separates the accepted floor from the mist failure mode.
     let ratio0 = g0 / r0.max(1.0);
     let ratio1 = g1 / r1.max(1.0);
     assert!(
-        ratio1 < ratio0 + 0.15,
-        "corner must stay red, not fade to white (g/r {ratio0:.2} -> {ratio1:.2})"
+        ratio1 < 0.6,
+        "corner must stay predominantly red (g/r {ratio0:.2} -> {ratio1:.2}; mist was ~0.9)"
     );
 
     // Full deflection: rescue power — a severely vignetted corner must be
@@ -618,4 +623,49 @@ fn devignette_lifts_corners_without_white_mist() {
         r_full > r1 + 20.0,
         "full deflection must lift far beyond working strength (r {r1} -> {r_full})"
     );
+}
+
+/// Measurement (not an assertion suite): print what full-strength
+/// devignette actually does to corners at several darkness levels.
+#[test]
+fn measure_devignette_response() {
+    let Some((device, queue, limits)) = make_device() else {
+        eprintln!("no GPU; skipping");
+        return;
+    };
+    let context = GpuContext {
+        device: Arc::new(device),
+        queue: Arc::new(queue),
+        limits,
+        display: Arc::new(std::sync::Mutex::new(None)),
+    };
+    let device = context.device.clone();
+    let queue = context.queue.clone();
+    let processor = GpuProcessor::new(context, W, H).expect("processor");
+
+    for corner_level in [0.18f32, 0.05, 0.02, 0.005] {
+        let mut img = vec![0f32; (W * H * 4) as usize];
+        for y in 0..H {
+            for x in 0..W {
+                let i = ((y * W + x) * 4) as usize;
+                let v = corner_level;
+                img[i] = v;
+                img[i + 1] = v;
+                img[i + 2] = v;
+                img[i + 3] = 1.0;
+            }
+        }
+        let mut adj = AllAdjustments::default();
+        adj.global.process_version = 2;
+        let base = render(&processor, &device, &queue, &img, adj);
+        adj.global.vignette_amount = 1.0;
+        adj.global.vignette_midpoint = 0.5;
+        adj.global.vignette_feather = 0.5;
+        let lifted = render(&processor, &device, &queue, &img, adj);
+        let idx = ((2 * W + 2) * 4) as usize;
+        eprintln!(
+            "corner linear {:.3}: display {} -> {} (of 255)",
+            corner_level, base[idx], lifted[idx]
+        );
+    }
 }
