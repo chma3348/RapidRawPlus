@@ -2177,8 +2177,18 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         let aspect = full_dims_f.y / full_dims_f.x;
         let uv_centered = (coord_f / full_dims_f - 0.5) * 2.0;
         let uv_round = sign(uv_centered) * pow(abs(uv_centered), vec2<f32>(v_round, v_round));
-        let d = length(uv_round * vec2<f32>(1.0, aspect)) * 0.5;
-        let vignette_mask = smoothstep(v_mid - v_feather, v_mid + v_feather, d);
+        // Radius normalized so the extreme corner is exactly 1.0 — the old
+        // ring mask peaked at ~0.78 in the corner tip and near zero at
+        // half-radius, so even ±4 stops "barely did anything" against real
+        // lens vignetting (which spreads smoothly from ~30% radius out).
+        let corner_len = length(vec2<f32>(1.0, aspect));
+        let dn = length(uv_round * vec2<f32>(1.0, aspect)) / max(corner_len, 1e-4);
+        // Polynomial radial profile like actual lens falloff: midpoint sets
+        // where it begins, feather sets curve softness, corners ALWAYS get
+        // full strength.
+        let start = v_mid * 0.6;
+        let shape = 1.0 + v_feather * 4.0;
+        let vignette_mask = pow(clamp((dn - start) / max(1.0 - start, 1e-4), 0.0, 1.0), shape);
         // Exposure-style gain in linear light, both directions. Brightening
         // used to BLEND TOWARD WHITE — devignetting painted white mist over
         // the corners instead of pulling the darks up; darkening crushed
