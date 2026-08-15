@@ -25,7 +25,7 @@ interface SliderProps {
 }
 
 const DOUBLE_CLICK_THRESHOLD_MS = 300;
-const FINE_ADJUSTMENT_MULTIPLIER = 0.2;
+const FINE_ADJUSTMENT_MULTIPLIER = 0.1;
 const TOUCH_DRAG_THRESHOLD_PX = 10;
 const TOUCH_THUMB_HIT_RADIUS_PX = 24;
 
@@ -470,6 +470,7 @@ const Slider = ({
       <div className="flex justify-between items-center mb-1">
         <div
           className={`grid ${typeof label === 'string' ? 'cursor-pointer' : ''}`}
+          title="⇧ drag: fine (10×) · ⇧ scroll: nudge · click label: reset"
           onClick={typeof label === 'string' ? handleReset : undefined}
           onDoubleClick={typeof label === 'string' ? handleReset : undefined}
           onMouseEnter={typeof label === 'string' ? () => setIsLabelHovered(true) : undefined}
