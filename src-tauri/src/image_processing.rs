@@ -1385,7 +1385,7 @@ pub struct GlobalAdjustments {
     // cube receives the working image encoded as a Fujifilm body would
     // (F-Gamut C + F-Log2 curve) and its output IS the finished 709 look.
     pub lut_input_space: u32,
-    pub _pad_lspace1: u32,
+    pub lut_sim_exposure: f32,
     pub _pad_lspace2: u32,
     pub _pad_lspace3: u32,
 }
@@ -2156,6 +2156,11 @@ fn get_global_adjustments_from_json(
     } else {
         0u32
     };
+    let lut_sim_exposure = if is_visible("effects") {
+        (js_adjustments["lutSimExposure"].as_f64().unwrap_or(0.0) as f32).clamp(-3.0, 3.0)
+    } else {
+        0.0
+    };
     let (has_lut, lut_intensity) = if is_visible("effects") {
         (
             if js_adjustments["lutPath"].is_string() {
@@ -2379,7 +2384,7 @@ fn get_global_adjustments_from_json(
         point_color_meta,
 
         lut_input_space,
-        _pad_lspace1: 0,
+        lut_sim_exposure,
         _pad_lspace2: 0,
         _pad_lspace3: 0,
     }

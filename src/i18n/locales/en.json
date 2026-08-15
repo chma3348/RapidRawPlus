@@ -147,6 +147,7 @@
       "halation": "Halation",
       "filmSaturation": "Film saturation",
       "filmSimulations": "Film simulations",
+      "simExposure": "Sim exposure (stops)",
       "lightFlares": "Light Flares",
       "lut": "LUT",
       "midpoint": "Midpoint",

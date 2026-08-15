@@ -553,3 +553,59 @@ fn pale_chip_luminance_does_not_amplify_blocks() {
         "look-alike blocks must move together, not checkerboard (imbalance {imbalance:.2})"
     );
 }
+
+/// Devignetting (positive vignette) must LIFT dark corners as an exposure
+/// gain — the old code blended toward solid white, painting "white mist"
+/// over the corners and destroying their color. A dark red corner must
+/// come out brighter but still RED.
+#[test]
+fn devignette_lifts_corners_without_white_mist() {
+    let Some((device, queue, limits)) = make_device() else {
+        eprintln!("no GPU; skipping");
+        return;
+    };
+    let context = GpuContext {
+        device: Arc::new(device),
+        queue: Arc::new(queue),
+        limits,
+        display: Arc::new(std::sync::Mutex::new(None)),
+    };
+    let device = context.device.clone();
+    let queue = context.queue.clone();
+    let processor = GpuProcessor::new(context, W, H).expect("processor");
+
+    // Dark red frame corners, mid-gray center.
+    let mut img = vec![0f32; (W * H * 4) as usize];
+    for y in 0..H {
+        for x in 0..W {
+            let i = ((y * W + x) * 4) as usize;
+            img[i] = 0.16;
+            img[i + 1] = 0.02;
+            img[i + 2] = 0.02;
+            img[i + 3] = 1.0;
+        }
+    }
+
+    let mut adj = AllAdjustments::default();
+    adj.global.process_version = 2;
+    let base = render(&processor, &device, &queue, &img, adj);
+
+    adj.global.vignette_amount = 1.0;
+    adj.global.vignette_midpoint = 0.3;
+    adj.global.vignette_feather = 0.5;
+    let lifted = render(&processor, &device, &queue, &img, adj);
+
+    // Sample the extreme corner.
+    let idx = ((2 * W + 2) * 4) as usize;
+    let (r0, g0) = (base[idx] as f32, base[idx + 1] as f32);
+    let (r1, g1) = (lifted[idx] as f32, lifted[idx + 1] as f32);
+
+    assert!(r1 > r0 + 10.0, "corner must brighten (r {r0} -> {r1})");
+    // White mist pushes g toward r (ratio -> 1). Gain preserves the ratio.
+    let ratio0 = g0 / r0.max(1.0);
+    let ratio1 = g1 / r1.max(1.0);
+    assert!(
+        ratio1 < ratio0 + 0.15,
+        "corner must stay red, not fade to white (g/r {ratio0:.2} -> {ratio1:.2})"
+    );
+}

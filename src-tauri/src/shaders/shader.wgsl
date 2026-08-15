@@ -159,7 +159,7 @@ struct GlobalAdjustments {
 
     // 0 = display-referred LUT, 1 = F-Log2C film-sim LUT.
     lut_input_space: u32,
-    _pad_lspace1: u32,
+    lut_sim_exposure: f32,
     _pad_lspace2: u32,
     _pad_lspace3: u32,
 }
@@ -2179,11 +2179,11 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         let uv_round = sign(uv_centered) * pow(abs(uv_centered), vec2<f32>(v_round, v_round));
         let d = length(uv_round * vec2<f32>(1.0, aspect)) * 0.5;
         let vignette_mask = smoothstep(v_mid - v_feather, v_mid + v_feather, d);
-        if (v_amount < 0.0) {
-            composite_rgb_linear *= (1.0 + v_amount * vignette_mask);
-        } else {
-            composite_rgb_linear = mix(composite_rgb_linear, vec3<f32>(1.0), v_amount * vignette_mask);
-        }
+        // Exposure-style gain in linear light, both directions. Brightening
+        // used to BLEND TOWARD WHITE — devignetting painted white mist over
+        // the corners instead of pulling the darks up; darkening crushed
+        // linearly to black. ±2.4 stops at full deflection, chroma intact.
+        composite_rgb_linear *= exp2(v_amount * 2.4 * vignette_mask);
     }
 
     if (adjustments.global.process_version >= 2u) {
@@ -2235,7 +2235,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             // exactly as a Fujifilm body would (F-Gamut C + F-Log2 curve);
             // its output IS the finished BT.709 film-simulation image —
             // the LUT replaces our display rendering at full intensity.
-            let fgc = SRGB_TO_FGAMUT_C * max(composite_rgb_linear, vec3<f32>(0.0));
+            let sim_gain = exp2(adjustments.global.lut_sim_exposure);
+            let fgc = SRGB_TO_FGAMUT_C * (max(composite_rgb_linear, vec3<f32>(0.0)) * sim_gain);
             let encoded = vec3<f32>(
                 flog2_encode(fgc.r),
                 flog2_encode(fgc.g),

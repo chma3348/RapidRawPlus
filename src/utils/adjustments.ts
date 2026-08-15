@@ -207,6 +207,7 @@ export interface Adjustments {
   lutName?: string | null;
   lutPath?: string | null;
   lutInputSpace?: 'display' | 'flog2c';
+  lutSimExposure?: number;
   lutSize?: number;
   masks: Array<MaskContainer>;
   orientationSteps: number;
@@ -551,6 +552,7 @@ export const INITIAL_ADJUSTMENTS: Adjustments = {
   lutName: null,
   lutPath: null,
   lutInputSpace: 'display',
+  lutSimExposure: 0,
   lutSize: 0,
   masks: [],
   orientationSteps: 0,

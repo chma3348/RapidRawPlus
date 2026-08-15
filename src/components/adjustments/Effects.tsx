@@ -145,6 +145,25 @@ export default function EffectsPanel({
                 />
               </div>
             )}
+            {adjustments.lutPath && adjustments.lutInputSpace === 'flog2c' && (
+              <div className="mb-3">
+                <Slider
+                  label={t('adjustments.effects.simExposure')}
+                  min={-3}
+                  max={3}
+                  step={0.05}
+                  defaultValue={0}
+                  value={adjustments.lutSimExposure ?? 0}
+                  onChange={(e: any) =>
+                    setAdjustments((prev: Partial<Adjustments>) => ({
+                      ...prev,
+                      lutSimExposure: parseFloat(e.target.value),
+                    }))
+                  }
+                  onDragStateChange={onDragStateChange}
+                />
+              </div>
+            )}
             <LUTControl
               lutPath={adjustments.lutPath || null}
               lutName={adjustments.lutName || null}
