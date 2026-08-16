@@ -10,7 +10,7 @@ fn half_to_f32_matches_reference_values() {
         (0x3800, 0.5),
         (0xBC00, -1.0),
         (0x4000, 2.0),
-        (0x7BFF, 65504.0),      // largest normal half
+        (0x7BFF, 65504.0),        // largest normal half
         (0x0400, 6.103515625e-5), // smallest normal half
         (0x0001, 5.9604645e-8),   // smallest subnormal half
         (0x0200, 3.0517578e-5),   // mid subnormal

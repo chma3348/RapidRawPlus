@@ -65,13 +65,9 @@ pub struct MaskDefinition {
 
 impl MaskDefinition {
     pub fn requires_warped_image(&self) -> bool {
-        self.sub_masks
-            .iter()
-            .any(|sm| {
-                sm.mask_type == "color"
-                    || sm.mask_type == "luminance"
-                    || sm.mask_type == "clipped"
-            })
+        self.sub_masks.iter().any(|sm| {
+            sm.mask_type == "color" || sm.mask_type == "luminance" || sm.mask_type == "clipped"
+        })
     }
 }
 
@@ -1196,12 +1192,13 @@ fn generate_color_bitmap(
     let target_x = params.target_x.round() as i32;
     let target_y = params.target_y.round() as i32;
 
-    let extras: ParametricExtras =
-        serde_json::from_value(params_value.clone()).unwrap_or_default();
+    let extras: ParametricExtras = serde_json::from_value(params_value.clone()).unwrap_or_default();
 
     // Reference set: swatch band, multi-sample chips, or the classic
     // single click point.
-    let swatch = extras.swatch_hue.map(|h| (h, extras.swatch_width.unwrap_or(45.0)));
+    let swatch = extras
+        .swatch_hue
+        .map(|h| (h, extras.swatch_width.unwrap_or(45.0)));
     let mut refs: Vec<(f32, f32, f32)> = Vec::new();
     if swatch.is_none() {
         let mut pts: Vec<(i64, i64)> = extras
@@ -1875,7 +1872,6 @@ pub fn get_cached_or_generate_mask(
     generated
 }
 
-
 #[cfg(test)]
 mod color_select_tests {
     use super::*;
@@ -1914,10 +1910,22 @@ mod color_select_tests {
         let white = color_key_distance(rgb_to_hsv_f(1.0, 1.0, 1.0), light_ref);
         let mid_gray = color_key_distance(rgb_to_hsv_f(0.55, 0.55, 0.55), light_ref);
         let pale_pink = color_key_distance(rgb_to_hsv_f(0.95, 0.72, 0.72), light_ref);
-        assert!(same_tone < white, "same tone ({same_tone:.3}) must beat white ({white:.3})");
-        assert!(same_tone < mid_gray, "same tone must beat mid-gray ({mid_gray:.3})");
-        assert!(same_tone < pale_pink, "same tone must beat pale saturated ({pale_pink:.3})");
-        assert!(mid_gray > 0.3, "mid-gray must fall outside a light-tone key");
+        assert!(
+            same_tone < white,
+            "same tone ({same_tone:.3}) must beat white ({white:.3})"
+        );
+        assert!(
+            same_tone < mid_gray,
+            "same tone must beat mid-gray ({mid_gray:.3})"
+        );
+        assert!(
+            same_tone < pale_pink,
+            "same tone must beat pale saturated ({pale_pink:.3})"
+        );
+        assert!(
+            mid_gray > 0.3,
+            "mid-gray must fall outside a light-tone key"
+        );
     }
 
     #[test]
@@ -1946,7 +1954,10 @@ mod color_select_tests {
         let before: u32 = mask.pixels().map(|p| (p[0] > 127) as u32).sum();
         apply_solidify(&mut mask, 50.0, 1.0);
         let after: u32 = mask.pixels().map(|p| (p[0] > 127) as u32).sum();
-        assert!(after > before * 5, "speckle must fill into a region ({before} -> {after})");
+        assert!(
+            after > before * 5,
+            "speckle must fill into a region ({before} -> {after})"
+        );
         // The interior gap between dots must now be selected.
         assert!(mask.get_pixel(55, 55)[0] > 127, "inter-dot gap filled");
         // Far corners stay empty — close must not flood the frame.
@@ -1989,7 +2000,13 @@ mod color_select_tests {
 
         assert!(mask.get_pixel(10, 16)[0] < 10, "erased white must clear");
         assert!(mask.get_pixel(50, 16)[0] > 200, "painted gray must add");
-        assert!(mask.get_pixel(10, 55)[0] > 200, "untouched white stays selected");
-        assert!(mask.get_pixel(50, 55)[0] < 10, "untouched gray stays unselected");
+        assert!(
+            mask.get_pixel(10, 55)[0] > 200,
+            "untouched white stays selected"
+        );
+        assert!(
+            mask.get_pixel(50, 55)[0] < 10,
+            "untouched gray stays unselected"
+        );
     }
 }

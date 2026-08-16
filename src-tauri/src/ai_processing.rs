@@ -366,7 +366,6 @@ pub async fn get_or_init_clip_models(
     Ok(clip_models)
 }
 
-
 #[derive(Clone, Copy)]
 struct TileParams {
     cs: usize,
@@ -781,7 +780,11 @@ pub fn run_lama_inpainting(
         .copied()
         .unwrap_or(1.0)
         .max(1e-4);
-    let gain = if typical < 0.35 { (0.6 / typical).min(64.0) } else { 1.0 };
+    let gain = if typical < 0.35 {
+        (0.6 / typical).min(64.0)
+    } else {
+        1.0
+    };
     log::info!(
         "lama: crop {}x{}, inference {}x{}, context median {:.4}, gain {:.2}",
         crop_w,
@@ -1173,12 +1176,15 @@ pub fn run_sam_decoder_with_paint(
     let stride = ((paint.width().max(paint.height()) / 256).max(1)) as usize;
     let mut painted: Vec<(f32, f32)> = Vec::new();
     for (x, y, p) in paint.enumerate_pixels() {
-        if p[0] > 127 && (x as usize).is_multiple_of(stride) && (y as usize).is_multiple_of(stride) {
+        if p[0] > 127 && (x as usize).is_multiple_of(stride) && (y as usize).is_multiple_of(stride)
+        {
             painted.push((x as f32, y as f32));
         }
     }
     if painted.is_empty() {
-        return Err(anyhow::anyhow!("Paint a region first, then release to detect."));
+        return Err(anyhow::anyhow!(
+            "Paint a region first, then release to detect."
+        ));
     }
 
     // Centroid + greedy farthest-point sampling for good spatial coverage.

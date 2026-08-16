@@ -49,7 +49,8 @@ fn lama_sanity() {
     let session = registry.get_session("lama-fp16", None).unwrap();
 
     let (img, mask) = test_image();
-    let (result, _) = rapidraw_lib::ai_processing::run_lama_inpainting(&img, &mask, &session).unwrap();
+    let (result, _) =
+        rapidraw_lib::ai_processing::run_lama_inpainting(&img, &mask, &session).unwrap();
     // Center of the oval should no longer be black if the fill worked.
     let center = result.get_pixel(200, 150);
     let src = img.to_rgba8();
@@ -64,14 +65,18 @@ fn lama_sanity() {
             }
         }
     }
-    println!("NORMAL mask: center px after = {:?}, changed {changed}/{total}", center);
+    println!(
+        "NORMAL mask: center px after = {:?}, changed {changed}/{total}",
+        center
+    );
 
     // Inverted polarity probe
     let mut inv = mask.clone();
     for p in inv.pixels_mut() {
         p[0] = 255 - p[0];
     }
-    let (result_inv, _) = rapidraw_lib::ai_processing::run_lama_inpainting(&img, &inv, &session).unwrap();
+    let (result_inv, _) =
+        rapidraw_lib::ai_processing::run_lama_inpainting(&img, &inv, &session).unwrap();
     let center_inv = result_inv.get_pixel(200, 150);
     println!("INVERTED mask: center px after = {:?}", center_inv);
 }

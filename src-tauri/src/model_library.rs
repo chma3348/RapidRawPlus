@@ -24,7 +24,9 @@ pub const CONVERTIBLE_EXTENSIONS: [&str; 3] = ["pth", "safetensors", "ckpt"];
 
 fn is_convertible_file(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    CONVERTIBLE_EXTENSIONS.iter().any(|e| lower.ends_with(&format!(".{e}")))
+    CONVERTIBLE_EXTENSIONS
+        .iter()
+        .any(|e| lower.ends_with(&format!(".{e}")))
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -116,7 +118,8 @@ fn library_view(registry: &ModelRegistry, catalog: &[CatalogEntry]) -> Vec<Libra
 
     let mut list: Vec<LibraryModelInfo> = seen.into_values().collect();
     list.sort_by(|a, b| {
-        format!("{:?}{}", a.task_type, a.display_name).cmp(&format!("{:?}{}", b.task_type, b.display_name))
+        format!("{:?}{}", a.task_type, a.display_name)
+            .cmp(&format!("{:?}{}", b.task_type, b.display_name))
     });
     list
 }
@@ -246,7 +249,10 @@ async fn pip_install(python: &Path, packages: &[&str]) -> Result<(), String> {
     if !output.status.success() {
         return Err(format!(
             "Installing conversion packages failed: {}",
-            String::from_utf8_lossy(&output.stderr).lines().last().unwrap_or("unknown error")
+            String::from_utf8_lossy(&output.stderr)
+                .lines()
+                .last()
+                .unwrap_or("unknown error")
         ));
     }
     Ok(())
@@ -270,7 +276,18 @@ async fn ensure_convert_env(app_handle: &tauri::AppHandle) -> Result<PathBuf, St
                 return Ok(python.clone());
             }
             let _ = app_handle.emit("convert-progress", "Installing conversion packages...");
-            if pip_install(python, &["spandrel", "spandrel_extra_arches", "onnx", "packaging", "einops"]).await.is_ok()
+            if pip_install(
+                python,
+                &[
+                    "spandrel",
+                    "spandrel_extra_arches",
+                    "onnx",
+                    "packaging",
+                    "einops",
+                ],
+            )
+            .await
+            .is_ok()
                 && python_has_spandrel(python).await
             {
                 return Ok(python.clone());
@@ -305,8 +322,18 @@ async fn ensure_convert_env(app_handle: &tauri::AppHandle) -> Result<PathBuf, St
     }
     let python = venv_dir.join("bin/python3");
     pip_install(&python, &["--upgrade", "pip"]).await?;
-    pip_install(&python, &["torch", "spandrel", "spandrel_extra_arches", "onnx", "packaging", "einops"])
-        .await?;
+    pip_install(
+        &python,
+        &[
+            "torch",
+            "spandrel",
+            "spandrel_extra_arches",
+            "onnx",
+            "packaging",
+            "einops",
+        ],
+    )
+    .await?;
     if !python_has_spandrel(&python).await {
         return Err("Conversion environment setup did not complete correctly.".to_string());
     }
@@ -349,8 +376,10 @@ async fn convert_checkpoint_to_onnx(
         .map_err(|e| format!("Could not run the converter: {}", e))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let result: Option<ConvertResult> =
-        stdout.lines().last().and_then(|l| serde_json::from_str(l).ok());
+    let result: Option<ConvertResult> = stdout
+        .lines()
+        .last()
+        .and_then(|l| serde_json::from_str(l).ok());
     match result {
         Some(r) if r.ok => {
             if let Some(arch) = r.architecture {
@@ -366,7 +395,10 @@ async fn convert_checkpoint_to_onnx(
             let _ = fs::remove_file(&out_path);
             Err(format!(
                 "Conversion crashed: {}",
-                String::from_utf8_lossy(&output.stderr).lines().last().unwrap_or("unknown error")
+                String::from_utf8_lossy(&output.stderr)
+                    .lines()
+                    .last()
+                    .unwrap_or("unknown error")
             ))
         }
     }
@@ -400,7 +432,8 @@ pub async fn add_model_from_file(
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<Vec<LibraryModelInfo>, String> {
-    let task = TaskType::parse(&task_type).ok_or_else(|| format!("Unknown task '{}'", task_type))?;
+    let task =
+        TaskType::parse(&task_type).ok_or_else(|| format!("Unknown task '{}'", task_type))?;
     let registry =
         get_or_init_registry(&app_handle, &state.model_registry).map_err(|e| e.to_string())?;
 
@@ -497,12 +530,19 @@ async fn download_to_models_dir(
     let dest = registry.models_dir().join(filename);
     let resp = reqwest::get(url).await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
-        return Err(format!("Download failed with status {} for {}", resp.status(), url));
+        return Err(format!(
+            "Download failed with status {} for {}",
+            resp.status(),
+            url
+        ));
     }
     let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
     let sha256 = hex::encode(Sha256::digest(&bytes));
     fs::write(&dest, &bytes).map_err(|e| e.to_string())?;
-    Ok(DownloadSpec { url: url.to_string(), sha256 })
+    Ok(DownloadSpec {
+        url: url.to_string(),
+        sha256,
+    })
 }
 
 /// Probes a freshly downloaded model; on failure removes the files and
@@ -537,7 +577,8 @@ pub async fn add_model_from_url(
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<Vec<LibraryModelInfo>, String> {
-    let task = TaskType::parse(&task_type).ok_or_else(|| format!("Unknown task '{}'", task_type))?;
+    let task =
+        TaskType::parse(&task_type).ok_or_else(|| format!("Unknown task '{}'", task_type))?;
     let registry =
         get_or_init_registry(&app_handle, &state.model_registry).map_err(|e| e.to_string())?;
 
@@ -697,7 +738,12 @@ pub async fn search_remote_models(query: String) -> Result<Vec<RemoteModelRepo>,
             .collect();
 
         if !files.is_empty() {
-            results.push(RemoteModelRepo { repo_id, downloads, likes, files });
+            results.push(RemoteModelRepo {
+                repo_id,
+                downloads,
+                likes,
+                files,
+            });
         }
     }
     results.sort_by_key(|r| std::cmp::Reverse(r.downloads));
@@ -716,7 +762,8 @@ pub async fn install_remote_model(
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<Vec<LibraryModelInfo>, String> {
-    let task = TaskType::parse(&task_type).ok_or_else(|| format!("Unknown task '{}'", task_type))?;
+    let task =
+        TaskType::parse(&task_type).ok_or_else(|| format!("Unknown task '{}'", task_type))?;
     let registry =
         get_or_init_registry(&app_handle, &state.model_registry).map_err(|e| e.to_string())?;
 
@@ -726,7 +773,11 @@ pub async fn install_remote_model(
     }
 
     // rfilename may sit in a subfolder of the repo; store flat locally.
-    let source_name = filename.split('/').next_back().unwrap_or(&filename).to_string();
+    let source_name = filename
+        .split('/')
+        .next_back()
+        .unwrap_or(&filename)
+        .to_string();
     let url = format!(
         "https://huggingface.co/{}/resolve/main/{}?download=true",
         repo_id, filename

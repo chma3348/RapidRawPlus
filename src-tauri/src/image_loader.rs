@@ -209,11 +209,19 @@ fn patch_half_float_tiff(bytes: &[u8]) -> Option<Vec<u8>> {
     };
     let u16_at = |b: &[u8], i: usize| -> Option<u16> {
         let s: [u8; 2] = b.get(i..i + 2)?.try_into().ok()?;
-        Some(if big { u16::from_be_bytes(s) } else { u16::from_le_bytes(s) })
+        Some(if big {
+            u16::from_be_bytes(s)
+        } else {
+            u16::from_le_bytes(s)
+        })
     };
     let u32_at = |b: &[u8], i: usize| -> Option<u32> {
         let s: [u8; 4] = b.get(i..i + 4)?.try_into().ok()?;
-        Some(if big { u32::from_be_bytes(s) } else { u32::from_le_bytes(s) })
+        Some(if big {
+            u32::from_be_bytes(s)
+        } else {
+            u32::from_le_bytes(s)
+        })
     };
     if u16_at(bytes, 2)? != 42 {
         return None;
@@ -260,7 +268,11 @@ fn patch_half_float_tiff(bytes: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
     let mut patched = bytes.to_vec();
-    let one: [u8; 2] = if big { 1u16.to_be_bytes() } else { 1u16.to_le_bytes() };
+    let one: [u8; 2] = if big {
+        1u16.to_be_bytes()
+    } else {
+        1u16.to_le_bytes()
+    };
     for k in 0..n {
         let at = slot + k * 2;
         *patched.get_mut(at)? = one[0];
@@ -345,9 +357,7 @@ fn decode_heic_via_sips(bytes: &[u8]) -> Result<DynamicImage> {
 
 #[cfg(not(target_os = "macos"))]
 fn decode_heic_via_sips(_bytes: &[u8]) -> Result<DynamicImage> {
-    Err(anyhow!(
-        "HEIC files are currently only supported on macOS"
-    ))
+    Err(anyhow!("HEIC files are currently only supported on macOS"))
 }
 
 pub fn load_image_with_orientation(
@@ -486,8 +496,7 @@ pub fn composite_patches_on_image(
         // Patches from float/RAW sources are stored gamma-encoded so their
         // deep-shadow values survive 8-bit storage; decode back to linear
         // here before compositing onto the linear base image.
-        let gamma_encoded =
-            patch_data.get("encoding").and_then(|v| v.as_str()) == Some("gamma");
+        let gamma_encoded = patch_data.get("encoding").and_then(|v| v.as_str()) == Some("gamma");
 
         let color_b64 = patch_data
             .get("color")

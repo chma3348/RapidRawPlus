@@ -141,7 +141,11 @@ pub fn run_tiled_enhancement(
                 )
             };
 
-            let out_tensor = run_window(session, window_tensor(input, win_x, win_y, win_w, win_h), scale)?;
+            let out_tensor = run_window(
+                session,
+                window_tensor(input, win_x, win_y, win_w, win_h),
+                scale,
+            )?;
 
             // Only the part of the window inside the image contributes
             // (fixed-size windows may extend past it via padding).
@@ -338,8 +342,9 @@ pub(crate) fn enhancement_input(
     let settings = load_settings(app_handle.clone()).unwrap_or_default();
     let is_raw = is_raw_file(path_str);
     let bytes = fs::read(Path::new(path_str)).map_err(|e| e.to_string())?;
-    let base = crate::image_loader::load_and_composite(&bytes, path_str, adj, false, &settings, None)
-        .map_err(|e| format!("Failed to load image: {}", e))?;
+    let base =
+        crate::image_loader::load_and_composite(&bytes, path_str, adj, false, &settings, None)
+            .map_err(|e| format!("Failed to load image: {}", e))?;
     let rendered = crate::export_processing::process_image_for_export_pipeline(
         path_str,
         &base,
@@ -392,7 +397,8 @@ fn estimate_fine_noise(img: &Rgb32FImage) -> f32 {
     while y < h - 1 {
         let mut x = 1;
         while x < w - 1 {
-            let lap = luma(x, y) - (luma(x - 1, y) + luma(x + 1, y) + luma(x, y - 1) + luma(x, y + 1)) * 0.25;
+            let lap = luma(x, y)
+                - (luma(x - 1, y) + luma(x + 1, y) + luma(x, y - 1) + luma(x, y + 1)) * 0.25;
             vals.push(lap.abs());
             x += step;
         }
@@ -482,7 +488,12 @@ pub(crate) fn blend_result(
     grain: f32,
 ) -> Rgb32FImage {
     let mut enhanced = if raw.dimensions() != (target_w, target_h) {
-        image::imageops::resize(raw, target_w, target_h, image::imageops::FilterType::Lanczos3)
+        image::imageops::resize(
+            raw,
+            target_w,
+            target_h,
+            image::imageops::FilterType::Lanczos3,
+        )
     } else {
         raw.clone()
     };
@@ -565,7 +576,9 @@ pub(crate) fn blend_result(
         // Match grain a silent no-op on upscaled results.
         let sigma_ref = estimate_fine_noise(original);
         let sigma_out = estimate_fine_noise(&enhanced);
-        let deficit = (sigma_ref * sigma_ref - sigma_out * sigma_out).max(0.0).sqrt();
+        let deficit = (sigma_ref * sigma_ref - sigma_out * sigma_out)
+            .max(0.0)
+            .sqrt();
         // Matching alone almost never fires in practice: degraded JPEGs
         // carry BLOCK artifacts (8px scale) rather than fine noise, so the
         // measured deficit is ~0 and the slider read as dead. The slider
@@ -575,7 +588,10 @@ pub(crate) fn blend_result(
         let sigma_add = (deficit.max(GRAIN_FLOOR) * grain).min(0.06);
         log::info!(
             "[enhance] grain: sigma_ref={:.5} sigma_out={:.5} adding sigma={:.5} (ratio {:.2})",
-            sigma_ref, sigma_out, sigma_add, scale_ratio
+            sigma_ref,
+            sigma_out,
+            sigma_add,
+            scale_ratio
         );
         if sigma_add > 1e-4 {
             let amplitude = sigma_add / 0.408;
@@ -600,9 +616,8 @@ pub(crate) fn blend_result(
                         // subdued in deep shadows and near white.
                         let weight = 0.35 + 0.65 * (4.0 * l * (1.0 - l)).clamp(0.0, 1.0);
                         let nx = ((px as f32 * inv_ratio) as u32).min(ow.saturating_sub(1));
-                        let n = grain_noise(ny.wrapping_mul(ow).wrapping_add(nx))
-                            * amplitude
-                            * weight;
+                        let n =
+                            grain_noise(ny.wrapping_mul(ow).wrapping_add(nx)) * amplitude * weight;
                         for c in 0..3 {
                             e_row[px * 3 + c] = (e_row[px * 3 + c] + n).max(0.0);
                         }
@@ -694,13 +709,20 @@ pub async fn apply_enhancement(
     let chain_step = chain_step.unwrap_or(0);
     log::info!(
         "[enhance] apply: task={} strength={:?} texture={:?} grain={:?} scale={:?} chain={}",
-        task, strength, texture, grain, output_scale, chain_step
+        task,
+        strength,
+        texture,
+        grain,
+        output_scale,
+        chain_step
     );
 
     let (registry, model) =
-        resolve_and_prepare(&app_handle, &state.model_registry, task_type, &task, |_| true)
-            .await
-            .map_err(|e| e.to_string())?;
+        resolve_and_prepare(&app_handle, &state.model_registry, task_type, &task, |_| {
+            true
+        })
+        .await
+        .map_err(|e| e.to_string())?;
 
     // Instant retry: if the last run was this exact photo/model/edits, the
     // raw model output is still in memory — a new strength or output size
@@ -965,7 +987,9 @@ fn preview_payload(
         let mean = sum / raw.as_raw().len().max(1) as f64;
         log::info!(
             "[enhance] crop model delta: mean|raw-original| = {:.5} ({}x{})",
-            mean, rw, rh
+            mean,
+            rw,
+            rh
         );
     }
 
@@ -1008,16 +1032,24 @@ pub async fn preview_enhancement(
         _ => return Err(format!("'{}' is not an enhancement task", task)),
     };
     let (registry, model) =
-        resolve_and_prepare(&app_handle, &state.model_registry, task_type, &task, |_| true)
-            .await
-            .map_err(|e| e.to_string())?;
+        resolve_and_prepare(&app_handle, &state.model_registry, task_type, &task, |_| {
+            true
+        })
+        .await
+        .map_err(|e| e.to_string())?;
 
     let strength_v = strength.unwrap_or(1.0);
     let texture_v = texture.unwrap_or(0.0);
     let grain_v = grain.unwrap_or(0.0);
     log::info!(
         "[enhance] preview: task={} strength={:?} texture={:?} grain={:?} center=({:.3},{:.3}) region={:?}",
-        task, strength, texture, grain, center_x, center_y, region_size
+        task,
+        strength,
+        texture,
+        grain,
+        center_x,
+        center_y,
+        region_size
     );
 
     // Region-specific cache key: same photo/model/edits/region → the raw
@@ -1106,7 +1138,14 @@ pub async fn preview_enhancement(
         )
         .map_err(|e| e.to_string())?;
 
-        let reply = preview_payload(&enhanced, &crop, params.scale, strength_v, texture_v, grain_v);
+        let reply = preview_payload(
+            &enhanced,
+            &crop,
+            params.scale,
+            strength_v,
+            texture_v,
+            grain_v,
+        );
         *preview_cache.lock().unwrap() = Some(crate::app_state::PreviewRaw {
             key: preview_key,
             raw: enhanced,
@@ -1173,15 +1212,18 @@ async fn preview_comfy_enhancement(
                 .max(1)
                 * 16;
         let full_ratio = full_target as f32 / full_short as f32;
-        let target =
-            ((crop.width().min(crop.height()) as f32 * full_ratio) as u32).clamp(64, 1024);
+        let target = ((crop.width().min(crop.height()) as f32 * full_ratio) as u32).clamp(64, 1024);
         let aligned = align_for_engine(&crop, target, target);
         let mut buf = Cursor::new(Vec::new());
         DynamicImage::ImageRgb32F(aligned.clone())
             .to_rgb8()
             .write_to(&mut buf, ImageFormat::Png)
             .map_err(|e| e.to_string())?;
-        Ok::<_, String>((crop, aligned.width().min(aligned.height()), buf.into_inner()))
+        Ok::<_, String>((
+            crop,
+            aligned.width().min(aligned.height()),
+            buf.into_inner(),
+        ))
     })
     .await
     .map_err(|e| e.to_string())??;
@@ -1214,7 +1256,6 @@ async fn preview_comfy_enhancement(
     });
     reply
 }
-
 
 /// Resizes an image for the generative engine so both dimensions are
 /// multiples of 16 — latent-space models shear or corrupt output on
@@ -1306,8 +1347,16 @@ async fn run_comfy_enhancement(
             .map_err(|e| e.to_string())?
             .to_rgb32f();
         let (rw, rh) = raw.dimensions();
-        let out_dynamic =
-            finish_enhancement(&raw, &rgb_input, rw, rh, strength, texture, grain, &app_handle)?;
+        let out_dynamic = finish_enhancement(
+            &raw,
+            &rgb_input,
+            rw,
+            rh,
+            strength,
+            texture,
+            grain,
+            &app_handle,
+        )?;
         *result_handle.lock().unwrap() = Some(out_dynamic);
         // native_scale 0 = engine result: retries deliver at raw dims.
         *raw_handle.lock().unwrap() = Some(crate::app_state::EnhancementRaw {
@@ -1461,12 +1510,24 @@ mod authentic_texture_tests {
         let (raw, original) = test_pair();
         let a = blend_result(&raw, &original, 96, 64, 0.7, 0.5, 1.0);
         let b = blend_result(&raw, &original, 96, 64, 0.7, 0.5, 1.0);
-        assert_eq!(a.as_raw(), b.as_raw(), "same settings must reproduce exactly");
+        assert_eq!(
+            a.as_raw(),
+            b.as_raw(),
+            "same settings must reproduce exactly"
+        );
 
         let c = blend_result(&raw, &original, 96, 64, 0.7, 0.9, 1.0);
-        assert_ne!(a.as_raw(), c.as_raw(), "changing texture must change the result");
+        assert_ne!(
+            a.as_raw(),
+            c.as_raw(),
+            "changing texture must change the result"
+        );
         let d = blend_result(&raw, &original, 96, 64, 0.4, 0.5, 1.0);
-        assert_ne!(a.as_raw(), d.as_raw(), "changing strength must change the result");
+        assert_ne!(
+            a.as_raw(),
+            d.as_raw(),
+            "changing strength must change the result"
+        );
     }
 
     fn mean_abs_diff(a: &Rgb32FImage, b: &Rgb32FImage) -> f32 {

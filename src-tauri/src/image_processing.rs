@@ -1959,7 +1959,11 @@ fn parse_color_wheel(v: &serde_json::Value) -> [f32; 4] {
 /// x-domain (360 for hue, 100 for luminance); y is -100..100. Hue-domain
 /// curves wrap: phantom copies of the outermost points are added across the
 /// 0/1 seam so the shader can do a plain scan.
-fn convert_delta_curve(points_json: Option<&serde_json::Value>, x_max: f32, wrap: bool) -> ([Point; 16], u32) {
+fn convert_delta_curve(
+    points_json: Option<&serde_json::Value>,
+    x_max: f32,
+    wrap: bool,
+) -> ([Point; 16], u32) {
     let mut pts: Vec<(f32, f32)> = points_json
         .and_then(|v| v.as_array())
         .map(|arr| {
@@ -1987,7 +1991,12 @@ fn convert_delta_curve(points_json: Option<&serde_json::Value>, x_max: f32, wrap
     pts.truncate(16);
     let mut out = [Point::default(); 16];
     for (i, (x, y)) in pts.iter().enumerate() {
-        out[i] = Point { x: *x, y: *y, _pad1: 0.0, _pad2: 0.0 };
+        out[i] = Point {
+            x: *x,
+            y: *y,
+            _pad1: 0.0,
+            _pad2: 0.0,
+        };
     }
     (out, pts.len() as u32)
 }
@@ -2099,7 +2108,10 @@ fn get_global_adjustments_from_json(
     let tone_mapper = js_adjustments["toneMapper"].as_str().unwrap_or("basic");
     let (pipe_to_rendering, rendering_to_pipe) = calculate_agx_matrices();
 
-    let cw_obj = js_adjustments.get("colorWheels").cloned().unwrap_or_default();
+    let cw_obj = js_adjustments
+        .get("colorWheels")
+        .cloned()
+        .unwrap_or_default();
     let cw = |name: &str| -> [f32; 4] {
         if is_visible("color") {
             parse_color_wheel(&cw_obj[name])
@@ -2130,7 +2142,12 @@ fn get_global_adjustments_from_json(
                 let f = |k: &str| entry.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
                 // Slider ranges are ±100; scale to shader units here so the
                 // WGSL stays unit-clean: hue ±45°, sat ±100%, lum ±60%.
-                pc[i] = [f("hue"), f("hueShift") * 0.45, f("satShift") / 100.0, f("lumShift") / 100.0 * 0.6];
+                pc[i] = [
+                    f("hue"),
+                    f("hueShift") * 0.45,
+                    f("satShift") / 100.0,
+                    f("lumShift") / 100.0 * 0.6,
+                ];
                 // Full-color keying: the sampled sat/val gate the window so
                 // a pick means THAT color, not every pixel sharing its hue —
                 // critical on wash-tinted photos where one hue covers the
@@ -2151,13 +2168,12 @@ fn get_global_adjustments_from_json(
         0.0
     };
 
-    let lut_input_space = if is_visible("effects")
-        && js_adjustments["lutInputSpace"].as_str() == Some("flog2c")
-    {
-        1u32
-    } else {
-        0u32
-    };
+    let lut_input_space =
+        if is_visible("effects") && js_adjustments["lutInputSpace"].as_str() == Some("flog2c") {
+            1u32
+        } else {
+            0u32
+        };
     let lut_sim_exposure = if is_visible("effects") {
         (js_adjustments["lutSimExposure"].as_f64().unwrap_or(0.0) as f32).clamp(-3.0, 3.0)
     } else {
@@ -2521,10 +2537,26 @@ fn get_mask_adjustments_from_json(adj: &serde_json::Value) -> MaskAdjustments {
         _pad_end6: 0.0,
         _pad_end7: 0.0,
 
-        cw_lift: if is_visible("color") { parse_color_wheel(&adj["colorWheels"]["lift"]) } else { [0.0; 4] },
-        cw_gamma: if is_visible("color") { parse_color_wheel(&adj["colorWheels"]["gamma"]) } else { [0.0; 4] },
-        cw_gain: if is_visible("color") { parse_color_wheel(&adj["colorWheels"]["gain"]) } else { [0.0; 4] },
-        cw_offset: if is_visible("color") { parse_color_wheel(&adj["colorWheels"]["offset"]) } else { [0.0; 4] },
+        cw_lift: if is_visible("color") {
+            parse_color_wheel(&adj["colorWheels"]["lift"])
+        } else {
+            [0.0; 4]
+        },
+        cw_gamma: if is_visible("color") {
+            parse_color_wheel(&adj["colorWheels"]["gamma"])
+        } else {
+            [0.0; 4]
+        },
+        cw_gain: if is_visible("color") {
+            parse_color_wheel(&adj["colorWheels"]["gain"])
+        } else {
+            [0.0; 4]
+        },
+        cw_offset: if is_visible("color") {
+            parse_color_wheel(&adj["colorWheels"]["offset"])
+        } else {
+            [0.0; 4]
+        },
         // The mask slider shows the same 0..100 pivot; the shader wants a
         // delta on top of the global pivot, so 50 is neutral.
         contrast_pivot: if is_visible("basic") {
@@ -3513,7 +3545,6 @@ pub fn calculate_auto_adjustments(
     Ok(auto_results_to_json(&results))
 }
 
-
 #[cfg(test)]
 mod pro_color_tests {
     use super::*;
@@ -3524,7 +3555,10 @@ mod pro_color_tests {
         let v = json!({"hue": 15.0, "saturation": 60.0, "luminance": 0.0});
         let w = parse_color_wheel(&v);
         let sum = w[0] + w[1] + w[2];
-        assert!(sum.abs() < 1e-4, "chroma should be zero-mean, got sum {sum}");
+        assert!(
+            sum.abs() < 1e-4,
+            "chroma should be zero-mean, got sum {sum}"
+        );
         assert!(w[0] > 0.0, "a red-ish hue should push red positive");
     }
 

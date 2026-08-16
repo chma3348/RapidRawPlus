@@ -42,7 +42,13 @@ fn make_device() -> Option<(wgpu::Device, wgpu::Queue, wgpu::Limits)> {
 }
 
 /// Renders `pixels` (linear RGBA f32, W×H) through the full pipeline.
-fn render(processor: &GpuProcessor, device: &wgpu::Device, queue: &wgpu::Queue, pixels: &[f32], adjustments: AllAdjustments) -> Vec<u8> {
+fn render(
+    processor: &GpuProcessor,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    pixels: &[f32],
+    adjustments: AllAdjustments,
+) -> Vec<u8> {
     render_sized(processor, device, queue, pixels, adjustments, W, H)
 }
 
@@ -123,7 +129,11 @@ fn srgb_to_linear1(c: f32) -> f32 {
 /// eyes call "the same color, brighter". RGB/HSV hue intentionally differs
 /// (Abney correction), so it is the wrong yardstick for hue stability.
 fn oklab_hue_deg(r8: f32, g8: f32, b8: f32) -> (f32, f32) {
-    let (r, g, b) = (srgb_to_linear1(r8), srgb_to_linear1(g8), srgb_to_linear1(b8));
+    let (r, g, b) = (
+        srgb_to_linear1(r8),
+        srgb_to_linear1(g8),
+        srgb_to_linear1(b8),
+    );
     let l = 0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b;
     let m = 0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b;
     let s = 0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b;
@@ -356,10 +366,7 @@ fn v2_contrast_is_hue_stable_and_filmic_rolls_off() {
         c2 > c1 + 0.01,
         "v2 recovery should reconstruct color in the blown disc (v1 {c1:.4}, v2 {c2:.4})"
     );
-    assert!(
-        c2 > 0.02,
-        "recovered disc still gray (chroma {c2:.4})"
-    );
+    assert!(c2 > 0.02, "recovered disc still gray (chroma {c2:.4})");
 
     // ---- 4. shadow lift strength + detail preservation ----
     // Left half: deep-shadow checkerboard (0.035 / 0.09 linear). Shadows
@@ -370,7 +377,11 @@ fn v2_contrast_is_hue_stable_and_filmic_rolls_off() {
         for x in 0..RW {
             let i = ((y * RW + x) * 4) as usize;
             let v = if x < RW / 2 {
-                if ((x / 8) + (y / 8)) % 2 == 0 { 0.035 } else { 0.09 }
+                if ((x / 8) + (y / 8)) % 2 == 0 {
+                    0.035
+                } else {
+                    0.09
+                }
             } else {
                 0.5
             };
@@ -394,7 +405,15 @@ fn v2_contrast_is_hue_stable_and_filmic_rolls_off() {
         adj.global.shadows = amount;
         adj.global.contrast_pivot = 0.5;
         adj.global.tonemapper_mode = 0;
-        let out = render_sized(&recovery_processor, &rdevice, &rqueue, &shscene, adj, RW, RH);
+        let out = render_sized(
+            &recovery_processor,
+            &rdevice,
+            &rqueue,
+            &shscene,
+            adj,
+            RW,
+            RH,
+        );
         (
             sample_lin(&out, dark_cell.0, dark_cell.1),
             sample_lin(&out, lite_cell.0, lite_cell.1),

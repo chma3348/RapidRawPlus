@@ -91,7 +91,9 @@ pub struct MasterFlatStats {
 /// result is blurred (reference noise must not divide into photos) and
 /// per-channel normalized so the brightest region sits at gain 1.0 with
 /// no global white-balance shift.
-pub fn build_master_flat(frames: Vec<Rgb32FImage>) -> Result<(Rgb32FImage, MasterFlatStats), String> {
+pub fn build_master_flat(
+    frames: Vec<Rgb32FImage>,
+) -> Result<(Rgb32FImage, MasterFlatStats), String> {
     let first = frames.first().ok_or("No flat frames provided")?;
     let (w, h) = (first.width(), first.height());
     let n_samples = (w * h * 3) as usize;
@@ -112,10 +114,15 @@ pub fn build_master_flat(frames: Vec<Rgb32FImage>) -> Result<(Rgb32FImage, Maste
             .filter(|p| p[0] >= 0.98 || p[1] >= 0.98 || p[2] >= 0.98)
             .count() as u64;
 
-        let mut lumas: Vec<f32> = data.chunks_exact(3).map(|p| luma(p[0], p[1], p[2])).collect();
+        let mut lumas: Vec<f32> = data
+            .chunks_exact(3)
+            .map(|p| luma(p[0], p[1], p[2]))
+            .collect();
         let norm = percentile(&mut lumas, NORMALIZE_PERCENTILE).max(1e-6);
         let inv = 1.0 / norm;
-        sum.iter_mut().zip(data.iter()).for_each(|(s, v)| *s += v * inv);
+        sum.iter_mut()
+            .zip(data.iter())
+            .for_each(|(s, v)| *s += v * inv);
     }
 
     let inv_n = 1.0 / frame_count as f32;
@@ -178,7 +185,9 @@ fn decode_flat_frame(
         img
     };
     let mut rgb = img.to_rgb32f();
-    rgb.as_mut().par_iter_mut().for_each(|v| *v = srgb_to_linear(*v));
+    rgb.as_mut()
+        .par_iter_mut()
+        .for_each(|v| *v = srgb_to_linear(*v));
     Ok(rgb)
 }
 
@@ -190,7 +199,10 @@ static RESIZED_CACHE: Lazy<Mutex<ResizedFlatCache>> = Lazy::new(|| Mutex::new(Ha
 
 fn invalidate_profile_caches(profile: &str) {
     MASTER_CACHE.lock().unwrap().remove(profile);
-    RESIZED_CACHE.lock().unwrap().retain(|(p, _, _), _| p != profile);
+    RESIZED_CACHE
+        .lock()
+        .unwrap()
+        .retain(|(p, _, _), _| p != profile);
 }
 
 fn load_master(profile: &str) -> Option<Arc<Rgb32FImage>> {
@@ -288,10 +300,12 @@ pub fn apply_flat_field<'a>(
         Some(p) if !p.is_empty() => p,
         _ => return image,
     };
-    let strength =
-        (adjustments.get("flatFieldStrength").and_then(|v| v.as_f64()).unwrap_or(100.0) as f32
-            / 100.0)
-            .clamp(0.0, 1.0);
+    let strength = (adjustments
+        .get("flatFieldStrength")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(100.0) as f32
+        / 100.0)
+        .clamp(0.0, 1.0);
     if strength <= 0.0 {
         return image;
     }
@@ -324,7 +338,10 @@ pub async fn create_flat_profile(
     let settings = load_settings(app_handle).unwrap_or_default();
 
     tokio::task::spawn_blocking(move || {
-        log::info!("[flat] building profile '{name}' from {} frames", source_paths.len());
+        log::info!(
+            "[flat] building profile '{name}' from {} frames",
+            source_paths.len()
+        );
         let mut frames = Vec::with_capacity(source_paths.len());
         let mut target_dims: Option<(u32, u32)> = None;
         for path in &source_paths {
@@ -472,9 +489,7 @@ mod tests {
             let v = (linear_to_srgb(scene * f) * 255.0).round() as u8;
             data.extend_from_slice(&[v, v, v]);
         }
-        let mut img = DynamicImage::ImageRgb8(
-            image::ImageBuffer::from_raw(w, h, data).unwrap(),
-        );
+        let mut img = DynamicImage::ImageRgb8(image::ImageBuffer::from_raw(w, h, data).unwrap());
         apply_flat_to_image(&mut img, &flat, 1.0);
         let expected = (linear_to_srgb(scene) * 255.0).round();
         let recovered = img.to_rgb8();
@@ -497,10 +512,16 @@ mod tests {
             "flatFieldStrength": 0
         });
         let out = apply_flat_field(Cow::Borrowed(&img), &adjustments);
-        assert!(matches!(out, Cow::Borrowed(_)), "strength 0 must be a passthrough");
+        assert!(
+            matches!(out, Cow::Borrowed(_)),
+            "strength 0 must be a passthrough"
+        );
         let adjustments = serde_json::json!({});
         let out = apply_flat_field(Cow::Borrowed(&img), &adjustments);
-        assert!(matches!(out, Cow::Borrowed(_)), "no profile must be a passthrough");
+        assert!(
+            matches!(out, Cow::Borrowed(_)),
+            "no profile must be a passthrough"
+        );
     }
 
     #[test]
@@ -518,7 +539,10 @@ mod tests {
         let expected = (linear_to_srgb(quantized_linear / FLAT_FLOOR) * 255.0).round();
         let uncapped = (linear_to_srgb(quantized_linear / 0.001) * 255.0).round();
         let got = img.to_rgb8().get_pixel(0, 0)[0] as f32;
-        assert!((got - expected).abs() <= 3.0, "got {got}, expected capped {expected}");
+        assert!(
+            (got - expected).abs() <= 3.0,
+            "got {got}, expected capped {expected}"
+        );
         assert!((got - uncapped).abs() > 10.0, "boost was not capped");
     }
 

@@ -68,7 +68,11 @@ async fn ensure_uv(app_handle: &tauri::AppHandle) -> Result<PathBuf> {
     }
     let bin_dir = app_handle.path().app_data_dir()?.join("bin");
     fs::create_dir_all(&bin_dir)?;
-    let arch = if cfg!(target_arch = "aarch64") { "aarch64" } else { "x86_64" };
+    let arch = if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else {
+        "x86_64"
+    };
     let url = format!(
         "https://github.com/astral-sh/uv/releases/download/{UV_VERSION}/uv-{arch}-apple-darwin.tar.gz"
     );
@@ -126,7 +130,12 @@ fn run_step(cmd: &mut std::process::Command, what: &str) -> Result<()> {
 
 /// Downloads a pinned GitHub commit tarball and extracts it as `dest`.
 async fn fetch_repo_snapshot(repo: &str, commit: &str, dest: &Path) -> Result<()> {
-    if dest.join(".").is_dir() && dest.read_dir().map(|mut d| d.next().is_some()).unwrap_or(false) {
+    if dest.join(".").is_dir()
+        && dest
+            .read_dir()
+            .map(|mut d| d.next().is_some())
+            .unwrap_or(false)
+    {
         return Ok(());
     }
     let parent = dest
@@ -160,7 +169,12 @@ pub async fn install_engine(
     fs::create_dir_all(&dir)?;
 
     on_progress("Downloading ComfyUI...".to_string());
-    fetch_repo_snapshot("comfyanonymous/ComfyUI", COMFYUI_COMMIT, &dir.join("ComfyUI")).await?;
+    fetch_repo_snapshot(
+        "comfyanonymous/ComfyUI",
+        COMFYUI_COMMIT,
+        &dir.join("ComfyUI"),
+    )
+    .await?;
 
     for (name, repo, commit) in NODE_PACKS {
         on_progress(format!("Downloading extension: {name}..."));
@@ -212,7 +226,8 @@ pub fn seedvr2_model_present(app_handle: &tauri::AppHandle, model_file: &str) ->
     engine_dir(app_handle)
         .map(|d| {
             d.join("ComfyUI/models/SEEDVR2").join(model_file).is_file()
-                && d.join("ComfyUI/models/SEEDVR2/ema_vae_fp16.safetensors").is_file()
+                && d.join("ComfyUI/models/SEEDVR2/ema_vae_fp16.safetensors")
+                    .is_file()
         })
         .unwrap_or(false)
 }
@@ -263,7 +278,9 @@ pub async fn ensure_running(
             return Ok(());
         }
     }
-    Err(anyhow!("The generative engine did not become ready in time."))
+    Err(anyhow!(
+        "The generative engine did not become ready in time."
+    ))
 }
 
 pub fn stop(engine_process: &Mutex<Option<std::process::Child>>) {
@@ -294,10 +311,7 @@ async fn upload_image(client: &reqwest::Client, name: &str, png_bytes: Vec<u8>) 
 
 /// Submits a workflow and returns the first output image's PNG bytes.
 /// `on_progress` receives coarse status strings.
-pub async fn run_workflow(
-    prompt: Value,
-    mut on_progress: impl FnMut(String),
-) -> Result<Vec<u8>> {
+pub async fn run_workflow(prompt: Value, mut on_progress: impl FnMut(String)) -> Result<Vec<u8>> {
     let client = reqwest::Client::new();
     let resp: Value = client
         .post(format!("{}/prompt", base_url()))
@@ -306,9 +320,10 @@ pub async fn run_workflow(
         .await?
         .json()
         .await?;
-    if let Some(node_errors) = resp.get("node_errors").filter(|e| {
-        e.as_object().map(|o| !o.is_empty()).unwrap_or(false)
-    }) {
+    if let Some(node_errors) = resp
+        .get("node_errors")
+        .filter(|e| e.as_object().map(|o| !o.is_empty()).unwrap_or(false))
+    {
         return Err(anyhow!("Engine rejected the workflow: {}", node_errors));
     }
     let prompt_id = resp
@@ -330,7 +345,9 @@ pub async fn run_workflow(
             .await?
             .json()
             .await?;
-        let Some(entry) = history.get(&prompt_id) else { continue };
+        let Some(entry) = history.get(&prompt_id) else {
+            continue;
+        };
         let status = entry.pointer("/status/status_str").and_then(|v| v.as_str());
         if status == Some("error") {
             // Surface just the exception message, not the whole traceback.
@@ -386,7 +403,10 @@ pub async fn run_workflow(
 
 pub fn sdxl_model_present(app_handle: &tauri::AppHandle) -> bool {
     engine_dir(app_handle)
-        .map(|d| d.join("ComfyUI/models/checkpoints/sd_xl_base_1.0.safetensors").is_file())
+        .map(|d| {
+            d.join("ComfyUI/models/checkpoints/sd_xl_base_1.0.safetensors")
+                .is_file()
+        })
         .unwrap_or(false)
 }
 
@@ -412,7 +432,9 @@ impl FillKind {
 }
 
 pub(crate) fn fill_files_present(app_handle: &tauri::AppHandle, kind: FillKind) -> bool {
-    let Ok(dir) = engine_dir(app_handle) else { return false };
+    let Ok(dir) = engine_dir(app_handle) else {
+        return false;
+    };
     let m = dir.join("ComfyUI/models");
     match kind {
         FillKind::SdxlBase => m.join("checkpoints/sd_xl_base_1.0.safetensors").is_file(),
@@ -589,7 +611,6 @@ pub async fn run_seedvr2(
     });
     run_workflow(prompt, &mut on_progress).await
 }
-
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]

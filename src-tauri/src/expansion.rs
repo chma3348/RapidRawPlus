@@ -58,8 +58,7 @@ pub fn build_canvas_and_mask(
             // Mask = everything outside the original image bounds, plus a
             // small seam band just inside each expanded edge so the model
             // can blend into real content.
-            let in_original =
-                x >= add_left && x < add_left + w && y >= add_top && y < add_top + h;
+            let in_original = x >= add_left && x < add_left + w && y >= add_top && y < add_top + h;
             let near_left = add_left > 0 && x < add_left + SEAM_OVERLAP;
             let near_top = add_top > 0 && y < add_top + SEAM_OVERLAP;
             let near_right = add_right > 0 && x + SEAM_OVERLAP >= add_left + w;
@@ -120,7 +119,10 @@ pub fn fill_variant(
 
 /// Downscales canvas+mask to the fill model's working size (long edge
 /// ~1216, multiple of 8) and encodes them as PNGs for the engine.
-pub(crate) fn engine_canvas_pngs(canvas: &RgbaImage, mask: &GrayImage) -> Result<(Vec<u8>, Vec<u8>, u32, u32), String> {
+pub(crate) fn engine_canvas_pngs(
+    canvas: &RgbaImage,
+    mask: &GrayImage,
+) -> Result<(Vec<u8>, Vec<u8>, u32, u32), String> {
     let (w, h) = canvas.dimensions();
     let scale = (1216.0 / w.max(h) as f32).min(1.0);
     let round8 = |v: f32| ((v / 8.0).round() as u32).max(8) * 8;
@@ -146,7 +148,11 @@ pub(crate) fn engine_canvas_pngs(canvas: &RgbaImage, mask: &GrayImage) -> Result
 
 /// Composites an engine fill (at working resolution) back onto the
 /// full-resolution canvas, touching only masked pixels.
-fn composite_engine_fill(canvas: &RgbaImage, mask: &GrayImage, fill_png: &[u8]) -> Result<RgbaImage, String> {
+fn composite_engine_fill(
+    canvas: &RgbaImage,
+    mask: &GrayImage,
+    fill_png: &[u8],
+) -> Result<RgbaImage, String> {
     let (w, h) = canvas.dimensions();
     let filled = image::load_from_memory(fill_png)
         .map_err(|e| e.to_string())?
@@ -221,13 +227,19 @@ pub async fn apply_expansion(
 
     let (source_path, _) = parse_virtual_path(&path);
     let path_str = source_path.to_string_lossy().to_string();
-    let rgb_loaded =
-        crate::enhancement::enhancement_input(&path_str, js_adjustments.as_ref(), &state, &app_handle)?;
+    let rgb_loaded = crate::enhancement::enhancement_input(
+        &path_str,
+        js_adjustments.as_ref(),
+        &state,
+        &app_handle,
+    )?;
 
     if model.manifest.params.get("engine").and_then(|v| v.as_str()) == Some("comfy") {
         let kind = crate::comfy_engine::FillKind::from_params(&model.manifest.params);
-        return apply_expansion_engine(rgb_loaded, left, top, right, bottom, kind, app_handle, state)
-            .await;
+        return apply_expansion_engine(
+            rgb_loaded, left, top, right, bottom, kind, app_handle, state,
+        )
+        .await;
     }
 
     let session = registry
@@ -264,7 +276,8 @@ pub async fn apply_expansion(
                     "expand-progress",
                     format!("Generating variant {}/{}...", i + 1, VARIANT_DIMS.len()),
                 );
-                variants.push(fill_variant(&canvas, &mask, &session, *dim).map_err(|e| e.to_string())?);
+                variants
+                    .push(fill_variant(&canvas, &mask, &session, *dim).map_err(|e| e.to_string())?);
             }
             Ok(variants)
         };
@@ -276,8 +289,10 @@ pub async fn apply_expansion(
                 match previews {
                     Ok(previews) => {
                         *results_handle.lock().unwrap() = variants;
-                        let _ = app_handle
-                            .emit("expand-complete", serde_json::json!({ "variants": previews }));
+                        let _ = app_handle.emit(
+                            "expand-complete",
+                            serde_json::json!({ "variants": previews }),
+                        );
                     }
                     Err(e) => {
                         let _ = app_handle.emit("expand-error", e);
@@ -375,7 +390,10 @@ async fn apply_expansion_engine(
     match previews {
         Ok(previews) => {
             *state.expansion_results.lock().unwrap() = variants;
-            let _ = app_handle.emit("expand-complete", serde_json::json!({ "variants": previews }));
+            let _ = app_handle.emit(
+                "expand-complete",
+                serde_json::json!({ "variants": previews }),
+            );
         }
         Err(e) => {
             let _ = app_handle.emit("expand-error", e);

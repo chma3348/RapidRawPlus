@@ -663,9 +663,7 @@ impl ModelRegistry {
 /// Manifest filter matching a mask model's subtype ("subject",
 /// "foreground", "sky", "depth").
 pub fn mask_subtype_filter(subtype: &'static str) -> impl Fn(&ModelManifest) -> bool {
-    move |m: &ModelManifest| {
-        m.params.get("mask_subtype").and_then(|v| v.as_str()) == Some(subtype)
-    }
+    move |m: &ModelManifest| m.params.get("mask_subtype").and_then(|v| v.as_str()) == Some(subtype)
 }
 
 /// Resolves which model to use for a task (honouring the user's
@@ -692,7 +690,9 @@ pub async fn resolve_and_prepare(
                 preference_key
             )
         })?;
-    let model = registry.ensure_available(app_handle, &model.manifest.id).await?;
+    let model = registry
+        .ensure_available(app_handle, &model.manifest.id)
+        .await?;
     Ok((registry, model))
 }
 
@@ -739,11 +739,22 @@ pub fn probe_onnx_model(path: &Path) -> Result<ModelProbe> {
         ));
     }
     if dims[1] > 0 && dims[1] != 3 {
-        return Err(anyhow!("Model expects {} channels; only 3-channel RGB is supported", dims[1]));
+        return Err(anyhow!(
+            "Model expects {} channels; only 3-channel RGB is supported",
+            dims[1]
+        ));
     }
 
-    let fixed_h = if dims[2] > 0 { Some(dims[2] as u32) } else { None };
-    let fixed_w = if dims[3] > 0 { Some(dims[3] as u32) } else { None };
+    let fixed_h = if dims[2] > 0 {
+        Some(dims[2] as u32)
+    } else {
+        None
+    };
+    let fixed_w = if dims[3] > 0 {
+        Some(dims[3] as u32)
+    } else {
+        None
+    };
     let declared_fixed = fixed_h.is_some() || fixed_w.is_some();
 
     let run_at = |session: &mut Session, h: u32, w: u32| -> Result<Vec<usize>> {

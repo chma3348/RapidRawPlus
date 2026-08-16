@@ -17,11 +17,11 @@ use crate::ai_processing::{
 };
 use crate::app_settings::load_settings;
 use crate::app_state::AppState;
-use crate::model_registry::{TaskType, mask_subtype_filter, resolve_and_prepare};
 use crate::cache_utils::GEOMETRY_KEYS;
 use crate::image_loader::composite_patches_on_image;
 use crate::image_processing::apply_unwarp_geometry;
 use crate::mask_generation::{AiPatchDefinition, MaskDefinition, generate_mask_bitmap};
+use crate::model_registry::{TaskType, mask_subtype_filter, resolve_and_prepare};
 use crate::{
     get_cached_full_warped_image, get_full_image_for_processing, resolve_warped_image_for_masks,
 };
@@ -771,10 +771,7 @@ impl MaskComponent {
 /// Labels 8-connected components of mask pixels above `threshold`.
 /// Returns the label map (0 = background, component ids start at 1) and
 /// the component list.
-pub(crate) fn mask_components(
-    mask: &GrayImage,
-    threshold: u8,
-) -> (Vec<u32>, Vec<MaskComponent>) {
+pub(crate) fn mask_components(mask: &GrayImage, threshold: u8) -> (Vec<u32>, Vec<MaskComponent>) {
     let (w, h) = mask.dimensions();
     let (wu, hu) = (w as usize, h as usize);
     let mut labels = vec![0u32; wu * hu];
@@ -868,8 +865,8 @@ fn region_fine_noise(img: &RgbaImage, region: &GrayImage, want_inside: bool) -> 
             if inside != want_inside {
                 continue;
             }
-            let lap =
-                luma(x, y) - (luma(x - 1, y) + luma(x + 1, y) + luma(x, y - 1) + luma(x, y + 1)) * 0.25;
+            let lap = luma(x, y)
+                - (luma(x - 1, y) + luma(x + 1, y) + luma(x, y - 1) + luma(x, y + 1)) * 0.25;
             vals.push(lap.abs());
         }
     }
@@ -955,14 +952,17 @@ fn harmonize_patch(
     // dialog's grain match).
     let sigma_ring = region_fine_noise(original_crop, &ring, true);
     let sigma_fill = region_fine_noise(filled_crop, crop_mask, true);
-    let deficit = (sigma_ring * sigma_ring - sigma_fill * sigma_fill).max(0.0).sqrt();
+    let deficit = (sigma_ring * sigma_ring - sigma_fill * sigma_fill)
+        .max(0.0)
+        .sqrt();
     let sigma_add = deficit.min(0.05);
     if sigma_add > 1e-3 {
         let amplitude = sigma_add / 0.408 * 255.0;
         let w = filled_crop.width();
         for (x, y, p) in filled_crop.enumerate_pixels_mut() {
             if crop_mask.get_pixel(x, y)[0] > 0 {
-                let n = crate::enhancement::grain_noise(y.wrapping_mul(w).wrapping_add(x)) * amplitude;
+                let n =
+                    crate::enhancement::grain_noise(y.wrapping_mul(w).wrapping_add(x)) * amplitude;
                 for c in 0..3 {
                     p[c] = (p[c] as f32 + n).clamp(0.0, 255.0) as u8;
                 }
@@ -1157,7 +1157,8 @@ async fn run_engine_inpaint_patch(
             crop_img = prefill;
         }
 
-        let (img_png, mask_png, _, _) = crate::expansion::engine_canvas_pngs(&crop_img, &crop_mask)?;
+        let (img_png, mask_png, _, _) =
+            crate::expansion::engine_canvas_pngs(&crop_img, &crop_mask)?;
         let fill_png = crate::comfy_engine::run_generative_fill(
             app_handle,
             state,
@@ -1174,8 +1175,12 @@ async fn run_engine_inpaint_patch(
         let filled = image::load_from_memory(&fill_png)
             .map_err(|e| e.to_string())?
             .to_rgba8();
-        let mut filled_crop =
-            image::imageops::resize(&filled, crop_w, crop_h, image::imageops::FilterType::Lanczos3);
+        let mut filled_crop = image::imageops::resize(
+            &filled,
+            crop_w,
+            crop_h,
+            image::imageops::FilterType::Lanczos3,
+        );
         // Prompted fills intentionally differ from their surroundings —
         // only nudge those; prompt-less removal gets the full match.
         let tone_strength = if prompt.trim().is_empty() { 1.0 } else { 0.35 };
@@ -1484,8 +1489,7 @@ async fn run_spot_enhance_patch(
     .await
     .map_err(|e| e.to_string())?;
 
-    let is_engine =
-        model.manifest.params.get("engine").and_then(|v| v.as_str()) == Some("comfy");
+    let is_engine = model.manifest.params.get("engine").and_then(|v| v.as_str()) == Some("comfy");
 
     // f32 [0,1] working copy of the crop for the model + blend.
     let crop_f32: image::Rgb32FImage = DynamicImage::ImageRgba8(crop_img.clone()).to_rgb32f();
@@ -1644,7 +1648,9 @@ pub async fn respot_enhance(
     tokio::task::spawn_blocking(move || {
         let guard = spot_handle.lock().unwrap();
         let Some(cache) = guard.as_ref().filter(|c| c.patch_id == patch_id) else {
-            return Err("This edit's raw result is no longer cached — run Enhance again.".to_string());
+            return Err(
+                "This edit's raw result is no longer cached — run Enhance again.".to_string(),
+            );
         };
         log::info!("[spot] re-blend patch {} from cache", patch_id);
         let mut base = cache.encoded_full.clone();
@@ -1664,7 +1670,6 @@ pub async fn respot_enhance(
     .map_err(|e| e.to_string())?
 }
 
-
 #[tauri::command]
 pub async fn invoke_spot_enhance_with_mask_def(
     path: String,
@@ -1680,7 +1685,11 @@ pub async fn invoke_spot_enhance_with_mask_def(
     let _ = path;
     log::info!(
         "[spot] enhance requested: task={} strength={:?} texture={:?} grain={:?} patch={}",
-        task, strength, texture, grain, patch_definition.id
+        task,
+        strength,
+        texture,
+        grain,
+        patch_definition.id
     );
     let task_type = match crate::model_registry::TaskType::parse(&task) {
         Some(
@@ -1787,7 +1796,10 @@ mod fill_component_tests {
         assert_eq!(comps.len(), 2, "two disjoint blobs expected");
         let big = comps.iter().max_by_key(|c| c.area).unwrap();
         let small = comps.iter().min_by_key(|c| c.area).unwrap();
-        assert_eq!((big.min_x, big.min_y, big.max_x, big.max_y), (20, 20, 139, 99));
+        assert_eq!(
+            (big.min_x, big.min_y, big.max_x, big.max_y),
+            (20, 20, 139, 99)
+        );
         assert_eq!(big.area, 120 * 80);
         assert!(big.span() > 96, "big blob goes to diffusion");
         assert!(small.span() <= 96, "speck goes to the LaMa spot path");
@@ -1889,7 +1901,10 @@ mod fill_component_tests {
 
         let noise_after = region_fine_noise(&filled, &mask, true);
         let ring_noise = region_fine_noise(&original, &ring, true);
-        assert!(noise_before < ring_noise * 0.2, "test setup: fill starts smooth");
+        assert!(
+            noise_before < ring_noise * 0.2,
+            "test setup: fill starts smooth"
+        );
         assert!(
             noise_after > ring_noise * 0.5,
             "fill noise {noise_after:.4} must approach ring noise {ring_noise:.4}"
