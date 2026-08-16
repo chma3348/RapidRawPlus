@@ -33,6 +33,7 @@ const Dropdown = <T extends React.Key>({
   triggerClassName = '',
 }: DropdownProps<T>) => {
   const [isOpen, setIsOpen] = useState(false);
+  const [opensUpward, setOpensUpward] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [searchTerm, setSearchTerm] = useState('');
@@ -61,6 +62,18 @@ const Dropdown = <T extends React.Key>({
   const handleSelect = (option: OptionItem<T>) => {
     onChange(option.value);
     setIsOpen(false);
+  };
+
+  // Near the bottom of a scroll panel the menu would open into clipped,
+  // unreachable space (absolute children don't extend the scroll area) —
+  // flip it upward when there's more room above than below.
+  const toggleOpen = () => {
+    if (!isOpen && dropdownRef.current) {
+      const rect = dropdownRef.current.getBoundingClientRect();
+      const spaceBelow = window.innerHeight - rect.bottom;
+      setOpensUpward(spaceBelow < 340 && rect.top > spaceBelow);
+    }
+    setIsOpen(!isOpen);
   };
 
   const filteredOptions = useMemo(() => {
@@ -112,7 +125,7 @@ const Dropdown = <T extends React.Key>({
           'focus:ring-accent focus:border-accent focus:outline-hidden focus:ring-2',
           triggerClassName || 'bg-surface',
         )}
-        onClick={() => setIsOpen(!isOpen)}
+        onClick={toggleOpen}
         type="button"
       >
         <Text as="span" variant={TextVariants.label} color={TextColors.primary}>
@@ -128,7 +141,9 @@ const Dropdown = <T extends React.Key>({
         {isOpen && (
           <motion.div
             animate={{ opacity: 1, scale: 1 }}
-            className="absolute right-0 mt-2 w-full origin-top-right z-20"
+            className={`absolute right-0 w-full z-20 ${
+              opensUpward ? 'bottom-full mb-2 origin-bottom-right' : 'mt-2 origin-top-right'
+            }`}
             exit={{ opacity: 0, scale: 0.95 }}
             initial={{ opacity: 0, scale: 0.95 }}
             transition={{ duration: 0.1, ease: 'easeOut' }}
