@@ -205,5 +205,5 @@ per-pixel, in linear light. Replaces parametric devignette for rig shots.
 ### Verify + ship
 - [x] cargo tests green, clippy 0, TS baseline, vite build.
 - [x] Full `npm run tauri build`, install, relaunch.
-- [ ] Commit + push. Flat profile files stay local (user calibration
+- [x] Commit + push. Flat profile files stay local (user calibration
       data, like LUTs) — never committed.
