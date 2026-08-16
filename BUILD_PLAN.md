@@ -133,3 +133,77 @@ rebuild + install at phase end. Nothing added or dropped silently.
       per-pack SOURCES.md provenance; official pack copied there; files
       never committed (Fujifilm copyright). Repo doc: LUTS.md.
 - [x] "Film simulations" preset dropdown in Effects -> LUT.
+
+## Round: Flat-field correction (rig calibration profiles) (agreed 2026-08-16) — SHIPPED
+
+Goal: cancel the illumination falloff of a fixed camera rig (ground-glass
+repro setup) by dividing each photo by a "master flat" reference frame,
+per-pixel, in linear light. Replaces parametric devignette for rig shots.
+
+### Backend — profile store
+- [x] Managed folder `~/Documents/RapidRAW Models/flats/<profile>/`:
+      `flat.png` (16-bit, linear-encoded, long edge capped ~2048 — the
+      field is smooth, full res is wasted) + `profile.json` (name,
+      created date, frame count, source filenames, notes, stats).
+- [x] `create_flat_profile(name, source_paths)` command: decode each
+      frame (RAW or JPEG via existing loaders), linearize, average all
+      frames, gaussian blur (sigma ~3px) to kill reference noise,
+      normalize per-channel by the 99.5th percentile (brightest spot =
+      1.0), save. Returns stats: deepest-corner falloff in stops,
+      clipped-pixel %, frame count.
+- [x] Validation warnings surfaced to UI: hot spot clipped (>0.5% at
+      255), falloff deeper than 6 stops ("add diffusion / expect noise"),
+      single-frame reference ("average 5+ for a cleaner master").
+- [x] `list_flat_profiles` / `delete_flat_profile` commands.
+- [x] AppState cache slot: loaded flat as f32 image keyed by profile
+      path (avoid re-decode per render).
+
+### Backend — application in the pipeline
+- [x] New adjustments: `flatFieldProfile` (string | null) and
+      `flatFieldStrength` (0-100, default 100). Sidecar-persisted; ride
+      along with copy/paste adjustments and presets like everything else.
+- [x] Applied at the head of `apply_geometry_warp` (image_processing.rs)
+      BEFORE distortion/rotation/crop — the flat was shot through the
+      same optics, so the divide must happen in the unwarped sensor
+      frame. Same precedent as lensfun vignetting correction (which
+      already lives in the warp stage).
+- [x] Math: bilinear-resize flat to image dims, convert photo to linear
+      (skip for already-linear RAW path), then
+      `out = photo / max(mix(1.0, flat, strength), 0.02)` per channel
+      (floor = boost cap ~5.6 stops: rig edges outside the light cone
+      must not explode into noise), re-encode.
+- [x] Include profile path + strength in the geometry hash so
+      `full_warped_cache` invalidates correctly; preview, export, masks,
+      and AI all inherit the correction automatically (it is upstream of
+      everything).
+- [x] Orientation check: flat and photo must agree on rotation
+      (EXIF-orient the flat the same way as photos at profile build).
+
+### Frontend UI
+- [x] Effects panel, new "Flat-field correction" section at the BOTTOM
+      of the Effects tab (rig-specific tool, not everyday): profile
+      dropdown (None / saved profiles / "New
+      profile..."), Amount slider 0-100 (default 100), small caption
+      line with profile stats ("4.8 stops - 8 frames").
+- [x] "New profile..." opens a modal: name field, multi-file picker /
+      drop zone for flat frames (1-20), Create button with progress;
+      result view shows a normalized preview of the master flat, the
+      stats, and any warnings before saving.
+- [x] Day-to-day flow documented in-UI (caption/tooltip): save a preset
+      with the profile + amount, or copy/paste adjustments, to apply the
+      rig correction across a whole shoot.
+
+### Tests
+- [x] Unit: synthetic scene x synthetic falloff -> divide recovers the
+      scene within epsilon (both sRGB-encoded and linear inputs).
+- [x] Unit: strength 0 = byte-identical output; floor cap limits boost
+      to ~5.6 stops on a near-black flat region.
+- [x] Unit: profile build — averaging reduces noise vs single frame,
+      normalization puts max at 1.0, stats (stops/clip%) correct on a
+      synthetic flat.
+
+### Verify + ship
+- [x] cargo tests green, clippy 0, TS baseline, vite build.
+- [x] Full `npm run tauri build`, install, relaunch.
+- [ ] Commit + push. Flat profile files stay local (user calibration
+      data, like LUTs) — never committed.

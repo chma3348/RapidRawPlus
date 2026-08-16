@@ -1038,7 +1038,9 @@ pub fn apply_geometry_warp<'a>(
     image: impl IntoCowImage<'a>,
     adjustments: &serde_json::Value,
 ) -> Cow<'a, DynamicImage> {
-    let image = image.into_cow();
+    // Flat-field correction runs first: it must divide in the unwarped
+    // sensor frame, since the flat reference shares the photo's optics.
+    let image = crate::flat_field::apply_flat_field(image.into_cow(), adjustments);
     let params = get_geometry_params_from_json(adjustments);
     if !is_geometry_identity(&params) {
         Cow::Owned(warp_image_geometry(image.as_ref(), params))

@@ -202,6 +202,8 @@ export interface Adjustments {
   lensMaker: string | null;
   lensModel: string | null;
   lumaNoiseReduction: number;
+  flatFieldProfile?: string | null;
+  flatFieldStrength?: number;
   lutData?: string | null;
   lutIntensity?: number;
   lutName?: string | null;
@@ -547,6 +549,8 @@ export const INITIAL_ADJUSTMENTS: Adjustments = {
   lensMaker: null,
   lensModel: null,
   lumaNoiseReduction: 0,
+  flatFieldProfile: null,
+  flatFieldStrength: 100,
   lutData: null,
   lutIntensity: 100,
   lutName: null,

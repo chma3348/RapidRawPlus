@@ -22,6 +22,7 @@ mod exif_processing;
 pub mod expansion;
 mod export_processing;
 mod file_management;
+pub mod flat_field;
 mod formats;
 pub mod gpu_processing;
 pub mod image_loader;
@@ -2235,6 +2236,9 @@ pub fn run() {
             ai_commands::sample_image_color,
             ai_commands::respot_enhance,
             ai_commands::list_managed_luts,
+            flat_field::create_flat_profile,
+            flat_field::list_flat_profiles,
+            flat_field::delete_flat_profile,
             ai_commands::precompute_ai_subject_mask,
             ai_commands::generate_ai_foreground_mask,
             ai_commands::generate_ai_sky_mask,

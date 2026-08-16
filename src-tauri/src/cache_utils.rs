@@ -23,6 +23,8 @@ pub const GEOMETRY_KEYS: &[&str] = &[
     "lensDistortionEnabled",
     "lensTcaEnabled",
     "lensVignetteEnabled",
+    "flatFieldProfile",
+    "flatFieldStrength",
 ];
 
 pub fn calculate_geometry_hash(adjustments: &serde_json::Value) -> u64 {

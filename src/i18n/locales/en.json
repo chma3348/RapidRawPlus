@@ -89,7 +89,7 @@
         "hueSat": "Hue vs Saturation",
         "hueLum": "Hue vs Luminance",
         "satSat": "Saturation vs Saturation — compress loud colors, lift muted ones",
-      "lumSat": "Luminance vs Saturation"
+        "lumSat": "Luminance vs Saturation"
       }
     },
     "curves": {
@@ -154,7 +154,15 @@
       "roughness": "Roughness",
       "roundness": "Roundness",
       "size": "Size",
-      "vignette": "Vignette"
+      "vignette": "Vignette",
+      "flatField": "Flat-field correction",
+      "flatFieldProfile": "Profile",
+      "flatFieldNone": "None",
+      "flatFieldNew": "New profile…",
+      "flatFieldStats": "{{stops}} stops falloff · {{frames}} frames · {{date}}",
+      "flatFieldHint": "Save a preset with this profile to apply it to a whole shoot.",
+      "flatFieldDelete": "Delete profile",
+      "flatFieldDeleteConfirm": "Delete flat-field profile \"{{name}}\"? Its master flat file will be removed."
     }
   },
   "contextMenus": {
@@ -1438,6 +1446,24 @@
       "yAxis": "Y Axis",
       "zoomInTooltip": "Zoom In",
       "zoomOutTooltip": "Zoom Out"
+    },
+    "flatField": {
+      "title": "New flat-field profile",
+      "name": "Name",
+      "namePlaceholder": "e.g. Busch rig v1",
+      "pickFrames": "Choose flat frames (RAW or JPEG)…",
+      "pickFramesTitle": "Select flat reference frames",
+      "framesSelected": "{{count}} frames selected — click to change",
+      "framesHint": "Shoot 5–10 frames of your rig with no subject (blank light path), same lens and aperture as your photos, brightest area around 50–70%, nothing clipped.",
+      "create": "Create profile",
+      "building": "Building…",
+      "builtSummary": "Profile \"{{name}}\" saved: {{stops}} stops of falloff measured from {{frames}} frame(s).",
+      "noClipping": "No clipping detected — good reference.",
+      "warnClipped": "The hot spot is clipped in {{percent}}% of pixels — the correction will be wrong there. Re-shoot slightly darker.",
+      "warnDeepFalloff": "Falloff is {{stops}} stops — corners will show noise after correction. Consider more diffusion on the light.",
+      "warnFewFrames": "Built from fewer than 3 frames — average 5+ for a cleaner master.",
+      "cancel": "Cancel",
+      "done": "Done"
     }
   },
   "modelRegistry": {
