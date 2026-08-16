@@ -1,5 +1,5 @@
 // Requires the LaMa weights in the app models dir — validates gamma-space inpainting on deep-shadow linear data.
-use image::{DynamicImage, GrayImage, Luma, Rgb, Rgb32FImage};
+use image::{DynamicImage, GrayImage, Luma, Rgb32FImage};
 use std::path::PathBuf;
 
 #[test]

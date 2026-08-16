@@ -10,6 +10,10 @@
 //! data sheet's published 10-bit code values so drift in either copy is
 //! caught.
 
+// This module is the Rust-side copy of the spec: nothing calls it outside the
+// tests below, and the constants stay at data-sheet precision on purpose.
+#![allow(dead_code, clippy::excessive_precision)]
+
 pub const A: f32 = 5.555556;
 pub const B: f32 = 0.064829;
 pub const C: f32 = 0.245281;

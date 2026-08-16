@@ -2279,7 +2279,7 @@ fn get_global_adjustments_from_json(
         has_lut,
         lut_intensity,
 
-        tonemapper_mode: tonemapper_override.unwrap_or_else(|| match tone_mapper {
+        tonemapper_mode: tonemapper_override.unwrap_or(match tone_mapper {
             "agx" => 1,
             "filmic" => 2,
             _ => 0,

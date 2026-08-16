@@ -686,7 +686,7 @@ pub async fn list_managed_luts() -> Result<Vec<serde_json::Value>, String> {
             .filter(|f| {
                 f.path()
                     .extension()
-                    .map(|e| e.to_ascii_lowercase() == "cube")
+                    .map(|e| e.eq_ignore_ascii_case("cube"))
                     .unwrap_or(false)
             })
             .collect();
@@ -1670,6 +1670,7 @@ pub async fn respot_enhance(
     .map_err(|e| e.to_string())?
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn invoke_spot_enhance_with_mask_def(
     path: String,

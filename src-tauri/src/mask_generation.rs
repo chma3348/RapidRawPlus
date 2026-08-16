@@ -1740,6 +1740,7 @@ pub fn generate_mask_bitmap(
     Some(final_mask)
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub fn generate_mask_overlay(
     mut mask_def: serde_json::Value,

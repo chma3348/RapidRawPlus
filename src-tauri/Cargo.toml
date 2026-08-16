@@ -9,6 +9,13 @@ rust-version = "1.95"
 name = "rapidraw_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[lints.rust]
+# objc's msg_send!/sel_impl! expand to the pre-1.30 `feature = "cargo-clippy"`
+# probe, and the cfg is checked against this crate's feature list.
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(feature, values("cargo-clippy"))',
+] }
+
 [dependencies]
 tauri = { version = "2.11", features = [ "macos-private-api", "rustls-tls" ] }
 tauri-plugin-dialog = "2.7.1"

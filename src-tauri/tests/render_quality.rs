@@ -128,6 +128,9 @@ fn srgb_to_linear1(c: f32) -> f32 {
 /// Perceptual (Oklab) hue angle in degrees — the metric that matches what
 /// eyes call "the same color, brighter". RGB/HSV hue intentionally differs
 /// (Abney correction), so it is the wrong yardstick for hue stability.
+// The matrices below are the published OKLab constants; keep them verbatim
+// rather than trimmed to f32's round-trip precision.
+#[allow(clippy::excessive_precision)]
 fn oklab_hue_deg(r8: f32, g8: f32, b8: f32) -> (f32, f32) {
     let (r, g, b) = (
         srgb_to_linear1(r8),
@@ -144,23 +147,6 @@ fn oklab_hue_deg(r8: f32, g8: f32, b8: f32) -> (f32, f32) {
     let bb = 0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_;
     let chroma = (a * a + bb * bb).sqrt();
     (bb.atan2(a).to_degrees(), chroma)
-}
-
-fn hue_deg(r: f32, g: f32, b: f32) -> f32 {
-    let max = r.max(g).max(b);
-    let min = r.min(g).min(b);
-    let d = max - min;
-    if d < 1e-6 {
-        return 0.0;
-    }
-    let h = if max == r {
-        ((g - b) / d).rem_euclid(6.0)
-    } else if max == g {
-        (b - r) / d + 2.0
-    } else {
-        (r - g) / d + 4.0
-    };
-    h * 60.0
 }
 
 #[test]

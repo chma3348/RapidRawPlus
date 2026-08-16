@@ -1,6 +1,9 @@
 //! Correctness of the binary16 -> f32 conversion used to decode
 //! half-float TIFFs (video-tool frame exports).
 
+// The expectations are the exact decimal expansions of the half bit patterns;
+// keep them full-length rather than trimmed to f32's round-trip precision.
+#[allow(clippy::excessive_precision)]
 #[test]
 fn half_to_f32_matches_reference_values() {
     let cases: &[(u16, f32)] = &[
