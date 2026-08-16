@@ -769,3 +769,140 @@ fn measure_tonal_dial_response() {
     let (lm, la) = amp(&lifted);
     eprintln!("shadow texture: base mean {bm:.1} amp {ba:.1} -> lifted mean {lm:.1} amp {la:.1}");
 }
+
+/// Pins the audited tonal-dial contract (2026-08-16 audit): every light
+/// dial must be MONOTONE (the old highlights curve inverted tone order),
+/// must grab only its own zone, and shadow lifts must stay grounded with
+/// surviving texture — strong pull, no white mist.
+#[test]
+fn tonal_dials_zone_contract() {
+    let Some((device, queue, limits)) = make_device() else {
+        eprintln!("no GPU; skipping");
+        return;
+    };
+    let context = GpuContext {
+        device: Arc::new(device),
+        queue: Arc::new(queue),
+        limits,
+        display: Arc::new(std::sync::Mutex::new(None)),
+    };
+    let device = context.device.clone();
+    let queue = context.queue.clone();
+    let processor = GpuProcessor::new(context, W, H).expect("processor");
+
+    let render_level = |level: f32, set: &dyn Fn(&mut AllAdjustments)| -> u8 {
+        let mut img = vec![0f32; (W * H * 4) as usize];
+        for px in img.chunks_mut(4) {
+            px[0] = level;
+            px[1] = level;
+            px[2] = level;
+            px[3] = 1.0;
+        }
+        let mut adj = AllAdjustments::default();
+        adj.global.process_version = 2;
+        set(&mut adj);
+        let out = render(&processor, &device, &queue, &img, adj);
+        out[(((H / 2) * W + W / 2) * 4) as usize]
+    };
+
+    // 1. Monotonicity across a dense ramp for every dial extreme. The old
+    //    highlights -100 pulled a 0.85 patch BELOW a 0.6 patch.
+    let dials: Vec<(&str, Box<dyn Fn(&mut AllAdjustments)>)> = vec![
+        ("highlights -100", Box::new(|a: &mut AllAdjustments| a.global.highlights = -1.0)),
+        ("highlights +100", Box::new(|a: &mut AllAdjustments| a.global.highlights = 1.0)),
+        ("shadows +100", Box::new(|a: &mut AllAdjustments| a.global.shadows = 1.0)),
+        ("shadows -100", Box::new(|a: &mut AllAdjustments| a.global.shadows = -1.0)),
+        ("whites +100", Box::new(|a: &mut AllAdjustments| a.global.whites = 1.0)),
+        ("whites -100", Box::new(|a: &mut AllAdjustments| a.global.whites = -1.0)),
+        ("blacks +100", Box::new(|a: &mut AllAdjustments| a.global.blacks = 1.0)),
+        ("blacks -100", Box::new(|a: &mut AllAdjustments| a.global.blacks = -1.0)),
+    ];
+    for (name, set) in &dials {
+        let mut prev = 0i32;
+        for step in 0..24 {
+            let level = 0.004 + (step as f32 / 23.0).powf(2.0) * 1.0;
+            let v = render_level(level, set.as_ref()) as i32;
+            assert!(
+                v >= prev - 1, // 1 step of quantization slack
+                "{name}: tone order breaks at level {level:.3}: {v} after {prev}"
+            );
+            prev = prev.max(v);
+        }
+    }
+
+    // 2. Highlights -100: strong recovery with preserved separation,
+    //    midtones pinned.
+    let base_06 = render_level(0.6, &|_| {}) as f32;
+    let base_085 = render_level(0.85, &|_| {}) as f32;
+    let base_10 = render_level(1.0, &|_| {}) as f32;
+    let base_018 = render_level(0.18, &|_| {}) as f32;
+    let h = |a: &mut AllAdjustments| a.global.highlights = -1.0;
+    let r_085 = render_level(0.85, &h) as f32;
+    let r_10 = render_level(1.0, &h) as f32;
+    let r_06 = render_level(0.6, &h) as f32;
+    let r_018 = render_level(0.18, &h) as f32;
+    assert!(r_085 <= base_085 * 0.82, "highlight pull too weak: {base_085} -> {r_085}");
+    assert!(r_10 - r_06 >= 15.0, "highlight separation collapsed: 0.6->{r_06}, 1.0->{r_10}");
+    assert!((r_018 - base_018).abs() <= 2.0, "highlights moved midtones: {base_018} -> {r_018}");
+    let _ = base_06;
+    let _ = base_10;
+
+    // 3. Shadows +100: satisfying pull in the shadow band, midtones and
+    //    deep floor controlled (a launched floor reads as mist).
+    let s = |a: &mut AllAdjustments| a.global.shadows = 1.0;
+    let s_005 = render_level(0.05, &s) as f32;
+    let s_035 = render_level(0.35, &s) as f32;
+    let s_0005 = render_level(0.005, &s) as f32;
+    let base_005 = render_level(0.05, &|_| {}) as f32;
+    let base_035 = render_level(0.35, &|_| {}) as f32;
+    assert!(s_005 >= base_005 * 2.4, "shadow lift too weak: {base_005} -> {s_005}");
+    assert!((s_035 - base_035).abs() <= 6.0, "shadows moved midtones: {base_035} -> {s_035}");
+    assert!(s_0005 <= 12.0, "deep floor launched (mist): 0.005 -> {s_0005}");
+
+    // 4. Whites/blacks stay in their own end zones.
+    let w = |a: &mut AllAdjustments| a.global.whites = 1.0;
+    assert!((render_level(0.05, &w) as f32 - render_level(0.05, &|_| {}) as f32).abs() <= 2.0);
+    let b = |a: &mut AllAdjustments| a.global.blacks = 1.0;
+    let b_0005 = render_level(0.005, &b) as f32;
+    assert!((6.0..=22.0).contains(&b_0005), "blacks +100 floor lift off target: {b_0005}");
+    assert!((render_level(0.18, &b) as f32 - base_018).abs() <= 2.0, "blacks moved midtones");
+
+    // 5. Texture survives a full shadow lift: relative amplitude keeps
+    //    at least 55% (flat mist = detail gone).
+    let level = 0.03f32;
+    let mut img = vec![0f32; (W * H * 4) as usize];
+    for y in 0..H {
+        for x in 0..W {
+            let i = ((y * W + x) * 4) as usize;
+            let v = if (x + y) % 2 == 0 { level * 1.35 } else { level * 0.65 };
+            img[i] = v;
+            img[i + 1] = v;
+            img[i + 2] = v;
+            img[i + 3] = 1.0;
+        }
+    }
+    let mut adj = AllAdjustments::default();
+    adj.global.process_version = 2;
+    let base = render(&processor, &device, &queue, &img, adj);
+    adj.global.shadows = 1.0;
+    let lifted = render(&processor, &device, &queue, &img, adj);
+    let amp = |buf: &[u8]| -> (f32, f32) {
+        let (mut hi, mut lo, mut n) = (0f32, 0f32, 0);
+        for y in 8..H - 8 {
+            for x in 8..W - 8 {
+                let v = buf[((y * W + x) * 4) as usize] as f32;
+                if (x + y) % 2 == 0 { hi += v } else { lo += v }
+                n += 1;
+            }
+        }
+        let half = (n / 2) as f32;
+        ((hi / half + lo / half) / 2.0, hi / half - lo / half)
+    };
+    let (bm, ba) = amp(&base);
+    let (lm, la) = amp(&lifted);
+    let retention = (la / lm) / (ba / bm);
+    assert!(
+        retention >= 0.55,
+        "shadow lift flattens texture: relative amplitude retention {retention:.2}"
+    );
+}

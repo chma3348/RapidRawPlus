@@ -228,3 +228,32 @@ per-pixel, in linear light. Replaces parametric devignette for rig shots.
       Enhance -> Restore -> Model.
 - [x] Verify: cargo tests, TS 119, vite build, full build, install,
       commit + push.
+
+## Round: tonal dials audit — light-working power + precision (2026-08-16)
+Measured every light dial on a GPU patch ladder; found and fixed:
+- [x] Highlights -100 INVERTED tone order (0.85 landed below 0.6; all
+      separation collapsed to flat gray). Now a monotone rational
+      shoulder with unit slope at the knee: strong recovery (255->175)
+      with preserved separation (142/166/175) and pinned midtones;
+      neighborhood detail-restore keeps texture inside recovered skies;
+      clipped-chroma inherit retuned.
+- [x] Highlights +100 hard-clipped 0.85 to 255; now clip-resistant
+      approach (216->244).
+- [x] Shadows +100 doubled a JPEG midtone (0.18: 46->101) and squeezed
+      the shadow band 2.4:1 (mist-flat). Root cause: one zone fade for
+      two domains — RAW scene-linear vs JPEG display-linear put the
+      same perceptual zone at different Oklab L. Per-domain fade
+      (0.46 JPEG / 0.62 RAW) + grounded lift (deep floor takes a
+      reduced share): 0.05 lifts 3.3x, 0.18 +59%, 0.35 pinned, floor
+      0.005->5 (grounded), texture amplitude retention 66%.
+- [x] Whites was a second exposure slider (moved 0.05 at full strength);
+      now a true white-point control pinned below midtones.
+- [x] Blacks was nearly inert (+100: 1->5); now real floor authority
+      (1->12) fading out by the midtones.
+- [x] Regression: tonal_dials_zone_contract — monotonicity across a
+      dense ramp for every dial extreme, zone isolation bounds, pull
+      strength minimums, grounded floor, texture retention >= 55%.
+      All 7 render_quality GPU tests green (legacy RAW contracts kept:
+      3.2x checker lift, detail contrast retained, disc chroma
+      reconstruction).
+- [x] Verify: full cargo suite, build, install, commit + push.

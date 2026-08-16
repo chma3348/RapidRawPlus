@@ -720,26 +720,52 @@ fn apply_tonal_adjustments_v2(
     let l_base = clamp(linear_to_oklab(max(neighborhood_linear, vec3<f32>(0.0))).x, 0.0, 1.0);
     let driver = mix(l_clamped, l_base, 0.75);
 
-    // Whites: linear headroom expansion, same intent as v1.
+    // Whites: true white-point control — the gain fades in above the
+    // midtones so the lower half of the image stays pinned (the old
+    // uniform expansion was just a second exposure slider).
     var l_new = l_ok;
     if (wh != 0.0) {
-        l_new = l_new / max(1.0 - wh * 0.22, 0.01);
+        let wzone = smoothstep(0.35, 0.95, driver);
+        if (wh > 0.0) {
+            l_new = l_new * (1.0 + wh * 0.38 * wzone);
+        } else {
+            l_new = l_new * (1.0 + wh * 0.24 * wzone);
+        }
     }
 
-    // Shadows / blacks: exposure-style gain, zone-weighted by the driver.
-    // Multiplicative on L (not additive) so intra-zone ratios — the
-    // detail — are preserved exactly.
-    if (sh != 0.0 || bl != 0.0) {
-        let shadow_zone = 1.0 - smoothstep(0.0, 0.62, driver);
-        let black_zone = 1.0 - smoothstep(0.0, 0.28, driver);
-        let stops = sh * 1.6 * shadow_zone + bl * 0.9 * black_zone;
-        if (stops != 0.0) {
-            l_new = l_new * pow(2.0, stops * 0.9);
+    // Shadows: exponential lift, zone-weighted by the driver. The lift
+    // peaks in the mid-shadows: deep blacks take a reduced share so the
+    // frame keeps its footing (a floor launched upward reads as mist),
+    // and the zone fades out before the midtones.
+    if (sh != 0.0) {
+        // Neighborhood-heavy driver: adjacent texture shares one lift
+        // (detail survives). RAW scene-linear and JPEG display-linear
+        // place the same perceptual zone at different L — calibrate the
+        // fade per domain (one wide fade for both was how shadows
+        // grabbed JPEG midtones).
+        let sh_fade = select(0.46, 0.62, is_raw == 1u);
+        let zone = 1.0 - smoothstep(0.04, sh_fade, driver);
+        if (sh > 0.0) {
+            let ground = 0.45 + 0.55 * smoothstep(0.0, 0.30, driver);
+            let stops = sh * 1.35 * zone * ground;
+            l_new = l_new * pow(2.0, stops);
             // Lifted shadows read slightly desaturated at constant (a,b);
             // nudge chroma with the lift like film does.
-            let chroma_boost = 1.0 + max(stops, 0.0) * 0.12;
+            let chroma_boost = 1.0 + stops * 0.14;
             lab.y *= chroma_boost;
             lab.z *= chroma_boost;
+        } else {
+            l_new = l_new * pow(2.0, sh * 1.1 * zone);
+        }
+    }
+
+    // Blacks: floor control with real authority, tightly range-limited.
+    if (bl != 0.0) {
+        let bzone = 1.0 - smoothstep(0.0, 0.27, driver);
+        if (bl > 0.0) {
+            l_new = l_new + bl * 0.10 * bzone;
+        } else {
+            l_new = max(l_new + bl * 0.11 * bzone, 0.0);
         }
     }
 
@@ -886,8 +912,24 @@ fn apply_highlights_adjustment(
         let driver_h = mix(t, l_base_h, 0.75);
         let mask = smoothstep(0.45, 1.0, driver_h);
         if (highlights_adj < 0.0) {
-            let stops = highlights_adj * 1.1 * mask;
-            lab.x = lab.x * pow(2.0, stops * 0.8);
+            // Monotone shoulder: L above the knee is remapped through a
+            // rational compressor with unit slope at the knee. Tone order
+            // can never invert (the old mask-scaled gain pulled brighter
+            // pixels BELOW darker ones at strong settings) and midtones
+            // sit below the knee, untouched.
+            let amt = min(-highlights_adj, 1.0);
+            let knee = select(0.56, 0.70, is_raw == 1u);
+            let span = 0.30;
+            if (lab.x > knee) {
+                let x = (lab.x - knee) / span;
+                let c = 0.60 * amt;
+                let shoulder = knee + span * (x / (1.0 + c * x * (2.0 + x) / (1.0 + x)));
+                // The compressor's top-end slope flattens texture inside
+                // bright regions; restore part of the pixel-vs-neighborhood
+                // detail so recovered skies keep their clouds.
+                let restore_zone = smoothstep(0.68, 0.92, l_base_h);
+                lab.x = shoulder + (t - min(l_base_h, 1.0)) * 0.5 * amt * restore_zone;
+            }
 
             // Clipped pixels carry no color of their own — when pulled
             // down they'd surface as gray/white blotches. Reconstruct
@@ -909,11 +951,13 @@ fn apply_highlights_adjustment(
                 // neutral surroundings the absolute chroma stays tiny, so
                 // this cannot invent color that is not there.
                 let inherit = clipped * min(-highlights_adj, 1.0);
-                lab.y = mix(lab.y, blab.y * 2.4, inherit);
-                lab.z = mix(lab.z, blab.z * 2.4, inherit);
+                lab.y = mix(lab.y, blab.y * 3.2, inherit);
+                lab.z = mix(lab.z, blab.z * 3.2, inherit);
             }
         } else {
-            lab.x = lab.x + highlights_adj * 0.5 * mask * (1.15 - t);
+            // Brighten with a clip-resistant approach: the push fades as
+            // L nears white, so +100 glows instead of blowing out.
+            lab.x = lab.x + highlights_adj * 0.7 * mask * max(1.02 - t, 0.0);
         }
         return compress_gamut_soft(oklab_to_linear(lab));
     }
