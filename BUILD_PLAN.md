@@ -207,3 +207,24 @@ per-pixel, in linear light. Replaces parametric devignette for rig shots.
 - [x] Full `npm run tauri build`, install, relaunch.
 - [x] Commit + push. Flat profile files stay local (user calibration
       data, like LUTs) — never committed.
+
+## Round: De-pixelate prep + demoiré visibility (agreed 2026-08-16)
+- [x] Enhance dialog "De-pixelate" switch (all tasks) with cell dropdown
+      (Auto detects the grid; 4-48px manual): detects the mosaic grid
+      (cell + phase from gradient-energy profiles, smallest-harmonic
+      rule), collapses each block to its true mean, rebuilds the image
+      as a Catmull-Rom surface through the cell centers — the model sees
+      a natural soft image instead of a grid it would sharpen.
+- [x] Wired through apply_enhancement + preview_enhancement (ONNX and
+      engine paths, applied to the full image before preview crops so
+      grid phase matches the full run); cache keys carry the setting.
+- [x] Auto mode refuses images with no detectable grid (clear error)
+      instead of mangling them.
+- [x] Unit tests: synthetic mosaic (cell 8, phase 3/5) → exact cell and
+      phase detected, collapse at least halves the error vs the mosaic;
+      noise image → detection refuses.
+- [x] Demoiré: ESDNet-L (screen patterns) was never gone — hidden by the
+      dropdown clipping bug fixed in e71f4881; verify it lists under
+      Enhance -> Restore -> Model.
+- [x] Verify: cargo tests, TS 119, vite build, full build, install,
+      commit + push.

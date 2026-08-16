@@ -1276,7 +1276,10 @@
       "titleUpscale": "AI Upscaling",
       "upscaleProgress": "Upscaling image…",
       "continueWith": "Continue with",
-      "chainNote": "Working on the previous result"
+      "chainNote": "Working on the previous result",
+      "depixelateLabel": "De-pixelate",
+      "depixelateAuto": "Auto",
+      "depixelateTooltip": "Dissolves a blocky pixel mosaic into the smooth low-res image it encodes before the model runs, so the AI restores detail instead of sharpening the blocks. Auto detects the grid size; pick a size manually if detection fails."
     },
     "expand": {
       "btnGenerate": "Generate",

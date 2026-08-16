@@ -698,6 +698,7 @@ pub async fn apply_enhancement(
     output_scale: Option<u32>,
     chain_step: Option<u32>,
     reblend_only: Option<bool>,
+    depixelate: Option<u32>,
     js_adjustments: Option<serde_json::Value>,
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
@@ -738,10 +739,11 @@ pub async fn apply_enhancement(
         1
     };
     let cache_key = format!(
-        "{}|c{}|s{}",
+        "{}|c{}|s{}|dp{}",
         enhancement_cache_key(&path, &task, &model.manifest.id, js_adjustments.as_ref()),
         chain_step,
-        engine_scale
+        engine_scale,
+        depixelate.map(|c| c.to_string()).unwrap_or_else(|| "off".into())
     );
     {
         let raw_handle = state.enhancement_raw.clone();
@@ -837,6 +839,19 @@ pub async fn apply_enhancement(
         let (source_path, _) = parse_virtual_path(&path);
         let path_str = source_path.to_string_lossy().to_string();
         enhancement_input(&path_str, js_adjustments.as_ref(), &state, &app_handle)?
+    };
+
+    // De-pixelate prep: dissolve a hard mosaic into the smooth low-res
+    // image it encodes before the model sees it (models sharpen crisp
+    // block edges instead of removing them).
+    let rgb_input = match depixelate {
+        Some(cell) => {
+            let _ = app_handle.emit("enhance-progress", "De-pixelating...");
+            let (out, used) = apply_depixelate(&rgb_input, cell)?;
+            log::info!("[enhance] de-pixelate prep: cell {used}px (requested {cell}, 0=auto)");
+            out
+        }
+        None => rgb_input,
     };
 
     // Generative-engine models run through the managed ComfyUI process
@@ -1019,6 +1034,7 @@ pub async fn preview_enhancement(
     texture: Option<f32>,
     grain: Option<f32>,
     output_scale: Option<u32>,
+    depixelate: Option<u32>,
     js_adjustments: Option<serde_json::Value>,
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
@@ -1056,12 +1072,13 @@ pub async fn preview_enhancement(
     // crop output is still valid, only the blend settings changed.
     let engine_scale = output_scale.unwrap_or(1).clamp(1, 2);
     let preview_key = format!(
-        "{}|{:x}|{:x}|{:x}|s{}",
+        "{}|{:x}|{:x}|{:x}|s{}|dp{}",
         enhancement_cache_key(&path, &task, &model.manifest.id, js_adjustments.as_ref()),
         center_x.to_bits(),
         center_y.to_bits(),
         region_size.map(|v| v.to_bits()).unwrap_or(0),
-        engine_scale
+        engine_scale,
+        depixelate.map(|c| c.to_string()).unwrap_or_else(|| "off".into())
     );
     {
         let cache = state.enhancement_preview_raw.clone();
@@ -1093,6 +1110,7 @@ pub async fn preview_enhancement(
             texture_v,
             grain_v,
             engine_scale,
+            depixelate,
             preview_key,
             js_adjustments,
             app_handle,
@@ -1109,6 +1127,12 @@ pub async fn preview_enhancement(
     let (source_path, _) = parse_virtual_path(&path);
     let path_str = source_path.to_string_lossy().to_string();
     let rgb_input = enhancement_input(&path_str, js_adjustments.as_ref(), &state, &app_handle)?;
+    // Same prep as the full run, applied to the WHOLE image before the
+    // crop so the grid phase matches what a full render would see.
+    let rgb_input = match depixelate {
+        Some(cell) => apply_depixelate(&rgb_input, cell)?.0,
+        None => rgb_input,
+    };
 
     let preview_cache = state.enhancement_preview_raw.clone();
     tokio::task::spawn_blocking(move || {
@@ -1170,6 +1194,7 @@ async fn preview_comfy_enhancement(
     texture: f32,
     grain: f32,
     output_scale: u32,
+    depixelate: Option<u32>,
     preview_key: String,
     js_adjustments: Option<serde_json::Value>,
     app_handle: tauri::AppHandle,
@@ -1182,6 +1207,10 @@ async fn preview_comfy_enhancement(
     let (source_path, _) = parse_virtual_path(&path);
     let path_str = source_path.to_string_lossy().to_string();
     let rgb_input = enhancement_input(&path_str, js_adjustments.as_ref(), &state, &app_handle)?;
+    let rgb_input = match depixelate {
+        Some(cell) => apply_depixelate(&rgb_input, cell)?.0,
+        None => rgb_input,
+    };
     let resolution = model
         .manifest
         .params
@@ -1443,6 +1472,345 @@ pub async fn save_enhanced_image(
     let _ = source_sidecar_path;
 
     Ok(output_path.to_string_lossy().to_string())
+}
+
+// ---------------------------------------------------------------------------
+// De-pixelate prep: a hard mosaic is an honest low-res image wearing a crisp
+// grid — and restoration models PRESERVE crisp edges, block edges included.
+// The prep collapses each grid cell to its true mean and rebuilds the image
+// as a smooth interpolation of those means (Catmull-Rom through the cell
+// centers, phase-aware), so the model sees a natural soft image it knows how
+// to restore instead of a grid it would sharpen.
+// ---------------------------------------------------------------------------
+
+pub const DEPIX_MIN_CELL: u32 = 2;
+pub const DEPIX_MAX_CELL: u32 = 96;
+const DEPIX_MIN_SCORE: f32 = 2.0;
+
+/// Column/row gradient-energy profiles of the luma image. A mosaic
+/// concentrates its gradient energy on the grid boundaries, so these
+/// profiles spike at positions ≡ boundary (mod cell).
+fn mosaic_gradient_profiles(img: &Rgb32FImage) -> (Vec<f32>, Vec<f32>) {
+    let (w, h) = (img.width() as usize, img.height() as usize);
+    let mut luma = vec![0.0f32; w * h];
+    for (i, p) in img.pixels().enumerate() {
+        luma[i] = 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
+    }
+    let mut gx = vec![0.0f32; w.saturating_sub(1)];
+    let mut gy = vec![0.0f32; h.saturating_sub(1)];
+    for y in 0..h {
+        let row = &luma[y * w..(y + 1) * w];
+        for x in 0..w - 1 {
+            gx[x] += (row[x + 1] - row[x]).abs();
+        }
+    }
+    for y in 0..h - 1 {
+        for x in 0..w {
+            gy[y] += (luma[(y + 1) * w + x] - luma[y * w + x]).abs();
+        }
+    }
+    (gx, gy)
+}
+
+/// Best boundary residue class for a candidate cell size: returns the
+/// phase (index mod cell) whose mean gradient is highest, and that mean
+/// divided by the overall mean (≈1 for non-mosaic content, ≫1 on a grid).
+fn best_phase_score(profile: &[f32], cell: u32) -> (u32, f32) {
+    let n = profile.len();
+    if n == 0 {
+        return (0, 0.0);
+    }
+    let mean_all = profile.iter().sum::<f32>() / n as f32;
+    let mut best = (0u32, 0.0f32);
+    for phase in 0..cell {
+        let mut sum = 0.0f32;
+        let mut count = 0u32;
+        let mut i = phase as usize;
+        while i < n {
+            sum += profile[i];
+            count += 1;
+            i += cell as usize;
+        }
+        if count == 0 {
+            continue;
+        }
+        let score = (sum / count as f32) / mean_all.max(1e-6);
+        if score > best.1 {
+            best = (phase, score);
+        }
+    }
+    best
+}
+
+/// Detects a square pixelation grid. Returns (cell, offset_x, offset_y)
+/// where offsets are the column/row at which the first full cell starts.
+/// None when no strong grid periodicity exists in both axes.
+pub fn detect_mosaic_cell(img: &Rgb32FImage) -> Option<(u32, u32, u32)> {
+    let (gx, gy) = mosaic_gradient_profiles(img);
+    let max_cell = DEPIX_MAX_CELL.min(img.width() / 4).min(img.height() / 4);
+    if max_cell < DEPIX_MIN_CELL {
+        return None;
+    }
+    let mut candidates: Vec<(u32, u32, u32, f32)> = Vec::new();
+    for cell in DEPIX_MIN_CELL..=max_cell {
+        let (px, sx) = best_phase_score(&gx, cell);
+        let (py, sy) = best_phase_score(&gy, cell);
+        let score = sx.min(sy);
+        if score >= DEPIX_MIN_SCORE {
+            candidates.push((cell, px, py, score));
+        }
+    }
+    let best_score = candidates
+        .iter()
+        .map(|c| c.3)
+        .fold(0.0f32, f32::max);
+    // Every multiple of the true cell scores as well as the true cell
+    // (its boundaries are a subset of the real ones), so take the
+    // SMALLEST candidate within reach of the best score.
+    candidates
+        .iter()
+        .find(|c| c.3 >= best_score * 0.9)
+        .map(|&(cell, bx, by, _)| (cell, (bx + 1) % cell, (by + 1) % cell))
+}
+
+/// Phase for a KNOWN cell size (manual mode still aligns to the grid).
+fn phase_for_cell(img: &Rgb32FImage, cell: u32) -> (u32, u32) {
+    let (gx, gy) = mosaic_gradient_profiles(img);
+    let (bx, _) = best_phase_score(&gx, cell);
+    let (by, _) = best_phase_score(&gy, cell);
+    ((bx + 1) % cell, (by + 1) % cell)
+}
+
+/// Collapse each grid cell to its mean, then evaluate a Catmull-Rom
+/// surface through the cell-center means at every original pixel. Output
+/// has the input's dimensions with the grid dissolved into smooth ramps.
+pub fn collapse_mosaic(img: &Rgb32FImage, cell: u32, off_x: u32, off_y: u32) -> Rgb32FImage {
+    use rayon::prelude::*;
+
+    let (w, h) = img.dimensions();
+    let cf = cell as f32;
+    // Grid layout: a partial "head" cell of width off (when off > 0) at
+    // index 0, then full cells. head_x/head_y are the head cell widths.
+    let head_cols = off_x % cell;
+    let head_rows = off_y % cell;
+    let n_cols = u32::from(head_cols != 0) + (w - head_cols).div_ceil(cell);
+    let n_rows = u32::from(head_rows != 0) + (h - head_rows).div_ceil(cell);
+    let col_of = |x: u32| -> u32 {
+        if head_cols != 0 && x < head_cols {
+            0
+        } else {
+            (x - head_cols) / cell + u32::from(head_cols != 0)
+        }
+    };
+    let row_of = |y: u32| -> u32 {
+        if head_rows != 0 && y < head_rows {
+            0
+        } else {
+            (y - head_rows) / cell + u32::from(head_rows != 0)
+        }
+    };
+
+    // Accumulate block means.
+    let nc = n_cols as usize;
+    let nr = n_rows as usize;
+    let mut sums = vec![[0.0f64; 3]; nc * nr];
+    let mut counts = vec![0u32; nc * nr];
+    for y in 0..h {
+        let r = row_of(y) as usize;
+        for x in 0..w {
+            let c = col_of(x) as usize;
+            let p = img.get_pixel(x, y);
+            let idx = r * nc + c;
+            sums[idx][0] += p[0] as f64;
+            sums[idx][1] += p[1] as f64;
+            sums[idx][2] += p[2] as f64;
+            counts[idx] += 1;
+        }
+    }
+    let means: Vec<[f32; 3]> = sums
+        .iter()
+        .zip(&counts)
+        .map(|(s, &n)| {
+            let n = n.max(1) as f64;
+            [(s[0] / n) as f32, (s[1] / n) as f32, (s[2] / n) as f32]
+        })
+        .collect();
+
+    // Fractional cell index for a pixel coordinate (cell centers land on
+    // integer indices; the partial head cell's center is at half its width).
+    let head_x = head_cols as f32;
+    let head_y = head_rows as f32;
+    let index_x = move |x: f32| -> f32 {
+        if head_x > 0.0 {
+            if x < head_x { x / head_x.max(1.0) - 0.5 } else { 1.0 + (x - head_x - cf / 2.0) / cf }
+        } else {
+            (x - cf / 2.0) / cf
+        }
+    };
+    let index_y = move |y: f32| -> f32 {
+        if head_y > 0.0 {
+            if y < head_y { y / head_y.max(1.0) - 0.5 } else { 1.0 + (y - head_y - cf / 2.0) / cf }
+        } else {
+            (y - cf / 2.0) / cf
+        }
+    };
+
+    let catmull = |p0: f32, p1: f32, p2: f32, p3: f32, t: f32| -> f32 {
+        let t2 = t * t;
+        let t3 = t2 * t;
+        0.5 * ((2.0 * p1)
+            + (-p0 + p2) * t
+            + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
+            + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3)
+    };
+    let grid = |cx: i64, cy: i64, ch: usize| -> f32 {
+        let cx = cx.clamp(0, nc as i64 - 1) as usize;
+        let cy = cy.clamp(0, nr as i64 - 1) as usize;
+        means[cy * nc + cx][ch]
+    };
+
+    let mut out = Rgb32FImage::new(w, h);
+    out.as_mut()
+        .par_chunks_mut(w as usize * 3)
+        .enumerate()
+        .for_each(|(y, row)| {
+            let fy = index_y(y as f32);
+            let cy0 = fy.floor() as i64;
+            let ty = fy - fy.floor();
+            for x in 0..w as usize {
+                let fx = index_x(x as f32);
+                let cx0 = fx.floor() as i64;
+                let tx = fx - fx.floor();
+                for ch in 0..3 {
+                    let mut col = [0.0f32; 4];
+                    for (j, cv) in col.iter_mut().enumerate() {
+                        let cy = cy0 - 1 + j as i64;
+                        *cv = catmull(
+                            grid(cx0 - 1, cy, ch),
+                            grid(cx0, cy, ch),
+                            grid(cx0 + 1, cy, ch),
+                            grid(cx0 + 2, cy, ch),
+                            tx,
+                        );
+                    }
+                    row[x * 3 + ch] = catmull(col[0], col[1], col[2], col[3], ty).clamp(0.0, 1.0);
+                }
+            }
+        });
+    out
+}
+
+/// Applies the de-pixelate prep. `requested_cell` of 0 means auto-detect;
+/// a positive value forces that cell size (phase still auto-aligned).
+/// Returns the prepared image and the cell size actually used.
+pub fn apply_depixelate(img: &Rgb32FImage, requested_cell: u32) -> Result<(Rgb32FImage, u32), String> {
+    let (cell, ox, oy) = if requested_cell == 0 {
+        detect_mosaic_cell(img).ok_or_else(|| {
+            "No pixel grid detected in this image — set the cell size manually.".to_string()
+        })?
+    } else {
+        let c = requested_cell.clamp(DEPIX_MIN_CELL, DEPIX_MAX_CELL);
+        let (ox, oy) = phase_for_cell(img, c);
+        (c, ox, oy)
+    };
+    Ok((collapse_mosaic(img, cell, ox, oy), cell))
+}
+
+#[cfg(test)]
+mod depixelate_tests {
+    use super::*;
+
+    /// Mosaic a smooth gradient at a known cell/phase, then check that
+    /// detection recovers the grid and the collapse gets closer to the
+    /// pre-mosaic image than the mosaic was.
+    #[test]
+    fn detects_and_dissolves_synthetic_mosaic() {
+        let (w, h) = (240u32, 200u32);
+        let cell = 8u32;
+        let (off_x, off_y) = (3u32, 5u32);
+        let smooth = |x: u32, y: u32| -> [f32; 3] {
+            let u = x as f32 / w as f32;
+            let v = y as f32 / h as f32;
+            [
+                0.2 + 0.6 * u,
+                0.3 + 0.4 * v,
+                0.5 + 0.3 * (u * 6.0).sin() * (v * 5.0).cos(),
+            ]
+        };
+        let mut original = Rgb32FImage::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                original.put_pixel(x, y, Rgb(smooth(x, y)));
+            }
+        }
+        // Build the mosaic: average each aligned cell.
+        let mut mosaic = original.clone();
+        let mut y0 = 0u32;
+        while y0 < h {
+            let ch = if y0 == 0 && off_y > 0 { off_y } else { cell.min(h - y0) };
+            let mut x0 = 0u32;
+            while x0 < w {
+                let cw = if x0 == 0 && off_x > 0 { off_x } else { cell.min(w - x0) };
+                let mut acc = [0.0f32; 3];
+                for y in y0..(y0 + ch).min(h) {
+                    for x in x0..(x0 + cw).min(w) {
+                        let p = original.get_pixel(x, y);
+                        for c in 0..3 {
+                            acc[c] += p[c];
+                        }
+                    }
+                }
+                let n = ((y0 + ch).min(h) - y0) * ((x0 + cw).min(w) - x0);
+                for c in acc.iter_mut() {
+                    *c /= n as f32;
+                }
+                for y in y0..(y0 + ch).min(h) {
+                    for x in x0..(x0 + cw).min(w) {
+                        mosaic.put_pixel(x, y, Rgb(acc));
+                    }
+                }
+                x0 += cw;
+            }
+            y0 += ch;
+        }
+
+        let (det_cell, det_ox, det_oy) =
+            detect_mosaic_cell(&mosaic).expect("grid not detected");
+        assert_eq!(det_cell, cell, "wrong cell size detected");
+        assert_eq!((det_ox, det_oy), (off_x, off_y), "wrong grid phase detected");
+
+        let (restored, used) = apply_depixelate(&mosaic, 0).unwrap();
+        assert_eq!(used, cell);
+        let mae = |a: &Rgb32FImage, b: &Rgb32FImage| -> f32 {
+            let mut sum = 0.0f64;
+            for (pa, pb) in a.pixels().zip(b.pixels()) {
+                for c in 0..3 {
+                    sum += (pa[c] - pb[c]).abs() as f64;
+                }
+            }
+            (sum / (a.width() * a.height() * 3) as f64) as f32
+        };
+        let err_mosaic = mae(&mosaic, &original);
+        let err_restored = mae(&restored, &original);
+        assert!(
+            err_restored < err_mosaic * 0.5,
+            "collapse did not improve on the mosaic: {err_restored} vs {err_mosaic}"
+        );
+    }
+
+    /// Auto mode must refuse images without a grid instead of mangling them.
+    #[test]
+    fn auto_refuses_non_mosaic() {
+        let mut img = Rgb32FImage::new(160, 160);
+        let mut state = 11u32;
+        for p in img.pixels_mut() {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            let v = (state >> 16) as f32 / 65535.0;
+            *p = Rgb([v, 1.0 - v, v * 0.5 + 0.25]);
+        }
+        assert!(detect_mosaic_cell(&img).is_none(), "noise misread as a grid");
+        assert!(apply_depixelate(&img, 0).is_err());
+    }
 }
 
 #[cfg(test)]

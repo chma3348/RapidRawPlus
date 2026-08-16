@@ -8,6 +8,7 @@ import { Invokes } from '../ui/AppProperties';
 import Dropdown from '../ui/Dropdown';
 import ModelPicker, { ModelTaskType } from '../ui/ModelPicker';
 import Slider from '../ui/Slider';
+import Switch from '../ui/Switch';
 import Text from '../ui/Text';
 import { TextColors, TextVariants, TextWeights } from '../../types/typography';
 import { useSettingsStore } from '../../store/useSettingsStore';
@@ -73,6 +74,7 @@ interface EnhanceModalProps {
     chainStep: number,
     texture: number,
     grain: number,
+    depixelate?: number | null,
     quiet?: boolean,
   ): Promise<void> | void;
   onSave(): Promise<string>;
@@ -122,6 +124,13 @@ export default function EnhanceModal({
   const [texture, setTexture] = useState(() => {
     const saved = Number(localStorage.getItem('rapidraw-enhance-texture'));
     return Number.isFinite(saved) && saved >= 0 && saved <= 100 ? saved : 40;
+  });
+  // De-pixelate prep: dissolve a hard mosaic before the model runs.
+  // Cell: 0 = auto-detect the grid, otherwise a forced size in px.
+  const [depixelate, setDepixelate] = useState(false);
+  const [depixCell, setDepixCell] = useState(() => {
+    const saved = Number(localStorage.getItem('rapidraw-enhance-depix-cell'));
+    return Number.isFinite(saved) && saved >= 0 ? saved : 0;
   });
   const [grain, setGrain] = useState(() => {
     const saved = Number(localStorage.getItem('rapidraw-enhance-grain'));
@@ -232,7 +241,7 @@ export default function EnhanceModal({
     setSavedPath(null);
     setSaveError(null);
     setShowPreviewArea(false);
-    onEnhance(strength / 100, effectiveScale, chainStep, texture / 100, grain / 100);
+    onEnhance(strength / 100, effectiveScale, chainStep, texture / 100, grain / 100, depixelate ? depixCell : null);
   };
 
   // Promote the current result to the working input and switch task —
@@ -270,6 +279,7 @@ export default function EnhanceModal({
         strength: strength / 100,
         texture: texture / 100,
         grain: grain / 100,
+        depixelate: depixelate ? depixCell : null,
         outputScale: effectiveScale,
         jsAdjustments: selectedImage?.path === targetPaths[0] ? adjustments : null,
       });
@@ -298,8 +308,9 @@ export default function EnhanceModal({
   // the latest values afterwards.
   const quietBusy = useRef(false);
   const quietPending = useRef(false);
-  const latestSettings = useRef({ strength, texture, grain, effectiveScale, chainStep });
-  latestSettings.current = { strength, texture, grain, effectiveScale, chainStep };
+  const depixParam = depixelate ? depixCell : null;
+  const latestSettings = useRef({ strength, texture, grain, effectiveScale, chainStep, depixParam });
+  latestSettings.current = { strength, texture, grain, effectiveScale, chainStep, depixParam };
   useEffect(() => {
     if (!previewBase64 || isProcessing || isSaving) return;
     const timer = setTimeout(async () => {
@@ -312,7 +323,7 @@ export default function EnhanceModal({
         do {
           quietPending.current = false;
           const s = latestSettings.current;
-          await onEnhance(s.strength / 100, s.effectiveScale, s.chainStep, s.texture / 100, s.grain / 100, true);
+          await onEnhance(s.strength / 100, s.effectiveScale, s.chainStep, s.texture / 100, s.grain / 100, s.depixParam, true);
         } while (quietPending.current);
       } finally {
         quietBusy.current = false;
@@ -718,6 +729,39 @@ export default function EnhanceModal({
                 />
               </div>
             )}
+            <div
+              className="flex flex-col gap-1 mt-2 shrink-0"
+              data-tooltip={t('modals.enhance.depixelateTooltip')}
+            >
+              <Switch
+                label={t('modals.enhance.depixelateLabel')}
+                checked={depixelate}
+                onChange={(v: boolean) => {
+                  setDepixelate(v);
+                  // Changes the model input itself — existing previews and
+                  // cached raw outputs no longer predict the result.
+                  setPreviewData(null);
+                  markDirty();
+                }}
+                className="gap-2"
+              />
+              {depixelate && (
+                <Dropdown
+                  className="w-[110px]"
+                  options={[
+                    { label: t('modals.enhance.depixelateAuto'), value: 0 },
+                    ...[4, 6, 8, 12, 16, 24, 32, 48].map((n) => ({ label: `${n}px`, value: n })),
+                  ]}
+                  value={depixCell}
+                  onChange={(v: number) => {
+                    setDepixCell(v);
+                    localStorage.setItem('rapidraw-enhance-depix-cell', String(v));
+                    setPreviewData(null);
+                    markDirty();
+                  }}
+                />
+              )}
+            </div>
           </div>
           <div className="flex items-center gap-4">
             <div className="flex-1 min-w-0">
