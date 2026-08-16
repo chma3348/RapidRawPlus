@@ -674,3 +674,98 @@ fn measure_devignette_response() {
         );
     }
 }
+
+/// Diagnostic table: what each light dial actually does to a ladder of
+/// gray patches. Run with --nocapture to read the response matrix.
+#[test]
+fn measure_tonal_dial_response() {
+    let Some((device, queue, limits)) = make_device() else {
+        eprintln!("no GPU; skipping");
+        return;
+    };
+    let context = GpuContext {
+        device: Arc::new(device),
+        queue: Arc::new(queue),
+        limits,
+        display: Arc::new(std::sync::Mutex::new(None)),
+    };
+    let device = context.device.clone();
+    let queue = context.queue.clone();
+    let processor = GpuProcessor::new(context, W, H).expect("processor");
+
+    let levels = [0.005f32, 0.02, 0.05, 0.1, 0.18, 0.35, 0.6, 0.85, 1.0];
+    let render_level = |level: f32, set: &dyn Fn(&mut AllAdjustments)| -> u8 {
+        let mut img = vec![0f32; (W * H * 4) as usize];
+        for px in img.chunks_mut(4) {
+            px[0] = level;
+            px[1] = level;
+            px[2] = level;
+            px[3] = 1.0;
+        }
+        let mut adj = AllAdjustments::default();
+        adj.global.process_version = 2;
+        set(&mut adj);
+        let out = render(&processor, &device, &queue, &img, adj);
+        out[(((H / 2) * W + W / 2) * 4) as usize]
+    };
+
+    let dials: Vec<(&str, Box<dyn Fn(&mut AllAdjustments)>)> = vec![
+        ("base      ", Box::new(|_: &mut AllAdjustments| {})),
+        ("high -100 ", Box::new(|a: &mut AllAdjustments| a.global.highlights = -1.0)),
+        ("high +100 ", Box::new(|a: &mut AllAdjustments| a.global.highlights = 1.0)),
+        ("shad +100 ", Box::new(|a: &mut AllAdjustments| a.global.shadows = 1.0)),
+        ("shad -100 ", Box::new(|a: &mut AllAdjustments| a.global.shadows = -1.0)),
+        ("white+100 ", Box::new(|a: &mut AllAdjustments| a.global.whites = 1.0)),
+        ("white-100 ", Box::new(|a: &mut AllAdjustments| a.global.whites = -1.0)),
+        ("black+100 ", Box::new(|a: &mut AllAdjustments| a.global.blacks = 1.0)),
+        ("black-100 ", Box::new(|a: &mut AllAdjustments| a.global.blacks = -1.0)),
+    ];
+
+    eprint!("linear:    ");
+    for l in levels {
+        eprint!("{:>6.3}", l);
+    }
+    eprintln!();
+    for (name, set) in &dials {
+        eprint!("{name}");
+        for l in levels {
+            eprint!("{:>6}", render_level(l, set.as_ref()));
+        }
+        eprintln!();
+    }
+
+    // Texture survival: checkerboard ±35% around a deep shadow level,
+    // lifted hard — report amplitude before/after.
+    let level = 0.03f32;
+    let mut img = vec![0f32; (W * H * 4) as usize];
+    for y in 0..H {
+        for x in 0..W {
+            let i = ((y * W + x) * 4) as usize;
+            let v = if (x + y) % 2 == 0 { level * 1.35 } else { level * 0.65 };
+            img[i] = v;
+            img[i + 1] = v;
+            img[i + 2] = v;
+            img[i + 3] = 1.0;
+        }
+    }
+    let mut adj = AllAdjustments::default();
+    adj.global.process_version = 2;
+    let base = render(&processor, &device, &queue, &img, adj);
+    adj.global.shadows = 1.0;
+    let lifted = render(&processor, &device, &queue, &img, adj);
+    let amp = |buf: &[u8]| -> (f32, f32) {
+        let (mut hi, mut lo, mut n) = (0f32, 0f32, 0);
+        for y in 8..H - 8 {
+            for x in 8..W - 8 {
+                let v = buf[((y * W + x) * 4) as usize] as f32;
+                if (x + y) % 2 == 0 { hi += v } else { lo += v }
+                n += 1;
+            }
+        }
+        let half = (n / 2) as f32;
+        ((hi / half + lo / half) / 2.0, hi / half - lo / half)
+    };
+    let (bm, ba) = amp(&base);
+    let (lm, la) = amp(&lifted);
+    eprintln!("shadow texture: base mean {bm:.1} amp {ba:.1} -> lifted mean {lm:.1} amp {la:.1}");
+}

@@ -1948,7 +1948,11 @@ pub fn apply_depixelate(
 ) -> Result<(Rgb32FImage, u32), String> {
     let grid = if requested_cell == 0 {
         detect_mosaic_grid(img).ok_or_else(|| {
-            "No pixel grid detected in this image — set the cell size manually.".to_string()
+            "No pixel grid detected — this image looks soft/low-res rather than \
+             mosaic-pixelated. For blur and compression, run Restore with \
+             De-pixelate OFF. Only set a manual cell size if you can see \
+             actual square blocks."
+                .to_string()
         })?
     } else {
         grid_for_cell(img, requested_cell.clamp(DEPIX_MIN_CELL, DEPIX_MAX_CELL))
