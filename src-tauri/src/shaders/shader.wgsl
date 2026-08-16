@@ -2197,15 +2197,26 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         // severe lens vignetting runs 3-4 stops in extreme corners and the
         // correction must reach that far.
         let stops = v_amount * (1.6 + 2.4 * abs(v_amount));
+        let pre_luma = get_luma(max(composite_rgb_linear, vec3<f32>(0.0)));
         composite_rgb_linear *= exp2(stops * vignette_mask);
         // Crushed-black rescue: multiplication cannot lift corners the
-        // camera clipped to ~0 (16x of nothing is nothing — measured:
-        // display 1 -> 12 at full gain). A small black-floor lift, ramping
-        // in only at high slider positions, recovers them the way phone
-        // devignette tools do. amount^2 keeps the mid-range physically
-        // clean.
+        // camera clipped to ~0 (measured: display 1 -> 12 at full gain).
+        // The floor lift is (a) gated to pixels that were actually crushed
+        // — surviving detail gets pure gain, no haze — and (b) tinted by
+        // the blurred neighborhood so recovered blacks inherit the scene's
+        // cast instead of reading as gray mist. amount^2 keeps the
+        // mid-range physically clean.
         if (v_amount > 0.0) {
-            composite_rgb_linear += vec3<f32>(v_amount * v_amount * 0.05 * vignette_mask);
+            let crushed = 1.0 - smoothstep(0.008, 0.09, pre_luma);
+            if (crushed > 0.001) {
+                var nb = max(structure_blurred, vec3<f32>(0.0));
+                if (is_raw != 1u) {
+                    nb = srgb_to_linear(nb);
+                }
+                let tint = clamp(nb / max(get_luma(nb), 1e-4), vec3<f32>(0.4), vec3<f32>(2.2));
+                let lift = v_amount * v_amount * 0.05 * vignette_mask * crushed;
+                composite_rgb_linear += tint * lift;
+            }
         }
     }
 
