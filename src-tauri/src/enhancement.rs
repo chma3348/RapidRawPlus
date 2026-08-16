@@ -1127,12 +1127,6 @@ pub async fn preview_enhancement(
     let (source_path, _) = parse_virtual_path(&path);
     let path_str = source_path.to_string_lossy().to_string();
     let rgb_input = enhancement_input(&path_str, js_adjustments.as_ref(), &state, &app_handle)?;
-    // Same prep as the full run, applied to the WHOLE image before the
-    // crop so the grid phase matches what a full render would see.
-    let rgb_input = match depixelate {
-        Some(cell) => apply_depixelate(&rgb_input, cell)?.0,
-        None => rgb_input,
-    };
 
     let preview_cache = state.enhancement_preview_raw.clone();
     tokio::task::spawn_blocking(move || {
@@ -1150,6 +1144,13 @@ pub async fn preview_enhancement(
         let y0 = cy.saturating_sub(crop_h / 2).min(h - crop_h);
 
         let crop = image::imageops::crop_imm(&rgb_input, x0, y0, crop_w, crop_h).to_image();
+        // De-pixelate on the CROP: the user pointed the preview at the
+        // pixelated area, which is a far stronger detection target than
+        // the whole frame.
+        let crop = match depixelate {
+            Some(cell) => apply_depixelate(&crop, cell)?.0,
+            None => crop,
+        };
 
         let enhanced = run_tiled_enhancement(
             &crop,
@@ -1207,10 +1208,6 @@ async fn preview_comfy_enhancement(
     let (source_path, _) = parse_virtual_path(&path);
     let path_str = source_path.to_string_lossy().to_string();
     let rgb_input = enhancement_input(&path_str, js_adjustments.as_ref(), &state, &app_handle)?;
-    let rgb_input = match depixelate {
-        Some(cell) => apply_depixelate(&rgb_input, cell)?.0,
-        None => rgb_input,
-    };
     let resolution = model
         .manifest
         .params
@@ -1230,6 +1227,13 @@ async fn preview_comfy_enhancement(
         let x0 = cx.saturating_sub(crop_w / 2).min(w - crop_w);
         let y0 = cy.saturating_sub(crop_h / 2).min(h - crop_h);
         let crop = image::imageops::crop_imm(&rgb_input, x0, y0, crop_w, crop_h).to_image();
+        // De-pixelate on the CROP: the user pointed the preview at the
+        // pixelated area, which is a far stronger detection target than
+        // the whole frame.
+        let crop = match depixelate {
+            Some(cell) => apply_depixelate(&crop, cell)?.0,
+            None => crop,
+        };
         // Run the crop at the SAME effective scale the full render would
         // use (align_for_engine on the whole photo), so what the preview
         // shows — including how much detail the model invents and how the
@@ -1488,9 +1492,9 @@ pub const DEPIX_MAX_CELL: u32 = 96;
 /// Boundary comb must carry this much more gradient energy than the
 /// profile average. Soft (JPEG/resized) mosaics dilute the comb, so this
 /// is deliberately gentler than a crisp-grid threshold.
-const DEPIX_MIN_COMB_SCORE: f32 = 1.4;
+const DEPIX_MIN_COMB_SCORE: f32 = 1.3;
 /// Minimum normalized autocorrelation peak to accept as a repeating grid.
-const DEPIX_MIN_ACF_PEAK: f32 = 0.22;
+const DEPIX_MIN_ACF_PEAK: f32 = 0.18;
 
 /// A detected (or forced) pixelation grid. Pitches are FLOAT: real-world
 /// mosaics were usually resized after creation, so the block period is
@@ -1533,7 +1537,7 @@ fn mosaic_gradient_profiles(img: &Rgb32FImage) -> (Vec<f32>, Vec<f32>) {
 /// with parabolic sub-pixel refinement. Returns (pitch, peak strength).
 /// A mosaic's boundary comb autocorrelates periodically; natural content
 /// decays smoothly and produces no isolated peak.
-fn dominant_pitch(profile: &[f32]) -> Option<(f32, f32)> {
+fn normalized_autocorr(profile: &[f32]) -> Option<Vec<f32>> {
     let n = profile.len();
     if n < 16 {
         return None;
@@ -1556,6 +1560,30 @@ fn dominant_pitch(profile: &[f32]) -> Option<(f32, f32)> {
         }
         *rv = s / r0;
     }
+    Some(r)
+}
+
+/// Top autocorrelation local maxima, for failure diagnostics in the log.
+fn peak_diagnostics(profile: &[f32]) -> String {
+    let Some(r) = normalized_autocorr(profile) else {
+        return "no-acf".to_string();
+    };
+    let mut peaks: Vec<(usize, f32)> = (3..r.len().saturating_sub(1))
+        .filter(|&lag| r[lag] >= r[lag - 1] && r[lag] >= r[lag + 1])
+        .map(|lag| (lag, r[lag]))
+        .collect();
+    peaks.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    peaks
+        .iter()
+        .take(5)
+        .map(|(l, v)| format!("{l}:{v:.2}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn dominant_pitch(profile: &[f32]) -> Option<(f32, f32)> {
+    let r = normalized_autocorr(profile)?;
+    let max_lag = r.len() - 1;
     // Isolated local maxima only. Every multiple of the true pitch peaks
     // about as high as the pitch itself, so take the SMALLEST peak within
     // 80% of the best one.
@@ -1614,10 +1642,10 @@ fn comb_phase(profile: &[f32], pitch: f32) -> (f32, f32) {
 /// Local search around an approximate pitch, maximizing the boundary-comb
 /// score (this is what nails FRACTIONAL pitches: integer autocorrelation
 /// lags can't, but the comb sampler tracks float boundaries exactly).
-fn refine_pitch(profile: &[f32], approx: f32) -> (f32, f32, f32) {
+fn refine_pitch_range(profile: &[f32], approx: f32, range: f32) -> (f32, f32, f32) {
     let mut best = (approx, 0.0f32, 0.0f32);
-    let mut p = approx - 0.6;
-    while p <= approx + 0.6 {
+    let mut p = approx - range;
+    while p <= approx + range {
         if p >= 2.0 {
             let (phase, score) = comb_phase(profile, p);
             if score > best.2 {
@@ -1627,6 +1655,10 @@ fn refine_pitch(profile: &[f32], approx: f32) -> (f32, f32, f32) {
         p += 0.05;
     }
     best
+}
+
+fn refine_pitch(profile: &[f32], approx: f32) -> (f32, f32, f32) {
+    refine_pitch_range(profile, approx, 0.6)
 }
 
 /// One axis: autocorrelation peak (which may land on a HARMONIC — with
@@ -1651,20 +1683,10 @@ fn detect_axis(profile: &[f32]) -> Option<(f32, f32, f32)> {
         .copied()
 }
 
-/// Detects the pixelation grid, tolerating fractional pitch (resized
-/// mosaics) and softened edges (JPEG). None when either axis lacks both a
-/// clear autocorrelation peak and an aligned boundary comb.
-pub fn detect_mosaic_grid(img: &Rgb32FImage) -> Option<MosaicGrid> {
-    let (gx, gy) = mosaic_gradient_profiles(img);
-    let ax = detect_axis(&gx);
-    let ay = detect_axis(&gy);
-    let (Some((pitch_x, phase_x, sx)), Some((pitch_y, phase_y, sy))) = (ax, ay) else {
-        log::info!("[enhance] de-pixelate: no periodic grid (x={ax:?} y={ay:?})");
-        return None;
-    };
-    log::info!(
-        "[enhance] de-pixelate detect: pitch=({pitch_x:.2},{pitch_y:.2}) comb=({sx:.2},{sy:.2})"
-    );
+/// Both axes from precomputed profiles.
+fn detect_from_profiles(gx: &[f32], gy: &[f32]) -> Option<MosaicGrid> {
+    let (pitch_x, phase_x, _) = detect_axis(gx)?;
+    let (pitch_y, phase_y, _) = detect_axis(gy)?;
     if pitch_x < DEPIX_MIN_CELL as f32 || pitch_y < DEPIX_MIN_CELL as f32 {
         return None;
     }
@@ -1676,6 +1698,129 @@ pub fn detect_mosaic_grid(img: &Rgb32FImage) -> Option<MosaicGrid> {
         bound_x: phase_x + 1.0,
         bound_y: phase_y + 1.0,
     })
+}
+
+/// Windowed vote: a mosaic that covers only part of the frame (or whose
+/// comb is diluted by flat regions) is invisible to global profiles but
+/// obvious inside a window that sits on it. Windows detect independently;
+/// two or more agreeing on a pitch within 8% carries the vote, then the
+/// phase is aligned globally at that pitch.
+fn detect_windowed(img: &Rgb32FImage, gx_full: &[f32], gy_full: &[f32]) -> Option<MosaicGrid> {
+    let (w, h) = img.dimensions();
+    // Windows must be meaningfully smaller than the frame, or they inherit
+    // the same dilution that defeated the global profiles.
+    let win = (w.min(h) / 2).min(384);
+    if win < 96 {
+        return None;
+    }
+    let positions = |len: u32| -> Vec<u32> {
+        if len <= win { vec![0] } else { vec![0, (len - win) / 2, len - win] }
+    };
+    let mut xs_pitches: Vec<f32> = Vec::new();
+    let mut ys_pitches: Vec<f32> = Vec::new();
+    for &y0 in &positions(h) {
+        for &x0 in &positions(w) {
+            let sub = image::imageops::crop_imm(img, x0, y0, win, win).to_image();
+            let (sgx, sgy) = mosaic_gradient_profiles(&sub);
+            if let Some((p, _, _)) = detect_axis(&sgx) {
+                xs_pitches.push(p);
+            }
+            if let Some((p, _, _)) = detect_axis(&sgy) {
+                ys_pitches.push(p);
+            }
+        }
+    }
+    let vote = |mut v: Vec<f32>| -> Option<f32> {
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mut best: Option<(usize, f32)> = None;
+        let mut i = 0;
+        while i < v.len() {
+            let mut j = i;
+            while j + 1 < v.len() && v[j + 1] <= v[i] * 1.08 {
+                j += 1;
+            }
+            let count = j - i + 1;
+            let median = v[i + (count / 2).min(j - i)];
+            if best.is_none_or(|(bc, _)| count > bc) {
+                best = Some((count, median));
+            }
+            i = j + 1;
+        }
+        best.filter(|(c, _)| *c >= 2).map(|(_, m)| m)
+    };
+    let px = vote(xs_pitches)?;
+    let py = vote(ys_pitches)?;
+    // The vote is the evidence; global phase alignment needs no threshold.
+    let (pitch_x, phase_x, _) = refine_pitch(gx_full, px);
+    let (pitch_y, phase_y, _) = refine_pitch(gy_full, py);
+    log::info!("[enhance] de-pixelate windowed vote: pitch=({pitch_x:.2},{pitch_y:.2})");
+    Some(MosaicGrid {
+        pitch_x,
+        pitch_y,
+        bound_x: phase_x + 1.0,
+        bound_y: phase_y + 1.0,
+    })
+}
+
+/// Detects the pixelation grid, tolerating fractional pitch (resized
+/// mosaics), softened edges (JPEG), very large blocks (octave fallback),
+/// and mosaics covering only part of the frame (windowed vote).
+pub fn detect_mosaic_grid(img: &Rgb32FImage) -> Option<MosaicGrid> {
+    let (gx, gy) = mosaic_gradient_profiles(img);
+
+    if let Some(g) = detect_from_profiles(&gx, &gy) {
+        log::info!(
+            "[enhance] de-pixelate detect: pitch=({:.2},{:.2})",
+            g.pitch_x,
+            g.pitch_y
+        );
+        return Some(g);
+    }
+
+    // Octaves: blocks larger than the autocorrelation range at native
+    // resolution compress into range when the image is downscaled.
+    let (w, h) = img.dimensions();
+    for scale in [2u32, 4] {
+        if w / scale < 64 || h / scale < 64 {
+            break;
+        }
+        let small = image::imageops::resize(
+            img,
+            w / scale,
+            h / scale,
+            image::imageops::FilterType::Triangle,
+        );
+        let (sgx, sgy) = mosaic_gradient_profiles(&small);
+        if let Some(sg) = detect_from_profiles(&sgx, &sgy) {
+            let range = 0.8 * scale as f32;
+            let (pitch_x, phase_x, sx) =
+                refine_pitch_range(&gx, sg.pitch_x * scale as f32, range);
+            let (pitch_y, phase_y, sy) =
+                refine_pitch_range(&gy, sg.pitch_y * scale as f32, range);
+            if sx.min(sy) >= DEPIX_MIN_COMB_SCORE * 0.9 {
+                log::info!(
+                    "[enhance] de-pixelate detect at 1/{scale}: pitch=({pitch_x:.2},{pitch_y:.2})"
+                );
+                return Some(MosaicGrid {
+                    pitch_x,
+                    pitch_y,
+                    bound_x: phase_x + 1.0,
+                    bound_y: phase_y + 1.0,
+                });
+            }
+        }
+    }
+
+    if let Some(g) = detect_windowed(img, &gx, &gy) {
+        return Some(g);
+    }
+
+    log::info!(
+        "[enhance] de-pixelate: no grid found. acf peaks x=[{}] y=[{}]",
+        peak_diagnostics(&gx),
+        peak_diagnostics(&gy)
+    );
+    None
 }
 
 /// Grid for a KNOWN cell size (manual mode): pitch refined near the given
@@ -1934,6 +2079,27 @@ mod depixelate_tests {
         let soft = image::imageops::blur(&mosaic, 0.8);
         let grid = detect_mosaic_grid(&soft).expect("soft grid not detected");
         assert!((grid.pitch_x - 10.0).abs() < 0.6, "pitch_x {}", grid.pitch_x);
+    }
+
+    /// A mosaic that covers only part of the frame: global profiles are
+    /// diluted by the flat surround, so the windowed vote must carry it.
+    #[test]
+    fn detects_partial_coverage_mosaic() {
+        let scene = smooth_scene(480, 400);
+        let patch = mosaic_of(&scene, 9.0, 4.0, 2.0);
+        // Flat frame with the mosaic pasted into the central region only.
+        let mut img = Rgb32FImage::from_pixel(480, 400, Rgb([0.82f32, 0.8, 0.78]));
+        for y in 100..300u32 {
+            for x in 120..360u32 {
+                img.put_pixel(x, y, *patch.get_pixel(x, y));
+            }
+        }
+        let grid = detect_mosaic_grid(&img).expect("partial mosaic not detected");
+        assert!(
+            (grid.pitch_x - 9.0).abs() < 0.6,
+            "pitch_x {} not near 9",
+            grid.pitch_x
+        );
     }
 
     /// Auto mode must refuse images without a grid instead of mangling them.
