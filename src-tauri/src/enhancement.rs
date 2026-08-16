@@ -1485,11 +1485,28 @@ pub async fn save_enhanced_image(
 
 pub const DEPIX_MIN_CELL: u32 = 2;
 pub const DEPIX_MAX_CELL: u32 = 96;
-const DEPIX_MIN_SCORE: f32 = 2.0;
+/// Boundary comb must carry this much more gradient energy than the
+/// profile average. Soft (JPEG/resized) mosaics dilute the comb, so this
+/// is deliberately gentler than a crisp-grid threshold.
+const DEPIX_MIN_COMB_SCORE: f32 = 1.4;
+/// Minimum normalized autocorrelation peak to accept as a repeating grid.
+const DEPIX_MIN_ACF_PEAK: f32 = 0.22;
+
+/// A detected (or forced) pixelation grid. Pitches are FLOAT: real-world
+/// mosaics were usually resized after creation, so the block period is
+/// rarely a whole number of pixels. `bound_x`/`bound_y` are the positions
+/// of the first cell boundary (the first cell may be partial).
+#[derive(Clone, Copy, Debug)]
+pub struct MosaicGrid {
+    pub pitch_x: f32,
+    pub pitch_y: f32,
+    pub bound_x: f32,
+    pub bound_y: f32,
+}
 
 /// Column/row gradient-energy profiles of the luma image. A mosaic
 /// concentrates its gradient energy on the grid boundaries, so these
-/// profiles spike at positions ≡ boundary (mod cell).
+/// profiles spike periodically.
 fn mosaic_gradient_profiles(img: &Rgb32FImage) -> (Vec<f32>, Vec<f32>) {
     let (w, h) = (img.width() as usize, img.height() as usize);
     let mut luma = vec![0.0f32; w * h];
@@ -1512,113 +1529,202 @@ fn mosaic_gradient_profiles(img: &Rgb32FImage) -> (Vec<f32>, Vec<f32>) {
     (gx, gy)
 }
 
-/// Best boundary residue class for a candidate cell size: returns the
-/// phase (index mod cell) whose mean gradient is highest, and that mean
-/// divided by the overall mean (≈1 for non-mosaic content, ≫1 on a grid).
-fn best_phase_score(profile: &[f32], cell: u32) -> (u32, f32) {
+/// Dominant repetition period of a profile via normalized autocorrelation
+/// with parabolic sub-pixel refinement. Returns (pitch, peak strength).
+/// A mosaic's boundary comb autocorrelates periodically; natural content
+/// decays smoothly and produces no isolated peak.
+fn dominant_pitch(profile: &[f32]) -> Option<(f32, f32)> {
     let n = profile.len();
-    if n == 0 {
-        return (0, 0.0);
+    if n < 16 {
+        return None;
+    }
+    let mean = profile.iter().sum::<f32>() / n as f32;
+    let x: Vec<f32> = profile.iter().map(|v| v - mean).collect();
+    let r0: f32 = x.iter().map(|v| v * v).sum();
+    if r0 <= 1e-12 {
+        return None;
+    }
+    let max_lag = (n / 3).min((DEPIX_MAX_CELL * 2) as usize);
+    if max_lag < 4 {
+        return None;
+    }
+    let mut r = vec![0.0f32; max_lag + 1];
+    for (lag, rv) in r.iter_mut().enumerate().take(max_lag + 1).skip(2) {
+        let mut s = 0.0f32;
+        for i in 0..n - lag {
+            s += x[i] * x[i + lag];
+        }
+        *rv = s / r0;
+    }
+    // Isolated local maxima only. Every multiple of the true pitch peaks
+    // about as high as the pitch itself, so take the SMALLEST peak within
+    // 80% of the best one.
+    let mut peaks: Vec<(usize, f32)> = Vec::new();
+    for lag in 3..max_lag {
+        if r[lag] >= DEPIX_MIN_ACF_PEAK && r[lag] >= r[lag - 1] && r[lag] >= r[lag + 1] {
+            peaks.push((lag, r[lag]));
+        }
+    }
+    let best = peaks.iter().map(|p| p.1).fold(0.0f32, f32::max);
+    let (lag, strength) = *peaks.iter().find(|p| p.1 >= best * 0.8)?;
+    let (a, b, c) = (r[lag - 1], r[lag], r[lag + 1]);
+    let denom = a - 2.0 * b + c;
+    let delta = if denom.abs() > 1e-9 {
+        (0.5 * (a - c) / denom).clamp(-0.5, 0.5)
+    } else {
+        0.0
+    };
+    Some((lag as f32 + delta, strength))
+}
+
+/// Best comb alignment for a float pitch: samples the profile at
+/// phase + k*pitch (rounded) and returns (best phase, boundary mean over
+/// profile mean). Phase resolution 0.25px.
+fn comb_phase(profile: &[f32], pitch: f32) -> (f32, f32) {
+    let n = profile.len();
+    if n == 0 || pitch < 2.0 {
+        return (0.0, 0.0);
     }
     let mean_all = profile.iter().sum::<f32>() / n as f32;
-    let mut best = (0u32, 0.0f32);
-    for phase in 0..cell {
+    let mut best = (0.0f32, 0.0f32);
+    let mut phase = 0.0f32;
+    while phase < pitch {
         let mut sum = 0.0f32;
         let mut count = 0u32;
-        let mut i = phase as usize;
-        while i < n {
-            sum += profile[i];
-            count += 1;
-            i += cell as usize;
+        let mut b = phase;
+        while b < (n as f32) - 0.5 {
+            let i = b.round() as usize;
+            if i < n {
+                sum += profile[i];
+                count += 1;
+            }
+            b += pitch;
         }
-        if count == 0 {
-            continue;
+        if count >= 3 {
+            let score = (sum / count as f32) / mean_all.max(1e-6);
+            if score > best.1 {
+                best = (phase, score);
+            }
         }
-        let score = (sum / count as f32) / mean_all.max(1e-6);
-        if score > best.1 {
-            best = (phase, score);
-        }
+        phase += 0.25;
     }
     best
 }
 
-/// Detects a square pixelation grid. Returns (cell, offset_x, offset_y)
-/// where offsets are the column/row at which the first full cell starts.
-/// None when no strong grid periodicity exists in both axes.
-pub fn detect_mosaic_cell(img: &Rgb32FImage) -> Option<(u32, u32, u32)> {
-    let (gx, gy) = mosaic_gradient_profiles(img);
-    let max_cell = DEPIX_MAX_CELL.min(img.width() / 4).min(img.height() / 4);
-    if max_cell < DEPIX_MIN_CELL {
-        return None;
-    }
-    let mut candidates: Vec<(u32, u32, u32, f32)> = Vec::new();
-    for cell in DEPIX_MIN_CELL..=max_cell {
-        let (px, sx) = best_phase_score(&gx, cell);
-        let (py, sy) = best_phase_score(&gy, cell);
-        let score = sx.min(sy);
-        if score >= DEPIX_MIN_SCORE {
-            candidates.push((cell, px, py, score));
+/// Local search around an approximate pitch, maximizing the boundary-comb
+/// score (this is what nails FRACTIONAL pitches: integer autocorrelation
+/// lags can't, but the comb sampler tracks float boundaries exactly).
+fn refine_pitch(profile: &[f32], approx: f32) -> (f32, f32, f32) {
+    let mut best = (approx, 0.0f32, 0.0f32);
+    let mut p = approx - 0.6;
+    while p <= approx + 0.6 {
+        if p >= 2.0 {
+            let (phase, score) = comb_phase(profile, p);
+            if score > best.2 {
+                best = (p, phase, score);
+            }
         }
+        p += 0.05;
     }
-    let best_score = candidates
-        .iter()
-        .map(|c| c.3)
-        .fold(0.0f32, f32::max);
-    // Every multiple of the true cell scores as well as the true cell
-    // (its boundaries are a subset of the real ones), so take the
-    // SMALLEST candidate within reach of the best score.
-    candidates
-        .iter()
-        .find(|c| c.3 >= best_score * 0.9)
-        .map(|&(cell, bx, by, _)| (cell, (bx + 1) % cell, (by + 1) % cell))
+    best
 }
 
-/// Phase for a KNOWN cell size (manual mode still aligns to the grid).
-fn phase_for_cell(img: &Rgb32FImage, cell: u32) -> (u32, u32) {
+/// One axis: autocorrelation peak (which may land on a HARMONIC — with
+/// fractional pitch the integer lags re-align best at a multiple), then
+/// try sub-multiples of that lag refined against the comb, preferring the
+/// smallest pitch that scores comparably. Returns (pitch, phase, score).
+fn detect_axis(profile: &[f32]) -> Option<(f32, f32, f32)> {
+    let (lag, _) = dominant_pitch(profile)?;
+    let mut candidates: Vec<(f32, f32, f32)> = Vec::new();
+    for divisor in 1..=6u32 {
+        let approx = lag / divisor as f32;
+        if approx < 2.5 {
+            break;
+        }
+        candidates.push(refine_pitch(profile, approx));
+    }
+    let best_score = candidates.iter().map(|c| c.2).fold(0.0f32, f32::max);
+    candidates
+        .iter()
+        .rev() // smallest pitch first
+        .find(|c| c.2 >= (best_score * 0.85).max(DEPIX_MIN_COMB_SCORE))
+        .copied()
+}
+
+/// Detects the pixelation grid, tolerating fractional pitch (resized
+/// mosaics) and softened edges (JPEG). None when either axis lacks both a
+/// clear autocorrelation peak and an aligned boundary comb.
+pub fn detect_mosaic_grid(img: &Rgb32FImage) -> Option<MosaicGrid> {
     let (gx, gy) = mosaic_gradient_profiles(img);
-    let (bx, _) = best_phase_score(&gx, cell);
-    let (by, _) = best_phase_score(&gy, cell);
-    ((bx + 1) % cell, (by + 1) % cell)
+    let ax = detect_axis(&gx);
+    let ay = detect_axis(&gy);
+    let (Some((pitch_x, phase_x, sx)), Some((pitch_y, phase_y, sy))) = (ax, ay) else {
+        log::info!("[enhance] de-pixelate: no periodic grid (x={ax:?} y={ay:?})");
+        return None;
+    };
+    log::info!(
+        "[enhance] de-pixelate detect: pitch=({pitch_x:.2},{pitch_y:.2}) comb=({sx:.2},{sy:.2})"
+    );
+    if pitch_x < DEPIX_MIN_CELL as f32 || pitch_y < DEPIX_MIN_CELL as f32 {
+        return None;
+    }
+    Some(MosaicGrid {
+        pitch_x,
+        pitch_y,
+        // Gradient index i is the edge between pixels i and i+1, so the
+        // first cell starts at phase+1.
+        bound_x: phase_x + 1.0,
+        bound_y: phase_y + 1.0,
+    })
+}
+
+/// Grid for a KNOWN cell size (manual mode): pitch refined near the given
+/// size (so "12" works on an 11.6px grid), phase auto-aligned, never fails.
+fn grid_for_cell(img: &Rgb32FImage, cell: u32) -> MosaicGrid {
+    let (gx, gy) = mosaic_gradient_profiles(img);
+    let (pitch_x, phase_x, _) = refine_pitch(&gx, cell as f32);
+    let (pitch_y, phase_y, _) = refine_pitch(&gy, cell as f32);
+    MosaicGrid {
+        pitch_x,
+        pitch_y,
+        bound_x: phase_x + 1.0,
+        bound_y: phase_y + 1.0,
+    }
 }
 
 /// Collapse each grid cell to its mean, then evaluate a Catmull-Rom
 /// surface through the cell-center means at every original pixel. Output
 /// has the input's dimensions with the grid dissolved into smooth ramps.
-pub fn collapse_mosaic(img: &Rgb32FImage, cell: u32, off_x: u32, off_y: u32) -> Rgb32FImage {
+pub fn collapse_mosaic(img: &Rgb32FImage, grid: &MosaicGrid) -> Rgb32FImage {
     use rayon::prelude::*;
 
     let (w, h) = img.dimensions();
-    let cf = cell as f32;
-    // Grid layout: a partial "head" cell of width off (when off > 0) at
-    // index 0, then full cells. head_x/head_y are the head cell widths.
-    let head_cols = off_x % cell;
-    let head_rows = off_y % cell;
-    let n_cols = u32::from(head_cols != 0) + (w - head_cols).div_ceil(cell);
-    let n_rows = u32::from(head_rows != 0) + (h - head_rows).div_ceil(cell);
-    let col_of = |x: u32| -> u32 {
-        if head_cols != 0 && x < head_cols {
+    let bx = grid.bound_x.rem_euclid(grid.pitch_x);
+    let by = grid.bound_y.rem_euclid(grid.pitch_y);
+    // Cell index for a coordinate: 0 for the partial head cell (before the
+    // first boundary), then one per pitch.
+    let idx_of = |v: f32, bound: f32, pitch: f32| -> i64 {
+        if v < bound {
             0
         } else {
-            (x - head_cols) / cell + u32::from(head_cols != 0)
+            ((v - bound) / pitch).floor() as i64 + 1
         }
     };
-    let row_of = |y: u32| -> u32 {
-        if head_rows != 0 && y < head_rows {
-            0
-        } else {
-            (y - head_rows) / cell + u32::from(head_rows != 0)
-        }
-    };
+    let col_idx: Vec<usize> = (0..w)
+        .map(|x| idx_of(x as f32, bx, grid.pitch_x) as usize)
+        .collect();
+    let row_idx: Vec<usize> = (0..h)
+        .map(|y| idx_of(y as f32, by, grid.pitch_y) as usize)
+        .collect();
+    let nc = col_idx[w as usize - 1] + 1;
+    let nr = row_idx[h as usize - 1] + 1;
 
-    // Accumulate block means.
-    let nc = n_cols as usize;
-    let nr = n_rows as usize;
     let mut sums = vec![[0.0f64; 3]; nc * nr];
     let mut counts = vec![0u32; nc * nr];
     for y in 0..h {
-        let r = row_of(y) as usize;
+        let r = row_idx[y as usize];
         for x in 0..w {
-            let c = col_of(x) as usize;
+            let c = col_idx[x as usize];
             let p = img.get_pixel(x, y);
             let idx = r * nc + c;
             sums[idx][0] += p[0] as f64;
@@ -1636,24 +1742,12 @@ pub fn collapse_mosaic(img: &Rgb32FImage, cell: u32, off_x: u32, off_y: u32) -> 
         })
         .collect();
 
-    // Fractional cell index for a pixel coordinate (cell centers land on
-    // integer indices; the partial head cell's center is at half its width).
-    let head_x = head_cols as f32;
-    let head_y = head_rows as f32;
-    let index_x = move |x: f32| -> f32 {
-        if head_x > 0.0 {
-            if x < head_x { x / head_x.max(1.0) - 0.5 } else { 1.0 + (x - head_x - cf / 2.0) / cf }
-        } else {
-            (x - cf / 2.0) / cf
-        }
-    };
-    let index_y = move |y: f32| -> f32 {
-        if head_y > 0.0 {
-            if y < head_y { y / head_y.max(1.0) - 0.5 } else { 1.0 + (y - head_y - cf / 2.0) / cf }
-        } else {
-            (y - cf / 2.0) / cf
-        }
-    };
+    // Fractional cell index for a pixel: interior cell k's center maps to
+    // index k (head cell centers land slightly off; clamped sampling
+    // absorbs the sub-cell edge distortion).
+    let (pitch_x, pitch_y) = (grid.pitch_x, grid.pitch_y);
+    let index_x = move |x: f32| -> f32 { (x - bx) / pitch_x + 0.5 };
+    let index_y = move |y: f32| -> f32 { (y - by) / pitch_y + 0.5 };
 
     let catmull = |p0: f32, p1: f32, p2: f32, p3: f32, t: f32| -> f32 {
         let t2 = t * t;
@@ -1663,7 +1757,7 @@ pub fn collapse_mosaic(img: &Rgb32FImage, cell: u32, off_x: u32, off_y: u32) -> 
             + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
             + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3)
     };
-    let grid = |cx: i64, cy: i64, ch: usize| -> f32 {
+    let grid_at = |cx: i64, cy: i64, ch: usize| -> f32 {
         let cx = cx.clamp(0, nc as i64 - 1) as usize;
         let cy = cy.clamp(0, nr as i64 - 1) as usize;
         means[cy * nc + cx][ch]
@@ -1686,10 +1780,10 @@ pub fn collapse_mosaic(img: &Rgb32FImage, cell: u32, off_x: u32, off_y: u32) -> 
                     for (j, cv) in col.iter_mut().enumerate() {
                         let cy = cy0 - 1 + j as i64;
                         *cv = catmull(
-                            grid(cx0 - 1, cy, ch),
-                            grid(cx0, cy, ch),
-                            grid(cx0 + 1, cy, ch),
-                            grid(cx0 + 2, cy, ch),
+                            grid_at(cx0 - 1, cy, ch),
+                            grid_at(cx0, cy, ch),
+                            grid_at(cx0 + 1, cy, ch),
+                            grid_at(cx0 + 2, cy, ch),
                             tx,
                         );
                     }
@@ -1702,100 +1796,144 @@ pub fn collapse_mosaic(img: &Rgb32FImage, cell: u32, off_x: u32, off_y: u32) -> 
 
 /// Applies the de-pixelate prep. `requested_cell` of 0 means auto-detect;
 /// a positive value forces that cell size (phase still auto-aligned).
-/// Returns the prepared image and the cell size actually used.
-pub fn apply_depixelate(img: &Rgb32FImage, requested_cell: u32) -> Result<(Rgb32FImage, u32), String> {
-    let (cell, ox, oy) = if requested_cell == 0 {
-        detect_mosaic_cell(img).ok_or_else(|| {
+/// Returns the prepared image and the approximate cell size used.
+pub fn apply_depixelate(
+    img: &Rgb32FImage,
+    requested_cell: u32,
+) -> Result<(Rgb32FImage, u32), String> {
+    let grid = if requested_cell == 0 {
+        detect_mosaic_grid(img).ok_or_else(|| {
             "No pixel grid detected in this image — set the cell size manually.".to_string()
         })?
     } else {
-        let c = requested_cell.clamp(DEPIX_MIN_CELL, DEPIX_MAX_CELL);
-        let (ox, oy) = phase_for_cell(img, c);
-        (c, ox, oy)
+        grid_for_cell(img, requested_cell.clamp(DEPIX_MIN_CELL, DEPIX_MAX_CELL))
     };
-    Ok((collapse_mosaic(img, cell, ox, oy), cell))
+    let cell = grid.pitch_x.round().max(2.0) as u32;
+    Ok((collapse_mosaic(img, &grid), cell))
 }
 
 #[cfg(test)]
 mod depixelate_tests {
     use super::*;
 
-    /// Mosaic a smooth gradient at a known cell/phase, then check that
-    /// detection recovers the grid and the collapse gets closer to the
-    /// pre-mosaic image than the mosaic was.
-    #[test]
-    fn detects_and_dissolves_synthetic_mosaic() {
-        let (w, h) = (240u32, 200u32);
-        let cell = 8u32;
-        let (off_x, off_y) = (3u32, 5u32);
-        let smooth = |x: u32, y: u32| -> [f32; 3] {
-            let u = x as f32 / w as f32;
-            let v = y as f32 / h as f32;
-            [
-                0.2 + 0.6 * u,
-                0.3 + 0.4 * v,
-                0.5 + 0.3 * (u * 6.0).sin() * (v * 5.0).cos(),
-            ]
-        };
-        let mut original = Rgb32FImage::new(w, h);
+    fn smooth_scene(w: u32, h: u32) -> Rgb32FImage {
+        let mut img = Rgb32FImage::new(w, h);
         for y in 0..h {
             for x in 0..w {
-                original.put_pixel(x, y, Rgb(smooth(x, y)));
+                let u = x as f32 / w as f32;
+                let v = y as f32 / h as f32;
+                img.put_pixel(
+                    x,
+                    y,
+                    Rgb([
+                        0.2 + 0.6 * u,
+                        0.3 + 0.4 * v,
+                        0.5 + 0.3 * (u * 6.0).sin() * (v * 5.0).cos(),
+                    ]),
+                );
             }
         }
-        // Build the mosaic: average each aligned cell.
-        let mut mosaic = original.clone();
-        let mut y0 = 0u32;
-        while y0 < h {
-            let ch = if y0 == 0 && off_y > 0 { off_y } else { cell.min(h - y0) };
-            let mut x0 = 0u32;
-            while x0 < w {
-                let cw = if x0 == 0 && off_x > 0 { off_x } else { cell.min(w - x0) };
+        img
+    }
+
+    /// Mosaic with FLOAT pitch: boundaries at round(off + k*pitch), the
+    /// shape of a mosaic that was resized after creation.
+    fn mosaic_of(original: &Rgb32FImage, pitch: f32, off_x: f32, off_y: f32) -> Rgb32FImage {
+        let (w, h) = original.dimensions();
+        let bounds = |len: u32, off: f32| -> Vec<u32> {
+            let mut b = vec![0u32];
+            let mut v = off;
+            while v < len as f32 {
+                let r = v.round() as u32;
+                if r > *b.last().unwrap() && r < len {
+                    b.push(r);
+                }
+                v += pitch;
+            }
+            b.push(len);
+            b
+        };
+        let xs = bounds(w, off_x);
+        let ys = bounds(h, off_y);
+        let mut out = original.clone();
+        for yi in 0..ys.len() - 1 {
+            for xi in 0..xs.len() - 1 {
                 let mut acc = [0.0f32; 3];
-                for y in y0..(y0 + ch).min(h) {
-                    for x in x0..(x0 + cw).min(w) {
+                let mut n = 0u32;
+                for y in ys[yi]..ys[yi + 1] {
+                    for x in xs[xi]..xs[xi + 1] {
                         let p = original.get_pixel(x, y);
                         for c in 0..3 {
                             acc[c] += p[c];
                         }
+                        n += 1;
                     }
                 }
-                let n = ((y0 + ch).min(h) - y0) * ((x0 + cw).min(w) - x0);
                 for c in acc.iter_mut() {
                     *c /= n as f32;
                 }
-                for y in y0..(y0 + ch).min(h) {
-                    for x in x0..(x0 + cw).min(w) {
-                        mosaic.put_pixel(x, y, Rgb(acc));
+                for y in ys[yi]..ys[yi + 1] {
+                    for x in xs[xi]..xs[xi + 1] {
+                        out.put_pixel(x, y, Rgb(acc));
                     }
                 }
-                x0 += cw;
             }
-            y0 += ch;
         }
+        out
+    }
 
-        let (det_cell, det_ox, det_oy) =
-            detect_mosaic_cell(&mosaic).expect("grid not detected");
-        assert_eq!(det_cell, cell, "wrong cell size detected");
-        assert_eq!((det_ox, det_oy), (off_x, off_y), "wrong grid phase detected");
-
-        let (restored, used) = apply_depixelate(&mosaic, 0).unwrap();
-        assert_eq!(used, cell);
-        let mae = |a: &Rgb32FImage, b: &Rgb32FImage| -> f32 {
-            let mut sum = 0.0f64;
-            for (pa, pb) in a.pixels().zip(b.pixels()) {
-                for c in 0..3 {
-                    sum += (pa[c] - pb[c]).abs() as f64;
-                }
+    fn mae(a: &Rgb32FImage, b: &Rgb32FImage) -> f32 {
+        let mut sum = 0.0f64;
+        for (pa, pb) in a.pixels().zip(b.pixels()) {
+            for c in 0..3 {
+                sum += (pa[c] - pb[c]).abs() as f64;
             }
-            (sum / (a.width() * a.height() * 3) as f64) as f32
-        };
-        let err_mosaic = mae(&mosaic, &original);
-        let err_restored = mae(&restored, &original);
+        }
+        (sum / (a.width() * a.height() * 3) as f64) as f32
+    }
+
+    #[test]
+    fn detects_and_dissolves_integer_mosaic() {
+        let original = smooth_scene(240, 200);
+        let mosaic = mosaic_of(&original, 8.0, 3.0, 5.0);
+        let grid = detect_mosaic_grid(&mosaic).expect("integer grid not detected");
+        assert!((grid.pitch_x - 8.0).abs() < 0.3, "pitch_x {}", grid.pitch_x);
+        assert!((grid.pitch_y - 8.0).abs() < 0.3, "pitch_y {}", grid.pitch_y);
+        let (restored, used) = apply_depixelate(&mosaic, 0).unwrap();
+        assert_eq!(used, 8);
         assert!(
-            err_restored < err_mosaic * 0.5,
-            "collapse did not improve on the mosaic: {err_restored} vs {err_mosaic}"
+            mae(&restored, &original) < mae(&mosaic, &original) * 0.5,
+            "collapse did not improve on the mosaic"
         );
+    }
+
+    /// The real-world case that defeats integer detection: a mosaic that
+    /// was resized, so its block period is fractional.
+    #[test]
+    fn detects_and_dissolves_fractional_pitch_mosaic() {
+        let original = smooth_scene(300, 240);
+        let mosaic = mosaic_of(&original, 11.4, 4.0, 7.0);
+        let grid = detect_mosaic_grid(&mosaic).expect("fractional grid not detected");
+        assert!(
+            (grid.pitch_x - 11.4).abs() < 0.6,
+            "pitch_x {} not near 11.4",
+            grid.pitch_x
+        );
+        let (restored, _) = apply_depixelate(&mosaic, 0).unwrap();
+        assert!(
+            mae(&restored, &original) < mae(&mosaic, &original) * 0.6,
+            "fractional collapse did not improve enough"
+        );
+    }
+
+    /// JPEG-style softened block edges must still be detectable.
+    #[test]
+    fn detects_soft_edged_mosaic() {
+        let original = smooth_scene(240, 200);
+        let mosaic = mosaic_of(&original, 10.0, 2.0, 6.0);
+        let soft = image::imageops::blur(&mosaic, 0.8);
+        let grid = detect_mosaic_grid(&soft).expect("soft grid not detected");
+        assert!((grid.pitch_x - 10.0).abs() < 0.6, "pitch_x {}", grid.pitch_x);
     }
 
     /// Auto mode must refuse images without a grid instead of mangling them.
@@ -1808,7 +1946,7 @@ mod depixelate_tests {
             let v = (state >> 16) as f32 / 65535.0;
             *p = Rgb([v, 1.0 - v, v * 0.5 + 0.25]);
         }
-        assert!(detect_mosaic_cell(&img).is_none(), "noise misread as a grid");
+        assert!(detect_mosaic_grid(&img).is_none(), "noise misread as a grid");
         assert!(apply_depixelate(&img, 0).is_err());
     }
 }
