@@ -1247,9 +1247,26 @@ pub async fn invoke_generative_replace_with_mask_def(
     let mask_dynamic = DynamicImage::ImageLuma8(mask_bitmap);
     let unwarped_dynamic =
         apply_unwarp_geometry(Cow::Borrowed(&mask_dynamic), &current_adjustments).into_owned();
-    let mask_bitmap = unwarped_dynamic.to_luma8();
+    let mut mask_bitmap = unwarped_dynamic.to_luma8();
 
+    // Graded masks (Clipped/Color select) store per-pixel CONFIDENCE, not
+    // opacity — a washed-out sky rasterizes at 10-25%. Consumed literally,
+    // that (a) blends the fill at one-fifth strength (invisible result)
+    // and (b) hides the region from the blob router, which thresholds at
+    // 50%. A generative fill needs region membership: boost anything
+    // meaningfully selected to full strength, keep only the rim soft, and
+    // drop near-noise dust (which otherwise becomes thousands of
+    // one-speck LaMa jobs).
+    let pre_boost = mask_bitmap.pixels().filter(|p| p[0] > 0).count();
+    for p in mask_bitmap.pixels_mut() {
+        let v = p[0] as f32 / 255.0;
+        let boosted = ((v - 0.06) / (0.30 - 0.06)).clamp(0.0, 1.0);
+        p[0] = (boosted * 255.0).round() as u8;
+    }
     let nonzero = mask_bitmap.pixels().filter(|p| p[0] > 0).count();
+    log::info!(
+        "[fill] mask confidence boost: {pre_boost} px selected -> {nonzero} px at working strength"
+    );
     log::info!(
         "generative_replace: image {}x{}, mask {}x{}, {} masked px, {} sub-masks, fast={}",
         img_w,
