@@ -266,3 +266,13 @@ Measured every light dial on a GPU patch ladder; found and fixed:
       remaps confidence to region membership (>=30% -> full strength,
       soft rim, <6% dust dropped — also eliminates thousands-of-specks
       LaMa marathons from noisy selections).
+
+## Round: fill mask orientation fix (2026-08-16) — SHIPPED
+- [x] Value-derived fill masks (clipped/color/luminance) were generated
+      in full-image space then display-transformed (flips/rotation from
+      their overlay parameters) — on flipped/rotated photos the fill
+      edited the MIRROR position ("found the highlights, edited the
+      foliage"; measured: mask centroid matched the double-flip of the
+      true highlight centroid within 5px on a 7008px frame). Fills now
+      neutralize display orientation for value-derived sub-masks;
+      regression test pins mask-on-highlights for a flipped photo.

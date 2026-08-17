@@ -1216,6 +1216,15 @@ pub async fn invoke_generative_replace_with_mask_def(
         .map_err(|e| format!("Failed to prepare source image: {}", e))?;
 
     let (img_w, img_h) = source_image.dimensions();
+    // Value-derived masks (clipped/color/luminance) threshold the WARPED
+    // full image — their output is already in full-image space. The
+    // orientation parameters they carry (rotation/flips/coarse steps)
+    // exist to map that mask into DISPLAY space for the overlay; applying
+    // them here left the fill mask mirrored/rotated relative to the
+    // original on any flipped or rotated photo — the fill then edited the
+    // mirror-image position ("found the highlights, edited the foliage").
+    let mut sub_masks = patch_definition.sub_masks;
+    neutralize_display_orientation(&mut sub_masks);
     let mask_def_for_generation = MaskDefinition {
         id: patch_definition.id.clone(),
         name: patch_definition.name.clone(),
@@ -1225,7 +1234,7 @@ pub async fn invoke_generative_replace_with_mask_def(
         grow: 0.0,
         feather: 0.0,
         adjustments: serde_json::Value::Null,
-        sub_masks: patch_definition.sub_masks,
+        sub_masks,
     };
 
     let warped_image = resolve_warped_image_for_masks(
@@ -1926,6 +1935,84 @@ mod fill_component_tests {
         assert!(
             noise_after > ring_noise * 0.5,
             "fill noise {noise_after:.4} must approach ring noise {ring_noise:.4}"
+        );
+    }
+}
+
+/// Strips display-orientation parameters from value-derived sub-masks so
+/// their bitmaps stay in full-image space (see the comment at the call
+/// site in `invoke_generative_replace_with_mask_def`).
+pub(crate) fn neutralize_display_orientation(sub_masks: &mut [crate::mask_generation::SubMask]) {
+    for sm in sub_masks {
+        if matches!(sm.mask_type.as_str(), "clipped" | "color" | "luminance")
+            && let Some(params) = sm.parameters.as_object_mut()
+        {
+            params.insert("rotation".into(), serde_json::json!(0.0));
+            params.insert("flipHorizontal".into(), serde_json::json!(false));
+            params.insert("flipVertical".into(), serde_json::json!(false));
+            params.insert("orientationSteps".into(), serde_json::json!(0));
+        }
+    }
+}
+
+#[cfg(test)]
+mod fill_mask_orientation_tests {
+    use crate::mask_generation::{MaskDefinition, SubMask, SubMaskMode, generate_mask_bitmap};
+    use image::DynamicImage;
+
+    /// A clipped mask on a FLIPPED photo must select the bright region
+    /// where it actually is in the source image — not its mirror. This is
+    /// the "found the highlights, edited the foliage" bug.
+    #[test]
+    fn clipped_fill_mask_lands_on_highlights_not_their_mirror() {
+        let (w, h) = (200u32, 150u32);
+        let mut img = image::Rgb32FImage::from_pixel(w, h, image::Rgb([0.25f32, 0.25, 0.25]));
+        for y in 20..50 {
+            for x in 30..70 {
+                img.put_pixel(x, y, image::Rgb([0.99f32, 0.99, 0.99]));
+            }
+        }
+        let reference = DynamicImage::ImageRgb32F(img);
+
+        let sub_mask: SubMask = serde_json::from_value(serde_json::json!({
+            "id": "t", "type": "clipped", "visible": true, "mode": "additive",
+            "parameters": {
+                "whiteThreshold": 90, "blackThreshold": 0,
+                "feather": 0, "grow": 0, "clean": 0, "solidify": 0,
+                "flipHorizontal": true, "flipVertical": true,
+                "rotation": 0.0, "orientationSteps": 0
+            }
+        }))
+        .unwrap();
+        let mut sub_masks = vec![sub_mask];
+        super::neutralize_display_orientation(&mut sub_masks);
+        let def = MaskDefinition {
+            id: "t".into(),
+            name: "t".into(),
+            visible: true,
+            invert: false,
+            opacity: 100.0,
+            grow: 0.0,
+            feather: 0.0,
+            adjustments: serde_json::Value::Null,
+            sub_masks,
+        };
+        let mask = generate_mask_bitmap(&def, w, h, 1.0, (0.0, 0.0), Some(&reference))
+            .expect("mask generated");
+        let (mut sx, mut sy, mut n) = (0f64, 0f64, 0u64);
+        for (x, y, p) in mask.enumerate_pixels() {
+            if p[0] > 127 {
+                sx += x as f64;
+                sy += y as f64;
+                n += 1;
+            }
+        }
+        assert!(n > 0, "clipped mask selected nothing");
+        let (cx, cy) = (sx / n as f64, sy / n as f64);
+        assert!(
+            (30.0..70.0).contains(&cx) && (20.0..50.0).contains(&cy),
+            "mask centroid ({cx:.0},{cy:.0}) not on the bright region (30-70, 20-50) — \
+             landed at the mirror position"
         );
     }
 }
