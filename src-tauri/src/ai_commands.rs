@@ -1123,8 +1123,11 @@ async fn run_engine_inpaint_patch(
         };
         let span_x = comp.max_x - comp.min_x + 1;
         let span_y = comp.max_y - comp.min_y + 1;
-        let pad_x = 192.max((span_x as f32 * 1.5) as u32);
-        let pad_y = 192.max((span_y as f32 * 1.5) as u32);
+        // Generous context, but CAPPED: a 1.5x pad around a 1500px blob
+        // produced a ~6000px crop that the engine downscaled to 1216 —
+        // the blob itself rendered at ~300px and upscaled back as mush.
+        let pad_x = 192.max((span_x as f32 * 1.5) as u32).min(520);
+        let pad_y = 192.max((span_y as f32 * 1.5) as u32).min(520);
         let x0 = comp.min_x.saturating_sub(pad_x);
         let y0 = comp.min_y.saturating_sub(pad_y);
         let x1 = (comp.max_x + pad_x).min(w.saturating_sub(1));
@@ -1158,7 +1161,13 @@ async fn run_engine_inpaint_patch(
         }
 
         let (img_png, mask_png, _, _) =
-            crate::expansion::engine_canvas_pngs(&crop_img, &crop_mask)?;
+            crate::expansion::engine_canvas_pngs_sized(
+                &crop_img,
+                &crop_mask,
+                // Big reconstructions earn a bigger canvas (Flux handles
+                // 1536 comfortably on this hardware).
+                if comp.span() >= 900 { 1536 } else { 1216 },
+            )?;
         let fill_png = crate::comfy_engine::run_generative_fill(
             app_handle,
             state,

@@ -438,7 +438,10 @@
         "spotEnhanceDesc": "Sharpen or restore only the brushed area — the rest of the photo is untouched.",
         "spotEnhanceMode": "Mode",
         "spotSharpen": "Sharpen",
-        "spotEnhanceButton": "Enhance Selection"
+        "spotEnhanceButton": "Enhance Selection",
+        "resultBlendTitle": "Result blend",
+        "resultFeather": "Feather",
+        "resultOpacity": "Opacity"
       }
     },
     "crop": {

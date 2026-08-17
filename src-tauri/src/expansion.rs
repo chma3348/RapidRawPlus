@@ -123,8 +123,18 @@ pub(crate) fn engine_canvas_pngs(
     canvas: &RgbaImage,
     mask: &GrayImage,
 ) -> Result<(Vec<u8>, Vec<u8>, u32, u32), String> {
+    engine_canvas_pngs_sized(canvas, mask, 1216)
+}
+
+/// Same, with a caller-chosen working long edge (large fill blobs render
+/// mushy at 1216 — the blob itself may only span a few hundred px there).
+pub(crate) fn engine_canvas_pngs_sized(
+    canvas: &RgbaImage,
+    mask: &GrayImage,
+    long_edge: u32,
+) -> Result<(Vec<u8>, Vec<u8>, u32, u32), String> {
     let (w, h) = canvas.dimensions();
-    let scale = (1216.0 / w.max(h) as f32).min(1.0);
+    let scale = (long_edge as f32 / w.max(h) as f32).min(1.0);
     let round8 = |v: f32| ((v / 8.0).round() as u32).max(8) * 8;
     let (ww, wh) = (round8(w as f32 * scale), round8(h as f32 * scale));
     let small_canvas = image::imageops::resize(canvas, ww, wh, FilterType::Lanczos3);

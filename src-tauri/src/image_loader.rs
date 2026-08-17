@@ -460,6 +460,19 @@ pub fn composite_patches_on_image(
 
     for patch_obj in visible_patches {
         let patch_data = patch_obj.get("patchData").context("Missing patchData")?;
+        // Post-render taste controls: feather softens the composite rim,
+        // opacity scales the whole patch — both are mask-space operations,
+        // so adjusting them re-blends instantly without re-running the AI.
+        let patch_feather = patch_obj
+            .get("feather")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0) as f32;
+        let patch_opacity = (patch_obj
+            .get("opacity")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(100.0) as f32
+            / 100.0)
+            .clamp(0.0, 1.0);
 
         let mask_bitmap = if let Some(mask_b64) = patch_data
             .get("mask")
@@ -491,6 +504,15 @@ pub fn composite_patches_on_image(
 
             generate_mask_bitmap(&mask_def, base_w, base_h, 1.0, (0.0, 0.0), None)
                 .context("Failed to generate mask from sub_masks for compositing")?
+        };
+
+        let mask_bitmap = if patch_feather > 0.0 {
+            // Feather scales with image size so the slider feels the same
+            // on previews and full-res renders.
+            let sigma = (patch_feather / 100.0) * (base_w.max(base_h) as f32 / 60.0);
+            image::imageops::blur(&mask_bitmap, sigma.max(0.5))
+        } else {
+            mask_bitmap
         };
 
         // Patches from float/RAW sources are stored gamma-encoded so their
@@ -535,7 +557,7 @@ pub fn composite_patches_on_image(
                             }
                         };
 
-                        let alpha = mask_value as f32 / 255.0;
+                        let alpha = mask_value as f32 / 255.0 * patch_opacity;
                         let one_minus_alpha = 1.0 - alpha;
 
                         let base_r = row[x * 4];

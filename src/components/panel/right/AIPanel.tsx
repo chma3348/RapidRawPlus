@@ -1888,6 +1888,33 @@ function SettingsPanel({
       className={`space-y-2 transition-opacity duration-300 ${!isActive ? 'opacity-50 pointer-events-none' : ''}`}
       onClick={(e) => e.stopPropagation()}
     >
+      {container?.patchData && (
+        <div className="p-2 bg-bg-tertiary rounded-md">
+          <Text variant={TextVariants.heading} className="mb-2">
+            {t('editor.ai.settings.resultBlendTitle')}
+          </Text>
+          <Slider
+            label={t('editor.ai.settings.resultFeather')}
+            min={0}
+            max={100}
+            step={1}
+            defaultValue={0}
+            value={(container as any).feather ?? 0}
+            onChange={(e: any) => updateContainer(container.id, { feather: Number(e.target.value) })}
+            fillOrigin="min"
+          />
+          <Slider
+            label={t('editor.ai.settings.resultOpacity')}
+            min={0}
+            max={100}
+            step={1}
+            defaultValue={100}
+            value={(container as any).opacity ?? 100}
+            onChange={(e: any) => updateContainer(container.id, { opacity: Number(e.target.value) })}
+            fillOrigin="min"
+          />
+        </div>
+      )}
       <CollapsibleSection
         title={t('editor.ai.settings.generativeReplaceTitle')}
         isOpen={collapsibleState.generative}

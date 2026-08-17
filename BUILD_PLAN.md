@@ -276,3 +276,12 @@ Measured every light dial on a GPU patch ladder; found and fixed:
       true highlight centroid within 5px on a 7008px frame). Fills now
       neutralize display orientation for value-derived sub-masks;
       regression test pins mask-on-highlights for a flipped photo.
+
+## Round: AI result blend + fill quality (2026-08-16) — SHIPPED
+- [x] Result blend on EVERY AI patch: Feather + Opacity sliders in the
+      container settings, applied at composite time (instant re-blend,
+      no AI re-run). Feather scales with image size.
+- [x] Fill quality for large regions: context pad capped at 520px (a
+      1.5x pad around a 1500px blob shrank the fill area to ~300px on
+      the engine canvas — the gray-mush cause) and the engine canvas
+      grows to 1536 for blobs spanning >=900px.
