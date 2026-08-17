@@ -257,3 +257,12 @@ Measured every light dial on a GPU patch ladder; found and fixed:
       3.2x checker lift, detail contrast retained, disc chroma
       reconstruction).
 - [x] Verify: full cargo suite, build, install, commit + push.
+
+## Round: fill mask confidence boost (2026-08-16) — SHIPPED baff5acb
+- [x] Diagnosed from a real run (11.2M selected px, ZERO at full
+      strength): graded Clipped/Color masks were consumed as literal
+      opacity — fills composited at ~20% (invisible) and the 50%-
+      threshold blob router only saw total-clip cores. Fill entry now
+      remaps confidence to region membership (>=30% -> full strength,
+      soft rim, <6% dust dropped — also eliminates thousands-of-specks
+      LaMa marathons from noisy selections).
