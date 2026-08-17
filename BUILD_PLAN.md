@@ -302,3 +302,12 @@ Measured every light dial on a GPU patch ladder; found and fixed:
       flat gray mush. Node added to the Flux fill graph, steps 24->28.
       Method lesson recorded: verify output quality against a
       known-good baseline before declaring a fix.
+
+## Round: fill seed randomization + prompt verdict (2026-08-17) — SHIPPED
+- [x] Random seed per fill run (was hardcoded 42 — every retry
+      identical, sampling-for-quality impossible).
+- [x] Prompt A/B on the user's exact morning run (same canvas/mask/
+      seed/graph): "birght sky with clouds" -> wash; "dramatic gray
+      storm clouds with defined billowing edges" -> real structured
+      cloud. Pipeline verified end-to-end; prompt phrasing is the
+      remaining quality lever, as in stock ComfyUI.

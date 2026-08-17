@@ -1175,7 +1175,13 @@ async fn run_engine_inpaint_patch(
             img_png,
             mask_png,
             prompt,
-            42,
+            // Random seed per run: retries produce genuine variants (a
+            // fixed seed made every re-roll identical, so users could
+            // never sample for a better result).
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos() as u64 ^ (d.as_secs() << 20))
+                .unwrap_or(42),
             |_| {},
         )
         .await
