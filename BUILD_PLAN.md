@@ -285,3 +285,11 @@ Measured every light dial on a GPU patch ladder; found and fixed:
       1.5x pad around a 1500px blob shrank the fill area to ~300px on
       the engine canvas — the gray-mush cause) and the engine canvas
       grows to 1536 for blobs spanning >=900px.
+
+## Round: fill consolidation guard (2026-08-16) — SHIPPED
+- [x] When a fill mask fragments into >200 pieces, auto-close nearby
+      specks into solid regions (solidify 60) and drop isolated dust
+      <250px; log reports fragments -> regions. Measured motivation:
+      6,304-speck run = ~1 hour of LaMa for invisible dust healing.
+- [ ] Follow-up queued: Cancel button for fill runs (today's only
+      cancel path is restarting the app).

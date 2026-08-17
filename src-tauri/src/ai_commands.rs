@@ -1285,6 +1285,39 @@ pub async fn invoke_generative_replace_with_mask_def(
     log::info!(
         "[fill] mask confidence boost: {pre_boost} px selected -> {nonzero} px at working strength"
     );
+
+    // Consolidation guard: threshold-noise selections fragment into
+    // thousands of specks, each of which would become its own LaMa job
+    // (measured: 6,304 specks = ~an hour of compute for invisible dust
+    // healing). When the mask is badly fragmented, close nearby specks
+    // into solid regions and drop isolated dust outright.
+    {
+        let (_, comps) = mask_components(&mask_bitmap, 127);
+        if comps.len() > 200 {
+            let scale = (mask_bitmap.width().max(mask_bitmap.height()) as f32 / 2000.0).max(1.0);
+            crate::mask_generation::apply_solidify_public(&mut mask_bitmap, 60.0, scale);
+            let (labels2, comps2) = mask_components(&mask_bitmap, 127);
+            let mut drop = vec![false; comps2.len() + 1];
+            for c in &comps2 {
+                if c.area < 250 {
+                    drop[c.id as usize] = true;
+                }
+            }
+            let w = mask_bitmap.width() as usize;
+            for (i, p) in mask_bitmap.pixels_mut().enumerate() {
+                let label = labels2[(i / w) * w + (i % w)];
+                if label != 0 && drop[label as usize] {
+                    p[0] = 0;
+                }
+            }
+            let (_, comps3) = mask_components(&mask_bitmap, 127);
+            log::info!(
+                "[fill] consolidation guard: {} fragments -> {} regions (solidify + dust drop)",
+                comps.len(),
+                comps3.len()
+            );
+        }
+    }
     log::info!(
         "generative_replace: image {}x{}, mask {}x{}, {} masked px, {} sub-masks, fast={}",
         img_w,

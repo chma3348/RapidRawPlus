@@ -363,6 +363,11 @@ fn grayscale_erode(image: &GrayImage, k: u8) -> GrayImage {
 /// partial matches across a washed-out area) into the coherent regions a
 /// reconstruct-grade fill needs — diffusion on lace reads as blotches,
 /// diffusion on solid regions reads as detail.
+/// Public wrapper for the fill pipeline's consolidation guard.
+pub(crate) fn apply_solidify_public(mask: &mut GrayImage, solidify: f32, scale: f32) {
+    apply_solidify(mask, solidify, scale);
+}
+
 fn apply_solidify(mask: &mut GrayImage, solidify: f32, scale: f32) {
     if solidify <= 0.5 {
         return;
