@@ -293,3 +293,12 @@ Measured every light dial on a GPU patch ladder; found and fixed:
       6,304-speck run = ~1 hour of LaMa for invisible dust healing.
 - [ ] Follow-up queued: Cancel button for fill runs (today's only
       cancel path is restarting the app).
+
+## Round: Flux graph fix — DifferentialDiffusion (2026-08-16) — SHIPPED
+- [x] A/B against a stock canonical Flux Fill graph (same inputs, same
+      Q8 weights, run via curl on the app's own ComfyUI) PROVED our
+      graph was the mush source: stock (with DifferentialDiffusion +
+      28 steps) produced defined billowing storm clouds; ours produced
+      flat gray mush. Node added to the Flux fill graph, steps 24->28.
+      Method lesson recorded: verify output quality against a
+      known-good baseline before declaring a fix.

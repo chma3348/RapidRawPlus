@@ -544,6 +544,10 @@ pub async fn run_generative_fill(
                   "inputs": {"image": "rapidraw_fill_mask.png", "channel": "red"}},
             "3": {"class_type": "UnetLoaderGGUF",
                   "inputs": {"unet_name": "flux1-fill-dev-Q8_0.gguf"}},
+            // A/B-proven (2026-08-16): without DifferentialDiffusion the
+            // fill comes out as flat mush; the canonical Flux Fill graph
+            // applies it to the model before sampling.
+            "3d": {"class_type": "DifferentialDiffusion", "inputs": {"model": ["3", 0]}},
             "3c": {"class_type": "DualCLIPLoaderGGUF",
                    "inputs": {"clip_name1": "t5-v1_1-xxl-encoder-Q8_0.gguf",
                                "clip_name2": "clip_l.safetensors", "type": "flux"}},
@@ -556,8 +560,8 @@ pub async fn run_generative_fill(
                   "inputs": {"positive": ["4g", 0], "negative": ["5", 0], "vae": ["3v", 0],
                               "pixels": ["1", 0], "mask": ["2", 0], "noise_mask": true}},
             "7": {"class_type": "KSampler",
-                  "inputs": {"model": ["3", 0], "positive": ["6", 0], "negative": ["6", 1],
-                              "latent_image": ["6", 2], "seed": seed, "steps": 24, "cfg": 1.0,
+                  "inputs": {"model": ["3d", 0], "positive": ["6", 0], "negative": ["6", 1],
+                              "latent_image": ["6", 2], "seed": seed, "steps": 28, "cfg": 1.0,
                               "sampler_name": "euler", "scheduler": "normal", "denoise": 1.0}},
             "8": {"class_type": "VAEDecode", "inputs": {"samples": ["7", 0], "vae": ["3v", 0]}},
             "9": {"class_type": "SaveImage",
