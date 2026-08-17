@@ -926,9 +926,14 @@ fn apply_highlights_adjustment(
                 let shoulder = knee + span * (x / (1.0 + c * x * (2.0 + x) / (1.0 + x)));
                 // The compressor's top-end slope flattens texture inside
                 // bright regions; restore part of the pixel-vs-neighborhood
-                // detail so recovered skies keep their clouds.
-                let restore_zone = smoothstep(0.68, 0.92, l_base_h);
-                lab.x = shoulder + (t - min(l_base_h, 1.0)) * 0.5 * amt * restore_zone;
+                // detail so recovered skies keep their clouds. The term
+                // fades in ABOVE the knee (a hard gate speckled cloud
+                // edges) and the detail is clamped so partially-clipped
+                // edge pixels can't take individual jolts.
+                let restore_zone = smoothstep(0.68, 0.92, l_base_h)
+                    * smoothstep(knee, knee + 0.14, lab.x);
+                let detail = clamp(t - min(l_base_h, 1.0), -0.12, 0.12);
+                lab.x = shoulder + detail * 0.5 * amt * restore_zone;
             }
 
             // Clipped pixels carry no color of their own — when pulled
