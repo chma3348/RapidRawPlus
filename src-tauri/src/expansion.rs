@@ -138,11 +138,15 @@ pub(crate) fn engine_canvas_pngs_sized(
     let round8 = |v: f32| ((v / 8.0).round() as u32).max(8) * 8;
     let (ww, wh) = (round8(w as f32 * scale), round8(h as f32 * scale));
     let small_canvas = image::imageops::resize(canvas, ww, wh, FilterType::Lanczos3);
-    // Feathered mask: soft transitions avoid tone steps at the fill seam.
-    let small_mask = image::imageops::blur(
-        &image::imageops::resize(mask, ww, wh, FilterType::Triangle),
-        4.0,
-    );
+    // BINARY mask for the engine: diffusion inpainting reads gray mask
+    // values as "mostly keep the original" — a feathered mask told the
+    // model to preserve the very wash it was asked to replace (mushy,
+    // object-free fills). Soft blending belongs to the composite step,
+    // not the conditioning.
+    let mut small_mask = image::imageops::resize(mask, ww, wh, FilterType::Triangle);
+    for p in small_mask.pixels_mut() {
+        p[0] = if p[0] > 32 { 255 } else { 0 };
+    }
     let mut cbuf = Cursor::new(Vec::new());
     DynamicImage::ImageRgba8(small_canvas)
         .to_rgb8()
