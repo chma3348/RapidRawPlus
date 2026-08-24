@@ -113,6 +113,16 @@ pub fn calculate_transform_hash(adjustments: &serde_json::Value) -> u64 {
                 .unwrap_or(true);
             is_visible.hash(&mut hasher);
 
+            // Post-render blend controls change the composite without
+            // changing patch data — omitting them here served a stale
+            // cached preview, making the Feather/Opacity sliders dead.
+            let feather = patch.get("feather").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            feather.to_bits().hash(&mut hasher);
+            let opacity = patch.get("opacity").and_then(|v| v.as_f64()).unwrap_or(100.0);
+            opacity.to_bits().hash(&mut hasher);
+            let invert = patch.get("invert").and_then(|v| v.as_bool()).unwrap_or(false);
+            invert.hash(&mut hasher);
+
             if let Some(patch_data) = patch.get("patchData") {
                 let color_len = patch_data
                     .get("color")
@@ -237,5 +247,27 @@ pub fn clear_session_caches(state: tauri::State<AppState>) {
     }
     if let Ok(mut geometry_cache) = state.geometry_cache.lock() {
         geometry_cache.clear();
+    }
+}
+
+#[cfg(test)]
+mod patch_blend_hash_tests {
+    use super::*;
+
+    /// Feather/Opacity changes MUST change the transform hash — a stale
+    /// hash served a cached composite and made the sliders dead.
+    #[test]
+    fn feather_and_opacity_change_the_transform_hash() {
+        let base = serde_json::json!({
+            "aiPatches": [{"id": "p1", "visible": true,
+                            "patchData": {"color": "abc", "mask": "def"}}]
+        });
+        let mut with_feather = base.clone();
+        with_feather["aiPatches"][0]["feather"] = serde_json::json!(30.0);
+        let mut with_opacity = base.clone();
+        with_opacity["aiPatches"][0]["opacity"] = serde_json::json!(55.0);
+        let h0 = calculate_transform_hash(&base);
+        assert_ne!(h0, calculate_transform_hash(&with_feather), "feather ignored by hash");
+        assert_ne!(h0, calculate_transform_hash(&with_opacity), "opacity ignored by hash");
     }
 }

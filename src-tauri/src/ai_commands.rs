@@ -979,7 +979,10 @@ fn blend_patch_into(
     x0: u32,
     y0: u32,
 ) {
-    let soft_mask = image::imageops::blur(crop_mask, 4.0);
+    // Feather scales with the patch: a fixed 4px on a full-res image is
+    // a razor edge that reads as a pasted silhouette with a halo rim.
+    let sigma = (crop_mask.width().max(crop_mask.height()) as f32 / 90.0).clamp(4.0, 26.0);
+    let soft_mask = image::imageops::blur(crop_mask, sigma);
     for y in 0..filled_crop.height() {
         for x in 0..filled_crop.width() {
             let m = soft_mask.get_pixel(x, y)[0];
@@ -1197,8 +1200,11 @@ async fn run_engine_inpaint_patch(
             image::imageops::FilterType::Lanczos3,
         );
         // Prompted fills intentionally differ from their surroundings —
-        // only nudge those; prompt-less removal gets the full match.
-        let tone_strength = if prompt.trim().is_empty() { 1.0 } else { 0.35 };
+        // barely touch them (ring-matching is what painted a bright halo
+        // gradient around generated clouds). Prompt-less LARGE blobs are
+        // reconstructions, not removals: full-strength matching forced
+        // them back to the wash they replaced; spots keep 1.0 elsewhere.
+        let tone_strength = if prompt.trim().is_empty() { 0.65 } else { 0.15 };
         harmonize_patch(&original_crop, &mut filled_crop, &crop_mask, tone_strength);
         blend_patch_into(&mut encoded_full, &filled_crop, &crop_mask, x0, y0);
     }

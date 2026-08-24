@@ -311,3 +311,17 @@ Measured every light dial on a GPU patch ladder; found and fixed:
       storm clouds with defined billowing edges" -> real structured
       cloud. Pipeline verified end-to-end; prompt phrasing is the
       remaining quality lever, as in stock ComfyUI.
+
+## Round: fill composite polish + blend-slider cache fix (2026-08-17)
+- [x] BUG FIX (root-caused): Feather/Opacity sliders were dead on ALL
+      patch types — calculate_transform_hash omitted patch-level
+      feather/opacity/invert, so the cached composite was served
+      unchanged. Hash extended; regression test pins it. One compositor
+      + one cache covers fills, spot enhance, and quick erase alike.
+- [x] Halo/pasted look: blend feather now scales with patch size
+      (was fixed 4px — razor edge at full res); prompted harmonization
+      0.35 -> 0.15 (ring-matching painted the bright halo gradient);
+      promptless LARGE blobs 1.0 -> 0.65 (full match forced
+      reconstructions back to the wash); LaMa spot removals keep 1.0.
+- [ ] User verification pending: promptless + prompted sky runs, live
+      Feather/Opacity drag.
