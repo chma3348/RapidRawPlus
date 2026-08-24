@@ -508,9 +508,17 @@ pub fn composite_patches_on_image(
 
         let mask_bitmap = if patch_feather > 0.0 {
             // Feather scales with image size so the slider feels the same
-            // on previews and full-res renders.
+            // on previews and full-res renders. INWARD-only: min() with
+            // the original mask so the gradient eases into the patch from
+            // its boundary — a plain blur also grew the mask outward,
+            // painting AI content in a soft band OUTSIDE the selection.
             let sigma = (patch_feather / 100.0) * (base_w.max(base_h) as f32 / 60.0);
-            image::imageops::blur(&mask_bitmap, sigma.max(0.5))
+            let blurred = image::imageops::blur(&mask_bitmap, sigma.max(0.5));
+            let mut inward = mask_bitmap;
+            for (dst, src) in inward.pixels_mut().zip(blurred.pixels()) {
+                dst[0] = dst[0].min(src[0]);
+            }
+            inward
         } else {
             mask_bitmap
         };
@@ -721,4 +729,36 @@ pub async fn load_image(
         exif: exif_data,
         is_raw,
     })
+}
+
+#[cfg(test)]
+mod patch_feather_tests {
+    use image::GrayImage;
+
+    /// Feathered patch alpha must NEVER exceed the original mask —
+    /// feather eases INWARD from the boundary; it must not paint AI
+    /// content outside the selection (a plain blur did exactly that).
+    #[test]
+    fn inward_feather_never_escapes_the_mask() {
+        let mut mask = GrayImage::new(120, 120);
+        for y in 40..80 {
+            for x in 40..80 {
+                mask.put_pixel(x, y, image::Luma([255]));
+            }
+        }
+        let blurred = image::imageops::blur(&mask, 8.0);
+        let mut inward = mask.clone();
+        for (dst, src) in inward.pixels_mut().zip(blurred.pixels()) {
+            dst[0] = dst[0].min(src[0]);
+        }
+        for (x, y, p) in inward.enumerate_pixels() {
+            let outside = !(40..80).contains(&x) || !(40..80).contains(&y);
+            if outside {
+                assert_eq!(p[0], 0, "feather escaped the mask at ({x},{y})");
+            }
+        }
+        // And the interior edge actually ramps (feather does something).
+        assert!(inward.get_pixel(41, 60)[0] < 255, "no inward gradient at the edge");
+        assert_eq!(inward.get_pixel(60, 60)[0], 255, "core lost full strength");
+    }
 }

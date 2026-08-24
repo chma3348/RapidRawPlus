@@ -982,7 +982,13 @@ fn blend_patch_into(
     // Feather scales with the patch: a fixed 4px on a full-res image is
     // a razor edge that reads as a pasted silhouette with a halo rim.
     let sigma = (crop_mask.width().max(crop_mask.height()) as f32 / 90.0).clamp(4.0, 26.0);
-    let soft_mask = image::imageops::blur(crop_mask, sigma);
+    // Inward-only soft edge: blurring alone also spills the fill OUTSIDE
+    // the mask boundary onto untouched image (the halo box).
+    let blurred = image::imageops::blur(crop_mask, sigma);
+    let mut soft_mask = crop_mask.clone();
+    for (dst, src) in soft_mask.pixels_mut().zip(blurred.pixels()) {
+        dst[0] = dst[0].min(src[0]);
+    }
     for y in 0..filled_crop.height() {
         for x in 0..filled_crop.width() {
             let m = soft_mask.get_pixel(x, y)[0];
