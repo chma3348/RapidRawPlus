@@ -1609,16 +1609,17 @@ pub struct AiDepthMaskParameters {
     pub orientation_steps: Option<u8>,
 }
 
-/// Inward-only feather with real reach: the gradient is sized by the
-/// PATCH's own span (at 100 it spans roughly a third of the patch), the
-/// ramp is smoothstep-shaped so the ease breathes instead of stepping,
-/// and the blur runs on a downscaled mask so slider drags stay instant.
-/// alpha = smoothstep(min(blur(mask), mask)) — never exceeds the original
-/// footprint, so feather can never paint outside the selection.
+/// Edge-band feather (Photoshop semantics): opacity ramps over a band of
+/// fixed width AT THE BOUNDARY only — every pixel deeper than the band
+/// stays fully opaque regardless of the patch's shape (a blur-based
+/// feather dimmed the whole interior of thin lobes: blur measures local
+/// mask coverage, not distance to the edge). Band width scales with the
+/// patch span; distance comes from a two-pass chamfer transform at 1/4
+/// resolution, so slider drags stay instant. Outside the mask the
+/// distance is zero, so feather can never paint outside the selection.
 pub fn feather_mask_inward(mask: &image::GrayImage, feather: f32) -> image::GrayImage {
     use image::imageops::FilterType;
     let (w, h) = mask.dimensions();
-    // Patch span from the mask's bounding box.
     let (mut min_x, mut min_y, mut max_x, mut max_y) = (w, h, 0u32, 0u32);
     for (x, y, p) in mask.enumerate_pixels() {
         if p[0] > 0 {
@@ -1632,21 +1633,56 @@ pub fn feather_mask_inward(mask: &image::GrayImage, feather: f32) -> image::Gray
         return mask.clone();
     }
     let span = (max_x - min_x + 1).max(max_y - min_y + 1) as f32;
-    let sigma_full = ((feather / 100.0) * span / 3.0).max(1.0);
+    // 100 on the slider = a band ~10% of the patch span (capped): a deep
+    // edge melt that still leaves the interior untouched.
+    let band = ((feather / 100.0) * span * 0.10).clamp(2.0, 220.0);
 
-    // Blur on a downscaled copy: sigma/8 at 1/8 res == sigma at full res,
-    // at 1/64th the cost; bilinear upscale restores a smooth field.
-    let ds = 8u32;
-    let (sw, sh) = ((w / ds).max(1), (h / ds).max(1));
+    // Chamfer 3-4 distance transform at 1/4 resolution.
+    let ds = 4u32;
+    let (sw, sh) = ((w.div_ceil(ds)).max(1), (h.div_ceil(ds)).max(1));
     let small = image::imageops::resize(mask, sw, sh, FilterType::Triangle);
-    let small_blur = image::imageops::blur(&small, (sigma_full / ds as f32).max(0.5));
-    let blurred = image::imageops::resize(&small_blur, w, h, FilterType::Triangle);
+    let (swi, shi) = (sw as i64, sh as i64);
+    const INF: f32 = 1e9;
+    let mut dist = vec![0f32; (swi * shi) as usize];
+    for (i, p) in small.pixels().enumerate() {
+        dist[i] = if p[0] > 127 { INF } else { 0.0 };
+    }
+    let idx = |x: i64, y: i64| (y * swi + x) as usize;
+    for y in 0..shi {
+        for x in 0..swi {
+            let mut d = dist[idx(x, y)];
+            if x > 0 { d = d.min(dist[idx(x - 1, y)] + 3.0); }
+            if y > 0 { d = d.min(dist[idx(x, y - 1)] + 3.0); }
+            if x > 0 && y > 0 { d = d.min(dist[idx(x - 1, y - 1)] + 4.0); }
+            if x + 1 < swi && y > 0 { d = d.min(dist[idx(x + 1, y - 1)] + 4.0); }
+            dist[idx(x, y)] = d;
+        }
+    }
+    for y in (0..shi).rev() {
+        for x in (0..swi).rev() {
+            let mut d = dist[idx(x, y)];
+            if x + 1 < swi { d = d.min(dist[idx(x + 1, y)] + 3.0); }
+            if y + 1 < shi { d = d.min(dist[idx(x, y + 1)] + 3.0); }
+            if x + 1 < swi && y + 1 < shi { d = d.min(dist[idx(x + 1, y + 1)] + 4.0); }
+            if x > 0 && y + 1 < shi { d = d.min(dist[idx(x - 1, y + 1)] + 4.0); }
+            dist[idx(x, y)] = d;
+        }
+    }
+
+    // Distance (chamfer units /3 = small px; *ds = full-res px) -> alpha
+    // ramp at small res, then a smooth upscale back.
+    let mut alpha_small = image::GrayImage::new(sw, sh);
+    for (i, p) in alpha_small.pixels_mut().enumerate() {
+        let d_px = (dist[i] / 3.0) * ds as f32;
+        let t = (d_px / band).clamp(0.0, 1.0);
+        let eased = t * t * (3.0 - 2.0 * t);
+        p[0] = (eased * 255.0).round() as u8;
+    }
+    let alpha_full = image::imageops::resize(&alpha_small, w, h, FilterType::Triangle);
 
     let mut out = mask.clone();
-    for (dst, src) in out.pixels_mut().zip(blurred.pixels()) {
-        let a = (dst[0].min(src[0])) as f32 / 255.0;
-        let eased = a * a * (3.0 - 2.0 * a);
-        dst[0] = (eased * 255.0).round() as u8;
+    for (dst, a) in out.pixels_mut().zip(alpha_full.pixels()) {
+        dst[0] = dst[0].min(a[0]);
     }
     out
 }
@@ -1668,10 +1704,10 @@ pub fn round_mask_geometry(mask: &image::GrayImage, radius: f32) -> image::GrayI
 mod mask_geometry_tests {
     use super::*;
 
-    /// A square mask must come out with rounded corners (no perfect
-    /// right angle survives), and feather must reach deep: at 100 the
-    /// patch center of a small patch is noticeably faded while outside
-    /// pixels stay exactly zero.
+    /// Edge-band semantics: interior deeper than the band stays FULLY
+    /// opaque at every feather value (blur-based feather dimmed whole
+    /// thin lobes); the ramp exists only at the boundary; nothing ever
+    /// escapes the mask.
     #[test]
     fn rounding_and_feather_reach() {
         let mut mask = image::GrayImage::new(200, 200);
@@ -1681,20 +1717,34 @@ mod mask_geometry_tests {
             }
         }
         let rounded = round_mask_geometry(&mask, 6.0);
-        // The exact corner pixel of the square must have been rounded off.
         assert_eq!(rounded.get_pixel(61, 61)[0], 0, "corner not rounded");
-        // Interior survives.
         assert_eq!(rounded.get_pixel(100, 100)[0], 255, "interior lost");
 
-        let feathered = feather_mask_inward(&rounded, 100.0);
-        for (x, y, p) in feathered.enumerate_pixels() {
-            if !(55..145).contains(&x) || !(55..145).contains(&y) {
-                assert_eq!(p[0], 0, "feather escaped at ({x},{y})");
+        for feather in [25.0f32, 100.0] {
+            let f = feather_mask_inward(&rounded, feather);
+            for (x, y, p) in f.enumerate_pixels() {
+                if !(55..145).contains(&x) || !(55..145).contains(&y) {
+                    assert_eq!(p[0], 0, "feather escaped at ({x},{y})");
+                }
             }
+            // Interior beyond the band (span 80 -> band <= 8px at 100)
+            // must be untouched — the whole point of edge-band feather.
+            assert_eq!(
+                f.get_pixel(100, 100)[0], 255,
+                "interior dimmed at feather {feather}"
+            );
+            assert_eq!(
+                f.get_pixel(80, 100)[0], 255,
+                "20px-deep pixel dimmed at feather {feather}"
+            );
         }
-        let center = feathered.get_pixel(100, 100)[0];
-        let near_edge = feathered.get_pixel(70, 100)[0];
-        assert!(near_edge < center, "no inward gradient");
-        assert!(near_edge < 200, "gradient too shallow near edge at feather 100");
+        // The boundary band itself ramps at high feather.
+        let f100 = feather_mask_inward(&rounded, 100.0);
+        // The 8px band spans ~2 cells of the 1/4-res transform on this
+        // tiny test patch — probe inside the first cell of the ramp.
+        assert!(
+            f100.get_pixel(62, 100)[0] < 255,
+            "no edge ramp at feather 100"
+        );
     }
 }
