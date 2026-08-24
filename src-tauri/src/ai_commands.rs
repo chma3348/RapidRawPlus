@@ -1151,6 +1151,12 @@ async fn run_engine_inpaint_patch(
         // otherwise stay visible AND anchor the model to repaint the object.
         let grow = (crop_w.max(crop_h) / 60).clamp(12, 32);
         let crop_mask = dilate_mask(&crop_mask, grow);
+        // Square dilation reintroduces corners — round to organic curves.
+        let crop_mask = ai_processing::round_mask_geometry(&crop_mask, (grow as f32 / 2.0).max(6.0));
+        // The model paints a margin BEYOND the composite line, so the
+        // visible seam lands inside freshly painted content instead of
+        // exactly where the model stopped (the classic mask-expand trick).
+        let engine_mask = dilate_mask(&crop_mask, 16);
         // Ring stats must come from pre-fill pixels (the prefill below
         // rewrites the masked interior).
         let original_crop = crop_img.clone();
@@ -1172,7 +1178,7 @@ async fn run_engine_inpaint_patch(
         let (img_png, mask_png, _, _) =
             crate::expansion::engine_canvas_pngs_sized(
                 &crop_img,
-                &crop_mask,
+                &engine_mask,
                 // Big reconstructions earn a bigger canvas (Flux handles
                 // 1536 comfortably on this hardware).
                 if comp.span() >= 900 { 1536 } else { 1216 },
@@ -1314,6 +1320,9 @@ pub async fn invoke_generative_replace_with_mask_def(
         if comps.len() > 200 {
             let scale = (mask_bitmap.width().max(mask_bitmap.height()) as f32 / 2000.0).max(1.0);
             crate::mask_generation::apply_solidify_public(&mut mask_bitmap, 60.0, scale);
+            // Square-kernel closing leaves rectangles; round them into
+            // organic contours before anything downstream consumes them.
+            mask_bitmap = ai_processing::round_mask_geometry(&mask_bitmap, 8.0 * scale);
             let (labels2, comps2) = mask_components(&mask_bitmap, 127);
             let mut drop = vec![false; comps2.len() + 1];
             for c in &comps2 {

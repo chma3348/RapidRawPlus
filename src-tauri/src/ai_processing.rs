@@ -1608,3 +1608,93 @@ pub struct AiDepthMaskParameters {
     #[serde(default)]
     pub orientation_steps: Option<u8>,
 }
+
+/// Inward-only feather with real reach: the gradient is sized by the
+/// PATCH's own span (at 100 it spans roughly a third of the patch), the
+/// ramp is smoothstep-shaped so the ease breathes instead of stepping,
+/// and the blur runs on a downscaled mask so slider drags stay instant.
+/// alpha = smoothstep(min(blur(mask), mask)) — never exceeds the original
+/// footprint, so feather can never paint outside the selection.
+pub fn feather_mask_inward(mask: &image::GrayImage, feather: f32) -> image::GrayImage {
+    use image::imageops::FilterType;
+    let (w, h) = mask.dimensions();
+    // Patch span from the mask's bounding box.
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (w, h, 0u32, 0u32);
+    for (x, y, p) in mask.enumerate_pixels() {
+        if p[0] > 0 {
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+        }
+    }
+    if max_x < min_x {
+        return mask.clone();
+    }
+    let span = (max_x - min_x + 1).max(max_y - min_y + 1) as f32;
+    let sigma_full = ((feather / 100.0) * span / 3.0).max(1.0);
+
+    // Blur on a downscaled copy: sigma/8 at 1/8 res == sigma at full res,
+    // at 1/64th the cost; bilinear upscale restores a smooth field.
+    let ds = 8u32;
+    let (sw, sh) = ((w / ds).max(1), (h / ds).max(1));
+    let small = image::imageops::resize(mask, sw, sh, FilterType::Triangle);
+    let small_blur = image::imageops::blur(&small, (sigma_full / ds as f32).max(0.5));
+    let blurred = image::imageops::resize(&small_blur, w, h, FilterType::Triangle);
+
+    let mut out = mask.clone();
+    for (dst, src) in out.pixels_mut().zip(blurred.pixels()) {
+        let a = (dst[0].min(src[0])) as f32 / 255.0;
+        let eased = a * a * (3.0 - 2.0 * a);
+        dst[0] = (eased * 255.0).round() as u8;
+    }
+    out
+}
+
+/// Rounds square-kernel mask geometry into organic contours: blur then
+/// re-threshold turns rectangles and stair-steps into curves. Every
+/// consumer downstream (engine conditioning, blends, feather) inherits
+/// the organic boundary.
+pub fn round_mask_geometry(mask: &image::GrayImage, radius: f32) -> image::GrayImage {
+    let blurred = image::imageops::blur(mask, radius.max(1.0));
+    let mut out = blurred;
+    for p in out.pixels_mut() {
+        p[0] = if p[0] >= 128 { 255 } else { 0 };
+    }
+    out
+}
+
+#[cfg(test)]
+mod mask_geometry_tests {
+    use super::*;
+
+    /// A square mask must come out with rounded corners (no perfect
+    /// right angle survives), and feather must reach deep: at 100 the
+    /// patch center of a small patch is noticeably faded while outside
+    /// pixels stay exactly zero.
+    #[test]
+    fn rounding_and_feather_reach() {
+        let mut mask = image::GrayImage::new(200, 200);
+        for y in 60..140 {
+            for x in 60..140 {
+                mask.put_pixel(x, y, image::Luma([255]));
+            }
+        }
+        let rounded = round_mask_geometry(&mask, 6.0);
+        // The exact corner pixel of the square must have been rounded off.
+        assert_eq!(rounded.get_pixel(61, 61)[0], 0, "corner not rounded");
+        // Interior survives.
+        assert_eq!(rounded.get_pixel(100, 100)[0], 255, "interior lost");
+
+        let feathered = feather_mask_inward(&rounded, 100.0);
+        for (x, y, p) in feathered.enumerate_pixels() {
+            if !(55..145).contains(&x) || !(55..145).contains(&y) {
+                assert_eq!(p[0], 0, "feather escaped at ({x},{y})");
+            }
+        }
+        let center = feathered.get_pixel(100, 100)[0];
+        let near_edge = feathered.get_pixel(70, 100)[0];
+        assert!(near_edge < center, "no inward gradient");
+        assert!(near_edge < 200, "gradient too shallow near edge at feather 100");
+    }
+}

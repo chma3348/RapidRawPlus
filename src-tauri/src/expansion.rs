@@ -147,6 +147,11 @@ pub(crate) fn engine_canvas_pngs_sized(
     for p in small_mask.pixels_mut() {
         p[0] = if p[0] > 32 { 255 } else { 0 };
     }
+    // Thin AA edge at engine resolution: hard giant pixels here become
+    // content staircases after upscale. 1-2px of softness does NOT
+    // trigger the keep-the-original partial-mask behavior (that took
+    // wide gradients); it just rounds the paint boundary.
+    let small_mask = image::imageops::blur(&small_mask, 1.2);
     let mut cbuf = Cursor::new(Vec::new());
     DynamicImage::ImageRgba8(small_canvas)
         .to_rgb8()

@@ -325,3 +325,18 @@ Measured every light dial on a GPU patch ladder; found and fixed:
       reconstructions back to the wash); LaMa spot removals keep 1.0.
 - [ ] User verification pending: promptless + prompted sky runs, live
       Feather/Opacity drag.
+
+## Round: organic fill masks + deep feather (2026-08-17) — SHIPPED
+- [x] Feather rebuilt for texture blending: reach scales with the
+      PATCH span (100 = ~1/3 of the patch), smoothstep-eased ramp,
+      inward-only invariant kept, fast via downscaled blur. Works on
+      existing patches immediately.
+- [x] Blocky content edges fixed at source (new runs): masks rounded
+      to organic contours after solidify and grow (blur+rethreshold);
+      thin AA edge on the engine conditioning mask at working res;
+      model paints a 16px margin beyond the composite line so seams
+      land inside painted content (mask-expand trick).
+- [x] Tests: rounding kills square corners, feather reach at 100,
+      escape-prevention invariant; all 12 suites green (gated).
+- [ ] User verification: feather drag on existing patch; fresh fill
+      for organic silhouettes; promptless run still pending.

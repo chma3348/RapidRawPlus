@@ -507,18 +507,7 @@ pub fn composite_patches_on_image(
         };
 
         let mask_bitmap = if patch_feather > 0.0 {
-            // Feather scales with image size so the slider feels the same
-            // on previews and full-res renders. INWARD-only: min() with
-            // the original mask so the gradient eases into the patch from
-            // its boundary — a plain blur also grew the mask outward,
-            // painting AI content in a soft band OUTSIDE the selection.
-            let sigma = (patch_feather / 100.0) * (base_w.max(base_h) as f32 / 60.0);
-            let blurred = image::imageops::blur(&mask_bitmap, sigma.max(0.5));
-            let mut inward = mask_bitmap;
-            for (dst, src) in inward.pixels_mut().zip(blurred.pixels()) {
-                dst[0] = dst[0].min(src[0]);
-            }
-            inward
+            crate::ai_processing::feather_mask_inward(&mask_bitmap, patch_feather)
         } else {
             mask_bitmap
         };
