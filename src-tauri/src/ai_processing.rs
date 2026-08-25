@@ -1633,9 +1633,10 @@ pub fn feather_mask_inward(mask: &image::GrayImage, feather: f32) -> image::Gray
         return mask.clone();
     }
     let span = (max_x - min_x + 1).max(max_y - min_y + 1) as f32;
-    // 100 on the slider = a band ~10% of the patch span (capped): a deep
-    // edge melt that still leaves the interior untouched.
-    let band = ((feather / 100.0) * span * 0.10).clamp(2.0, 220.0);
+    // 100 on the slider = a band ~5% of the patch span (capped) — halved
+    // after field use showed ~20 already delivered the wanted maximum;
+    // this spreads the useful range across the whole slider.
+    let band = ((feather / 100.0) * span * 0.05).clamp(2.0, 120.0);
 
     // Chamfer 3-4 distance transform at 1/4 resolution.
     let ds = 4u32;
