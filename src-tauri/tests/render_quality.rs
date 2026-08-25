@@ -859,9 +859,9 @@ fn tonal_dials_zone_contract() {
     assert!((s_035 - base_035).abs() <= 6.0, "shadows moved midtones: {base_035} -> {s_035}");
     assert!(s_0005 <= 12.0, "deep floor launched (mist): 0.005 -> {s_0005}");
 
-    // 4. Whites/blacks stay in their own end zones.
-    let w = |a: &mut AllAdjustments| a.global.whites = 1.0;
-    assert!((render_level(0.05, &w) as f32 - render_level(0.05, &|_| {}) as f32).abs() <= 2.0);
+    // 4. Blacks stay in their end zone. (Whites reverted to uniform
+    //    expansion 2026-08-24 after two zone designs damaged faces —
+    //    no end-zone assertion until a portrait-tested design ships.)
     let b = |a: &mut AllAdjustments| a.global.blacks = 1.0;
     let b_0005 = render_level(0.005, &b) as f32;
     assert!((6.0..=22.0).contains(&b_0005), "blacks +100 floor lift off target: {b_0005}");
@@ -947,9 +947,13 @@ fn whites_no_halo_no_chroma_bloom() {
     // reaches it, the whites zone must not.
     let idx = (((H / 2) * W + (W / 2 + 12)) * 4) as usize;
     let (b, d) = (base[idx] as i32, dark[idx] as i32);
+    // Uniform expansion moves everything equally: no HALO possible (the
+    // property under test), though absolute movement is expected.
+    let far_idx = (((H / 2) * W + (W - 8)) * 4) as usize;
+    let (fb, fd) = (base[far_idx] as i32, dark[far_idx] as i32);
     assert!(
-        (b - d).abs() <= 8,
-        "whites -100 haloed a midtone neighbor: {b} -> {d}"
+        ((b - d) - (fb - fd)).abs() <= 8,
+        "whites -100 moved boundary-adjacent pixels differently than far ones (halo)"
     );
 
     // Saturated skin-tone patch: whites -100 must not increase saturation.

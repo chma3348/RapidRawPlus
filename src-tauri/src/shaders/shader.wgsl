@@ -725,29 +725,18 @@ fn apply_tonal_adjustments_v2(
     // uniform expansion was just a second exposure slider).
     var l_new = l_ok;
     if (wh != 0.0) {
-        // True white-point curve (highlights-shoulder style): pixels
-        // below the knee are untouched — and the knee sits ABOVE skin
-        // tones, so faces cannot be affected (the old zone spanned
-        // 0.4-0.95 Oklab and hammered entire faces: the "muddle").
-        // No zone mask: a single smooth curve, so no gain changes
-        // mid-gradient (the rim glow / posterized-yellow mechanisms).
-        let wk = select(0.78, 0.85, is_raw == 1u);
-        if (l_new > wk) {
-            let x = l_new - wk;
-            var stretched = wk + x * (1.0 + wh * 1.1);
-            if (wh < 0.0) {
-                stretched = wk + x * (1.0 + wh * 0.55);
-            }
-            // Ease in over the first 0.06 above the knee: no band.
-            let t = smoothstep(0.0, 0.06, x);
-            let l_out = mix(l_new, stretched, t);
-            // Chroma follows a darkening pull — no orange bloom.
-            if (l_out < l_new) {
-                let ratio = l_out / max(l_new, 1e-4);
-                lab.y *= ratio;
-                lab.z *= ratio;
-            }
-            l_new = l_out;
+        // REVERTED to the original uniform headroom expansion. Two zone/
+        // curve redesigns (2026-08-16/24) both damaged faces: lit skin
+        // occupies Oklab L 0.80-0.88, inside any "whites" luminance zone
+        // — a knee or mask that spares skin excludes real whites, and one
+        // that reaches whites grabs faces. Weak-but-safe wins until a
+        // portrait-fixture-tested design exists. Chroma follows a
+        // darkening pull (kept from the redesign - prevents bloom).
+        let w_gain = 1.0 / max(1.0 - wh * 0.22, 0.01);
+        l_new = l_new * w_gain;
+        if (w_gain < 1.0) {
+            lab.y *= w_gain;
+            lab.z *= w_gain;
         }
     }
 
