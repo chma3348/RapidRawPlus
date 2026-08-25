@@ -477,11 +477,11 @@ pub async fn run_generative_fill(
     upload_image(&client, "rapidraw_fill_image.png", image_png).await?;
     upload_image(&client, "rapidraw_fill_mask.png", mask_png).await?;
 
-    let positive = if prompt.trim().is_empty() {
-        "seamless photographic continuation of the scene, natural, detailed".to_string()
-    } else {
-        prompt.to_string()
-    };
+    // A/B-tested (2026-08-17): on featureless context, caption fallback,
+    // empty@g30 and empty@g10 all produce identical context-continuation.
+    // Truly empty matches stock ComfyUI semantics — the model extends the
+    // scene; prompts are how structure gets injected.
+    let positive = prompt.trim().to_string();
     let negative = "blurry, low quality, artifacts, watermark, text";
 
     let workflow = match kind {

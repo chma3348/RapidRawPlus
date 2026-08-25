@@ -1636,7 +1636,7 @@ pub fn feather_mask_inward(mask: &image::GrayImage, feather: f32) -> image::Gray
     // 100 on the slider = a band ~5% of the patch span (capped) — halved
     // after field use showed ~20 already delivered the wanted maximum;
     // this spreads the useful range across the whole slider.
-    let band = ((feather / 100.0) * span * 0.05).clamp(2.0, 120.0);
+    let band = ((feather / 100.0) * span * 0.025).clamp(2.0, 60.0);
 
     // Chamfer 3-4 distance transform at 1/4 resolution.
     let ds = 4u32;

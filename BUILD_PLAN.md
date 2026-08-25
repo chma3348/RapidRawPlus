@@ -340,3 +340,13 @@ Measured every light dial on a GPU patch ladder; found and fixed:
       escape-prevention invariant; all 12 suites green (gated).
 - [ ] User verification: feather drag on existing patch; fresh fill
       for organic silhouettes; promptless run still pending.
+
+## Round: feather finesse + promptless verdict (2026-08-17) — SHIPPED
+- [x] Feather band reduced twice on user feedback: final 2.5% of patch
+      span at 100 (cap 60px) — the whole slider is edge-finesse range.
+- [x] Promptless A/B (empty@g30 vs empty@g10 vs caption baseline, same
+      canvas): ALL identical wash — promptless inpainting extends
+      context by design; on featureless regions no conditioning
+      produces structure (stock behaves the same). App now sends truly
+      empty conditioning (stock parity); structure comes from prompts.
+- [ ] User verification: feather feel + fresh organic-mask fill.
