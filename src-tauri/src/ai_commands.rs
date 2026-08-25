@@ -2026,7 +2026,7 @@ pub(crate) fn neutralize_display_orientation(sub_masks: &mut [crate::mask_genera
 
 #[cfg(test)]
 mod fill_mask_orientation_tests {
-    use crate::mask_generation::{MaskDefinition, SubMask, SubMaskMode, generate_mask_bitmap};
+    use crate::mask_generation::{MaskDefinition, SubMask, generate_mask_bitmap};
     use image::DynamicImage;
 
     /// A clipped mask on a FLIPPED photo must select the bright region

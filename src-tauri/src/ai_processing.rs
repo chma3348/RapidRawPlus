@@ -1711,40 +1711,40 @@ mod mask_geometry_tests {
     /// escapes the mask.
     #[test]
     fn rounding_and_feather_reach() {
-        let mut mask = image::GrayImage::new(200, 200);
-        for y in 60..140 {
-            for x in 60..140 {
+        // Patch sized so the band comfortably exceeds the transform's
+        // 1/4-res cells (span 400 -> band 20px at feather 100).
+        let mut mask = image::GrayImage::new(500, 500);
+        for y in 50..450 {
+            for x in 50..450 {
                 mask.put_pixel(x, y, image::Luma([255]));
             }
         }
         let rounded = round_mask_geometry(&mask, 6.0);
-        assert_eq!(rounded.get_pixel(61, 61)[0], 0, "corner not rounded");
-        assert_eq!(rounded.get_pixel(100, 100)[0], 255, "interior lost");
+        assert_eq!(rounded.get_pixel(51, 51)[0], 0, "corner not rounded");
+        assert_eq!(rounded.get_pixel(250, 250)[0], 255, "interior lost");
 
         for feather in [25.0f32, 100.0] {
             let f = feather_mask_inward(&rounded, feather);
             for (x, y, p) in f.enumerate_pixels() {
-                if !(55..145).contains(&x) || !(55..145).contains(&y) {
+                if !(45..455).contains(&x) || !(45..455).contains(&y) {
                     assert_eq!(p[0], 0, "feather escaped at ({x},{y})");
                 }
             }
-            // Interior beyond the band (span 80 -> band <= 8px at 100)
-            // must be untouched — the whole point of edge-band feather.
+            // Interior beyond the band must be untouched at ANY slider
+            // value — the whole point of edge-band feather.
             assert_eq!(
-                f.get_pixel(100, 100)[0], 255,
+                f.get_pixel(250, 250)[0], 255,
                 "interior dimmed at feather {feather}"
             );
             assert_eq!(
-                f.get_pixel(80, 100)[0], 255,
-                "20px-deep pixel dimmed at feather {feather}"
+                f.get_pixel(90, 250)[0], 255,
+                "40px-deep pixel dimmed at feather {feather}"
             );
         }
         // The boundary band itself ramps at high feather.
         let f100 = feather_mask_inward(&rounded, 100.0);
-        // The 8px band spans ~2 cells of the 1/4-res transform on this
-        // tiny test patch — probe inside the first cell of the ramp.
         assert!(
-            f100.get_pixel(62, 100)[0] < 255,
+            f100.get_pixel(55, 250)[0] < 255,
             "no edge ramp at feather 100"
         );
     }
