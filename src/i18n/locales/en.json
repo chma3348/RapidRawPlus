@@ -430,7 +430,7 @@
         "inpaintSelectionButton": "Inpaint Selection",
         "invertComponent": "Invert Component",
         "invertSelection": "Invert Selection",
-        "placeholder": "e.g., a field of flowers",
+        "placeholder": "Describe what should appear, e.g. \"overcast sky\" — empty = blend with surroundings",
         "quickEraseDesc": "Fill selection to remove the object.",
         "selectionPropertiesTitle": "Selection Properties",
         "useBasicInpaint": "Use basic inpainting",

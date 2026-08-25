@@ -1132,11 +1132,13 @@ async fn run_engine_inpaint_patch(
         };
         let span_x = comp.max_x - comp.min_x + 1;
         let span_y = comp.max_y - comp.min_y + 1;
-        // Generous context, but CAPPED: a 1.5x pad around a 1500px blob
-        // produced a ~6000px crop that the engine downscaled to 1216 —
-        // the blob itself rendered at ~300px and upscaled back as mush.
-        let pad_x = 192.max((span_x as f32 * 1.5) as u32).min(520);
-        let pad_y = 192.max((span_y as f32 * 1.5) as u32).min(520);
+        // Context pad = 0.75x the blob span (A/B-proven 2026-08-17): the
+        // fixed 520px cap starved the model of scene context — promptless
+        // fills could only blend the wash they were shown. 0.75x keeps
+        // the blob at ~40% of the engine canvas (sharp) while including
+        // enough surroundings for real context blending.
+        let pad_x = 192.max((span_x as f32 * 0.75) as u32).min(1400);
+        let pad_y = 192.max((span_y as f32 * 0.75) as u32).min(1400);
         let x0 = comp.min_x.saturating_sub(pad_x);
         let y0 = comp.min_y.saturating_sub(pad_y);
         let x1 = (comp.max_x + pad_x).min(w.saturating_sub(1));

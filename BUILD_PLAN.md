@@ -350,3 +350,14 @@ Measured every light dial on a GPU patch ladder; found and fixed:
       produces structure (stock behaves the same). App now sends truly
       empty conditioning (stock parity); structure comes from prompts.
 - [ ] User verification: feather feel + fresh organic-mask fill.
+
+## Round: adaptive context crop — promptless context-blend WORKS (2026-08-17) — SHIPPED
+- [x] User called it: "something is not right in the flow" — the 520px
+      context cap (resolution fix side effect) cropped away the scene's
+      real clouds; promptless fills could only blend the wash they were
+      shown. A/B on the original photo: same graph + empty prompt with
+      0.75x-span context pad -> REAL broken-cloud sky blended into the
+      wash (photo evidence in chat). Pad now 0.75x blob span (cap
+      1400px), blob keeps ~40% of the 1536 canvas.
+- [x] Also shipped: prompt-field placeholder teaching caption-not-
+      command semantics ("blend in with background" painted a tree).
