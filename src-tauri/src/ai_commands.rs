@@ -1229,7 +1229,12 @@ async fn run_engine_inpaint_patch(
         // gradient around generated clouds). Prompt-less LARGE blobs are
         // reconstructions, not removals: full-strength matching forced
         // them back to the wash they replaced; spots keep 1.0 elsewhere.
-        let tone_strength = if prompt.trim().is_empty() { 0.65 } else { 0.15 };
+        // Ring-matching belongs to spot REMOVALS (LaMa path keeps 1.0).
+        // Large-blob reconstructions replace defective regions — pulling
+        // their tone toward the (defective) ring beiged out the engine's
+        // clouds. Verified 2026-08-24: raw output had real clouds; the
+        // 0.65 pull was the last mush stage.
+        let tone_strength = 0.15;
         harmonize_patch(&original_crop, &mut filled_crop, &crop_mask, tone_strength);
         blend_patch_into(&mut encoded_full, &filled_crop, &crop_mask, x0, y0);
     }

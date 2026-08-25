@@ -725,11 +725,22 @@ fn apply_tonal_adjustments_v2(
     // uniform expansion was just a second exposure slider).
     var l_new = l_ok;
     if (wh != 0.0) {
-        let wzone = smoothstep(0.35, 0.95, driver);
-        if (wh > 0.0) {
-            l_new = l_new * (1.0 + wh * 0.38 * wzone);
-        } else {
-            l_new = l_new * (1.0 + wh * 0.24 * wzone);
+        // Pixel-weighted zone: the shared 75%-neighborhood driver smeared
+        // the whites zone across faces near bright regions as a soft blob
+        // (the "muddle"). Whites is an end-point control — the pixel's own
+        // brightness decides.
+        let w_driver = mix(l_clamped, l_base, 0.3);
+        let wzone = smoothstep(0.4, 0.95, w_driver);
+        var w_gain = 1.0 + wh * 0.38 * wzone;
+        if (wh < 0.0) {
+            w_gain = 1.0 + wh * 0.24 * wzone;
+        }
+        l_new = l_new * w_gain;
+        // Darkening at constant (a,b) inflates relative chroma — skin
+        // glows orange; ease chroma with the pull.
+        if (w_gain < 1.0) {
+            lab.y *= w_gain;
+            lab.z *= w_gain;
         }
     }
 

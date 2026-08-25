@@ -906,3 +906,75 @@ fn tonal_dials_zone_contract() {
         "shadow lift flattens texture: relative amplitude retention {retention:.2}"
     );
 }
+
+/// Whites must act on the PIXEL's brightness, not the neighborhood's: a
+/// midtone pixel near a bright region must not get dragged (the halo
+/// "muddle"), and whites-darkening must not inflate chroma (orange skin).
+#[test]
+fn whites_no_halo_no_chroma_bloom() {
+    let Some((device, queue, limits)) = make_device() else {
+        eprintln!("no GPU; skipping");
+        return;
+    };
+    let context = GpuContext {
+        device: Arc::new(device),
+        queue: Arc::new(queue),
+        limits,
+        display: Arc::new(std::sync::Mutex::new(None)),
+    };
+    let device = context.device.clone();
+    let queue = context.queue.clone();
+    let processor = GpuProcessor::new(context, W, H).expect("processor");
+
+    // Left half bright, right half midtone.
+    let mut img = vec![0f32; (W * H * 4) as usize];
+    for y in 0..H {
+        for x in 0..W {
+            let i = ((y * W + x) * 4) as usize;
+            let v = if x < W / 2 { 0.85 } else { 0.18 };
+            img[i] = v;
+            img[i + 1] = v;
+            img[i + 2] = v;
+            img[i + 3] = 1.0;
+        }
+    }
+    let mut adj = AllAdjustments::default();
+    adj.global.process_version = 2;
+    let base = render(&processor, &device, &queue, &img, adj);
+    adj.global.whites = -1.0;
+    let dark = render(&processor, &device, &queue, &img, adj);
+    // Midtone pixel 12px from the bright boundary: neighborhood blur
+    // reaches it, the whites zone must not.
+    let idx = (((H / 2) * W + (W / 2 + 12)) * 4) as usize;
+    let (b, d) = (base[idx] as i32, dark[idx] as i32);
+    assert!(
+        (b - d).abs() <= 8,
+        "whites -100 haloed a midtone neighbor: {b} -> {d}"
+    );
+
+    // Saturated skin-tone patch: whites -100 must not increase saturation.
+    let mut skin = vec![0f32; (W * H * 4) as usize];
+    for px in skin.chunks_mut(4) {
+        px[0] = 0.80;
+        px[1] = 0.55;
+        px[2] = 0.40;
+        px[3] = 1.0;
+    }
+    let mut adj2 = AllAdjustments::default();
+    adj2.global.process_version = 2;
+    let sb = render(&processor, &device, &queue, &skin, adj2);
+    adj2.global.whites = -1.0;
+    let sd = render(&processor, &device, &queue, &skin, adj2);
+    let c = ((H / 2) * W + W / 2) as usize * 4;
+    let sat = |b: &[u8]| -> f32 {
+        let (r, g, bl) = (b[c] as f32, b[c + 1] as f32, b[c + 2] as f32);
+        let mx = r.max(g).max(bl);
+        if mx < 1.0 { 0.0 } else { (mx - r.min(g).min(bl)) / mx }
+    };
+    assert!(
+        sat(&sd) <= sat(&sb) + 0.02,
+        "whites -100 bloomed chroma: sat {:.3} -> {:.3}",
+        sat(&sb),
+        sat(&sd)
+    );
+}

@@ -373,3 +373,16 @@ Measured every light dial on a GPU patch ladder; found and fixed:
       (both fill and spot paths).
 - [ ] Verify next run: uploaded canvas mean must land ~0.46; promptless
       fill should context-blend real clouds (proven externally).
+
+## Round: whites halo fix + harmonization release (2026-08-24) — SHIPPED
+- [x] Whites "muddle" explained + fixed: zone came 75% from the blurred
+      neighborhood (bright regions smeared soft-blob influence over
+      nearby faces) and L-only darkening inflated relative chroma
+      (orange skin glow). Whites zone is now pixel-weighted (mix 0.3)
+      and chroma scales proportionally with darkening. GPU test pins:
+      no halo on a midtone 12px from a bright boundary, no saturation
+      bloom on a skin patch (test caught the first half-strength fix).
+- [x] Promptless harmonization 0.65 -> 0.15 for engine blobs: user-run
+      forensics showed the raw engine output HAD real clouds (canvas
+      conditioning fixed, mean 0.74 -> 0.55) — the ring-tone pull was
+      beiging them out. Ring match stays 1.0 for LaMa spot removals.
