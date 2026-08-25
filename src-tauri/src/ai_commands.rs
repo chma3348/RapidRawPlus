@@ -1023,10 +1023,21 @@ async fn run_engine_inpaint_patch(
     const SPOT_SPAN: u32 = 96;
     const MAX_DIFFUSION_BLOBS: usize = 6;
 
-    let is_linear = matches!(
-        source_image,
-        DynamicImage::ImageRgb32F(_) | DynamicImage::ImageRgba32F(_)
-    );
+    // Linear-source detection must come from the SOURCE, not the pixel
+    // format: compositing patches returns float pixels even for JPEGs,
+    // and gamma-encoding an already-display-encoded JPEG double-brightens
+    // the canvas the model is conditioned on (measured: canvas mean 0.74
+    // vs 0.46 true) — the model then paints matching blown-out wash.
+    let is_linear = state
+        .original_image
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|l| l.is_raw)
+        && matches!(
+            source_image,
+            DynamicImage::ImageRgb32F(_) | DynamicImage::ImageRgba32F(_)
+        );
     let (w, h) = source_image.dimensions();
 
     // The engine wants display-referred pixels; float/RAW sources are
@@ -1543,10 +1554,21 @@ async fn run_spot_enhance_patch(
     app_handle: &tauri::AppHandle,
     state: &tauri::State<'_, AppState>,
 ) -> Result<(RgbaImage, bool), String> {
-    let is_linear = matches!(
-        source_image,
-        DynamicImage::ImageRgb32F(_) | DynamicImage::ImageRgba32F(_)
-    );
+    // Linear-source detection must come from the SOURCE, not the pixel
+    // format: compositing patches returns float pixels even for JPEGs,
+    // and gamma-encoding an already-display-encoded JPEG double-brightens
+    // the canvas the model is conditioned on (measured: canvas mean 0.74
+    // vs 0.46 true) — the model then paints matching blown-out wash.
+    let is_linear = state
+        .original_image
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|l| l.is_raw)
+        && matches!(
+            source_image,
+            DynamicImage::ImageRgb32F(_) | DynamicImage::ImageRgba32F(_)
+        );
     let (w, h) = source_image.dimensions();
 
     let (mut min_x, mut min_y, mut max_x, mut max_y) = (w, h, 0u32, 0u32);

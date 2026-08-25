@@ -361,3 +361,15 @@ Measured every light dial on a GPU patch ladder; found and fixed:
       1400px), blob keeps ~40% of the 1536 canvas.
 - [x] Also shipped: prompt-field placeholder teaching caption-not-
       command semantics ("blend in with background" painted a tree).
+
+## Round: engine conditioning space fix (2026-08-24) — SHIPPED
+- [x] SIXTH user-called flow defect, measured: fills on photos carrying
+      ANY prior patch uploaded a double-brightened canvas (composite
+      returns float pixels even for JPEGs; float was classified as
+      "linear RAW" -> gamma_encode on already-encoded data; canvas mean
+      0.74 vs 0.46 true). The model, conditioned on a blown-out scene,
+      painted matching wash — and results degraded as attempts
+      accumulated patches. is_linear now requires the SOURCE to be RAW
+      (both fill and spot paths).
+- [ ] Verify next run: uploaded canvas mean must land ~0.46; promptless
+      fill should context-blend real clouds (proven externally).
