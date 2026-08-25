@@ -725,22 +725,29 @@ fn apply_tonal_adjustments_v2(
     // uniform expansion was just a second exposure slider).
     var l_new = l_ok;
     if (wh != 0.0) {
-        // Pixel-weighted zone: the shared 75%-neighborhood driver smeared
-        // the whites zone across faces near bright regions as a soft blob
-        // (the "muddle"). Whites is an end-point control — the pixel's own
-        // brightness decides.
-        let w_driver = mix(l_clamped, l_base, 0.3);
-        let wzone = smoothstep(0.4, 0.95, w_driver);
-        var w_gain = 1.0 + wh * 0.38 * wzone;
-        if (wh < 0.0) {
-            w_gain = 1.0 + wh * 0.24 * wzone;
-        }
-        l_new = l_new * w_gain;
-        // Darkening at constant (a,b) inflates relative chroma — skin
-        // glows orange; ease chroma with the pull.
-        if (w_gain < 1.0) {
-            lab.y *= w_gain;
-            lab.z *= w_gain;
+        // True white-point curve (highlights-shoulder style): pixels
+        // below the knee are untouched — and the knee sits ABOVE skin
+        // tones, so faces cannot be affected (the old zone spanned
+        // 0.4-0.95 Oklab and hammered entire faces: the "muddle").
+        // No zone mask: a single smooth curve, so no gain changes
+        // mid-gradient (the rim glow / posterized-yellow mechanisms).
+        let wk = select(0.78, 0.85, is_raw == 1u);
+        if (l_new > wk) {
+            let x = l_new - wk;
+            var stretched = wk + x * (1.0 + wh * 1.1);
+            if (wh < 0.0) {
+                stretched = wk + x * (1.0 + wh * 0.55);
+            }
+            // Ease in over the first 0.06 above the knee: no band.
+            let t = smoothstep(0.0, 0.06, x);
+            let l_out = mix(l_new, stretched, t);
+            // Chroma follows a darkening pull — no orange bloom.
+            if (l_out < l_new) {
+                let ratio = l_out / max(l_new, 1e-4);
+                lab.y *= ratio;
+                lab.z *= ratio;
+            }
+            l_new = l_out;
         }
     }
 

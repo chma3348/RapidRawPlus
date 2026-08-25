@@ -386,3 +386,17 @@ Measured every light dial on a GPU patch ladder; found and fixed:
       forensics showed the raw engine output HAD real clouds (canvas
       conditioning fixed, mean 0.74 -> 0.55) — the ring-tone pull was
       beiging them out. Ring match stays 1.0 for LaMa spot removals.
+
+## Round: whites shoulder rebuild + prompted-crop revert (2026-08-24) — SHIPPED
+- [x] Whites is now a true white-point shoulder curve: knee ABOVE skin
+      (0.78 display / 0.85 RAW), untouched below, smooth engagement, no
+      zone mask (mid-gradient gain was the rim-glow/yellow-poster
+      mechanism), chroma follows darkening. GPU tests green.
+- [x] Fill context crop reverted to storm-cloud-era tight geometry
+      (1.5x span cap 520): wide context diluted prompt influence and
+      shrank the blob — and measured evidence shows promptless gains
+      nothing from wide context on wash-bounded regions.
+- [x] HONESTY RECORD: promptless-on-wash produces near-white in every
+      config (measured in-mask); my two "cloud" proofs were misread
+      whole-canvas impressions — the surrounding REAL clouds. Rule:
+      measure in-mask. Prompted structure verified on user's screen.
