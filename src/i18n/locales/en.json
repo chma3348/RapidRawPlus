@@ -414,7 +414,8 @@
         "invertedName": "{{name}} Inverted",
         "quickErase": "Quick Erase {{count}}",
         "quickErase_one": "Quick Erase {{count}}",
-        "quickErase_other": "Quick Erase {{count}}"
+        "quickErase_other": "Quick Erase {{count}}",
+        "heal": "Heal {{count}}"
       },
       "resetInpaintingTooltip": "Reset Inpainting",
       "settings": {
@@ -447,7 +448,11 @@
         "cloneHint": "Paint the area to repair, then choose how far away to copy real pixels from. No AI — the copied detail is genuine.",
         "cloneOffsetX": "Source offset X",
         "cloneOffsetY": "Source offset Y",
-        "cloneApply": "Clone Into Selection"
+        "cloneApply": "Clone Into Selection",
+        "healCreate": "Heal / Clone",
+        "healHint": "Paint what you want repaired, then drag the source marker on the photo to choose where the real pixels come from.",
+        "healSourceX": "Source X",
+        "healSourceY": "Source Y"
       }
     },
     "crop": {

@@ -3348,6 +3348,20 @@ async fn run_engine_inpaint_patch(
 /// real pixels from elsewhere in the same photograph. It is the right
 /// tool exactly where generative fill cannot work, such as fine repeating
 /// structure that dissolves at the model's canvas resolution.
+/// Graded masks (Clipped, Color select) store per-pixel CONFIDENCE, not
+/// opacity: a washed-out sky rasterises at 10-25%, and one measured
+/// Clipped mask peaked at 68/255. Consumed literally, that applies an
+/// edit at a quarter strength and hides the region from any 50% test.
+/// Anything meaningfully selected is promoted to full membership, the rim
+/// stays soft, and near-noise dust is dropped.
+pub(crate) fn boost_mask_confidence(mask: &mut GrayImage) {
+    for p in mask.pixels_mut() {
+        let v = p[0] as f32 / 255.0;
+        let boosted = ((v - 0.06) / (0.30 - 0.06)).clamp(0.0, 1.0);
+        p[0] = (boosted * 255.0).round() as u8;
+    }
+}
+
 pub(crate) fn clone_offset_copy(
     image: &RgbaImage,
     mask: &GrayImage,
@@ -3435,8 +3449,13 @@ pub async fn apply_clone_patch(
     let mask_dynamic = DynamicImage::ImageLuma8(mask_bitmap);
     let unwarped = apply_unwarp_geometry(Cow::Borrowed(&mask_dynamic), &current_adjustments)
         .into_owned();
-    let mask_bitmap = unwarped.to_luma8();
+    let mut mask_bitmap = unwarped.to_luma8();
+    // Same promotion the generative path does: a Clipped selection hands
+    // over confidence values (one measured mask peaked at 68/255), which
+    // consumed literally would clone at a quarter strength.
+    boost_mask_confidence(&mut mask_bitmap);
     let masked_px = mask_bitmap.pixels().filter(|p| p[0] > 0).count();
+    let solid_px = mask_bitmap.pixels().filter(|p| p[0] > 127).count();
     if masked_px == 0 {
         return Err("Paint over the area you want to clone into first.".to_string());
     }
@@ -3458,8 +3477,7 @@ pub async fn apply_clone_patch(
     };
 
     log::info!(
-        "[clone] {} px from offset ({offset_x}, {offset_y})",
-        masked_px
+        "[clone] {masked_px} px selected ({solid_px} at full strength) from offset ({offset_x}, {offset_y})"
     );
     let mut cloned = clone_offset_copy(&encoded_full, &mask_bitmap, offset_x, offset_y);
     // Same harmonisation as a fill patch: match the ring's tone and grain
@@ -3581,11 +3599,7 @@ pub async fn invoke_generative_replace_with_mask_def(
     // drop near-noise dust (which otherwise becomes thousands of
     // one-speck LaMa jobs).
     let pre_boost = mask_bitmap.pixels().filter(|p| p[0] > 0).count();
-    for p in mask_bitmap.pixels_mut() {
-        let v = p[0] as f32 / 255.0;
-        let boosted = ((v - 0.06) / (0.30 - 0.06)).clamp(0.0, 1.0);
-        p[0] = (boosted * 255.0).round() as u8;
-    }
+    boost_mask_confidence(&mut mask_bitmap);
     let mut nonzero = mask_bitmap.pixels().filter(|p| p[0] > 0).count();
     log::info!(
         "[fill] mask confidence boost: {pre_boost} px selected -> {nonzero} px at working strength"

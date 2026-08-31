@@ -567,6 +567,10 @@ export default function AIPanel() {
     return subMask;
   };
 
+  // Heal mode is just a brush container that carries a clone offset —
+  // the paint tool the user already knows, with a source to drag.
+  const [healMode, setHealMode] = useState(false);
+
   const handleAddAiPatchContainer = (type: Mask) => {
     const subMask = createMaskLogic(type);
 
@@ -582,22 +586,27 @@ export default function AIPanel() {
       name = t('editor.ai.patches.aiEdit', { count });
     }
 
+    const isHeal = type === Mask.Brush && healMode;
     const newContainer: AiPatch = {
       id: uuidv4(),
       invert: false,
       isLoading: false,
-      name: name,
+      name: isHeal ? t('editor.ai.patches.heal', { count: (adjustments.aiPatches || []).length + 1 }) : name,
       patchData: null,
       prompt: '',
       subMasks: [subMask],
       visible: true,
-    };
+      // A heal patch keeps its own source offset, so the source stays
+      // draggable long after the clone was applied.
+      ...(isHeal ? { patchType: 'heal', cloneOffset: { x: 0, y: -220 } } : {}),
+    } as AiPatch;
 
     setAdjustments((prev: Adjustments) => ({ ...prev, aiPatches: [...(prev.aiPatches || []), newContainer] }));
     onSelectPatchContainer(newContainer.id);
     onSelectSubMask(subMask.id);
     setExpandedContainers((prev) => new Set(prev).add(newContainer.id));
     if (type === Mask.Brush || type === Mask.AiPaint) selectBrushToolForNewMask();
+    setHealMode(false);
 
     if (type === Mask.AiForeground) handleGenerateAiForegroundMask(subMask.id);
   };
@@ -1054,6 +1063,17 @@ export default function AIPanel() {
                         />
                       ))}
                     </div>
+                    <button
+                      className="w-full mt-2 px-3 py-2 bg-bg-tertiary rounded-md hover:bg-card-active transition-colors text-sm text-text-primary disabled:opacity-40"
+                      disabled={isGeneratingAi}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setHealMode(true);
+                        handleAddAiPatchContainer(Mask.Brush);
+                      }}
+                    >
+                      {t('editor.ai.settings.healCreate')}
+                    </button>
                   </>
                 )}
               </motion.div>
@@ -1823,6 +1843,40 @@ function SettingsPanel({
 
   // Live re-edit of a rendered spot patch: sliders re-blend the cached raw
   // region backend-side — instant, no model re-run, no glitches.
+  // Dragging the source or target markers on the photo re-runs the heal.
+  // It is deterministic and engine-free, so the result follows the markers
+  // instead of waiting for a button press.
+  const healTimer = useRef<any>(null);
+  const healSignature =
+    (container as any)?.patchType === 'heal'
+      ? JSON.stringify([
+          (container as any)?.cloneOffset,
+          (container?.subMasks || []).map((sm: any) =>
+            ((sm.parameters as any)?.lines || []).map((line: any) => [
+              line.points?.length,
+              line.points?.[0]?.x,
+              line.points?.[0]?.y,
+            ]),
+          ),
+        ])
+      : '';
+  useEffect(() => {
+    if (!container || (container as any).patchType !== 'heal') return;
+    // Only after a first apply — otherwise painting would fire the clone
+    // on every stroke before the user has chosen a source.
+    if (!container.patchData || isGeneratingAi || container.isLoading) return;
+    clearTimeout(healTimer.current);
+    healTimer.current = setTimeout(() => {
+      onCloneStamp?.(
+        container.id,
+        (container as any)?.cloneOffset?.x ?? 0,
+        (container as any)?.cloneOffset?.y ?? -220,
+      );
+    }, 450);
+    return () => clearTimeout(healTimer.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [healSignature]);
+
   const spotRespotTimer = useRef<any>(null);
   useEffect(() => {
     const isSpotPatch = container?.patchData && String(container?.name || '').startsWith('Spot');
@@ -1995,6 +2049,7 @@ function SettingsPanel({
           />
         </div>
       )}
+      {(container as any)?.patchType === 'heal' && (
       <div className="p-2 bg-bg-tertiary rounded-md">
         <Text variant={TextVariants.heading} className="mb-2">
           {t('editor.ai.settings.cloneTitle')}
@@ -2008,8 +2063,13 @@ function SettingsPanel({
           max={1500}
           step={5}
           defaultValue={0}
-          value={cloneOffsetX}
-          onChange={(e: any) => setCloneOffsetX(Number(e.target.value))}
+          value={(container as any)?.cloneOffset?.x ?? 0}
+          onChange={(e: any) =>
+            container &&
+            updateContainer(container.id, {
+              cloneOffset: { x: Number(e.target.value), y: (container as any)?.cloneOffset?.y ?? 0 },
+            })
+          }
         />
         <Slider
           label={t('editor.ai.settings.cloneOffsetY')}
@@ -2017,18 +2077,32 @@ function SettingsPanel({
           max={1500}
           step={5}
           defaultValue={-200}
-          value={cloneOffsetY}
-          onChange={(e: any) => setCloneOffsetY(Number(e.target.value))}
+          value={(container as any)?.cloneOffset?.y ?? -220}
+          onChange={(e: any) =>
+            container &&
+            updateContainer(container.id, {
+              cloneOffset: { x: (container as any)?.cloneOffset?.x ?? 0, y: Number(e.target.value) },
+            })
+          }
         />
         <button
           className="w-full mt-2 px-3 py-2 bg-accent text-button-text rounded-md hover:bg-accent-hover transition-colors text-sm disabled:opacity-40"
-          disabled={!container || isGeneratingAi || (cloneOffsetX === 0 && cloneOffsetY === 0)}
-          onClick={() => container && onCloneStamp?.(container.id, cloneOffsetX, cloneOffsetY)}
+          disabled={!container || isGeneratingAi}
+          onClick={() =>
+            container &&
+            onCloneStamp?.(
+              container.id,
+              (container as any)?.cloneOffset?.x ?? 0,
+              (container as any)?.cloneOffset?.y ?? -220,
+            )
+          }
         >
           {t('editor.ai.settings.cloneApply')}
         </button>
       </div>
+      )}
 
+      {(container as any)?.patchType !== 'heal' && (
       <CollapsibleSection
         title={t('editor.ai.settings.generativeReplaceTitle')}
         isOpen={collapsibleState.generative}
@@ -2153,6 +2227,7 @@ function SettingsPanel({
           </Button>
         </div>
       </CollapsibleSection>
+      )}
 
       <CollapsibleSection
         title={t('editor.ai.settings.spotEnhanceTitle')}

@@ -251,6 +251,13 @@ export interface AiPatch {
   reconstructSinglePath?: boolean;
   subMasks: Array<SubMask>;
   visible: boolean;
+  /** 'heal' patches clone from a source offset and stay editable. */
+  patchType?: 'heal';
+  /** Where the heal copies FROM, relative to the painted area, in source px. */
+  cloneOffset?: { x: number; y: number };
+  /** Post-render blend controls, applied at composite time. */
+  feather?: number;
+  opacity?: number;
 }
 
 export interface AiPatchResultVariant {

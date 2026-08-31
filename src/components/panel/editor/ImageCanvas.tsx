@@ -1230,6 +1230,88 @@ const ImageCanvas = memo(
       isAiEditing,
     ]);
 
+    // Heal overlay geometry: the painted strokes define the target box,
+    // and the patch's own cloneOffset places the source box. Both are
+    // drawn in image coordinates like every other mask overlay.
+    const healOverlay = useMemo(() => {
+      const container: any = activeContainer;
+      if (!isAiEditing || !container || container.patchType !== 'heal') {
+        return null;
+      }
+      const points: Array<{ x: number; y: number }> = [];
+      let brush = 0;
+      for (const sm of container.subMasks || []) {
+        const lines = (sm.parameters as any)?.lines || [];
+        for (const line of lines) {
+          brush = Math.max(brush, line.brushSize || 0);
+          for (const point of line.points || []) {
+            if (typeof point?.x === 'number' && typeof point?.y === 'number') {
+              points.push(point);
+            }
+          }
+        }
+      }
+      if (points.length === 0) {
+        return null;
+      }
+      const pad = Math.max(brush, 20) / 2;
+      const xs = points.map((p) => p.x);
+      const ys = points.map((p) => p.y);
+      const x = Math.min(...xs) - pad;
+      const y = Math.min(...ys) - pad;
+      const width = Math.max(...xs) - Math.min(...xs) + pad * 2;
+      const height = Math.max(...ys) - Math.min(...ys) + pad * 2;
+      const offset = container.cloneOffset || { x: 0, y: -220 };
+      return { x, y, width, height, offset, patchId: container.id };
+    }, [activeContainer, isAiEditing]);
+
+    const moveHealSource = useCallback(
+      (offset: { x: number; y: number }) => {
+        if (!healOverlay) return;
+        setAdjustments((prev: Adjustments) => ({
+          ...prev,
+          aiPatches: prev.aiPatches.map((patch: AiPatch) =>
+            patch.id === healOverlay.patchId ? ({ ...patch, cloneOffset: offset } as AiPatch) : patch,
+          ),
+        }));
+      },
+      [healOverlay, setAdjustments],
+    );
+
+    const moveHealTarget = useCallback(
+      (dx: number, dy: number) => {
+        if (!healOverlay || (dx === 0 && dy === 0)) return;
+        setAdjustments((prev: Adjustments) => ({
+          ...prev,
+          aiPatches: prev.aiPatches.map((patch: AiPatch) => {
+            if (patch.id !== healOverlay.patchId) return patch;
+            return {
+              ...patch,
+              subMasks: patch.subMasks.map((sm: SubMask) => {
+                const lines = (sm.parameters as any)?.lines;
+                if (!Array.isArray(lines)) return sm;
+                return {
+                  ...sm,
+                  parameters: {
+                    ...(sm.parameters as any),
+                    lines: lines.map((line: any) => ({
+                      ...line,
+                      points: (line.points || []).map((point: any) => ({
+                        ...point,
+                        x: point.x + dx,
+                        y: point.y + dy,
+                      })),
+                    })),
+                  },
+                } as SubMask;
+              }),
+            } as AiPatch;
+          }),
+        }));
+      },
+      [healOverlay, setAdjustments],
+    );
+
     const activeSubMask = useMemo(() => {
       if (!activeContainer) {
         return null;
@@ -2561,6 +2643,67 @@ const ImageCanvas = memo(
                             />
                           );
                         })}
+
+                      {healOverlay && (
+                        <>
+                          <Line
+                            points={[
+                              healOverlay.x + healOverlay.width / 2,
+                              healOverlay.y + healOverlay.height / 2,
+                              healOverlay.x + healOverlay.offset.x + healOverlay.width / 2,
+                              healOverlay.y + healOverlay.offset.y + healOverlay.height / 2,
+                            ]}
+                            stroke="#38bdf8"
+                            strokeWidth={1.5 / maxSafeScale}
+                            dash={[6 / maxSafeScale, 6 / maxSafeScale]}
+                            listening={false}
+                          />
+                          <Rect
+                            x={healOverlay.x + healOverlay.offset.x}
+                            y={healOverlay.y + healOverlay.offset.y}
+                            width={healOverlay.width}
+                            height={healOverlay.height}
+                            stroke="#f8fafc"
+                            strokeWidth={2 / maxSafeScale}
+                            dash={[10 / maxSafeScale, 6 / maxSafeScale]}
+                            draggable
+                            onDragEnd={(e: any) => {
+                              moveHealSource({
+                                x: Math.round(e.target.x() - healOverlay.x),
+                                y: Math.round(e.target.y() - healOverlay.y),
+                              });
+                            }}
+                            onMouseEnter={(e: any) => {
+                              e.target.getStage().container().style.cursor = 'move';
+                            }}
+                            onMouseLeave={(e: any) => {
+                              e.target.getStage().container().style.cursor = '';
+                            }}
+                          />
+                          <Rect
+                            x={healOverlay.x}
+                            y={healOverlay.y}
+                            width={healOverlay.width}
+                            height={healOverlay.height}
+                            stroke="#38bdf8"
+                            strokeWidth={2 / maxSafeScale}
+                            draggable
+                            onDragEnd={(e: any) => {
+                              moveHealTarget(
+                                Math.round(e.target.x() - healOverlay.x),
+                                Math.round(e.target.y() - healOverlay.y),
+                              );
+                              e.target.position({ x: healOverlay.x, y: healOverlay.y });
+                            }}
+                            onMouseEnter={(e: any) => {
+                              e.target.getStage().container().style.cursor = 'move';
+                            }}
+                            onMouseLeave={(e: any) => {
+                              e.target.getStage().container().style.cursor = '';
+                            }}
+                          />
+                        </>
+                      )}
 
                       {previewBox && (
                         <Rect
