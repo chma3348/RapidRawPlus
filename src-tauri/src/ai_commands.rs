@@ -3354,6 +3354,82 @@ async fn run_engine_inpaint_patch(
 /// edit at a quarter strength and hides the region from any 50% test.
 /// Anything meaningfully selected is promoted to full membership, the rim
 /// stays soft, and near-noise dust is dropped.
+/// Maps a point from DISPLAY space (what the user paints on: after the
+/// coarse rotation and flips, before the crop) back to ORIGINAL image
+/// space, where patches are composited. Brush strokes are recorded in
+/// display space, so a flipped or rotated photo needs this or the patch
+/// lands mirrored — measured on a flipH+flipV+1.4-degree photo where the
+/// clone appeared across the frame from the painted area.
+pub(crate) fn display_to_image_point(
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    orientation_steps: u32,
+    flip_horizontal: bool,
+    flip_vertical: bool,
+    rotation_deg: f64,
+) -> (f64, f64) {
+    // Dimensions as seen after the coarse rotation.
+    let (rot_w, rot_h) = if orientation_steps % 2 == 1 {
+        (height, width)
+    } else {
+        (width, height)
+    };
+
+    // 1. undo the fine rotation about the centre
+    let angle = -rotation_deg.to_radians();
+    let (cx, cy) = (rot_w / 2.0, rot_h / 2.0);
+    let (dx, dy) = (x - cx, y - cy);
+    let (cos_a, sin_a) = (angle.cos(), angle.sin());
+    let mut px = dx * cos_a - dy * sin_a + cx;
+    let mut py = dx * sin_a + dy * cos_a + cy;
+
+    // 2. undo the flips
+    if flip_horizontal {
+        px = rot_w - px;
+    }
+    if flip_vertical {
+        py = rot_h - py;
+    }
+
+    // 3. undo the coarse rotation
+    match orientation_steps % 4 {
+        1 => (py, rot_w - px),
+        2 => (rot_w - px, rot_h - py),
+        3 => (rot_h - py, px),
+        _ => (px, py),
+    }
+}
+
+/// Same mapping for a DIRECTION (the clone offset): no translation, only
+/// the rotation and mirroring parts apply.
+pub(crate) fn display_to_image_vector(
+    dx: f64,
+    dy: f64,
+    orientation_steps: u32,
+    flip_horizontal: bool,
+    flip_vertical: bool,
+    rotation_deg: f64,
+) -> (f64, f64) {
+    let angle = -rotation_deg.to_radians();
+    let (cos_a, sin_a) = (angle.cos(), angle.sin());
+    let mut vx = dx * cos_a - dy * sin_a;
+    let mut vy = dx * sin_a + dy * cos_a;
+    if flip_horizontal {
+        vx = -vx;
+    }
+    if flip_vertical {
+        vy = -vy;
+    }
+    match orientation_steps % 4 {
+        1 => (vy, -vx),
+        2 => (-vx, -vy),
+        3 => (-vy, vx),
+        _ => (vx, vy),
+    }
+}
+
 pub(crate) fn boost_mask_confidence(mask: &mut GrayImage) {
     for p in mask.pixels_mut() {
         let v = p[0] as f32 / 255.0;
@@ -3421,6 +3497,66 @@ pub async fn apply_clone_patch(
 
     let mut sub_masks = patch_definition.sub_masks.clone();
     neutralize_display_orientation(&mut sub_masks);
+
+    // Brush strokes are recorded in display space; the patch composites in
+    // original space. On a flipped or rotated photo those differ.
+    let steps = current_adjustments["orientationSteps"].as_u64().unwrap_or(0) as u32;
+    let flip_h = current_adjustments["flipHorizontal"].as_bool().unwrap_or(false);
+    let flip_v = current_adjustments["flipVertical"].as_bool().unwrap_or(false);
+    let rotation = current_adjustments["rotation"].as_f64().unwrap_or(0.0);
+    let needs_mapping = steps % 4 != 0 || flip_h || flip_v || rotation.abs() > 1e-6;
+    if needs_mapping {
+        for sm in sub_masks.iter_mut() {
+            let Some(lines) = sm
+                .parameters
+                .get_mut("lines")
+                .and_then(|v| v.as_array_mut())
+            else {
+                continue;
+            };
+            for line in lines.iter_mut() {
+                let Some(points) = line.get_mut("points").and_then(|v| v.as_array_mut()) else {
+                    continue;
+                };
+                for point in points.iter_mut() {
+                    let (Some(px), Some(py)) = (
+                        point.get("x").and_then(|v| v.as_f64()),
+                        point.get("y").and_then(|v| v.as_f64()),
+                    ) else {
+                        continue;
+                    };
+                    let (mx, my) = display_to_image_point(
+                        px,
+                        py,
+                        img_w as f64,
+                        img_h as f64,
+                        steps,
+                        flip_h,
+                        flip_v,
+                        rotation,
+                    );
+                    point["x"] = serde_json::json!(mx);
+                    point["y"] = serde_json::json!(my);
+                }
+            }
+        }
+        log::info!(
+            "[clone] mapped strokes from display space (steps={steps}, flipH={flip_h}, flipV={flip_v}, rot={rotation})"
+        );
+    }
+    let (offset_x, offset_y) = if needs_mapping {
+        let (mx, my) = display_to_image_vector(
+            offset_x as f64,
+            offset_y as f64,
+            steps,
+            flip_h,
+            flip_v,
+            rotation,
+        );
+        (mx.round() as i32, my.round() as i32)
+    } else {
+        (offset_x, offset_y)
+    };
     let mask_def = MaskDefinition {
         id: patch_definition.id.clone(),
         name: patch_definition.name.clone(),
@@ -5271,5 +5407,61 @@ mod clone_stamp_tests {
         let mask = GrayImage::new(16, 16);
         let out = clone_offset_copy(&img, &mask, 4, 4);
         assert_eq!(out.as_raw(), img.as_raw());
+    }
+}
+
+#[cfg(test)]
+mod display_space_tests {
+    use super::{display_to_image_point, display_to_image_vector};
+
+    const W: f64 = 7008.0;
+    const H: f64 = 4672.0;
+
+    /// With no transforms the mapping is the identity.
+    #[test]
+    fn identity_without_transforms() {
+        let (x, y) = display_to_image_point(3195.0, 2591.0, W, H, 0, false, false, 0.0);
+        assert!((x - 3195.0).abs() < 1e-6 && (y - 2591.0).abs() < 1e-6);
+    }
+
+    /// The user's actual photo: flipped both ways, so a painted point maps
+    /// to the opposite side — this is what put the clone across the frame.
+    #[test]
+    fn double_flip_mirrors_through_the_centre() {
+        let (x, y) = display_to_image_point(3195.0, 2591.0, W, H, 0, true, true, 0.0);
+        assert!((x - (W - 3195.0)).abs() < 1e-6, "x was {x}");
+        assert!((y - (H - 2591.0)).abs() < 1e-6, "y was {y}");
+    }
+
+    /// A direction mirrors without translating: dragging the source right
+    /// on a flipped photo means left in image space.
+    #[test]
+    fn vector_mirrors_but_does_not_translate() {
+        let (dx, dy) = display_to_image_vector(1207.0, 255.0, 0, true, true, 0.0);
+        assert!((dx + 1207.0).abs() < 1e-6, "dx was {dx}");
+        assert!((dy + 255.0).abs() < 1e-6, "dy was {dy}");
+    }
+
+    /// Fine rotation is undone, so a rotated photo still lands true.
+    #[test]
+    fn fine_rotation_round_trips() {
+        let (x, y) = display_to_image_point(3500.0, 2400.0, W, H, 0, false, false, 1.4);
+        // Rotating the result forward by the same angle returns the input.
+        let angle: f64 = 1.4_f64.to_radians();
+        let (cx, cy) = (W / 2.0, H / 2.0);
+        let (dx, dy) = (x - cx, y - cy);
+        let back_x = dx * angle.cos() - dy * angle.sin() + cx;
+        let back_y = dx * angle.sin() + dy * angle.cos() + cy;
+        assert!((back_x - 3500.0).abs() < 1e-6, "x round trip {back_x}");
+        assert!((back_y - 2400.0).abs() < 1e-6, "y round trip {back_y}");
+    }
+
+    /// A quarter turn swaps the axes rather than mirroring.
+    #[test]
+    fn quarter_turn_swaps_axes() {
+        let (x, y) = display_to_image_point(100.0, 200.0, W, H, 1, false, false, 0.0);
+        // Display is H-wide by W-tall after the coarse rotation.
+        assert!((x - 200.0).abs() < 1e-6, "x was {x}");
+        assert!((y - (H - 100.0)).abs() < 1e-6, "y was {y}");
     }
 }
