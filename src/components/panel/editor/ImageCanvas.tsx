@@ -2815,12 +2815,18 @@ const ImageCanvas = memo(
                             />
                             {isSelected && (
                               <Group
-                                x={spot.x + spot.width}
-                                y={spot.y}
+                                // Sat mostly outside the box: this deletes on
+                                // press, so its hit area must not overlap the
+                                // draggable spot any more than necessary.
+                                x={spot.x + spot.width + 7 / maxSafeScale}
+                                y={spot.y - 7 / maxSafeScale}
+                                // Delete on mousedown, not click: Konva only
+                                // synthesises a click when press and release
+                                // land on the same node, and the hover state
+                                // flipping as the pointer crosses onto the
+                                // badge re-renders it in between — so the
+                                // click never arrived and the x did nothing.
                                 onMouseDown={(e: any) => {
-                                  e.cancelBubble = true;
-                                }}
-                                onClick={(e: any) => {
                                   e.cancelBubble = true;
                                   deleteHealSpot(spot);
                                   setSelectedHealKey(null);
@@ -2832,6 +2838,9 @@ const ImageCanvas = memo(
                                   e.target.getStage().container().style.cursor = '';
                                 }}
                               >
+                                {/* Invisible hit pad: the visible badge is
+                                    only 9px across, an awkward target. */}
+                                <Circle radius={14 / maxSafeScale} fill="rgba(0,0,0,0.01)" />
                                 <Circle
                                   radius={9 / maxSafeScale}
                                   fill="#0f172a"
