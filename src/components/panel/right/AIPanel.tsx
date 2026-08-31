@@ -568,11 +568,7 @@ export default function AIPanel() {
     return subMask;
   };
 
-  // Heal mode is just a brush container that carries a clone offset —
-  // the paint tool the user already knows, with a source to drag.
-  const [healMode, setHealMode] = useState(false);
-
-  const handleAddAiPatchContainer = (type: Mask) => {
+  const handleAddAiPatchContainer = (type: Mask, options?: { heal?: boolean }) => {
     const subMask = createMaskLogic(type);
 
     let name: string;
@@ -587,7 +583,9 @@ export default function AIPanel() {
       name = t('editor.ai.patches.aiEdit', { count });
     }
 
-    const isHeal = type === Mask.Brush && healMode;
+    // Heal is a brush container that carries a clone offset. The flag is a
+    // parameter, not state: state set in the same click is not visible here.
+    const isHeal = !!options?.heal && type === Mask.Brush;
     const newContainer: AiPatch = {
       id: uuidv4(),
       invert: false,
@@ -607,7 +605,6 @@ export default function AIPanel() {
     onSelectSubMask(subMask.id);
     setExpandedContainers((prev) => new Set(prev).add(newContainer.id));
     if (type === Mask.Brush || type === Mask.AiPaint) selectBrushToolForNewMask();
-    setHealMode(false);
 
     if (type === Mask.AiForeground) handleGenerateAiForegroundMask(subMask.id);
   };
@@ -860,8 +857,7 @@ export default function AIPanel() {
         label: t('editor.ai.settings.healCreate'),
         icon: Stamp,
         onClick: () => {
-          setHealMode(true);
-          handleAddAiPatchContainer(Mask.Brush);
+          handleAddAiPatchContainer(Mask.Brush, { heal: true });
         },
       },
     ];
@@ -1079,8 +1075,7 @@ export default function AIPanel() {
                       disabled={isGeneratingAi}
                       onClick={(e) => {
                         e.stopPropagation();
-                        setHealMode(true);
-                        handleAddAiPatchContainer(Mask.Brush);
+                        handleAddAiPatchContainer(Mask.Brush, { heal: true });
                       }}
                     >
                       {t('editor.ai.settings.healCreate')}
@@ -1108,8 +1103,7 @@ export default function AIPanel() {
                   disabled={isGeneratingAi}
                   onClick={(e) => {
                     e.stopPropagation();
-                    setHealMode(true);
-                    handleAddAiPatchContainer(Mask.Brush);
+                    handleAddAiPatchContainer(Mask.Brush, { heal: true });
                   }}
                 >
                   {t('editor.ai.settings.healCreate')}
