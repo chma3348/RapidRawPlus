@@ -2263,6 +2263,7 @@ pub fn run() {
             ai_commands::generate_ai_paint_mask,
             ai_commands::sample_image_color,
             ai_commands::respot_enhance,
+            ai_commands::apply_clone_patch,
             ai_commands::list_managed_luts,
             merge_discovery::discover_merge_candidates,
             flat_field::create_flat_profile,

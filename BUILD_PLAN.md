@@ -441,3 +441,20 @@ Measured every light dial on a GPU patch ladder; found and fixed:
       oscillates forever on a bipartite constraint graph (a chain of
       frames is exactly that) and returned confidently wrong gains —
       now Gauss-Seidel.
+
+## Round: pre-flight + progressive tiling + clone stamp (2026-08-31)
+Recovery point before this round: tag known-good-2026-08-31
+- [x] Pre-flight suitability check: measures region mean and SURROUNDING
+      RING texture before the engine runs, warns via toast. Calibrated
+      on three real cases with a test each — DSC08310 sky gap (worked)
+      must not warn; Oculus ribs (lacy, span 6459) warn about lost
+      structure; rig photo (ring texture 4.3, promptless) warns that a
+      prompt-less fill will continue the flatness.
+- [x] Progressive tiling: regions wider than 900px fill as overlapping
+      ~700px tiles in sequence, each seeing the previous as context.
+      Validated offline first: the known-failing blob went from flat
+      wash (std 4.3 -> 16.5, no shapes) to visible cloud forms (18.4).
+- [x] Phase L clone/heal stamp: deterministic offset copy harmonised
+      like a fill patch, no engine. Backend + command + 3 unit tests +
+      AI panel UI (offset sliders, Clone Into Selection).
+      Follow-up: alt-click to set the source point on canvas.

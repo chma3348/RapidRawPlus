@@ -442,7 +442,12 @@
         "spotEnhanceButton": "Enhance Selection",
         "resultBlendTitle": "Result blend",
         "resultFeather": "Feather",
-        "resultOpacity": "Opacity"
+        "resultOpacity": "Opacity",
+        "cloneTitle": "Clone / Heal",
+        "cloneHint": "Paint the area to repair, then choose how far away to copy real pixels from. No AI — the copied detail is genuine.",
+        "cloneOffsetX": "Source offset X",
+        "cloneOffsetY": "Source offset Y",
+        "cloneApply": "Clone Into Selection"
       }
     },
     "crop": {

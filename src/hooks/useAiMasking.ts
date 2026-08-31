@@ -133,6 +133,58 @@ export function useAiMasking() {
     [setAdjustments, setEditor],
   );
 
+  /// Clone/heal: deterministic copy from a source offset. No engine, so
+  /// it returns in a moment and is the right tool where generation cannot
+  /// work — fine repeating structure, or anything that must stay real.
+  const handleCloneStamp = useCallback(
+    async (patchId: string, offsetX: number, offsetY: number) => {
+      const { selectedImage, adjustments, isGeneratingAi } = useEditorStore.getState();
+      if (!selectedImage?.path) return;
+      if (isGeneratingAi) {
+        console.error('[clone] blocked: another AI operation is running');
+        return;
+      }
+      const container = adjustments.aiPatches.find((p: AiPatch) => p.id === patchId);
+      if (!container) {
+        console.error('[clone] blocked: patch container not found', patchId);
+        return;
+      }
+
+      setEditor({ isGeneratingAi: true });
+      setAdjustments((prev: Adjustments) => ({
+        ...prev,
+        aiPatches: prev.aiPatches.map((p: AiPatch) => (p.id === patchId ? { ...p, isLoading: true } : p)),
+      }));
+
+      try {
+        const patchJson: any = await invoke(Invokes.ApplyClonePatch, {
+          path: selectedImage.path,
+          patchDefinition: container,
+          offsetX: Math.round(offsetX),
+          offsetY: Math.round(offsetY),
+          currentAdjustments: adjustments,
+        });
+        const patchData = JSON.parse(patchJson);
+        setAdjustments((prev: Adjustments) => ({
+          ...prev,
+          aiPatches: prev.aiPatches.map((p: AiPatch) =>
+            p.id === patchId ? { ...p, patchData, isLoading: false, name: 'Clone' } : p,
+          ),
+        }));
+        setEditor({ activeAiSubMaskId: null });
+      } catch (err) {
+        toast.error(`Clone failed: ${err}`);
+        setAdjustments((prev: Adjustments) => ({
+          ...prev,
+          aiPatches: prev.aiPatches.map((p: AiPatch) => (p.id === patchId ? { ...p, isLoading: false } : p)),
+        }));
+      } finally {
+        setEditor({ isGeneratingAi: false });
+      }
+    },
+    [setAdjustments, setEditor],
+  );
+
   const handleSpotEnhance = useCallback(
     async (patchId: string, task: string, strength: number, texture: number = 0, grain: number = 0) => {
       const { selectedImage, adjustments, isGeneratingAi, patchesSentToBackend } = useEditorStore.getState();
@@ -560,6 +612,7 @@ export function useAiMasking() {
   return {
     updateSubMask,
     handleGenerativeReplace,
+    handleCloneStamp,
     handleSpotEnhance,
     handleRespotEnhance,
     handleGenerateAiPaintMask,

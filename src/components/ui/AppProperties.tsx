@@ -72,6 +72,7 @@ export enum Invokes {
   HandleImportPresetsFromFile = 'handle_import_presets_from_file',
   HandleImportLegacyPresetsFromFile = 'handle_import_legacy_presets_from_file',
   ImportFiles = 'import_files',
+  ApplyClonePatch = 'apply_clone_patch',
   InvokeGenerativeReplace = 'invoke_generative_replace',
   InvokeGenerativeReplaseWithMaskDef = 'invoke_generative_replace_with_mask_def',
   InvokeSpotEnhanceWithMaskDef = 'invoke_spot_enhance_with_mask_def',

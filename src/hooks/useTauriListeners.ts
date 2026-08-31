@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { listen } from '@tauri-apps/api/event';
+import { toast } from 'react-toastify';
 import { Status } from '../components/ui/ExportImportProperties';
 import { useProcessStore } from '../store/useProcessStore';
 import { useEditorStore } from '../store/useEditorStore';
@@ -70,6 +71,13 @@ export function useTauriListeners({
     };
 
     const listeners = [
+      // Fill pre-flight: the backend measures whether a region can work
+      // before spending minutes on it, so the advice arrives up front.
+      listen('fill-warning', (event: any) => {
+        if (typeof event.payload === 'string' && event.payload.length > 0) {
+          toast.warn(event.payload, { autoClose: 12000 });
+        }
+      }),
       listen('preview-update-uncropped', (event: any) => {
         if (isEffectActive) useEditorStore.getState().setEditor({ uncroppedAdjustedPreviewUrl: event.payload });
       }),

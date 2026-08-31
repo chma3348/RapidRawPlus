@@ -916,6 +916,55 @@ struct BlobReport {
     used_fallback: bool,
 }
 
+/// Pre-flight assessment of whether generative fill can succeed on a
+/// region, from measurements taken BEFORE the engine runs.
+///
+/// Measured across three real cases (2026-08-31): success needs a mask
+/// compact enough to survive downscaling to the engine canvas AND
+/// surroundings that imply the wanted content. A sky gap framed by
+/// buildings satisfied both and produced convincing clouds; a blown
+/// region ringed by more blown wash continued the flatness; lacy ribs
+/// spanning the frame dissolved at canvas resolution and filled flat.
+pub(crate) fn fill_warning_for(
+    density: f32,
+    span: u32,
+    blob_px_on_canvas: u32,
+    region_mean_luma: f32,
+    ring_std: f32,
+    has_prompt: bool,
+) -> Option<String> {
+    if density < 0.30 && span > 1200 {
+        return Some(format!(
+            "This selection is fine detail spread across the frame ({:.0}% dense over {span}px). \
+             Generative fill downscales it for the model, so thin structure will be lost — \
+             highlight recovery or the clone tool will preserve it better.",
+            density * 100.0
+        ));
+    }
+    if blob_px_on_canvas < 200 {
+        return Some(format!(
+            "This region renders at only ~{blob_px_on_canvas}px on the model's canvas, \
+             too small to carry detail. Zoom the selection or fill it as part of a larger area."
+        ));
+    }
+    if ring_std < 12.0 && region_mean_luma > 200.0 && !has_prompt {
+        return Some(
+            "The area around this selection is featureless, so a prompt-less fill will simply \
+             continue that flatness. Add a prompt describing what belongs here, or use a \
+             flat-field profile to recover the real detail."
+                .to_string(),
+        );
+    }
+    if ring_std < 8.0 {
+        return Some(
+            "The surroundings of this selection carry almost no texture for the model to \
+             continue, so the fill is likely to come back flat."
+                .to_string(),
+        );
+    }
+    None
+}
+
 fn component_density(c: &MaskComponent) -> f32 {
     let bbox = ((c.max_x - c.min_x + 1) * (c.max_y - c.min_y + 1)).max(1);
     c.area as f32 / bbox as f32
@@ -2660,7 +2709,79 @@ async fn run_engine_inpaint_patch(
     let flux_available =
         crate::comfy_engine::fill_files_present(app_handle, crate::comfy_engine::FillKind::Flux);
 
-    for (blob_index, comp) in large.iter().enumerate() {
+    // Progressive tiling. Measured 2026-08-31: a large region returns flat
+    // wash in one pass because the model continues its surroundings, while
+    // small regions reliably invent content. Splitting an oversized blob
+    // into overlapping tiles filled IN SEQUENCE — each tile seeing the
+    // previous ones as context — turned that same blob from featureless
+    // (in-mask structure 4.3 -> 16.5, no shapes) into visible cloud forms
+    // (-> 18.4 with structure). Tiles overlap so the feathered composite
+    // crossfades instead of leaving seams.
+    const TILE_SPAN_THRESHOLD: u32 = 900;
+    const TILE_TARGET: u32 = 700;
+    const MIN_TILE_AREA: u32 = 4000;
+    let mut units: Vec<(MaskComponent, Option<(u32, u32, u32, u32)>)> = Vec::new();
+    for comp in &large {
+        if comp.span() <= TILE_SPAN_THRESHOLD {
+            units.push((*comp, None));
+            continue;
+        }
+        let bbox_w = comp.max_x - comp.min_x + 1;
+        let bbox_h = comp.max_y - comp.min_y + 1;
+        let cols = bbox_w.div_ceil(TILE_TARGET).max(1);
+        let rows = bbox_h.div_ceil(TILE_TARGET).max(1);
+        let step_x = bbox_w.div_ceil(cols);
+        let step_y = bbox_h.div_ceil(rows);
+        let overlap_x = (step_x / 5).max(24);
+        let overlap_y = (step_y / 5).max(24);
+        let mut tile_count = 0;
+        for row in 0..rows {
+            for col in 0..cols {
+                let raw_x0 = comp.min_x + col * step_x;
+                let raw_y0 = comp.min_y + row * step_y;
+                let tx0 = raw_x0.saturating_sub(overlap_x).max(comp.min_x);
+                let ty0 = raw_y0.saturating_sub(overlap_y).max(comp.min_y);
+                let tx1 = (raw_x0 + step_x - 1 + overlap_x).min(comp.max_x);
+                let ty1 = (raw_y0 + step_y - 1 + overlap_y).min(comp.max_y);
+                let mut area = 0u32;
+                let (mut nx0, mut ny0, mut nx1, mut ny1) = (u32::MAX, u32::MAX, 0u32, 0u32);
+                for y in ty0..=ty1 {
+                    for x in tx0..=tx1 {
+                        if labels[(y * w + x) as usize] == comp.id {
+                            area += 1;
+                            nx0 = nx0.min(x);
+                            ny0 = ny0.min(y);
+                            nx1 = nx1.max(x);
+                            ny1 = ny1.max(y);
+                        }
+                    }
+                }
+                if area < MIN_TILE_AREA {
+                    continue;
+                }
+                units.push((
+                    MaskComponent {
+                        id: comp.id,
+                        min_x: nx0,
+                        min_y: ny0,
+                        max_x: nx1,
+                        max_y: ny1,
+                        area,
+                    },
+                    Some((tx0, ty0, tx1, ty1)),
+                ));
+                tile_count += 1;
+            }
+        }
+        log::info!(
+            "[fill] blob span {} exceeds {} — filling as {} progressive tile(s)",
+            comp.span(),
+            TILE_SPAN_THRESHOLD,
+            tile_count
+        );
+    }
+
+    for (blob_index, (comp, tile_rect)) in units.iter().enumerate() {
         let blob_prefix = format!("blob-{blob_index:02}");
         let mut blob_used_fallback = false;
         let blob_kind = if reconstruct_single_path
@@ -2712,6 +2833,22 @@ async fn run_engine_inpaint_patch(
             crop_mask_window(mask, x0, y0, crop_w, crop_h)
         } else {
             component_crop_mask(mask, &labels, comp.id, x0, y0, crop_w, crop_h)
+        };
+        // A tile owns only its slice of the component; the neighbouring
+        // slices are filled by their own passes.
+        let crop_mask = match tile_rect {
+            Some((tx0, ty0, tx1, ty1)) => {
+                let mut restricted = crop_mask;
+                for (x, y, pixel) in restricted.enumerate_pixels_mut() {
+                    let gx = x0 + x;
+                    let gy = y0 + y;
+                    if gx < *tx0 || gx > *tx1 || gy < *ty0 || gy > *ty1 {
+                        pixel[0] = 0;
+                    }
+                }
+                restricted
+            }
+            None => crop_mask,
         };
         save_debug_rgba(
             app_handle,
@@ -2900,6 +3037,51 @@ async fn run_engine_inpaint_patch(
             blob_coverage * 100.0,
             blob_px_on_canvas
         );
+        // Pre-flight: measure whether this region CAN work before spending
+        // minutes on it. Ring texture is the predictor that separated the
+        // three known outcomes — a sky gap framed by buildings succeeded,
+        // blown wash ringed by blown wash did not.
+        {
+            let ring_outer = dilate_mask(&crop_mask, 40);
+            let ring_inner = dilate_mask(&crop_mask, 8);
+            let (mut region_sum, mut region_n) = (0.0f64, 0u32);
+            let (mut ring_sum, mut ring_sq, mut ring_n) = (0.0f64, 0.0f64, 0u32);
+            for (x, y, p) in original_crop.enumerate_pixels() {
+                let luma =
+                    0.2126 * p[0] as f64 + 0.7152 * p[1] as f64 + 0.0722 * p[2] as f64;
+                if crop_mask.get_pixel(x, y)[0] > 127 {
+                    region_sum += luma;
+                    region_n += 1;
+                } else if ring_outer.get_pixel(x, y)[0] > 127
+                    && ring_inner.get_pixel(x, y)[0] <= 127
+                {
+                    ring_sum += luma;
+                    ring_sq += luma * luma;
+                    ring_n += 1;
+                }
+            }
+            if region_n > 0 && ring_n > 32 {
+                let region_mean = (region_sum / region_n as f64) as f32;
+                let ring_mean = ring_sum / ring_n as f64;
+                let ring_std =
+                    ((ring_sq / ring_n as f64) - ring_mean * ring_mean).max(0.0).sqrt() as f32;
+                log::info!(
+                    "[fill] {blob_prefix} pre-flight: region_mean={region_mean:.1} ring_std={ring_std:.1} density={:.2}",
+                    component_density(comp)
+                );
+                if let Some(warning) = fill_warning_for(
+                    component_density(comp),
+                    comp.span(),
+                    blob_px_on_canvas,
+                    region_mean,
+                    ring_std,
+                    !prompt.trim().is_empty(),
+                ) {
+                    log::warn!("[fill] {blob_prefix} pre-flight warning: {warning}");
+                    let _ = tauri::Emitter::emit(app_handle, "fill-warning", warning);
+                }
+            }
+        }
         let (img_png, mask_png, _, _) = crate::expansion::engine_canvas_pngs_sized(
             &engine_crop_img,
             &engine_mask_for_model,
@@ -3159,6 +3341,135 @@ async fn run_engine_inpaint_patch(
             "ai"
         }),
     })
+}
+
+/// Copies pixels from a source offset into the masked area. This is the
+/// deterministic half of retouching: no model, no engine, no invention —
+/// real pixels from elsewhere in the same photograph. It is the right
+/// tool exactly where generative fill cannot work, such as fine repeating
+/// structure that dissolves at the model's canvas resolution.
+pub(crate) fn clone_offset_copy(
+    image: &RgbaImage,
+    mask: &GrayImage,
+    offset_x: i32,
+    offset_y: i32,
+) -> RgbaImage {
+    let (w, h) = image.dimensions();
+    let mut out = image.clone();
+    for y in 0..h {
+        for x in 0..w {
+            if mask.get_pixel(x, y)[0] == 0 {
+                continue;
+            }
+            // Clamp so a source point outside the frame reuses the edge
+            // rather than leaving a hole.
+            let sx = (x as i32 + offset_x).clamp(0, w as i32 - 1) as u32;
+            let sy = (y as i32 + offset_y).clamp(0, h as i32 - 1) as u32;
+            let src = *image.get_pixel(sx, sy);
+            let dst = out.get_pixel_mut(x, y);
+            dst[0] = src[0];
+            dst[1] = src[1];
+            dst[2] = src[2];
+        }
+    }
+    out
+}
+
+/// Clone/heal stamp: builds a patch by copying from a source offset,
+/// harmonised to its surroundings exactly like a fill patch so the seam
+/// disappears. Deterministic and fast — no engine involved.
+#[tauri::command]
+pub async fn apply_clone_patch(
+    path: String,
+    patch_definition: AiPatchDefinition,
+    offset_x: i32,
+    offset_y: i32,
+    current_adjustments: Value,
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    if offset_x == 0 && offset_y == 0 {
+        return Err("Set a clone source offset first — the source cannot be the same spot as the target.".to_string());
+    }
+
+    let mut source_adjustments = current_adjustments.clone();
+    if let Some(patches) = source_adjustments
+        .get_mut("aiPatches")
+        .and_then(|v| v.as_array_mut())
+    {
+        patches.retain(|p| p.get("id").and_then(|id| id.as_str()) != Some(&patch_definition.id));
+    }
+
+    let (base_image, _) = get_full_image_for_processing(&state)?;
+    let source_image = composite_patches_on_image(&base_image, &source_adjustments)
+        .map_err(|e| format!("Failed to prepare source image: {}", e))?;
+    let (img_w, img_h) = source_image.dimensions();
+
+    let mut sub_masks = patch_definition.sub_masks.clone();
+    neutralize_display_orientation(&mut sub_masks);
+    let mask_def = MaskDefinition {
+        id: patch_definition.id.clone(),
+        name: patch_definition.name.clone(),
+        visible: true,
+        invert: patch_definition.invert,
+        opacity: 100.0,
+        grow: 0.0,
+        feather: 0.0,
+        adjustments: Value::Null,
+        sub_masks,
+    };
+    let warped = resolve_warped_image_for_masks(
+        &state,
+        &current_adjustments,
+        std::slice::from_ref(&mask_def),
+    );
+    let mask_bitmap = generate_mask_bitmap(
+        &mask_def,
+        img_w,
+        img_h,
+        1.0,
+        (0.0, 0.0),
+        warped.as_deref(),
+    )
+    .ok_or("Paint over the area you want to clone into first.")?;
+    let mask_dynamic = DynamicImage::ImageLuma8(mask_bitmap);
+    let unwarped = apply_unwarp_geometry(Cow::Borrowed(&mask_dynamic), &current_adjustments)
+        .into_owned();
+    let mask_bitmap = unwarped.to_luma8();
+    let masked_px = mask_bitmap.pixels().filter(|p| p[0] > 0).count();
+    if masked_px == 0 {
+        return Err("Paint over the area you want to clone into first.".to_string());
+    }
+
+    let is_linear = state
+        .original_image
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|l| l.is_raw)
+        && matches!(
+            source_image,
+            DynamicImage::ImageRgb32F(_) | DynamicImage::ImageRgba32F(_)
+        );
+    let encoded_full = if is_linear {
+        ai_processing::gamma_encode_rgba8(&source_image)
+    } else {
+        source_image.to_rgba8()
+    };
+
+    log::info!(
+        "[clone] {} px from offset ({offset_x}, {offset_y})",
+        masked_px
+    );
+    let mut cloned = clone_offset_copy(&encoded_full, &mask_bitmap, offset_x, offset_y);
+    // Same harmonisation as a fill patch: match the ring's tone and grain
+    // so the copied pixels sit in their new surroundings.
+    harmonize_patch(&encoded_full, &mut cloned, &mask_bitmap, 1.0);
+
+    let patch_json = encode_patch_result(&cloned, is_linear, &mask_bitmap)?;
+    let _ = path;
+    let _ = app_handle;
+    Ok(patch_json)
 }
 
 #[tauri::command]
@@ -4848,5 +5159,103 @@ mod fill_mask_orientation_tests {
             "mask centroid ({cx:.0},{cy:.0}) not on the bright region (30-70, 20-50) — \
              landed at the mirror position"
         );
+    }
+}
+
+#[cfg(test)]
+mod fill_preflight_tests {
+    use super::fill_warning_for;
+
+    /// The DSC08310 sky gap: compact, well-sized, textured surroundings.
+    /// This one worked, so it must NOT warn.
+    #[test]
+    fn compact_region_with_textured_surroundings_is_clean() {
+        assert!(fill_warning_for(0.55, 2495, 1149, 250.7, 70.8, false).is_none());
+    }
+
+    /// The Oculus ribs: lacy over a huge span. Must warn about lost detail.
+    #[test]
+    fn lacy_wide_selection_warns_about_structure() {
+        let w = fill_warning_for(0.20, 6459, 1500, 64.5, 22.1, false).expect("should warn");
+        assert!(w.contains("fine detail"), "unexpected warning: {w}");
+    }
+
+    /// The rig photo: compact but ringed by more blown wash, no prompt.
+    #[test]
+    fn featureless_surroundings_warn_when_promptless() {
+        let w = fill_warning_for(0.47, 1584, 745, 221.0, 4.3, false).expect("should warn");
+        assert!(w.contains("featureless"), "unexpected warning: {w}");
+    }
+
+    /// Same region WITH a prompt: the flatness warning no longer applies,
+    /// but genuinely textureless surroundings still get the softer note.
+    #[test]
+    fn prompt_changes_the_featureless_advice() {
+        let w = fill_warning_for(0.47, 1584, 745, 221.0, 4.3, true);
+        assert!(w.is_some_and(|m| m.contains("almost no texture")));
+        assert!(fill_warning_for(0.47, 1584, 745, 221.0, 20.0, true).is_none());
+    }
+
+    #[test]
+    fn tiny_canvas_region_warns() {
+        let w = fill_warning_for(0.8, 300, 90, 128.0, 30.0, true).expect("should warn");
+        assert!(w.contains("too small"), "unexpected warning: {w}");
+    }
+}
+
+#[cfg(test)]
+mod clone_stamp_tests {
+    use super::clone_offset_copy;
+    use image::{GrayImage, Luma, Rgba, RgbaImage};
+
+    fn gradient(w: u32, h: u32) -> RgbaImage {
+        let mut img = RgbaImage::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                img.put_pixel(x, y, Rgba([(x % 256) as u8, (y % 256) as u8, 128, 255]));
+            }
+        }
+        img
+    }
+
+    /// Masked pixels take their colour from the source offset; everything
+    /// outside the mask is untouched.
+    #[test]
+    fn copies_from_the_offset_and_leaves_the_rest_alone() {
+        let img = gradient(64, 64);
+        let mut mask = GrayImage::new(64, 64);
+        for y in 20..30 {
+            for x in 20..30 {
+                mask.put_pixel(x, y, Luma([255]));
+            }
+        }
+        let out = clone_offset_copy(&img, &mask, 10, 5);
+        assert_eq!(out.get_pixel(25, 25).0[..3], img.get_pixel(35, 30).0[..3]);
+        assert_eq!(out.get_pixel(5, 5), img.get_pixel(5, 5));
+        assert_eq!(out.get_pixel(40, 40), img.get_pixel(40, 40));
+    }
+
+    /// A source point outside the frame clamps to the edge instead of
+    /// leaving a hole.
+    #[test]
+    fn clamps_source_at_the_border() {
+        let img = gradient(32, 32);
+        let mut mask = GrayImage::new(32, 32);
+        for y in 0..4 {
+            for x in 0..4 {
+                mask.put_pixel(x, y, Luma([255]));
+            }
+        }
+        let out = clone_offset_copy(&img, &mask, -20, -20);
+        assert_eq!(out.get_pixel(0, 0).0[..3], img.get_pixel(0, 0).0[..3]);
+        assert_eq!(out.get_pixel(3, 3).0[..3], img.get_pixel(0, 0).0[..3]);
+    }
+
+    #[test]
+    fn empty_mask_is_a_no_op() {
+        let img = gradient(16, 16);
+        let mask = GrayImage::new(16, 16);
+        let out = clone_offset_copy(&img, &mask, 4, 4);
+        assert_eq!(out.as_raw(), img.as_raw());
     }
 }

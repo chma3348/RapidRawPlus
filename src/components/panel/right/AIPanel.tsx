@@ -325,6 +325,7 @@ export default function AIPanel() {
   const { setAdjustments } = useEditorActions();
   const {
     handleGenerativeReplace,
+    handleCloneStamp,
     handleSpotEnhance,
     handleRespotEnhance,
     handleDeleteAiPatch,
@@ -1169,6 +1170,7 @@ export default function AIPanel() {
                   isGeneratingAiMask={isGeneratingAiMask}
                   onGenerativeReplace={handleGenerativeReplace}
                   onSelectAiPatchVariant={handleSelectAiPatchVariant}
+                  onCloneStamp={handleCloneStamp}
                   onSpotEnhance={handleSpotEnhance}
                   onRespotEnhance={handleRespotEnhance}
                   collapsibleState={collapsibleState}
@@ -1790,6 +1792,7 @@ function SettingsPanel({
   isGeneratingAiMask: _isGeneratingAiMask,
   onGenerativeReplace,
   onSelectAiPatchVariant,
+  onCloneStamp,
   onSpotEnhance,
   onRespotEnhance,
   collapsibleState,
@@ -1810,6 +1813,10 @@ function SettingsPanel({
   );
   const [inpaintModels, setInpaintModels] = useState<Array<any>>([]);
   const [spotTask, setSpotTask] = useState<'deblur' | 'restore' | 'upscale'>('deblur');
+  // Clone source offset, in source pixels: where to copy FROM relative to
+  // the painted area.
+  const [cloneOffsetX, setCloneOffsetX] = useState(0);
+  const [cloneOffsetY, setCloneOffsetY] = useState(-200);
   const [spotStrength, setSpotStrength] = useState(70);
   const [spotTexture, setSpotTexture] = useState(40);
   const [spotGrain, setSpotGrain] = useState(50);
@@ -1988,6 +1995,40 @@ function SettingsPanel({
           />
         </div>
       )}
+      <div className="p-2 bg-bg-tertiary rounded-md">
+        <Text variant={TextVariants.heading} className="mb-2">
+          {t('editor.ai.settings.cloneTitle')}
+        </Text>
+        <Text variant={TextVariants.small} className="mb-2 block text-text-secondary">
+          {t('editor.ai.settings.cloneHint')}
+        </Text>
+        <Slider
+          label={t('editor.ai.settings.cloneOffsetX')}
+          min={-1500}
+          max={1500}
+          step={5}
+          defaultValue={0}
+          value={cloneOffsetX}
+          onChange={(e: any) => setCloneOffsetX(Number(e.target.value))}
+        />
+        <Slider
+          label={t('editor.ai.settings.cloneOffsetY')}
+          min={-1500}
+          max={1500}
+          step={5}
+          defaultValue={-200}
+          value={cloneOffsetY}
+          onChange={(e: any) => setCloneOffsetY(Number(e.target.value))}
+        />
+        <button
+          className="w-full mt-2 px-3 py-2 bg-accent text-button-text rounded-md hover:bg-accent-hover transition-colors text-sm disabled:opacity-40"
+          disabled={!container || isGeneratingAi || (cloneOffsetX === 0 && cloneOffsetY === 0)}
+          onClick={() => container && onCloneStamp?.(container.id, cloneOffsetX, cloneOffsetY)}
+        >
+          {t('editor.ai.settings.cloneApply')}
+        </button>
+      </div>
+
       <CollapsibleSection
         title={t('editor.ai.settings.generativeReplaceTitle')}
         isOpen={collapsibleState.generative}
