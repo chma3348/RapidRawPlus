@@ -3360,6 +3360,7 @@ async fn run_engine_inpaint_patch(
 /// display space, so a flipped or rotated photo needs this or the patch
 /// lands mirrored — measured on a flipH+flipV+1.4-degree photo where the
 /// clone appeared across the frame from the painted area.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn display_to_image_point(
     x: f64,
     y: f64,
@@ -3438,6 +3439,42 @@ pub(crate) fn boost_mask_confidence(mask: &mut GrayImage) {
     }
 }
 
+/// Splits brush sub-masks into one unit per stroke, so each stroke can be
+/// healed from its own source the way Lightroom models heal spots.
+///
+/// The second element is the stroke's own source offset in display space
+/// when it carries one; `None` means it has never been moved and should
+/// inherit the container's offset. Sub-masks that are not brush strokes
+/// (a Clipped selection, say) stay whole and always inherit.
+pub(crate) fn split_heal_units(
+    sub_masks: &[crate::mask_generation::SubMask],
+) -> Vec<(crate::mask_generation::SubMask, Option<(f64, f64)>)> {
+    let mut units = Vec::new();
+    for sm in sub_masks {
+        let lines = sm
+            .parameters
+            .get("lines")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        if lines.is_empty() {
+            units.push((sm.clone(), None));
+            continue;
+        }
+        for line in lines {
+            let raw = line
+                .get("cloneOffset")
+                .and_then(|o| Some((o.get("x")?.as_f64()?, o.get("y")?.as_f64()?)));
+            let mut single = sm.clone();
+            if let Some(obj) = single.parameters.as_object_mut() {
+                obj.insert("lines".to_string(), serde_json::json!([line]));
+            }
+            units.push((single, raw));
+        }
+    }
+    units
+}
+
 pub(crate) fn clone_offset_copy(
     image: &RgbaImage,
     mask: &GrayImage,
@@ -3469,6 +3506,7 @@ pub(crate) fn clone_offset_copy(
 /// harmonised to its surroundings exactly like a fill patch so the seam
 /// disappears. Deterministic and fast — no engine involved.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn apply_clone_patch(
     path: String,
     patch_definition: AiPatchDefinition,
@@ -3558,7 +3596,12 @@ pub async fn apply_clone_patch(
     } else {
         (offset_x, offset_y)
     };
-    let mask_def = MaskDefinition {
+    // Each brush stroke is its own heal spot pulling from its own source,
+    // the way Lightroom models them. Build one mask per stroke so they can
+    // be healed independently; a stroke with no source of its own (and any
+    // non-brush selection, e.g. a Clipped one) falls back to the
+    // container's offset.
+    let build_def = |masks: Vec<crate::mask_generation::SubMask>| MaskDefinition {
         id: patch_definition.id.clone(),
         name: patch_definition.name.clone(),
         visible: true,
@@ -3567,35 +3610,31 @@ pub async fn apply_clone_patch(
         grow: 0.0,
         feather: 0.0,
         adjustments: Value::Null,
-        sub_masks,
+        sub_masks: masks,
     };
+
+    let units: Vec<(crate::mask_generation::SubMask, (i32, i32))> = split_heal_units(&sub_masks)
+        .into_iter()
+        .map(|(sm, raw)| {
+            let off = match raw {
+                Some((ox, oy)) if needs_mapping => {
+                    let (mx, my) =
+                        display_to_image_vector(ox, oy, steps, flip_h, flip_v, rotation);
+                    (mx.round() as i32, my.round() as i32)
+                }
+                Some((ox, oy)) => (ox.round() as i32, oy.round() as i32),
+                None => (offset_x, offset_y),
+            };
+            (sm, off)
+        })
+        .collect();
+
+    let full_def = build_def(sub_masks.clone());
     let warped = resolve_warped_image_for_masks(
         &state,
         &current_adjustments,
-        std::slice::from_ref(&mask_def),
+        std::slice::from_ref(&full_def),
     );
-    let mask_bitmap = generate_mask_bitmap(
-        &mask_def,
-        img_w,
-        img_h,
-        1.0,
-        (0.0, 0.0),
-        warped.as_deref(),
-    )
-    .ok_or("Paint over the area you want to clone into first.")?;
-    let mask_dynamic = DynamicImage::ImageLuma8(mask_bitmap);
-    let unwarped = apply_unwarp_geometry(Cow::Borrowed(&mask_dynamic), &current_adjustments)
-        .into_owned();
-    let mut mask_bitmap = unwarped.to_luma8();
-    // Same promotion the generative path does: a Clipped selection hands
-    // over confidence values (one measured mask peaked at 68/255), which
-    // consumed literally would clone at a quarter strength.
-    boost_mask_confidence(&mut mask_bitmap);
-    let masked_px = mask_bitmap.pixels().filter(|p| p[0] > 0).count();
-    let solid_px = mask_bitmap.pixels().filter(|p| p[0] > 127).count();
-    if masked_px == 0 {
-        return Err("Paint over the area you want to clone into first.".to_string());
-    }
 
     let is_linear = state
         .original_image
@@ -3613,23 +3652,65 @@ pub async fn apply_clone_patch(
         source_image.to_rgba8()
     };
 
-    log::info!(
-        "[clone] {masked_px} px selected ({solid_px} at full strength) from offset ({offset_x}, {offset_y})"
-    );
     // Heal and clone differ in exactly one way: a clone reproduces the
     // source verbatim, a heal keeps its texture but takes its tone from the
     // destination. Global harmonisation is not enough for the latter — on a
-    // real edit it left a 49/255 step at the mask edge — so healing solves
+    // real edit it left a 78/255 step at the mask edge — so healing solves
     // for a seamless blend instead.
-    let cloned = if heal {
-        crate::heal_blend::heal_blend(&encoded_full, &mask_bitmap, offset_x, offset_y)
-    } else {
-        let mut c = clone_offset_copy(&encoded_full, &mask_bitmap, offset_x, offset_y);
-        harmonize_patch(&encoded_full, &mut c, &mask_bitmap, 1.0);
-        c
-    };
+    //
+    // Spots are healed in turn, each reading from the running result, so a
+    // later spot may sample from an earlier repair — the same way repeated
+    // stamping behaves by hand.
+    let mut working = encoded_full.clone();
+    let mut union_mask = image::GrayImage::new(img_w, img_h);
+    let mut healed_spots = 0usize;
+    for (unit, (ox, oy)) in units {
+        let unit_def = build_def(vec![unit]);
+        let Some(bitmap) = generate_mask_bitmap(
+            &unit_def,
+            img_w,
+            img_h,
+            1.0,
+            (0.0, 0.0),
+            warped.as_deref(),
+        ) else {
+            continue;
+        };
+        let unwarped = apply_unwarp_geometry(
+            Cow::Owned(DynamicImage::ImageLuma8(bitmap)),
+            &current_adjustments,
+        )
+        .into_owned();
+        let mut spot_mask = unwarped.to_luma8();
+        // Same promotion the generative path does: a Clipped selection
+        // hands over confidence values (one measured mask peaked at
+        // 68/255), which consumed literally would clone at quarter strength.
+        boost_mask_confidence(&mut spot_mask);
+        if spot_mask.pixels().all(|p| p[0] == 0) {
+            continue;
+        }
+        working = if heal {
+            crate::heal_blend::heal_blend(&working, &spot_mask, ox, oy)
+        } else {
+            let mut c = clone_offset_copy(&working, &spot_mask, ox, oy);
+            harmonize_patch(&working, &mut c, &spot_mask, 1.0);
+            c
+        };
+        for (u, s) in union_mask.pixels_mut().zip(spot_mask.pixels()) {
+            u[0] = u[0].max(s[0]);
+        }
+        healed_spots += 1;
+    }
 
-    let patch_json = encode_patch_result(&cloned, is_linear, &mask_bitmap)?;
+    let masked_px = union_mask.pixels().filter(|p| p[0] > 0).count();
+    if masked_px == 0 {
+        return Err("Paint over the area you want to clone into first.".to_string());
+    }
+    log::info!(
+        "[clone] {healed_spots} spot(s), {masked_px} px total (heal={heal}, fallback offset {offset_x},{offset_y})"
+    );
+
+    let patch_json = encode_patch_result(&working, is_linear, &union_mask)?;
     let _ = path;
     let _ = app_handle;
     Ok(patch_json)
@@ -5416,6 +5497,72 @@ mod clone_stamp_tests {
         let mask = GrayImage::new(16, 16);
         let out = clone_offset_copy(&img, &mask, 4, 4);
         assert_eq!(out.as_raw(), img.as_raw());
+    }
+}
+
+#[cfg(test)]
+mod heal_unit_tests {
+    use super::split_heal_units;
+    use crate::mask_generation::{SubMask, SubMaskMode};
+    use serde_json::json;
+
+    fn brush(lines: serde_json::Value) -> SubMask {
+        SubMask {
+            id: "sm1".to_string(),
+            mask_type: "brush".to_string(),
+            visible: true,
+            invert: false,
+            opacity: 100.0,
+            mode: SubMaskMode::Additive,
+            parameters: json!({ "lines": lines }),
+        }
+    }
+
+    /// Two strokes must become two independent units, each carrying only
+    /// its own stroke — otherwise every spot would heal the whole mask.
+    #[test]
+    fn each_stroke_becomes_its_own_unit() {
+        let sm = brush(json!([
+            { "points": [{"x": 10, "y": 10}], "cloneOffset": {"x": 100, "y": -50} },
+            { "points": [{"x": 80, "y": 80}] },
+        ]));
+        let units = split_heal_units(&[sm]);
+        assert_eq!(units.len(), 2, "expected one unit per stroke");
+
+        let first_lines = units[0].0.parameters["lines"].as_array().unwrap();
+        assert_eq!(first_lines.len(), 1, "a unit must hold exactly one stroke");
+        assert_eq!(first_lines[0]["points"][0]["x"], 10);
+        assert_eq!(units[0].1, Some((100.0, -50.0)));
+
+        let second_lines = units[1].0.parameters["lines"].as_array().unwrap();
+        assert_eq!(second_lines[0]["points"][0]["x"], 80);
+        // No source of its own: inherits the container's.
+        assert_eq!(units[1].1, None);
+    }
+
+    /// A non-brush selection has no strokes and must survive whole.
+    #[test]
+    fn a_sub_mask_without_strokes_stays_intact() {
+        let sm = SubMask {
+            id: "clipped".to_string(),
+            mask_type: "clipped".to_string(),
+            visible: true,
+            invert: false,
+            opacity: 100.0,
+            mode: SubMaskMode::Additive,
+            parameters: json!({ "threshold": 0.9 }),
+        };
+        let units = split_heal_units(&[sm]);
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].1, None);
+        assert_eq!(units[0].0.parameters["threshold"], 0.9);
+    }
+
+    #[test]
+    fn a_partial_offset_is_ignored_rather_than_half_read() {
+        let sm = brush(json!([{ "points": [{"x": 1, "y": 1}], "cloneOffset": {"x": 5} }]));
+        let units = split_heal_units(&[sm]);
+        assert_eq!(units[0].1, None, "an offset missing y must not be used");
     }
 }
 

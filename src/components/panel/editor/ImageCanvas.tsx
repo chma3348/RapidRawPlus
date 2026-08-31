@@ -1256,30 +1256,19 @@ const ImageCanvas = memo(
       return { width: w, height: h };
     }, [selectedImage.width, selectedImage.height, adjustments.orientationSteps]);
 
-    const healOverlay = useMemo(() => {
+    const [selectedHealKey, setSelectedHealKey] = useState<string | null>(null);
+    const [hoveredHealKey, setHoveredHealKey] = useState<string | null>(null);
+
+    // Every brush stroke is its own heal spot pulling from its own source,
+    // the way Lightroom models them: hover highlights a stroke, clicking
+    // selects it and reveals where that one pulls from, and either box can
+    // then be dragged. A stroke that has never had its source moved falls
+    // back to the container's offset.
+    const healSpots = useMemo(() => {
       const container: any = activeContainer;
       if (!isAiEditing || !container || container.patchType !== 'heal') {
-        return null;
+        return [] as Array<any>;
       }
-      const points: Array<{ x: number; y: number }> = [];
-      let brush = 0;
-      for (const sm of container.subMasks || []) {
-        const lines = (sm.parameters as any)?.lines || [];
-        for (const line of lines) {
-          brush = Math.max(brush, line.brushSize || 0);
-          for (const point of line.points || []) {
-            if (typeof point?.x === 'number' && typeof point?.y === 'number') {
-              points.push(point);
-            }
-          }
-        }
-      }
-      if (points.length === 0) {
-        return null;
-      }
-      const pad = Math.max(brush, 20) / 2;
-      const xs = points.map((p) => p.x);
-      const ys = points.map((p) => p.y);
       // Image space -> display space, matching how brush strokes are drawn.
       const crop = adjustments.crop;
       const isPercent = crop?.unit === '%';
@@ -1294,67 +1283,59 @@ const ImageCanvas = memo(
           : crop.y
         : 0;
       const scale = imageRenderSize.scale;
-      const imageX = Math.min(...xs) - pad;
-      const imageY = Math.min(...ys) - pad;
-      const imageW = Math.max(...xs) - Math.min(...xs) + pad * 2;
-      const imageH = Math.max(...ys) - Math.min(...ys) + pad * 2;
-      const offset = container.cloneOffset || { x: 0, y: -220 };
-      return {
-        x: (imageX - cropX) * scale,
-        y: (imageY - cropY) * scale,
-        width: imageW * scale,
-        height: imageH * scale,
-        offset: { x: offset.x * scale, y: offset.y * scale },
-        scale,
-        patchId: container.id,
-      };
+      const fallback = container.cloneOffset || { x: 0, y: -220 };
+      const spots: Array<any> = [];
+      for (const sm of container.subMasks || []) {
+        const lines = (sm.parameters as any)?.lines || [];
+        lines.forEach((line: any, lineIndex: number) => {
+          const pts = (line.points || []).filter(
+            (p: any) => typeof p?.x === 'number' && typeof p?.y === 'number',
+          );
+          if (pts.length === 0) {
+            return;
+          }
+          const pad = Math.max(line.brushSize || 0, 20) / 2;
+          const xs = pts.map((p: any) => p.x);
+          const ys = pts.map((p: any) => p.y);
+          const minX = Math.min(...xs);
+          const minY = Math.min(...ys);
+          const offset = line.cloneOffset || fallback;
+          spots.push({
+            key: `${sm.id}:${lineIndex}`,
+            subMaskId: sm.id,
+            lineIndex,
+            patchId: container.id,
+            x: (minX - pad - cropX) * scale,
+            y: (minY - pad - cropY) * scale,
+            width: (Math.max(...xs) - minX + pad * 2) * scale,
+            height: (Math.max(...ys) - minY + pad * 2) * scale,
+            offset: { x: offset.x * scale, y: offset.y * scale },
+            scale,
+          });
+        });
+      }
+      return spots;
     }, [activeContainer, isAiEditing, adjustments.crop, effectiveImageDimensions, imageRenderSize.scale]);
 
-    const moveHealSource = useCallback(
-      (offset: { x: number; y: number }) => {
-        if (!healOverlay) return;
-        const scale = healOverlay.scale || 1;
-        const imageOffset = {
-          x: Math.round(offset.x / scale),
-          y: Math.round(offset.y / scale),
-        };
-        setAdjustments((prev: Adjustments) => ({
-          ...prev,
-          aiPatches: prev.aiPatches.map((patch: AiPatch) =>
-            patch.id === healOverlay.patchId ? ({ ...patch, cloneOffset: imageOffset } as AiPatch) : patch,
-          ),
-        }));
-      },
-      [healOverlay, setAdjustments],
-    );
-
-    const moveHealTarget = useCallback(
-      (displayDx: number, displayDy: number) => {
-        if (!healOverlay || (displayDx === 0 && displayDy === 0)) return;
-        const scale = healOverlay.scale || 1;
-        const dx = displayDx / scale;
-        const dy = displayDy / scale;
+    const updateHealLine = useCallback(
+      (spot: any, updater: (line: any) => any) => {
         setAdjustments((prev: Adjustments) => ({
           ...prev,
           aiPatches: prev.aiPatches.map((patch: AiPatch) => {
-            if (patch.id !== healOverlay.patchId) return patch;
+            if (patch.id !== spot.patchId) return patch;
             return {
               ...patch,
               subMasks: patch.subMasks.map((sm: SubMask) => {
+                if (sm.id !== spot.subMaskId) return sm;
                 const lines = (sm.parameters as any)?.lines;
                 if (!Array.isArray(lines)) return sm;
                 return {
                   ...sm,
                   parameters: {
                     ...(sm.parameters as any),
-                    lines: lines.map((line: any) => ({
-                      ...line,
-                      points: (line.points || []).map((point: any) => ({
-                        ...point,
-                        x: point.x + dx,
-                        y: point.y + dy,
-                      })),
-                    })),
+                    lines: lines.map((line: any, i: number) =>
+                      i === spot.lineIndex ? updater(line) : line,
+                    ),
                   },
                 } as SubMask;
               }),
@@ -1362,7 +1343,68 @@ const ImageCanvas = memo(
           }),
         }));
       },
-      [healOverlay, setAdjustments],
+      [setAdjustments],
+    );
+
+    // The source is stored as an offset from the spot, so it travels with
+    // the spot and keeps sampling the same relative place.
+    const moveHealSpot = useCallback(
+      (spot: any, displayDx: number, displayDy: number) => {
+        if (displayDx === 0 && displayDy === 0) return;
+        const scale = spot.scale || 1;
+        const dx = displayDx / scale;
+        const dy = displayDy / scale;
+        updateHealLine(spot, (line: any) => ({
+          ...line,
+          points: (line.points || []).map((point: any) => ({
+            ...point,
+            x: point.x + dx,
+            y: point.y + dy,
+          })),
+        }));
+      },
+      [updateHealLine],
+    );
+
+    const setHealSpotSource = useCallback(
+      (spot: any, displayOffset: { x: number; y: number }) => {
+        const scale = spot.scale || 1;
+        updateHealLine(spot, (line: any) => ({
+          ...line,
+          cloneOffset: {
+            x: Math.round(displayOffset.x / scale),
+            y: Math.round(displayOffset.y / scale),
+          },
+        }));
+      },
+      [updateHealLine],
+    );
+
+    const deleteHealSpot = useCallback(
+      (spot: any) => {
+        setAdjustments((prev: Adjustments) => ({
+          ...prev,
+          aiPatches: prev.aiPatches.map((patch: AiPatch) => {
+            if (patch.id !== spot.patchId) return patch;
+            return {
+              ...patch,
+              subMasks: patch.subMasks.map((sm: SubMask) => {
+                if (sm.id !== spot.subMaskId) return sm;
+                const lines = (sm.parameters as any)?.lines;
+                if (!Array.isArray(lines)) return sm;
+                return {
+                  ...sm,
+                  parameters: {
+                    ...(sm.parameters as any),
+                    lines: lines.filter((_: any, i: number) => i !== spot.lineIndex),
+                  },
+                } as SubMask;
+              }),
+            } as AiPatch;
+          }),
+        }));
+      },
+      [setAdjustments],
     );
 
 
@@ -2675,91 +2717,154 @@ const ImageCanvas = memo(
                           );
                         })}
 
-                      {healOverlay && (
-                        <>
-                          <Line
-                            points={[
-                              healOverlay.x + healOverlay.width / 2,
-                              healOverlay.y + healOverlay.height / 2,
-                              healOverlay.x + healOverlay.offset.x + healOverlay.width / 2,
-                              healOverlay.y + healOverlay.offset.y + healOverlay.height / 2,
-                            ]}
-                            stroke="#38bdf8"
-                            strokeWidth={1.5 / maxSafeScale}
-                            dash={[6 / maxSafeScale, 6 / maxSafeScale]}
-                            listening={false}
-                          />
-                          <Rect
-                            x={healOverlay.x + healOverlay.offset.x}
-                            y={healOverlay.y + healOverlay.offset.y}
-                            width={healOverlay.width}
-                            height={healOverlay.height}
-                            stroke="#f8fafc"
-                            strokeWidth={2 / maxSafeScale}
-                            dash={[10 / maxSafeScale, 6 / maxSafeScale]}
-                            // A stroke-only Rect is only hit on the outline
-                            // itself, so clicks inside it fell through to the
-                            // stage and panned the photo. A near-invisible
-                            // fill makes the whole marker grabbable.
-                            fill="rgba(248,250,252,0.06)"
-                            // While the brush is active the markers must not
-                            // swallow strokes — the user is painting, not
-                            // repositioning. They stay visible, just inert.
-                            listening={!isToolActive}
-                            draggable={!isToolActive}
-                            onMouseDown={(e: any) => {
-                              e.cancelBubble = true;
-                            }}
-                            onDragStart={(e: any) => {
-                              e.cancelBubble = true;
-                            }}
-                            onDragEnd={(e: any) => {
-                              e.cancelBubble = true;
-                              moveHealSource({
-                                x: Math.round(e.target.x() - healOverlay.x),
-                                y: Math.round(e.target.y() - healOverlay.y),
-                              });
-                            }}
-                            onMouseEnter={(e: any) => {
-                              e.target.getStage().container().style.cursor = 'move';
-                            }}
-                            onMouseLeave={(e: any) => {
-                              e.target.getStage().container().style.cursor = '';
-                            }}
-                          />
-                          <Rect
-                            x={healOverlay.x}
-                            y={healOverlay.y}
-                            width={healOverlay.width}
-                            height={healOverlay.height}
-                            stroke="#38bdf8"
-                            strokeWidth={2 / maxSafeScale}
-                            fill="rgba(56,189,248,0.10)"
-                            listening={!isToolActive}
-                            draggable={!isToolActive}
-                            onMouseDown={(e: any) => {
-                              e.cancelBubble = true;
-                            }}
-                            onDragStart={(e: any) => {
-                              e.cancelBubble = true;
-                            }}
-                            onDragEnd={(e: any) => {
-                              e.cancelBubble = true;
-                              moveHealTarget(
-                                Math.round(e.target.x() - healOverlay.x),
-                                Math.round(e.target.y() - healOverlay.y),
-                              );
-                              e.target.position({ x: healOverlay.x, y: healOverlay.y });
-                            }}
-                            onMouseEnter={(e: any) => {
-                              e.target.getStage().container().style.cursor = 'move';
-                            }}
-                            onMouseLeave={(e: any) => {
-                              e.target.getStage().container().style.cursor = '';
-                            }}
-                          />
-                        </>
-                      )}
+                      {healSpots.map((spot: any) => {
+                        const isSelected = selectedHealKey === spot.key;
+                        const isHovered = hoveredHealKey === spot.key;
+                        const cx = spot.x + spot.width / 2;
+                        const cy = spot.y + spot.height / 2;
+                        return (
+                          <Group key={spot.key}>
+                            {isSelected && (
+                              <>
+                                <Line
+                                  points={[cx, cy, cx + spot.offset.x, cy + spot.offset.y]}
+                                  stroke="#38bdf8"
+                                  strokeWidth={1.5 / maxSafeScale}
+                                  dash={[6 / maxSafeScale, 6 / maxSafeScale]}
+                                  listening={false}
+                                />
+                                <Rect
+                                  x={spot.x + spot.offset.x}
+                                  y={spot.y + spot.offset.y}
+                                  width={spot.width}
+                                  height={spot.height}
+                                  stroke="#f8fafc"
+                                  strokeWidth={2 / maxSafeScale}
+                                  dash={[10 / maxSafeScale, 6 / maxSafeScale]}
+                                  cornerRadius={4 / maxSafeScale}
+                                  // A stroke-only Rect is hit only on its
+                                  // outline, so clicks inside it fell through
+                                  // to the stage and panned the photo. A faint
+                                  // fill makes the whole marker grabbable.
+                                  fill="rgba(248,250,252,0.06)"
+                                  draggable
+                                  onMouseDown={(e: any) => {
+                                    e.cancelBubble = true;
+                                  }}
+                                  onDragStart={(e: any) => {
+                                    e.cancelBubble = true;
+                                  }}
+                                  onDragEnd={(e: any) => {
+                                    e.cancelBubble = true;
+                                    setHealSpotSource(spot, {
+                                      x: e.target.x() - spot.x,
+                                      y: e.target.y() - spot.y,
+                                    });
+                                  }}
+                                  onMouseEnter={(e: any) => {
+                                    e.target.getStage().container().style.cursor = 'move';
+                                  }}
+                                  onMouseLeave={(e: any) => {
+                                    e.target.getStage().container().style.cursor = '';
+                                  }}
+                                />
+                              </>
+                            )}
+                            <Rect
+                              x={spot.x}
+                              y={spot.y}
+                              width={spot.width}
+                              height={spot.height}
+                              stroke={
+                                isSelected ? '#38bdf8' : isHovered ? '#7dd3fc' : 'rgba(56,189,248,0.5)'
+                              }
+                              strokeWidth={(isSelected ? 2 : 1.5) / maxSafeScale}
+                              fill={
+                                isSelected
+                                  ? 'rgba(56,189,248,0.14)'
+                                  : isHovered
+                                    ? 'rgba(56,189,248,0.10)'
+                                    : 'rgba(56,189,248,0.03)'
+                              }
+                              cornerRadius={4 / maxSafeScale}
+                              draggable
+                              onMouseDown={(e: any) => {
+                                e.cancelBubble = true;
+                                setSelectedHealKey(spot.key);
+                              }}
+                              onDragStart={(e: any) => {
+                                e.cancelBubble = true;
+                              }}
+                              onDragEnd={(e: any) => {
+                                e.cancelBubble = true;
+                                moveHealSpot(
+                                  spot,
+                                  Math.round(e.target.x() - spot.x),
+                                  Math.round(e.target.y() - spot.y),
+                                );
+                                e.target.position({ x: spot.x, y: spot.y });
+                              }}
+                              onMouseEnter={(e: any) => {
+                                setHoveredHealKey(spot.key);
+                                e.target.getStage().container().style.cursor = 'move';
+                              }}
+                              onMouseLeave={(e: any) => {
+                                setHoveredHealKey((k: string | null) => (k === spot.key ? null : k));
+                                e.target.getStage().container().style.cursor = '';
+                              }}
+                            />
+                            {isSelected && (
+                              <Group
+                                x={spot.x + spot.width}
+                                y={spot.y}
+                                onMouseDown={(e: any) => {
+                                  e.cancelBubble = true;
+                                }}
+                                onClick={(e: any) => {
+                                  e.cancelBubble = true;
+                                  deleteHealSpot(spot);
+                                  setSelectedHealKey(null);
+                                }}
+                                onMouseEnter={(e: any) => {
+                                  e.target.getStage().container().style.cursor = 'pointer';
+                                }}
+                                onMouseLeave={(e: any) => {
+                                  e.target.getStage().container().style.cursor = '';
+                                }}
+                              >
+                                <Circle
+                                  radius={9 / maxSafeScale}
+                                  fill="#0f172a"
+                                  stroke="#f8fafc"
+                                  strokeWidth={1.5 / maxSafeScale}
+                                />
+                                <Line
+                                  points={[
+                                    -3.5 / maxSafeScale,
+                                    -3.5 / maxSafeScale,
+                                    3.5 / maxSafeScale,
+                                    3.5 / maxSafeScale,
+                                  ]}
+                                  stroke="#f8fafc"
+                                  strokeWidth={1.5 / maxSafeScale}
+                                  listening={false}
+                                />
+                                <Line
+                                  points={[
+                                    3.5 / maxSafeScale,
+                                    -3.5 / maxSafeScale,
+                                    -3.5 / maxSafeScale,
+                                    3.5 / maxSafeScale,
+                                  ]}
+                                  stroke="#f8fafc"
+                                  strokeWidth={1.5 / maxSafeScale}
+                                  listening={false}
+                                />
+                              </Group>
+                            )}
+                          </Group>
+                        );
+                      })}
 
                       {previewBox && (
                         <Rect

@@ -1873,6 +1873,10 @@ function SettingsPanel({
               line.points?.length,
               line.points?.[0]?.x,
               line.points?.[0]?.y,
+              // Each stroke carries its own source, so dragging one must
+              // re-run the blend even though nothing else changed.
+              line.cloneOffset?.x,
+              line.cloneOffset?.y,
             ]),
           ),
         ])
