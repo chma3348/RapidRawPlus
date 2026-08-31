@@ -414,3 +414,17 @@ Measured every light dial on a GPU patch ladder; found and fixed:
       pre-fills the existing HDR/Panorama dialog. Never auto-merges.
 - [ ] Next increment: content-overlap verification for pano candidates
       (thumbnail phase correlation) -> confidence + frame ordering.
+
+## Round: HDR merge rebuild (2026-08-25) — SHIPPED
+- [x] hdr_merge.rs replaces the opaque image-hdr merge: MTB (Ward)
+      alignment — exposure-invariant, so multi-stop brackets register;
+      weighted radiance merge (value/exposure, hat weighting so blown
+      and crushed samples drop out); deghosting rejects samples >1 stop
+      from the best-exposed frame.
+- [x] ISO no longer a hard requirement — it scales effective exposure,
+      so ISO-varied brackets merge correctly.
+- [x] Output is 16-bit TIFF (was 8-bit PNG, which discarded the range
+      the merge had just recovered).
+- [x] 5 unit tests: known shift recovered exactly, alignment survives a
+      2-stop difference, true 8:1 radiance ratio recovered across three
+      exposures, moving subject deghosted, bad input rejected.

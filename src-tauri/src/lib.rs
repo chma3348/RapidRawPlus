@@ -28,6 +28,7 @@ pub mod gpu_processing;
 pub mod image_loader;
 pub mod image_processing;
 mod lens_correction;
+pub mod hdr_merge;
 pub mod merge_discovery;
 mod lut_processing;
 mod mask_generation;
@@ -60,8 +61,6 @@ use std::time::Duration;
 use base64::{Engine as _, engine::general_purpose};
 use image::codecs::jpeg::JpegEncoder;
 use image::{DynamicImage, GenericImageView, ImageBuffer, ImageFormat, Luma, RgbImage, Rgba};
-use image_hdr::hdr_merge_images;
-use image_hdr::input::HDRInput;
 use imageproc::drawing::draw_line_segment_mut;
 use imageproc::edges::canny;
 use imageproc::hough::{LineDetectionOptions, detect_lines};
@@ -1423,10 +1422,9 @@ async fn merge_hdr(
                 dynamic_image = apply_srgb_to_linear(dynamic_image);
             }
 
-            let gains = match read_iso(path, &file_bytes) {
-                None => return Err(format!("Image {} is missing ISO/Sensitivity data", path)),
-                Some(gains) => gains as f32,
-            };
+            // ISO only scales effective exposure; a missing value is no
+            // longer fatal, it just means "same sensitivity as the others".
+            let gains = read_iso(path, &file_bytes).map(|v| v as f32).unwrap_or(100.0);
 
             let exposure = match read_exposure_time_secs(path, &file_bytes) {
                 None => return Err(format!("Image {} is missing ExposureTime data", path)),
@@ -1461,17 +1459,40 @@ async fn merge_hdr(
         }
     }
 
-    let images: Vec<HDRInput> = loaded_items
+    // Effective exposure folds ISO in, so ISO-varied brackets merge
+    // correctly too; the reference frame's ISO sets the scale.
+    let reference_iso = loaded_items.first().map(|(_, _, _, g)| *g).unwrap_or(100.0).max(1.0);
+    let exposures: Vec<f32> = loaded_items
         .iter()
-        .map(|(path, img, exposure, gains)| {
-            HDRInput::with_image(img, *exposure, *gains)
-                .map_err(|e| format!("Failed to prepare HDR input for {}: {}", path, e))
-        })
-        .collect::<Result<Vec<HDRInput>, String>>()?;
+        .map(|(_, _, exposure, gains)| exposure.as_secs_f32() * (gains / reference_iso))
+        .collect();
+    let mut frames: Vec<image::Rgb32FImage> = loaded_items
+        .iter()
+        .map(|(_, img, _, _)| img.to_rgb32f())
+        .collect();
 
-    log::info!("Starting HDR merge of {} images", images.len());
-    let mut hdr_merged = hdr_merge_images(&mut images.into()).map_err(|e| e.to_string())?;
-    hdr_merged = apply_linear_to_srgb(hdr_merged);
+    let _ = app_handle.emit("hdr-progress", "Aligning frames...");
+    let shifts = crate::hdr_merge::align_frames(&mut frames, &exposures);
+    for ((path, _, _, _), (dx, dy)) in loaded_items.iter().zip(&shifts) {
+        if *dx != 0 || *dy != 0 {
+            log::info!(
+                "[hdr] aligned '{}' by ({dx}, {dy}) px",
+                Path::new(path).file_name().unwrap_or_default().to_string_lossy()
+            );
+        }
+    }
+
+    let _ = app_handle.emit("hdr-progress", "Merging exposures...");
+    log::info!("Starting HDR merge of {} images", frames.len());
+    let merged_linear = crate::hdr_merge::merge_frames(
+        &frames,
+        &exposures,
+        &crate::hdr_merge::MergeOptions::default(),
+    )?;
+    // 16-bit output: an 8-bit PNG threw away most of the range the merge
+    // just recovered, leaving nothing for the editor's tonal controls.
+    let hdr_merged = apply_linear_to_srgb(DynamicImage::ImageRgb32F(merged_linear));
+    let hdr_merged = DynamicImage::ImageRgb16(hdr_merged.to_rgb16());
     log::info!("HDR merge completed");
 
     let mut buf = Cursor::new(Vec::new());
@@ -1519,7 +1540,8 @@ async fn save_hdr(
             format!("{}_Hdr.png", stem),
             DynamicImage::ImageRgba8(hdr_image.to_rgba8()),
         )
-    } else if hdr_image.as_rgb32f().is_some() {
+    } else if hdr_image.as_rgb32f().is_some() || hdr_image.as_rgb16().is_some() {
+        // TIFF keeps the merged bit depth; PNG-8 would discard it.
         (format!("{}_Hdr.tiff", stem), hdr_image)
     } else {
         (
