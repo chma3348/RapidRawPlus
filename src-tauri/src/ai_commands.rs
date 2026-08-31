@@ -2720,7 +2720,7 @@ async fn run_engine_inpaint_patch(
     const TILE_SPAN_THRESHOLD: u32 = 900;
     const TILE_TARGET: u32 = 700;
     const MIN_TILE_AREA: u32 = 4000;
-    let mut units: Vec<(MaskComponent, Option<(u32, u32, u32, u32)>)> = Vec::new();
+    let mut units: Vec<FillUnit> = Vec::new();
     for comp in &large {
         if comp.span() <= TILE_SPAN_THRESHOLD {
             units.push((*comp, None));
@@ -2735,6 +2735,7 @@ async fn run_engine_inpaint_patch(
         let overlap_x = (step_x / 5).max(24);
         let overlap_y = (step_y / 5).max(24);
         let mut tile_count = 0;
+        let mut tiles: Vec<TileCandidate> = Vec::new();
         for row in 0..rows {
             for col in 0..cols {
                 let raw_x0 = comp.min_x + col * step_x;
@@ -2759,26 +2760,44 @@ async fn run_engine_inpaint_patch(
                 if area < MIN_TILE_AREA {
                     continue;
                 }
-                units.push((
-                    MaskComponent {
-                        id: comp.id,
-                        min_x: nx0,
-                        min_y: ny0,
-                        max_x: nx1,
-                        max_y: ny1,
-                        area,
-                    },
-                    Some((tx0, ty0, tx1, ty1)),
-                ));
+                let tile_comp = MaskComponent {
+                    id: comp.id,
+                    min_x: nx0,
+                    min_y: ny0,
+                    max_x: nx1,
+                    max_y: ny1,
+                    area,
+                };
+                let context = ring_texture_std(
+                    &encoded_full,
+                    |x, y| labels[(y * w + x) as usize] != 0,
+                    (nx0, ny0, nx1, ny1),
+                    48,
+                );
+                tiles.push((tile_comp, (tx0, ty0, tx1, ty1), context));
                 tile_count += 1;
             }
         }
+        // Fill the tiles that still have texture around them first; each
+        // one then becomes context for the starved tiles behind it. In
+        // raster order a tile ringed by blown sky goes first and returns a
+        // flat wash, which is what left the top of a real edit blank.
+        tiles.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
         log::info!(
-            "[fill] blob span {} exceeds {} — filling as {} progressive tile(s)",
+            "[fill] blob span {} exceeds {} — filling as {} progressive tile(s); \
+             surrounding-texture order: [{}]",
             comp.span(),
             TILE_SPAN_THRESHOLD,
-            tile_count
+            tile_count,
+            tiles
+                .iter()
+                .map(|t| format!("{:.1}", t.2))
+                .collect::<Vec<_>>()
+                .join(", ")
         );
+        for (tile_comp, rect, _) in tiles {
+            units.push((tile_comp, Some(rect)));
+        }
     }
 
     for (blob_index, (comp, tile_rect)) in units.iter().enumerate() {
@@ -3473,6 +3492,61 @@ pub(crate) fn split_heal_units(
         }
     }
     units
+}
+
+/// A region the fill will process: a mask component — possibly one tile of
+/// a larger one — plus the rect it was cut from when it is a tile.
+type FillUnit = (MaskComponent, Option<(u32, u32, u32, u32)>);
+
+/// A tile waiting to be ordered: its component, the rect it covers, and how
+/// much texture its surroundings still carry for the engine to continue.
+type TileCandidate = (MaskComponent, (u32, u32, u32, u32), f32);
+
+/// Luma standard deviation of the photo in a band around a region,
+/// skipping pixels that are themselves inside the selection.
+///
+/// Flux Fill continues its surroundings rather than inventing from
+/// nothing, so this predicts whether a tile has anything to continue from.
+/// Measured on a real edit 2026-08-31: the same tile came back at
+/// luma_std 0.61 — dead flat, no shapes at all — when filled first against
+/// blown-out sky, and 5.57 with visible cloud form when filled last
+/// against neighbours that had already been generated. Ordering tiles by
+/// this score lets structure propagate inward from the textured edge
+/// instead of stranding the starved tiles at the front of the queue.
+pub(crate) fn ring_texture_std(
+    image: &RgbaImage,
+    masked: impl Fn(u32, u32) -> bool,
+    bounds: (u32, u32, u32, u32),
+    band: u32,
+) -> f32 {
+    let (w, h) = image.dimensions();
+    if w == 0 || h == 0 {
+        return 0.0;
+    }
+    let (min_x, min_y, max_x, max_y) = bounds;
+    let x0 = min_x.saturating_sub(band);
+    let y0 = min_y.saturating_sub(band);
+    let x1 = (max_x.saturating_add(band)).min(w - 1);
+    let y1 = (max_y.saturating_add(band)).min(h - 1);
+    let (mut sum, mut sq, mut n) = (0.0f64, 0.0f64, 0u64);
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            if masked(x, y) {
+                continue;
+            }
+            let p = image.get_pixel(x, y);
+            let l = 0.2126 * p[0] as f64 + 0.7152 * p[1] as f64 + 0.0722 * p[2] as f64;
+            sum += l;
+            sq += l * l;
+            n += 1;
+        }
+    }
+    // Too little context to judge; treat as starved so it queues late.
+    if n < 64 {
+        return 0.0;
+    }
+    let mean = sum / n as f64;
+    ((sq / n as f64) - mean * mean).max(0.0).sqrt() as f32
 }
 
 pub(crate) fn clone_offset_copy(
@@ -5497,6 +5571,62 @@ mod clone_stamp_tests {
         let mask = GrayImage::new(16, 16);
         let out = clone_offset_copy(&img, &mask, 4, 4);
         assert_eq!(out.as_raw(), img.as_raw());
+    }
+}
+
+#[cfg(test)]
+mod tile_order_tests {
+    use super::ring_texture_std;
+    use image::{Rgba, RgbaImage};
+
+    /// Left half carries grain, right half is blown flat white — the same
+    /// situation as a sky selection whose top edge runs into blown cloud.
+    fn split_scene() -> RgbaImage {
+        let mut img = RgbaImage::new(400, 200);
+        for y in 0..200 {
+            for x in 0..400 {
+                let v = if x < 200 {
+                    let n = ((x as f32 * 12.9898 + y as f32 * 78.233).sin() * 43758.547).fract();
+                    (120.0 + n.abs() * 90.0).clamp(0.0, 255.0) as u8
+                } else {
+                    252
+                };
+                img.put_pixel(x, y, Rgba([v, v, v, 255]));
+            }
+        }
+        img
+    }
+
+    /// The tile with real texture around it must score higher, so it is
+    /// filled first and becomes context for the starved one.
+    #[test]
+    fn textured_surroundings_outrank_blown_ones() {
+        let img = split_scene();
+        let none = |_x: u32, _y: u32| false;
+        let textured = ring_texture_std(&img, none, (60, 60, 140, 140), 48);
+        let blown = ring_texture_std(&img, none, (260, 60, 340, 140), 48);
+        assert!(
+            textured > blown * 4.0,
+            "textured ring {textured:.2} should clearly outrank blown ring {blown:.2}"
+        );
+        assert!(blown < 2.0, "a blown-white ring should read as no context, got {blown:.2}");
+    }
+
+    /// Pixels inside the selection are the blown area being replaced; they
+    /// must not be counted as context or every tile looks equally good.
+    #[test]
+    fn masked_pixels_are_excluded_from_the_score() {
+        let img = split_scene();
+        let bounds = (60, 60, 140, 140);
+        let all_masked = ring_texture_std(&img, |_x, _y| true, bounds, 48);
+        assert_eq!(all_masked, 0.0, "with no unmasked context the score must be 0");
+    }
+
+    #[test]
+    fn a_flat_scene_scores_near_zero() {
+        let img = RgbaImage::from_pixel(200, 200, Rgba([250, 250, 250, 255]));
+        let score = ring_texture_std(&img, |_x, _y| false, (80, 80, 120, 120), 40);
+        assert!(score < 0.5, "flat scene scored {score:.3}");
     }
 }
 
