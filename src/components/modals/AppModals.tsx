@@ -26,6 +26,7 @@ import { AppSettings, Invokes, AlbumItem, Album, AlbumGroup } from '../ui/AppPro
 import { CopyPasteSettings } from '../../utils/adjustments';
 
 export interface AppModalsProps {
+  requestThumbnails?: (paths: Array<string>) => void;
   handleImageSelect: (path: string) => void;
   handleSavePanorama: () => Promise<string>;
   handleStartPanorama: (paths: string[]) => void;
@@ -198,14 +199,15 @@ export default function AppModals(props: AppModalsProps) {
         onClose={() =>
           setUI({ mergeSuggestionsState: { candidates: [], error: null, isOpen: false, isScanning: false } })
         }
-        onUse={(candidate: MergeCandidate) => {
+        onRequestThumbnails={props.requestThumbnails}
+        onUse={(candidate: MergeCandidate, paths: Array<string>) => {
           const shared = {
             error: null,
             finalImageBase64: null,
             isOpen: true,
             isProcessing: false,
             progressMessage: '',
-            stitchingSourcePaths: candidate.paths,
+            stitchingSourcePaths: paths,
           };
           setUI({
             mergeSuggestionsState: { candidates: [], error: null, isOpen: false, isScanning: false },

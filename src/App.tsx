@@ -718,6 +718,7 @@ function App() {
           </div>
         </div>
         <AppModals
+          requestThumbnails={requestThumbnails}
           handleImageSelect={handleImageSelect}
           handleSavePanorama={handleSavePanorama}
           handleStartPanorama={handleStartPanorama}

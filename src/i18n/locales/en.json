@@ -1482,7 +1482,11 @@
       "highConfidence": "high confidence",
       "useHdr": "Merge to HDR",
       "usePano": "Stitch Panorama",
-      "close": "Close"
+      "close": "Close",
+      "dismiss": "Dismiss this group",
+      "frameHint": "Click a frame to exclude it",
+      "useHdrCount": "Merge to HDR ({{count}})",
+      "usePanoCount": "Stitch Panorama ({{count}})"
     }
   },
   "modelRegistry": {
