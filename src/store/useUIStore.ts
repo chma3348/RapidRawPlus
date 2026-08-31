@@ -33,6 +33,13 @@ export interface CollageModalState {
   sourceImages: ImageFile[];
 }
 
+export interface MergeSuggestionsState {
+  candidates: Array<any>;
+  error: string | null;
+  isOpen: boolean;
+  isScanning: boolean;
+}
+
 export interface PanoramaModalState {
   error: string | null;
   finalImageBase64: string | null;
@@ -141,6 +148,7 @@ interface UIState {
 
   // Complex Modal States
   confirmModalState: ConfirmModalState;
+  mergeSuggestionsState: MergeSuggestionsState;
   panoramaModalState: PanoramaModalState;
   hdrModalState: HdrModalState;
   negativeModalState: NegativeConversionModalState;
@@ -192,6 +200,12 @@ export const useUIStore = create<UIState>((set, get) => ({
   albumActionTarget: null,
 
   confirmModalState: { isOpen: false },
+  mergeSuggestionsState: {
+    candidates: [],
+    error: null,
+    isOpen: false,
+    isScanning: false,
+  },
   panoramaModalState: {
     error: null,
     finalImageBase64: null,

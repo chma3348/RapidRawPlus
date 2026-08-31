@@ -28,6 +28,7 @@ pub mod gpu_processing;
 pub mod image_loader;
 pub mod image_processing;
 mod lens_correction;
+pub mod merge_discovery;
 mod lut_processing;
 mod mask_generation;
 pub mod model_library;
@@ -2241,6 +2242,7 @@ pub fn run() {
             ai_commands::sample_image_color,
             ai_commands::respot_enhance,
             ai_commands::list_managed_luts,
+            merge_discovery::discover_merge_candidates,
             flat_field::create_flat_profile,
             flat_field::list_flat_profiles,
             flat_field::delete_flat_profile,

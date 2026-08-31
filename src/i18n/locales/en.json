@@ -236,7 +236,8 @@
       "stitchPanorama": "Stitch Panorama",
       "tagging": "Tagging",
       "undo": "Undo",
-      "upscale": "AI Upscale"
+      "upscale": "AI Upscale",
+      "findMerges": "Find Merge Candidates…"
     },
     "folders": {
       "changeIcon": "Change Icon",
@@ -1470,6 +1471,18 @@
       "warnFewFrames": "Built from fewer than 3 frames — average 5+ for a cleaner master.",
       "cancel": "Cancel",
       "done": "Done"
+    },
+    "mergeSuggestions": {
+      "title": "Suggested merges",
+      "scanning": "Scanning this folder for bracket sets and panorama sequences…",
+      "summary": "{{hdr}} bracket set(s) and {{pano}} panorama sequence(s) found in this folder.",
+      "empty": "No bracket sets or panorama sequences found. Detection uses capture times and exposure settings, so photos need their original EXIF.",
+      "bracketSet": "Bracket set — {{count}} frames",
+      "sweep": "Panorama sweep — {{count}} frames",
+      "highConfidence": "high confidence",
+      "useHdr": "Merge to HDR",
+      "usePano": "Stitch Panorama",
+      "close": "Close"
     }
   },
   "modelRegistry": {

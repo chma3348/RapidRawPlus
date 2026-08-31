@@ -666,6 +666,32 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
               },
             },
             {
+              icon: Sparkles,
+              label: t('contextMenus.editor.findMerges'),
+              onClick: async () => {
+                const paths = imageList.map((img) => img.path);
+                setUI({
+                  mergeSuggestionsState: { candidates: [], error: null, isOpen: true, isScanning: true },
+                });
+                try {
+                  const candidates: Array<any> = await invoke(Invokes.DiscoverMergeCandidates, { paths });
+                  setUI({
+                    mergeSuggestionsState: { candidates, error: null, isOpen: true, isScanning: false },
+                  });
+                } catch (err) {
+                  console.error('[discover] merge candidate scan failed:', err);
+                  setUI({
+                    mergeSuggestionsState: {
+                      candidates: [],
+                      error: String(err),
+                      isOpen: true,
+                      isScanning: false,
+                    },
+                  });
+                }
+              },
+            },
+            {
               icon: LayoutTemplate,
               label: collageLabel,
               onClick: () => {

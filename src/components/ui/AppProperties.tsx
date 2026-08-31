@@ -102,6 +102,7 @@ export enum Invokes {
   SetRatingForPaths = 'set_rating_for_paths',
   ShowInFinder = 'show_in_finder',
   StartBackgroundIndexing = 'start_background_indexing',
+  DiscoverMergeCandidates = 'discover_merge_candidates',
   StitchPanorama = 'stitch_panorama',
   MergeHdr = 'merge_hdr',
   TestAIConnectorConnection = 'test_ai_connector_connection',

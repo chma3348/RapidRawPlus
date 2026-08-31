@@ -9,6 +9,7 @@ import { useProcessStore } from '../../store/useProcessStore';
 import { useEditorStore } from '../../store/useEditorStore';
 import CopyPasteSettingsModal from './CopyPasteSettingsModal';
 import PanoramaModal from './PanoramaModal';
+import MergeSuggestionsModal, { MergeCandidate } from './MergeSuggestionsModal';
 import HdrModal from './HdrModal';
 import NegativeConversionModal from './NegativeConversionModal';
 import DenoiseModal from './DenoiseModal';
@@ -81,6 +82,7 @@ export default function AppModals(props: AppModalsProps) {
     confirmModalState,
     panoramaModalState,
     hdrModalState,
+    mergeSuggestionsState,
     negativeModalState,
     denoiseModalState,
     enhanceModalState,
@@ -105,6 +107,7 @@ export default function AppModals(props: AppModalsProps) {
       confirmModalState: state.confirmModalState,
       panoramaModalState: state.panoramaModalState,
       hdrModalState: state.hdrModalState,
+      mergeSuggestionsState: state.mergeSuggestionsState,
       negativeModalState: state.negativeModalState,
       denoiseModalState: state.denoiseModalState,
       enhanceModalState: state.enhanceModalState,
@@ -186,6 +189,29 @@ export default function AppModals(props: AppModalsProps) {
         onSave={(newSettings) =>
           handleSettingsChange({ ...appSettings, copyPasteSettings: newSettings } as AppSettings)
         }
+      />
+      <MergeSuggestionsModal
+        candidates={mergeSuggestionsState.candidates as Array<MergeCandidate>}
+        error={mergeSuggestionsState.error}
+        isOpen={mergeSuggestionsState.isOpen}
+        isScanning={mergeSuggestionsState.isScanning}
+        onClose={() =>
+          setUI({ mergeSuggestionsState: { candidates: [], error: null, isOpen: false, isScanning: false } })
+        }
+        onUse={(candidate: MergeCandidate) => {
+          const shared = {
+            error: null,
+            finalImageBase64: null,
+            isOpen: true,
+            isProcessing: false,
+            progressMessage: '',
+            stitchingSourcePaths: candidate.paths,
+          };
+          setUI({
+            mergeSuggestionsState: { candidates: [], error: null, isOpen: false, isScanning: false },
+            ...(candidate.kind === 'hdr' ? { hdrModalState: shared } : { panoramaModalState: shared }),
+          });
+        }}
       />
       <PanoramaModal
         error={panoramaModalState.error}

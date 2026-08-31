@@ -400,3 +400,17 @@ Measured every light dial on a GPU patch ladder; found and fixed:
       config (measured in-mask); my two "cloud" proofs were misread
       whole-canvas impressions — the surrounding REAL clouds. Rule:
       measure in-mask. Prompted structure verified on user's screen.
+
+## Round: merge auto-discovery (2026-08-25) — SHIPPED
+- [x] merge_discovery.rs: EXIF-driven scan (1MB prefix read + cached
+      sidecar fallback + mtime fallback), burst clustering on capture
+      time, bracket classification (aperture/focal/ISO locked + >=0.9
+      stop spread, even steps = high confidence), pano-sweep
+      classification (>=3 consistently exposed frames, one focal).
+- [x] 5 unit tests incl. the critical negative: aperture-priority
+      shutter drift must NOT read as a bracket.
+- [x] UI: thumbnail right-click -> Productivity -> "Find Merge
+      Candidates...", suggestion cards with evidence, one click
+      pre-fills the existing HDR/Panorama dialog. Never auto-merges.
+- [ ] Next increment: content-overlap verification for pano candidates
+      (thumbnail phase correlation) -> confidence + frame ordering.
