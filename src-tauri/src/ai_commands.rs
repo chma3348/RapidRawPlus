@@ -3474,6 +3474,7 @@ pub async fn apply_clone_patch(
     patch_definition: AiPatchDefinition,
     offset_x: i32,
     offset_y: i32,
+    heal: bool,
     current_adjustments: Value,
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
@@ -3615,10 +3616,18 @@ pub async fn apply_clone_patch(
     log::info!(
         "[clone] {masked_px} px selected ({solid_px} at full strength) from offset ({offset_x}, {offset_y})"
     );
-    let mut cloned = clone_offset_copy(&encoded_full, &mask_bitmap, offset_x, offset_y);
-    // Same harmonisation as a fill patch: match the ring's tone and grain
-    // so the copied pixels sit in their new surroundings.
-    harmonize_patch(&encoded_full, &mut cloned, &mask_bitmap, 1.0);
+    // Heal and clone differ in exactly one way: a clone reproduces the
+    // source verbatim, a heal keeps its texture but takes its tone from the
+    // destination. Global harmonisation is not enough for the latter — on a
+    // real edit it left a 49/255 step at the mask edge — so healing solves
+    // for a seamless blend instead.
+    let cloned = if heal {
+        crate::heal_blend::heal_blend(&encoded_full, &mask_bitmap, offset_x, offset_y)
+    } else {
+        let mut c = clone_offset_copy(&encoded_full, &mask_bitmap, offset_x, offset_y);
+        harmonize_patch(&encoded_full, &mut c, &mask_bitmap, 1.0);
+        c
+    };
 
     let patch_json = encode_patch_result(&cloned, is_linear, &mask_bitmap)?;
     let _ = path;

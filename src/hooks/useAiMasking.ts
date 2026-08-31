@@ -149,6 +149,9 @@ export function useAiMasking() {
         console.error('[clone] blocked: patch container not found', patchId);
         return;
       }
+      // Heal blends the source into the destination's tone; clone copies it
+      // verbatim. The backend needs to know which the user asked for.
+      const isHeal = container.patchType === 'heal';
 
       setEditor({ isGeneratingAi: true });
       setAdjustments((prev: Adjustments) => ({
@@ -162,18 +165,24 @@ export function useAiMasking() {
           patchDefinition: container,
           offsetX: Math.round(offsetX),
           offsetY: Math.round(offsetY),
+          heal: isHeal,
           currentAdjustments: adjustments,
         });
         const patchData = JSON.parse(patchJson);
         setAdjustments((prev: Adjustments) => ({
           ...prev,
           aiPatches: prev.aiPatches.map((p: AiPatch) =>
-            p.id === patchId ? { ...p, patchData, isLoading: false, name: 'Clone' } : p,
+            p.id === patchId ? { ...p, patchData, isLoading: false, name: isHeal ? 'Heal' : 'Clone' } : p,
           ),
         }));
-        setEditor({ activeAiSubMaskId: null });
+        // Heal is meant to be worked at: keep the brush pointed at the same
+        // sub-mask so more strokes can be added and the source re-dragged,
+        // each edit re-running the blend. Clone stays one-shot.
+        if (!isHeal) {
+          setEditor({ activeAiSubMaskId: null });
+        }
       } catch (err) {
-        toast.error(`Clone failed: ${err}`);
+        toast.error(`${isHeal ? 'Heal' : 'Clone'} failed: ${err}`);
         setAdjustments((prev: Adjustments) => ({
           ...prev,
           aiPatches: prev.aiPatches.map((p: AiPatch) => (p.id === patchId ? { ...p, isLoading: false } : p)),

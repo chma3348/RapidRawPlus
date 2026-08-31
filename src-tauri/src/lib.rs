@@ -24,6 +24,7 @@ mod file_management;
 pub mod flat_field;
 mod flog2c;
 mod formats;
+pub mod heal_blend;
 pub mod gpu_processing;
 pub mod image_loader;
 pub mod image_processing;

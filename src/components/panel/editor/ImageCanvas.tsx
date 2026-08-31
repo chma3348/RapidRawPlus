@@ -2697,8 +2697,24 @@ const ImageCanvas = memo(
                             stroke="#f8fafc"
                             strokeWidth={2 / maxSafeScale}
                             dash={[10 / maxSafeScale, 6 / maxSafeScale]}
-                            draggable
+                            // A stroke-only Rect is only hit on the outline
+                            // itself, so clicks inside it fell through to the
+                            // stage and panned the photo. A near-invisible
+                            // fill makes the whole marker grabbable.
+                            fill="rgba(248,250,252,0.06)"
+                            // While the brush is active the markers must not
+                            // swallow strokes — the user is painting, not
+                            // repositioning. They stay visible, just inert.
+                            listening={!isToolActive}
+                            draggable={!isToolActive}
+                            onMouseDown={(e: any) => {
+                              e.cancelBubble = true;
+                            }}
+                            onDragStart={(e: any) => {
+                              e.cancelBubble = true;
+                            }}
                             onDragEnd={(e: any) => {
+                              e.cancelBubble = true;
                               moveHealSource({
                                 x: Math.round(e.target.x() - healOverlay.x),
                                 y: Math.round(e.target.y() - healOverlay.y),
@@ -2718,8 +2734,17 @@ const ImageCanvas = memo(
                             height={healOverlay.height}
                             stroke="#38bdf8"
                             strokeWidth={2 / maxSafeScale}
-                            draggable
+                            fill="rgba(56,189,248,0.10)"
+                            listening={!isToolActive}
+                            draggable={!isToolActive}
+                            onMouseDown={(e: any) => {
+                              e.cancelBubble = true;
+                            }}
+                            onDragStart={(e: any) => {
+                              e.cancelBubble = true;
+                            }}
                             onDragEnd={(e: any) => {
+                              e.cancelBubble = true;
                               moveHealTarget(
                                 Math.round(e.target.x() - healOverlay.x),
                                 Math.round(e.target.y() - healOverlay.y),
