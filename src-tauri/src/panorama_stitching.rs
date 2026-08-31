@@ -4,7 +4,7 @@ use crate::file_management::parse_virtual_path;
 use base64::{Engine as _, engine::general_purpose};
 use image::ImageFormat;
 use image::{DynamicImage, GenericImageView, GrayImage, Rgb32FImage};
-use nalgebra::Matrix3;
+use nalgebra::{Matrix3, Vector3};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
@@ -15,7 +15,7 @@ use tauri::{AppHandle, Emitter};
 
 use crate::formats::is_raw_file;
 use crate::image_processing::apply_cpu_default_raw_processing;
-use crate::panorama_utils::{processing, stitching};
+use crate::panorama_utils::{finishing, processing, stitching};
 
 pub const BRIEF_DESCRIPTOR_SIZE: usize = 256;
 pub type Descriptor = [u8; BRIEF_DESCRIPTOR_SIZE / 8];
@@ -379,6 +379,73 @@ fn stitch_images(image_paths: Vec<String>, app_handle: AppHandle) -> Result<Dyna
         format!("Stitching order: {}", ordered_filenames.join(" -> ")),
     );
 
+    // Exposure compensation. Frames shot on auto exposure rarely match
+    // each other, and a seam between two differently exposed frames reads
+    // as a band across the sky however good the blend is. Estimate one
+    // gain per frame from brightness ratios measured where frames overlap.
+    {
+        let _ = app_handle.emit("panorama-progress", "Matching exposure between frames...");
+        let mut ratio_pairs: Vec<(usize, usize, f64)> = Vec::new();
+        for (position, &i) in ordered_indices.iter().enumerate() {
+            for &j in ordered_indices.iter().skip(position + 1) {
+                let (Some(h_i), Some(h_j)) =
+                    (global_homographies.get(&i), global_homographies.get(&j))
+                else {
+                    continue;
+                };
+                let Some(h_j_inv) = h_j.try_inverse() else {
+                    continue;
+                };
+                let map = h_j_inv * h_i;
+                let source = &image_data[i].image;
+                let target = &image_data[j].image;
+                let (sw, sh) = source.dimensions();
+                let (tw, th) = target.dimensions();
+                const GRID: u32 = 48;
+                let mut samples: Vec<(f32, f32)> = Vec::with_capacity((GRID * GRID) as usize);
+                for gy in 0..GRID {
+                    for gx in 0..GRID {
+                        let x = (gx as f64 + 0.5) * sw as f64 / GRID as f64;
+                        let y = (gy as f64 + 0.5) * sh as f64 / GRID as f64;
+                        let mapped = map * Vector3::new(x, y, 1.0);
+                        if mapped.z.abs() < 1e-9 {
+                            continue;
+                        }
+                        let (mx, my) = (mapped.x / mapped.z, mapped.y / mapped.z);
+                        if mx < 0.0 || my < 0.0 || mx >= tw as f64 || my >= th as f64 {
+                            continue;
+                        }
+                        let a = source.get_pixel((x as u32).min(sw - 1), (y as u32).min(sh - 1));
+                        let b = target.get_pixel(mx as u32, my as u32);
+                        let luma = |p: &image::Rgb<f32>| 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
+                        samples.push((luma(a), luma(b)));
+                    }
+                }
+                if let Some(ratio) = finishing::median_ratio(&samples) {
+                    ratio_pairs.push((i, j, ratio));
+                }
+            }
+        }
+        if ratio_pairs.is_empty() {
+            println!("Exposure compensation: no usable overlaps, frames left as shot.");
+        } else {
+            let gains = finishing::estimate_gains(image_data.len(), &ratio_pairs);
+            for (index, gain) in gains.iter().enumerate() {
+                if (gain - 1.0).abs() > 0.01 {
+                    println!(
+                        "  - exposure gain {:.3} for '{}'",
+                        gain,
+                        Path::new(&image_data[index].filename)
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                    );
+                }
+                finishing::apply_gain(&mut image_data[index].image, *gain);
+            }
+        }
+    }
+
     let stitched_images_info: Vec<&ImageInfo> =
         ordered_indices.iter().map(|&i| &image_data[i]).collect();
     let unstitched_count = image_data.len() - stitched_images_info.len();
@@ -408,6 +475,22 @@ fn stitch_images(image_paths: Vec<String>, app_handle: AppHandle) -> Result<Dyna
     println!("Stitching completed in {:.2?}\n", start_time.elapsed());
 
     let _ = app_handle.emit("panorama-progress", "Finalizing panorama...");
+
+    // Trim the canvas the warp never wrote to. Conservative by design:
+    // only completely unwritten lines go, so dark scene content is safe.
+    let (crop_x, crop_y, crop_w, crop_h) = finishing::trim_empty_borders(&panorama);
+    let panorama = if crop_w != panorama.width() || crop_h != panorama.height() {
+        println!(
+            "Trimmed unwritten canvas: {}x{} -> {}x{}",
+            panorama.width(),
+            panorama.height(),
+            crop_w,
+            crop_h
+        );
+        image::imageops::crop_imm(&panorama, crop_x, crop_y, crop_w, crop_h).to_image()
+    } else {
+        panorama
+    };
 
     Ok(DynamicImage::ImageRgb32F(panorama))
 }

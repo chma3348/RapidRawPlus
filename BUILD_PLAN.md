@@ -428,3 +428,16 @@ Measured every light dial on a GPU patch ladder; found and fixed:
 - [x] 5 unit tests: known shift recovered exactly, alignment survives a
       2-stop difference, true 8:1 radiance ratio recovered across three
       exposures, moving subject deghosted, bad input rejected.
+
+## Round: panorama finishing (2026-08-25) — SHIPPED
+- [x] Exposure compensation: 48x48 sample grid through each pair's
+      homography, MEDIAN overlap brightness ratio (robust to movers and
+      speculars), one gain per frame solved in log space, normalised so
+      the pano stays neutral. Nothing compensated exposure before, which
+      is what banded seams across skies.
+- [x] Conservative canvas trim: only completely unwritten lines are
+      removed, so genuinely black scene content is never cropped.
+- [x] 6 unit tests. The solver test caught a real bug: Jacobi iteration
+      oscillates forever on a bipartite constraint graph (a chain of
+      frames is exactly that) and returned confidently wrong gains —
+      now Gauss-Seidel.
