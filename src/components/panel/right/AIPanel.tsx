@@ -33,6 +33,7 @@ import {
   Sparkles,
   FolderOpen,
   SquaresIntersect,
+  Stamp,
 } from 'lucide-react';
 
 import CollapsibleSection from '../../ui/CollapsibleSection';
@@ -849,11 +850,21 @@ export default function AIPanel() {
       return;
     }
 
-    const newEditSubMenu = AI_PANEL_CREATION_TYPES.filter((maskType) => !maskType.disabled).map((maskType) => ({
-      label: maskType.name,
-      icon: maskType.icon,
-      onClick: () => handleAddAiPatchContainer(maskType.type),
-    }));
+    const newEditSubMenu = [
+      ...AI_PANEL_CREATION_TYPES.filter((maskType) => !maskType.disabled).map((maskType) => ({
+        label: maskType.name,
+        icon: maskType.icon,
+        onClick: () => handleAddAiPatchContainer(maskType.type),
+      })),
+      {
+        label: t('editor.ai.settings.healCreate'),
+        icon: Stamp,
+        onClick: () => {
+          setHealMode(true);
+          handleAddAiPatchContainer(Mask.Brush);
+        },
+      },
+    ];
 
     showContextMenu(e.clientX, e.clientY, [
       {
@@ -1091,6 +1102,18 @@ export default function AIPanel() {
                 <Text variant={TextVariants.heading} className="mb-2">
                   {t('editor.ai.editsTitle')}
                 </Text>
+
+                <button
+                  className="w-full mb-2 px-3 py-2 bg-bg-tertiary rounded-md hover:bg-card-active transition-colors text-sm text-text-primary disabled:opacity-40"
+                  disabled={isGeneratingAi}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setHealMode(true);
+                    handleAddAiPatchContainer(Mask.Brush);
+                  }}
+                >
+                  {t('editor.ai.settings.healCreate')}
+                </button>
 
                 <AnimatePresence
                   initial={false}
