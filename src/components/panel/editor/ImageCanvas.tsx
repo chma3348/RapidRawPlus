@@ -1233,6 +1233,29 @@ const ImageCanvas = memo(
     // Heal overlay geometry: the painted strokes define the target box,
     // and the patch's own cloneOffset places the source box. Both are
     // drawn in image coordinates like every other mask overlay.
+    const activeSubMask = useMemo(() => {
+      if (!activeContainer) {
+        return null;
+      }
+      if (isMasking) {
+        return activeContainer.subMasks.find((m: SubMask) => m.id === activeMaskId);
+      }
+      if (isAiEditing) {
+        return activeContainer.subMasks.find((m: SubMask) => m.id === activeAiSubMaskId);
+      }
+      return null;
+    }, [activeContainer, activeMaskId, activeAiSubMaskId, isMasking, isAiEditing]);
+
+    const effectiveImageDimensions = useMemo(() => {
+      const steps = adjustments.orientationSteps || 0;
+      const w = selectedImage.width || 0;
+      const h = selectedImage.height || 0;
+      if (steps === 1 || steps === 3) {
+        return { width: h, height: w };
+      }
+      return { width: w, height: h };
+    }, [selectedImage.width, selectedImage.height, adjustments.orientationSteps]);
+
     const healOverlay = useMemo(() => {
       const container: any = activeContainer;
       if (!isAiEditing || !container || container.patchType !== 'heal') {
@@ -1257,21 +1280,48 @@ const ImageCanvas = memo(
       const pad = Math.max(brush, 20) / 2;
       const xs = points.map((p) => p.x);
       const ys = points.map((p) => p.y);
-      const x = Math.min(...xs) - pad;
-      const y = Math.min(...ys) - pad;
-      const width = Math.max(...xs) - Math.min(...xs) + pad * 2;
-      const height = Math.max(...ys) - Math.min(...ys) + pad * 2;
+      // Image space -> display space, matching how brush strokes are drawn.
+      const crop = adjustments.crop;
+      const isPercent = crop?.unit === '%';
+      const cropX = crop
+        ? isPercent
+          ? (crop.x / 100) * effectiveImageDimensions.width
+          : crop.x
+        : 0;
+      const cropY = crop
+        ? isPercent
+          ? (crop.y / 100) * effectiveImageDimensions.height
+          : crop.y
+        : 0;
+      const scale = imageRenderSize.scale;
+      const imageX = Math.min(...xs) - pad;
+      const imageY = Math.min(...ys) - pad;
+      const imageW = Math.max(...xs) - Math.min(...xs) + pad * 2;
+      const imageH = Math.max(...ys) - Math.min(...ys) + pad * 2;
       const offset = container.cloneOffset || { x: 0, y: -220 };
-      return { x, y, width, height, offset, patchId: container.id };
-    }, [activeContainer, isAiEditing]);
+      return {
+        x: (imageX - cropX) * scale,
+        y: (imageY - cropY) * scale,
+        width: imageW * scale,
+        height: imageH * scale,
+        offset: { x: offset.x * scale, y: offset.y * scale },
+        scale,
+        patchId: container.id,
+      };
+    }, [activeContainer, isAiEditing, adjustments.crop, effectiveImageDimensions, imageRenderSize.scale]);
 
     const moveHealSource = useCallback(
       (offset: { x: number; y: number }) => {
         if (!healOverlay) return;
+        const scale = healOverlay.scale || 1;
+        const imageOffset = {
+          x: Math.round(offset.x / scale),
+          y: Math.round(offset.y / scale),
+        };
         setAdjustments((prev: Adjustments) => ({
           ...prev,
           aiPatches: prev.aiPatches.map((patch: AiPatch) =>
-            patch.id === healOverlay.patchId ? ({ ...patch, cloneOffset: offset } as AiPatch) : patch,
+            patch.id === healOverlay.patchId ? ({ ...patch, cloneOffset: imageOffset } as AiPatch) : patch,
           ),
         }));
       },
@@ -1279,8 +1329,11 @@ const ImageCanvas = memo(
     );
 
     const moveHealTarget = useCallback(
-      (dx: number, dy: number) => {
-        if (!healOverlay || (dx === 0 && dy === 0)) return;
+      (displayDx: number, displayDy: number) => {
+        if (!healOverlay || (displayDx === 0 && displayDy === 0)) return;
+        const scale = healOverlay.scale || 1;
+        const dx = displayDx / scale;
+        const dy = displayDy / scale;
         setAdjustments((prev: Adjustments) => ({
           ...prev,
           aiPatches: prev.aiPatches.map((patch: AiPatch) => {
@@ -1312,28 +1365,6 @@ const ImageCanvas = memo(
       [healOverlay, setAdjustments],
     );
 
-    const activeSubMask = useMemo(() => {
-      if (!activeContainer) {
-        return null;
-      }
-      if (isMasking) {
-        return activeContainer.subMasks.find((m: SubMask) => m.id === activeMaskId);
-      }
-      if (isAiEditing) {
-        return activeContainer.subMasks.find((m: SubMask) => m.id === activeAiSubMaskId);
-      }
-      return null;
-    }, [activeContainer, activeMaskId, activeAiSubMaskId, isMasking, isAiEditing]);
-
-    const effectiveImageDimensions = useMemo(() => {
-      const steps = adjustments.orientationSteps || 0;
-      const w = selectedImage.width || 0;
-      const h = selectedImage.height || 0;
-      if (steps === 1 || steps === 3) {
-        return { width: h, height: w };
-      }
-      return { width: w, height: h };
-    }, [selectedImage.width, selectedImage.height, adjustments.orientationSteps]);
 
     const effectiveZoomScale = transformState.scale > 0 ? transformState.scale : 1;
     const brushStageSize = (brushSettings?.size ?? 0) / effectiveZoomScale;
