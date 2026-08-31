@@ -89,6 +89,8 @@ pub struct AiPatchDefinition {
     pub invert: bool,
     pub prompt: String,
     #[serde(default)]
+    pub reconstruct_single_path: bool,
+    #[serde(default)]
     pub patch_data: Option<PatchData>,
     #[serde(default = "default_opacity")]
     pub opacity: f32,

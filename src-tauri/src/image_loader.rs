@@ -749,10 +749,16 @@ mod patch_feather_tests {
             }
         }
         // And the interior edge actually ramps (feather does something).
-        assert!(inward.get_pixel(41, 60)[0] < 255, "no inward gradient at the edge");
+        assert!(
+            inward.get_pixel(41, 60)[0] < 255,
+            "no inward gradient at the edge"
+        );
         // Gaussian tails dim the exact center by ~1 count on a small
         // square — allow that; the property is 'core stays essentially
         // full strength', not bit-exactness.
-        assert!(inward.get_pixel(60, 60)[0] >= 250, "core lost full strength");
+        assert!(
+            inward.get_pixel(60, 60)[0] >= 250,
+            "core lost full strength"
+        );
     }
 }

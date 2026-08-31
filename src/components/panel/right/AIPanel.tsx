@@ -54,7 +54,7 @@ import {
   formatMaskTypeName,
   getSubMaskName,
 } from './Masks';
-import { Adjustments, AiPatch } from '../../../utils/adjustments';
+import { Adjustments, AiPatch, AiPatchResultVariant } from '../../../utils/adjustments';
 import { Invokes, OPTION_SEPARATOR } from '../../ui/AppProperties';
 import { createSubMask } from '../../../utils/maskUtils';
 import ModelPicker, { ModelTaskType } from '../../ui/ModelPicker';
@@ -114,8 +114,8 @@ const SUB_MASK_CONFIG: any = {
     parameters: [
       { key: 'whiteThreshold', min: 50, max: 100, step: 1, defaultValue: 98 },
       { key: 'blackThreshold', min: 0, max: 50, step: 1, defaultValue: 2 },
-      { key: 'solidify', min: 0, max: 100, step: 1, defaultValue: 0 },
-      { key: 'clean', min: 0, max: 100, step: 1, defaultValue: 0 },
+      { key: 'solidify', min: 0, max: 100, step: 1, defaultValue: 40 },
+      { key: 'clean', min: 0, max: 100, step: 1, defaultValue: 12 },
       { key: 'grow', min: -100, max: 100, step: 1, defaultValue: 0 },
       { key: 'feather', min: 0, max: 100, step: 1, defaultValue: 10 },
     ],
@@ -323,7 +323,14 @@ export default function AIPanel() {
   const setCustomEscapeHandler = useUIStore((s) => s.setCustomEscapeHandler);
 
   const { setAdjustments } = useEditorActions();
-  const { handleGenerativeReplace, handleSpotEnhance, handleRespotEnhance, handleDeleteAiPatch, handleGenerateAiForegroundMask } = useAiMasking();
+  const {
+    handleGenerativeReplace,
+    handleSpotEnhance,
+    handleRespotEnhance,
+    handleDeleteAiPatch,
+    handleGenerateAiForegroundMask,
+    handleSelectAiPatchVariant,
+  } = useAiMasking();
   const appSettings = useSettingsStore((s) => s.appSettings);
   const aiProvider = appSettings?.aiProvider || 'cpu';
 
@@ -547,7 +554,7 @@ export default function AIPanel() {
       Object.assign(subMask.parameters as any, {
         whiteThreshold: 98,
         blackThreshold: 2,
-        clean: 0,
+        clean: 12,
         grow: 0,
         feather: 10,
         rotation: adjustments?.rotation || 0,
@@ -1161,6 +1168,7 @@ export default function AIPanel() {
                   isGeneratingAi={isGeneratingAi}
                   isGeneratingAiMask={isGeneratingAiMask}
                   onGenerativeReplace={handleGenerativeReplace}
+                  onSelectAiPatchVariant={handleSelectAiPatchVariant}
                   onSpotEnhance={handleSpotEnhance}
                   onRespotEnhance={handleRespotEnhance}
                   collapsibleState={collapsibleState}
@@ -1781,6 +1789,7 @@ function SettingsPanel({
   isGeneratingAi,
   isGeneratingAiMask: _isGeneratingAiMask,
   onGenerativeReplace,
+  onSelectAiPatchVariant,
   onSpotEnhance,
   onRespotEnhance,
   collapsibleState,
@@ -1792,8 +1801,13 @@ function SettingsPanel({
   const isActive = !!container;
   const isComponentMode = !!activeSubMask;
   const displayContainer = container || PLACEHOLDER_PATCH;
+  const isQuickErasePatch = displayContainer.subMasks?.some((sm: SubMask) => sm.type === Mask.QuickEraser);
+  const isReconstructPatch = displayContainer.subMasks?.some((sm: SubMask) => sm.type === Mask.Clipped);
   const [prompt, setPrompt] = useState(displayContainer.prompt || '');
   const [useFastInpaint, setUseFastInpaint] = useState(!isGenerativeAvailable);
+  const [reconstructSinglePath, setReconstructSinglePath] = useState(
+    isReconstructPatch && displayContainer.reconstructSinglePath !== false,
+  );
   const [inpaintModels, setInpaintModels] = useState<Array<any>>([]);
   const [spotTask, setSpotTask] = useState<'deblur' | 'restore' | 'upscale'>('deblur');
   const [spotStrength, setSpotStrength] = useState(70);
@@ -1827,6 +1841,11 @@ function SettingsPanel({
       : inpaintModels.find((m) => m.available)?.id;
   const selectedInpaint = inpaintModels.find((m) => m.id === selectedInpaintId);
   const isEngineFill = selectedInpaint?.params?.engine === 'comfy';
+  const reconstructVariants = ((displayContainer.patchData?.reconstructVariants || []) as AiPatchResultVariant[]).filter(
+    (variant) => variant?.id?.startsWith('attempt-') && variant?.color && variant?.mask,
+  );
+  const activeReconstructVariantId = displayContainer.patchData?.reconstructActiveVariantId || reconstructVariants[0]?.id;
+  const hasReconstructHistory = reconstructVariants.length > 1;
 
   const handleInpaintModelChange = (modelId: string) => {
     if (!appSettings) return;
@@ -1838,10 +1857,12 @@ function SettingsPanel({
   const prevContainerId = useRef<string | null>(null);
 
   useEffect(() => {
-    if (container) setPrompt(container.prompt || '');
+    if (container) {
+      setPrompt(container.prompt || '');
+      const hasClippedMask = container.subMasks?.some((sm: SubMask) => sm.type === Mask.Clipped);
+      setReconstructSinglePath(hasClippedMask && container.reconstructSinglePath !== false);
+    }
   }, [container?.id]);
-
-  const isQuickErasePatch = displayContainer.subMasks?.some((sm: SubMask) => sm.type === Mask.QuickEraser);
 
   useEffect(() => {
     if (container) {
@@ -1876,8 +1897,13 @@ function SettingsPanel({
       console.error('[ai] generate blocked: no active patch container');
       return;
     }
-    updateContainer(container.id, { prompt });
-    onGenerativeReplace(container.id, prompt, useFastInpaint);
+    updateContainer(container.id, { prompt, reconstructSinglePath });
+    onGenerativeReplace(container.id, prompt, useFastInpaint, reconstructSinglePath);
+  };
+
+  const handleVariantClick = (variantId: string) => {
+    if (!container) return;
+    onSelectAiPatchVariant?.(container.id, variantId);
   };
 
   const handleToggleSection = (section: string) =>
@@ -1893,6 +1919,53 @@ function SettingsPanel({
           <Text variant={TextVariants.heading} className="mb-2">
             {t('editor.ai.settings.resultBlendTitle')}
           </Text>
+          {hasReconstructHistory && (
+            <div className="mb-3 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <Text variant={TextVariants.small} weight={TextWeights.medium}>
+                  Attempts
+                </Text>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {reconstructVariants.map((variant) => {
+                  const isCurrent = variant.id === activeReconstructVariantId;
+                  return (
+                    <button
+                      key={variant.id}
+                      type="button"
+                      disabled={isGeneratingAi || displayContainer.isLoading}
+                      onClick={() => handleVariantClick(variant.id)}
+                      className={`min-w-0 rounded-md px-2 py-1 text-xs font-medium transition-colors ${
+                        isCurrent
+                          ? 'bg-accent text-button-text'
+                          : 'bg-surface text-text-secondary hover:bg-card-active hover:text-text-primary'
+                      } disabled:opacity-50`}
+                      data-tooltip={variant.debugDir ? `Debug: ${variant.debugDir}` : variant.prompt || variant.label}
+                    >
+                      <span className="block max-w-24 truncate">{variant.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+          {displayContainer.patchData?.reconstructVariants && (
+            <div className="mb-3">
+              <Button
+                className="w-full bg-surface text-text-primary text-sm py-1.5"
+                disabled={isGeneratingAi || displayContainer.isLoading || displayContainer.subMasks.length === 0}
+                onClick={handleGenerateClick}
+                title="Generate one more attempt"
+              >
+                {isGeneratingAi || displayContainer.isLoading ? (
+                  <Loader2 size={15} className="animate-spin" />
+                ) : (
+                  <RotateCcw size={15} />
+                )}
+                <span>Try Again</span>
+              </Button>
+            </div>
+          )}
           <Slider
             label={t('editor.ai.settings.resultFeather')}
             min={0}
@@ -1971,6 +2044,18 @@ function SettingsPanel({
                     : t('editor.ai.settings.basicInpaintTooltipEnabled')
                 }
               />
+            )}
+
+            {isReconstructPatch && (
+              <div className="mt-3">
+                <Switch
+                  checked={reconstructSinglePath}
+                  disabled={isGeneratingAi || displayContainer.isLoading}
+                  label="Single path test"
+                  onChange={setReconstructSinglePath}
+                  tooltip="Experimental: run this Reconstruct selection as one prompt-conditioned engine pass, without fast cleanup or fallback substitution."
+                />
+              </div>
             )}
 
             <AnimatePresence>

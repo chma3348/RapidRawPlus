@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'react-toastify';
 import { useEditorStore } from '../store/useEditorStore';
 import { useEditorActions } from './useEditorActions';
-import { Adjustments, AiPatch, MaskContainer, Coord } from '../utils/adjustments';
+import { Adjustments, AiPatch, AiPatchResultVariant, MaskContainer, Coord } from '../utils/adjustments';
 import { SubMask } from '../components/panel/right/Masks';
 import { Invokes } from '../components/ui/AppProperties';
 import { useAuth } from '@clerk/react';
@@ -51,7 +51,7 @@ export function useAiMasking() {
   );
 
   const handleGenerativeReplace = useCallback(
-    async (patchId: string, prompt: string, useFastInpaint: boolean) => {
+    async (patchId: string, prompt: string, useFastInpaint: boolean, reconstructSinglePath = false) => {
       const { selectedImage, adjustments, isGeneratingAi, patchesSentToBackend } = useEditorStore.getState();
       // Every early exit must be LOUD: silent returns here read as "the
       // button does nothing" (console.error reaches app.log).
@@ -71,13 +71,15 @@ export function useAiMasking() {
         return;
       }
 
-      const patchDefinition = { ...patch, prompt };
+      const patchDefinition = { ...patch, prompt, reconstructSinglePath };
 
       // Visible feedback FIRST — the token fetch used to run before any
       // state change, so a hung auth lookup looked like a dead button.
       setAdjustments((prev: Adjustments) => ({
         ...prev,
-        aiPatches: prev.aiPatches.map((p: AiPatch) => (p.id === patchId ? { ...p, isLoading: true, prompt } : p)),
+        aiPatches: prev.aiPatches.map((p: AiPatch) =>
+          p.id === patchId ? { ...p, isLoading: true, prompt, reconstructSinglePath } : p,
+        ),
       }));
       setEditor({ isGeneratingAi: true });
 
@@ -107,6 +109,7 @@ export function useAiMasking() {
                   ...p,
                   patchData: newPatchData,
                   isLoading: false,
+                  reconstructSinglePath,
                   name: useFastInpaint ? 'Inpaint' : prompt && prompt.trim() ? prompt.trim() : p.name,
                 }
               : p,
@@ -342,6 +345,36 @@ export function useAiMasking() {
     [setAdjustments],
   );
 
+  const handleSelectAiPatchVariant = useCallback(
+    (patchId: string, variantId: string) => {
+      setAdjustments((prev: Adjustments) => ({
+        ...prev,
+        aiPatches: (prev.aiPatches || []).map((p: AiPatch) => {
+          if (p.id !== patchId || !p.patchData?.reconstructVariants) return p;
+          const variants = p.patchData.reconstructVariants as AiPatchResultVariant[];
+          const variant = variants.find((v) => v.id === variantId);
+          if (!variant) return p;
+          return {
+            ...p,
+            patchData: {
+              ...p.patchData,
+              color: variant.color,
+              mask: variant.mask,
+              encoding: variant.encoding ?? p.patchData.encoding,
+              reconstructActiveVariantId: variant.id,
+              reconstructActiveKind: variant.kind,
+              reconstructPrompt: variant.prompt ?? p.patchData.reconstructPrompt,
+              reconstructDebugRunId: variant.debugRunId ?? p.patchData.reconstructDebugRunId,
+              reconstructDebugDir: variant.debugDir ?? p.patchData.reconstructDebugDir,
+              reconstructVariants: variants,
+            },
+          };
+        }),
+      }));
+    },
+    [setAdjustments],
+  );
+
   const handleGenerateAiMask = async (subMaskId: string, startPoint: Coord, endPoint: Coord) => {
     const { selectedImage, adjustments, patchesSentToBackend } = useEditorStore.getState();
     if (!selectedImage?.path) return;
@@ -534,6 +567,7 @@ export function useAiMasking() {
     handleDeleteMaskContainer,
     handleDeleteAiPatch,
     handleToggleAiPatchVisibility,
+    handleSelectAiPatchVariant,
     handleGenerateAiMask,
     handleGenerateAiDepthMask,
     handleGenerateAiForegroundMask,

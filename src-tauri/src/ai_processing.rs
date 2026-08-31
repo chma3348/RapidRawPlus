@@ -1652,20 +1652,36 @@ pub fn feather_mask_inward(mask: &image::GrayImage, feather: f32) -> image::Gray
     for y in 0..shi {
         for x in 0..swi {
             let mut d = dist[idx(x, y)];
-            if x > 0 { d = d.min(dist[idx(x - 1, y)] + 3.0); }
-            if y > 0 { d = d.min(dist[idx(x, y - 1)] + 3.0); }
-            if x > 0 && y > 0 { d = d.min(dist[idx(x - 1, y - 1)] + 4.0); }
-            if x + 1 < swi && y > 0 { d = d.min(dist[idx(x + 1, y - 1)] + 4.0); }
+            if x > 0 {
+                d = d.min(dist[idx(x - 1, y)] + 3.0);
+            }
+            if y > 0 {
+                d = d.min(dist[idx(x, y - 1)] + 3.0);
+            }
+            if x > 0 && y > 0 {
+                d = d.min(dist[idx(x - 1, y - 1)] + 4.0);
+            }
+            if x + 1 < swi && y > 0 {
+                d = d.min(dist[idx(x + 1, y - 1)] + 4.0);
+            }
             dist[idx(x, y)] = d;
         }
     }
     for y in (0..shi).rev() {
         for x in (0..swi).rev() {
             let mut d = dist[idx(x, y)];
-            if x + 1 < swi { d = d.min(dist[idx(x + 1, y)] + 3.0); }
-            if y + 1 < shi { d = d.min(dist[idx(x, y + 1)] + 3.0); }
-            if x + 1 < swi && y + 1 < shi { d = d.min(dist[idx(x + 1, y + 1)] + 4.0); }
-            if x > 0 && y + 1 < shi { d = d.min(dist[idx(x - 1, y + 1)] + 4.0); }
+            if x + 1 < swi {
+                d = d.min(dist[idx(x + 1, y)] + 3.0);
+            }
+            if y + 1 < shi {
+                d = d.min(dist[idx(x, y + 1)] + 3.0);
+            }
+            if x + 1 < swi && y + 1 < shi {
+                d = d.min(dist[idx(x + 1, y + 1)] + 4.0);
+            }
+            if x > 0 && y + 1 < shi {
+                d = d.min(dist[idx(x - 1, y + 1)] + 4.0);
+            }
             dist[idx(x, y)] = d;
         }
     }
@@ -1733,11 +1749,13 @@ mod mask_geometry_tests {
             // Interior beyond the band must be untouched at ANY slider
             // value — the whole point of edge-band feather.
             assert_eq!(
-                f.get_pixel(250, 250)[0], 255,
+                f.get_pixel(250, 250)[0],
+                255,
                 "interior dimmed at feather {feather}"
             );
             assert_eq!(
-                f.get_pixel(90, 250)[0], 255,
+                f.get_pixel(90, 250)[0],
+                255,
                 "40px-deep pixel dimmed at feather {feather}"
             );
         }

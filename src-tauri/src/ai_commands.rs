@@ -1,13 +1,16 @@
 use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
+use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::Cursor;
+use std::path::PathBuf;
 
 use base64::{Engine as _, engine::general_purpose};
 use image::{
     DynamicImage, GenericImageView, GrayImage, ImageFormat, Rgb, RgbImage, Rgba, RgbaImage,
 };
 use serde_json::Value;
+use tauri::Manager;
 
 use crate::ai_connector;
 use crate::ai_processing::{
@@ -19,8 +22,10 @@ use crate::app_settings::load_settings;
 use crate::app_state::AppState;
 use crate::cache_utils::GEOMETRY_KEYS;
 use crate::image_loader::composite_patches_on_image;
-use crate::image_processing::apply_unwarp_geometry;
-use crate::mask_generation::{AiPatchDefinition, MaskDefinition, generate_mask_bitmap};
+use crate::image_processing::{apply_flip, apply_unwarp_geometry};
+use crate::mask_generation::{
+    AiPatchDefinition, MaskDefinition, SubMask, SubMaskMode, generate_mask_bitmap,
+};
 use crate::model_registry::{TaskType, mask_subtype_filter, resolve_and_prepare};
 use crate::{
     get_cached_full_warped_image, get_full_image_for_processing, resolve_warped_image_for_masks,
@@ -822,6 +827,1445 @@ pub(crate) fn mask_components(mask: &GrayImage, threshold: u8) -> (Vec<u32>, Vec
     (labels, comps)
 }
 
+const ENGINE_SPOT_SPAN: u32 = 96;
+const MIN_SOLID_DENSITY: f32 = 0.35;
+const MAX_DIFFUSION_BLOBS: usize = 6;
+const MAX_RECONSTRUCT_DIFFUSION_BLOBS: usize = 10;
+const RECONSTRUCT_MIN_DIFFUSION_AREA: u32 = 128;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReconstructAutoHint {
+    HighlightSky,
+    Highlight,
+    Shadow,
+    Generic,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReconstructStrategy {
+    HighlightSky,
+    HighlightSurface,
+    ShadowTexture,
+    GenericContext,
+    PromptedSemantic,
+}
+
+impl ReconstructStrategy {
+    fn from_prompt_and_stats(
+        prompt: &str,
+        promptless_reconstruct: bool,
+        original_crop: &RgbaImage,
+        mask: &GrayImage,
+    ) -> Self {
+        if !promptless_reconstruct && !prompt.trim().is_empty() {
+            return ReconstructStrategy::PromptedSemantic;
+        }
+
+        let prompt_lower = prompt.to_ascii_lowercase();
+        if prompt_lower.contains("sky") || prompt_lower.contains("cloud") {
+            return ReconstructStrategy::HighlightSky;
+        }
+        if prompt_lower.contains("shadow") || prompt_lower.contains("dark") {
+            return ReconstructStrategy::ShadowTexture;
+        }
+        if prompt_lower.contains("highlight") || prompt_lower.contains("overexposed") {
+            return ReconstructStrategy::HighlightSurface;
+        }
+
+        let Some(stats) = reconstruct_region_stats(original_crop, mask) else {
+            return ReconstructStrategy::GenericContext;
+        };
+        if stats.mean_luma <= 48.0 {
+            ReconstructStrategy::ShadowTexture
+        } else if stats.mean_luma >= 210.0 {
+            ReconstructStrategy::HighlightSurface
+        } else {
+            ReconstructStrategy::GenericContext
+        }
+    }
+
+    fn is_sky_like(self) -> bool {
+        matches!(self, ReconstructStrategy::HighlightSky)
+    }
+
+    fn is_highlight(self) -> bool {
+        matches!(
+            self,
+            ReconstructStrategy::HighlightSky | ReconstructStrategy::HighlightSurface
+        )
+    }
+}
+
+/// One row of the per-blob diagnostic table. Every generative fill blob is
+/// an INDEPENDENT engine run with its own crop, canvas scale and mask
+/// coverage — which is why one region of a selection can follow the prompt
+/// while its neighbour returns flat mush. These numbers name the mechanism
+/// for each region instead of leaving it to impression.
+#[derive(Debug, Clone)]
+struct BlobReport {
+    index: usize,
+    span: u32,
+    area: u32,
+    density: f32,
+    coverage: f32,
+    canvas_long_edge: u32,
+    blob_px_on_canvas: u32,
+    src_std: f64,
+    ai_std: f64,
+    final_std: f64,
+    used_fallback: bool,
+}
+
+fn component_density(c: &MaskComponent) -> f32 {
+    let bbox = ((c.max_x - c.min_x + 1) * (c.max_y - c.min_y + 1)).max(1);
+    c.area as f32 / bbox as f32
+}
+
+fn component_goes_to_diffusion(c: &MaskComponent, lama_only: bool, reconstruct_fill: bool) -> bool {
+    if lama_only {
+        return false;
+    }
+    if reconstruct_fill {
+        // Clipped Reconstruct masks are often lacy by nature: the selected
+        // pixels are the missing highlight/shadow evidence. Do not treat
+        // that lacy shape as a reason to bypass prompt-conditioned fill.
+        return c.area >= RECONSTRUCT_MIN_DIFFUSION_AREA || c.span() > ENGINE_SPOT_SPAN;
+    }
+    c.span() > ENGINE_SPOT_SPAN && component_density(c) >= MIN_SOLID_DENSITY
+}
+
+fn patch_uses_clipped_reconstruct(patch: &AiPatchDefinition) -> bool {
+    patch
+        .sub_masks
+        .iter()
+        .any(|sm| sm.visible && sm.mask_type == "clipped")
+}
+
+fn submask_has_eraser_refine(sm: &SubMask) -> bool {
+    sm.parameters
+        .get("lines")
+        .and_then(Value::as_array)
+        .is_some_and(|lines| {
+            lines
+                .iter()
+                .any(|line| line.get("tool").and_then(Value::as_str) == Some("eraser"))
+        })
+}
+
+fn patch_has_negative_refinement(patch: &AiPatchDefinition) -> bool {
+    patch.invert
+        || patch.sub_masks.iter().any(|sm| {
+            sm.invert
+                || matches!(sm.mode, SubMaskMode::Subtractive | SubMaskMode::Intersect)
+                || submask_has_eraser_refine(sm)
+        })
+}
+
+fn consolidate_reconstruct_mask(mask: &mut GrayImage, preserve_negative_refinements: bool) {
+    let (_, before) = mask_components(mask, 127);
+    if before.is_empty() {
+        return;
+    }
+
+    let largest_density = before
+        .iter()
+        .max_by_key(|c| c.area)
+        .map(component_density)
+        .unwrap_or(1.0);
+    let needs_consolidation = before.len() > 12 || largest_density < MIN_SOLID_DENSITY;
+    if !needs_consolidation {
+        return;
+    }
+
+    if preserve_negative_refinements {
+        log::info!(
+            "[fill] reconstruct mask left unconsolidated to preserve eraser/subtractive refinements ({} regions, max density {:.2})",
+            before.len(),
+            largest_density
+        );
+        return;
+    }
+
+    let scale = (mask.width().max(mask.height()) as f32 / 2000.0).max(1.0);
+    crate::mask_generation::apply_solidify_public(mask, 45.0, scale);
+    *mask = ai_processing::round_mask_geometry(mask, 6.0 * scale);
+
+    let (labels, after) = mask_components(mask, 127);
+    let min_area = (180.0 * scale * scale).round().max(64.0) as u32;
+    let mut drop = vec![false; after.len() + 1];
+    for c in &after {
+        if c.area < min_area {
+            drop[c.id as usize] = true;
+        }
+    }
+    let w = mask.width() as usize;
+    for (i, p) in mask.pixels_mut().enumerate() {
+        let label = labels[(i / w) * w + (i % w)];
+        if label != 0 && drop[label as usize] {
+            p[0] = 0;
+        }
+    }
+
+    let (_, final_components) = mask_components(mask, 127);
+    log::info!(
+        "[fill] reconstruct mask consolidated: {} regions -> {} regions (solidify + dust drop)",
+        before.len(),
+        final_components.len()
+    );
+}
+
+fn materialize_reconstruct_mask(mask: &mut GrayImage) -> (usize, usize) {
+    let mut selected = 0usize;
+    for p in mask.pixels_mut() {
+        if p[0] > 0 {
+            selected += 1;
+            p[0] = 255;
+        }
+    }
+    let strong = mask.pixels().filter(|p| p[0] > 127).count();
+    (selected, strong)
+}
+
+fn reconstruct_composite_mask(mask: &GrayImage, preserve_negative_refinements: bool) -> GrayImage {
+    let base = if preserve_negative_refinements {
+        mask.clone()
+    } else {
+        let radius = (mask.width().max(mask.height()) / 500).clamp(8, 18);
+        let expanded = dilate_mask(mask, radius);
+        ai_processing::round_mask_geometry(&expanded, (radius as f32 / 2.0).max(4.0))
+    };
+    ai_processing::feather_mask_inward(
+        &base,
+        if preserve_negative_refinements {
+            45.0
+        } else {
+            70.0
+        },
+    )
+}
+
+fn infer_reconstruct_auto_hint(
+    source_image: &DynamicImage,
+    mask: &GrayImage,
+) -> ReconstructAutoHint {
+    let source = source_image.to_rgba8();
+    infer_reconstruct_auto_hint_rgba(&source, mask)
+}
+
+fn infer_reconstruct_auto_hint_rgba(source: &RgbaImage, mask: &GrayImage) -> ReconstructAutoHint {
+    if source.dimensions() != mask.dimensions() {
+        return ReconstructAutoHint::Generic;
+    }
+
+    let (w, h) = source.dimensions();
+    let mut count = 0u64;
+    let mut luma_sum = 0.0f64;
+    let mut y_sum = 0u64;
+    let mut min_x = w;
+    let mut min_y = h;
+    let mut max_x = 0u32;
+    let mut max_y = 0u32;
+
+    for (x, y, m) in mask.enumerate_pixels() {
+        if m[0] <= 127 {
+            continue;
+        }
+        let p = source.get_pixel(x, y);
+        luma_sum += 0.2126 * p[0] as f64 + 0.7152 * p[1] as f64 + 0.0722 * p[2] as f64;
+        y_sum += y as u64;
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
+        count += 1;
+    }
+
+    if count < 64 {
+        return ReconstructAutoHint::Generic;
+    }
+
+    let mean_luma = luma_sum / count as f64;
+    if mean_luma <= 42.0 {
+        return ReconstructAutoHint::Shadow;
+    }
+    if mean_luma < 215.0 {
+        return ReconstructAutoHint::Generic;
+    }
+
+    let centroid_y = y_sum as f64 / count as f64 / h.max(1) as f64;
+    let selected_ratio = count as f64 / (w as f64 * h as f64).max(1.0);
+    let upper_frame = centroid_y < 0.72 || min_y < h / 2;
+
+    let margin = (w.max(h) / 32).clamp(96, 360);
+    let x0 = min_x.saturating_sub(margin);
+    let y0 = min_y.saturating_sub(margin);
+    let x1 = (max_x + margin).min(w.saturating_sub(1));
+    let y1 = (max_y + margin).min(h.saturating_sub(1));
+    let stride = (w.max(h) / 1200).max(1) as usize;
+    let mut context_count = 0u64;
+    let mut context_sum = [0.0f64; 3];
+
+    for y in (y0..=y1).step_by(stride) {
+        for x in (x0..=x1).step_by(stride) {
+            if mask.get_pixel(x, y)[0] > 127 {
+                continue;
+            }
+            let p = source.get_pixel(x, y);
+            for c in 0..3 {
+                context_sum[c] += p[c] as f64;
+            }
+            context_count += 1;
+        }
+    }
+
+    let sky_like_context = if context_count < 32 {
+        upper_frame
+    } else {
+        let r = context_sum[0] / context_count as f64;
+        let g = context_sum[1] / context_count as f64;
+        let b = context_sum[2] / context_count as f64;
+        let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        luma > 115.0 && b + g * 0.35 >= r * 1.02
+    };
+
+    if upper_frame && selected_ratio >= 0.002 && sky_like_context {
+        ReconstructAutoHint::HighlightSky
+    } else {
+        ReconstructAutoHint::Highlight
+    }
+}
+
+fn effective_reconstruct_prompt<'a>(
+    user_prompt: &'a str,
+    reconstruct_fill: bool,
+    auto_hint: ReconstructAutoHint,
+) -> Cow<'a, str> {
+    if !reconstruct_fill || !user_prompt.trim().is_empty() {
+        return Cow::Borrowed(user_prompt);
+    }
+    let prompt = match auto_hint {
+        ReconstructAutoHint::HighlightSky => {
+            "bright backlit cloud detail and pale sky continuing naturally from the surrounding photograph, realistic soft cloud texture, subtle atmospheric haze, match the existing lighting, exposure, color, lens softness, perspective, and camera grain, seamless edge, no flat gray patch, no beige patch, no text, no borders"
+        }
+        ReconstructAutoHint::Highlight => {
+            "plausible recovered highlight detail continuing naturally from the surrounding photograph, realistic texture in the overexposed area, match the existing scene, lighting, exposure, color, lens softness, perspective, and camera grain, seamless edge, no new objects, no flat gray patch, no beige patch, no text, no borders"
+        }
+        ReconstructAutoHint::Shadow => {
+            "plausible recovered shadow detail continuing naturally from the surrounding photograph, realistic dark texture in the underexposed area, preserve the existing low light, color, lens softness, perspective, and camera grain, seamless edge, no new objects, no flat gray patch, no text, no borders"
+        }
+        ReconstructAutoHint::Generic => {
+            "seamlessly continue the surrounding photograph into the selected overexposed or underexposed area, realistic natural background texture, match the existing scene, lighting, exposure, color, camera grain, lens softness, and perspective, no new objects, no text, no borders, no flat gray patch"
+        }
+    };
+    Cow::Borrowed(prompt)
+}
+
+fn reconstruct_tone_strength(reconstruct_fill: bool, promptless_reconstruct: bool) -> f32 {
+    if promptless_reconstruct {
+        0.35
+    } else if reconstruct_fill {
+        0.0
+    } else {
+        0.15
+    }
+}
+
+fn coarse_rotate_rgba(image: DynamicImage, orientation_steps: u8) -> DynamicImage {
+    match orientation_steps % 4 {
+        1 => image.rotate90(),
+        2 => image.rotate180(),
+        3 => image.rotate270(),
+        _ => image,
+    }
+}
+
+fn inverse_coarse_rotate_rgba(image: DynamicImage, orientation_steps: u8) -> DynamicImage {
+    match orientation_steps % 4 {
+        1 => image.rotate270(),
+        2 => image.rotate180(),
+        3 => image.rotate90(),
+        _ => image,
+    }
+}
+
+fn orient_rgba_for_engine(
+    image: &RgbaImage,
+    orientation_steps: u8,
+    flip_horizontal: bool,
+    flip_vertical: bool,
+) -> RgbaImage {
+    let rotated = coarse_rotate_rgba(DynamicImage::ImageRgba8(image.clone()), orientation_steps);
+    apply_flip(Cow::Owned(rotated), flip_horizontal, flip_vertical)
+        .into_owned()
+        .to_rgba8()
+}
+
+fn orient_gray_for_engine(
+    image: &GrayImage,
+    orientation_steps: u8,
+    flip_horizontal: bool,
+    flip_vertical: bool,
+) -> GrayImage {
+    let rotated = coarse_rotate_rgba(DynamicImage::ImageLuma8(image.clone()), orientation_steps);
+    apply_flip(Cow::Owned(rotated), flip_horizontal, flip_vertical)
+        .into_owned()
+        .to_luma8()
+}
+
+fn deorient_rgba_from_engine(
+    image: &RgbaImage,
+    orientation_steps: u8,
+    flip_horizontal: bool,
+    flip_vertical: bool,
+) -> RgbaImage {
+    let unflipped = apply_flip(
+        Cow::Owned(DynamicImage::ImageRgba8(image.clone())),
+        flip_horizontal,
+        flip_vertical,
+    )
+    .into_owned();
+    inverse_coarse_rotate_rgba(unflipped, orientation_steps).to_rgba8()
+}
+
+fn engine_orientation_active(
+    orientation_steps: u8,
+    flip_horizontal: bool,
+    flip_vertical: bool,
+) -> bool {
+    orientation_steps % 4 != 0 || flip_horizontal || flip_vertical
+}
+
+fn ai_fill_orientation_from_adjustments(adjustments: &Value) -> (u8, bool, bool) {
+    let orientation_steps = adjustments
+        .get("orientationSteps")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u8;
+    let flip_horizontal = adjustments
+        .get("flipHorizontal")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let flip_vertical = adjustments
+        .get("flipVertical")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    (orientation_steps % 4, flip_horizontal, flip_vertical)
+}
+
+fn prefill_reconstruct_conditioning(crop_img: &mut RgbaImage, engine_mask: &GrayImage) -> usize {
+    let (w, h) = crop_img.dimensions();
+    if engine_mask.dimensions() != (w, h) {
+        return 0;
+    }
+
+    let ring = dilate_mask(engine_mask, 24);
+    let mut bbox = (w, h, 0u32, 0u32);
+    let mut masked = 0usize;
+
+    for y in 0..h {
+        for x in 0..w {
+            if engine_mask.get_pixel(x, y)[0] > 127 {
+                bbox.0 = bbox.0.min(x);
+                bbox.1 = bbox.1.min(y);
+                bbox.2 = bbox.2.max(x);
+                bbox.3 = bbox.3.max(y);
+                masked += 1;
+            }
+        }
+    }
+    if masked == 0 {
+        return 0;
+    }
+
+    #[derive(Clone, Copy)]
+    struct Accum {
+        sum: [f32; 3],
+        count: f32,
+    }
+
+    impl Accum {
+        fn add(&mut self, p: &Rgba<u8>) {
+            self.sum[0] += p[0] as f32;
+            self.sum[1] += p[1] as f32;
+            self.sum[2] += p[2] as f32;
+            self.count += 1.0;
+        }
+
+        fn mean_or(&self, fallback: [f32; 3]) -> [f32; 3] {
+            if self.count > 0.0 {
+                [
+                    self.sum[0] / self.count,
+                    self.sum[1] / self.count,
+                    self.sum[2] / self.count,
+                ]
+            } else {
+                fallback
+            }
+        }
+    }
+
+    let mut all = Accum {
+        sum: [0.0; 3],
+        count: 0.0,
+    };
+    let mut top = all;
+    let mut bottom = all;
+    let mut left = all;
+    let mut right = all;
+    let center_x = (bbox.0 + bbox.2) as f32 * 0.5;
+    let center_y = (bbox.1 + bbox.3) as f32 * 0.5;
+
+    for y in 0..h {
+        for x in 0..w {
+            if engine_mask.get_pixel(x, y)[0] > 127 || ring.get_pixel(x, y)[0] <= 127 {
+                continue;
+            }
+            let p = crop_img.get_pixel(x, y);
+            all.add(p);
+            if (y as f32) <= center_y {
+                top.add(p);
+            } else {
+                bottom.add(p);
+            }
+            if (x as f32) <= center_x {
+                left.add(p);
+            } else {
+                right.add(p);
+            }
+        }
+    }
+
+    let all_mean = all.mean_or([128.0, 128.0, 128.0]);
+    let top_mean = top.mean_or(all_mean);
+    let bottom_mean = bottom.mean_or(all_mean);
+    let left_mean = left.mean_or(all_mean);
+    let right_mean = right.mean_or(all_mean);
+    let lerp = |a: [f32; 3], b: [f32; 3], t: f32| -> [f32; 3] {
+        [
+            a[0] + (b[0] - a[0]) * t,
+            a[1] + (b[1] - a[1]) * t,
+            a[2] + (b[2] - a[2]) * t,
+        ]
+    };
+    let bbox_w = (bbox.2.saturating_sub(bbox.0)).max(1) as f32;
+    let bbox_h = (bbox.3.saturating_sub(bbox.1)).max(1) as f32;
+    let mut filled = 0usize;
+    for y in 0..h {
+        for x in 0..w {
+            if engine_mask.get_pixel(x, y)[0] <= 127 {
+                continue;
+            }
+            let tx = ((x.saturating_sub(bbox.0)) as f32 / bbox_w).clamp(0.0, 1.0);
+            let ty = ((y.saturating_sub(bbox.1)) as f32 / bbox_h).clamp(0.0, 1.0);
+            let horizontal = lerp(left_mean, right_mean, tx);
+            let vertical = lerp(top_mean, bottom_mean, ty);
+            let mut color = [
+                vertical[0] * 0.55 + horizontal[0] * 0.35 + all_mean[0] * 0.10,
+                vertical[1] * 0.55 + horizontal[1] * 0.35 + all_mean[1] * 0.10,
+                vertical[2] * 0.55 + horizontal[2] * 0.35 + all_mean[2] * 0.10,
+            ];
+            let grain = crate::enhancement::grain_noise(y.saturating_mul(w).saturating_add(x));
+            for channel in &mut color {
+                *channel = (*channel + grain * 5.0).clamp(0.0, 255.0);
+            }
+            crop_img.put_pixel(
+                x,
+                y,
+                Rgba([
+                    color[0].round() as u8,
+                    color[1].round() as u8,
+                    color[2].round() as u8,
+                    255,
+                ]),
+            );
+            filled += 1;
+        }
+    }
+
+    for _ in 0..4 {
+        let prev = crop_img.clone();
+        for y in 0..h {
+            for x in 0..w {
+                if engine_mask.get_pixel(x, y)[0] <= 127 {
+                    continue;
+                }
+                let mut sum = [0u32; 4];
+                let mut count = 0u32;
+                for yy in y.saturating_sub(1)..=(y + 1).min(h.saturating_sub(1)) {
+                    for xx in x.saturating_sub(1)..=(x + 1).min(w.saturating_sub(1)) {
+                        let p = prev.get_pixel(xx, yy);
+                        for c in 0..4 {
+                            sum[c] += p[c] as u32;
+                        }
+                        count += 1;
+                    }
+                }
+                crop_img.put_pixel(
+                    x,
+                    y,
+                    Rgba([
+                        (sum[0] / count) as u8,
+                        (sum[1] / count) as u8,
+                        (sum[2] / count) as u8,
+                        255,
+                    ]),
+                );
+            }
+        }
+    }
+
+    filled
+}
+
+fn seed_reconstruct_engine_canvas(
+    crop_img: &mut RgbaImage,
+    engine_mask: &GrayImage,
+    prompt: &str,
+) -> usize {
+    let (w, h) = crop_img.dimensions();
+    if engine_mask.dimensions() != (w, h) {
+        return 0;
+    }
+
+    let mut bbox = (w, h, 0u32, 0u32);
+    let mut masked = 0usize;
+    let mut ring_sum = [0.0f32; 3];
+    let mut ring_count = 0.0f32;
+    let ring = dilate_mask(engine_mask, 56);
+
+    for y in 0..h {
+        for x in 0..w {
+            if engine_mask.get_pixel(x, y)[0] > 127 {
+                bbox.0 = bbox.0.min(x);
+                bbox.1 = bbox.1.min(y);
+                bbox.2 = bbox.2.max(x);
+                bbox.3 = bbox.3.max(y);
+                masked += 1;
+            } else if ring.get_pixel(x, y)[0] > 127 {
+                let p = crop_img.get_pixel(x, y);
+                ring_sum[0] += p[0] as f32;
+                ring_sum[1] += p[1] as f32;
+                ring_sum[2] += p[2] as f32;
+                ring_count += 1.0;
+            }
+        }
+    }
+    if masked == 0 {
+        return 0;
+    }
+
+    let context = if ring_count > 0.0 {
+        [
+            ring_sum[0] / ring_count,
+            ring_sum[1] / ring_count,
+            ring_sum[2] / ring_count,
+        ]
+    } else {
+        [160.0, 175.0, 185.0]
+    };
+
+    let prompt_lower = prompt.to_ascii_lowercase();
+    let sky_requested = prompt_lower.contains("sky")
+        || prompt_lower.contains("cloud")
+        || prompt_lower.contains("bright")
+        || prompt_lower.contains("backlit");
+    let blue_requested = prompt_lower.contains("blue");
+    let prompt_seed = if blue_requested && sky_requested {
+        [95.0, 165.0, 225.0]
+    } else if sky_requested {
+        [175.0, 205.0, 220.0]
+    } else {
+        context
+    };
+
+    let bbox_w = (bbox.2.saturating_sub(bbox.0)).max(1) as f32;
+    let bbox_h = (bbox.3.saturating_sub(bbox.1)).max(1) as f32;
+    let prompt_weight = if sky_requested { 0.78 } else { 0.35 };
+    let mut changed = 0usize;
+
+    for y in 0..h {
+        for x in 0..w {
+            if engine_mask.get_pixel(x, y)[0] <= 127 {
+                continue;
+            }
+            let tx = ((x.saturating_sub(bbox.0)) as f32 / bbox_w).clamp(0.0, 1.0);
+            let ty = ((y.saturating_sub(bbox.1)) as f32 / bbox_h).clamp(0.0, 1.0);
+            let shade = 1.05 - ty * 0.18 + (tx - 0.5).abs() * 0.05;
+            let grain = crate::enhancement::grain_noise(y.saturating_mul(w).saturating_add(x));
+            let mut color = [0u8; 3];
+            for c in 0..3 {
+                let base = context[c] * (1.0 - prompt_weight) + prompt_seed[c] * prompt_weight;
+                color[c] = (base * shade + grain * 4.0).clamp(0.0, 255.0).round() as u8;
+            }
+            crop_img.put_pixel(x, y, Rgba([color[0], color[1], color[2], 255]));
+            changed += 1;
+        }
+    }
+
+    changed
+}
+
+fn should_seed_reconstruct_engine_canvas(
+    component_span: u32,
+    strategy: ReconstructStrategy,
+    blob_kind: crate::comfy_engine::FillKind,
+) -> bool {
+    if blob_kind == crate::comfy_engine::FillKind::Flux
+        && component_span >= 220
+        && matches!(
+            strategy,
+            ReconstructStrategy::HighlightSky | ReconstructStrategy::PromptedSemantic
+        )
+    {
+        return false;
+    }
+    true
+}
+
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0).max(1e-6)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn soft_reconstruct_noise(x: u32, y: u32, w: u32, h: u32) -> f32 {
+    let sx = x as f32 / w.max(1) as f32;
+    let sy = y as f32 / h.max(1) as f32;
+    let n1 = (sx * 17.13 + sy * 9.71).sin();
+    let n2 = (sx * 37.91 - sy * 21.47 + 1.7).sin();
+    let n3 = ((sx + sy) * 61.37 + (sx - sy) * 11.3).sin();
+    (n1 * 0.52 + n2 * 0.31 + n3 * 0.17).clamp(-1.0, 1.0)
+}
+
+struct ReconstructTextureField {
+    width: usize,
+    height: usize,
+    energy: f32,
+    values: Vec<[f32; 3]>,
+}
+
+impl ReconstructTextureField {
+    fn sample(&self, x: u32, y: u32, image_w: u32, image_h: u32) -> [f32; 3] {
+        let gx = (x as f32 / image_w.max(1) as f32 * (self.width.saturating_sub(1)) as f32)
+            .clamp(0.0, self.width.saturating_sub(1) as f32);
+        let gy = (y as f32 / image_h.max(1) as f32 * (self.height.saturating_sub(1)) as f32)
+            .clamp(0.0, self.height.saturating_sub(1) as f32);
+        let x0 = gx.floor() as usize;
+        let y0 = gy.floor() as usize;
+        let x1 = (x0 + 1).min(self.width.saturating_sub(1));
+        let y1 = (y0 + 1).min(self.height.saturating_sub(1));
+        let tx = gx - x0 as f32;
+        let ty = gy - y0 as f32;
+        let idx = |xx: usize, yy: usize| yy * self.width + xx;
+        let mut out = [0.0; 3];
+        for c in 0..3 {
+            let a = self.values[idx(x0, y0)][c] * (1.0 - tx) + self.values[idx(x1, y0)][c] * tx;
+            let b = self.values[idx(x0, y1)][c] * (1.0 - tx) + self.values[idx(x1, y1)][c] * tx;
+            out[c] = a * (1.0 - ty) + b * ty;
+        }
+        out
+    }
+}
+
+fn reconstruct_texture_candidate(
+    p: &Rgba<u8>,
+    context: [f32; 3],
+    strategy: ReconstructStrategy,
+) -> Option<[f32; 3]> {
+    let rgb = [p[0] as f32, p[1] as f32, p[2] as f32];
+    let luma = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+    let max_c = rgb[0].max(rgb[1]).max(rgb[2]);
+    let min_c = rgb[0].min(rgb[1]).min(rgb[2]);
+    let sat = if max_c > 1.0 {
+        (max_c - min_c) / max_c
+    } else {
+        0.0
+    };
+
+    let eligible = match strategy {
+        ReconstructStrategy::HighlightSky => {
+            luma > 135.0 && sat < 0.42 && rgb[2] + rgb[1] * 0.25 >= rgb[0] * 0.92
+        }
+        ReconstructStrategy::HighlightSurface => luma > 120.0 && sat < 0.55,
+        ReconstructStrategy::ShadowTexture => luma < 110.0,
+        ReconstructStrategy::GenericContext | ReconstructStrategy::PromptedSemantic => true,
+    };
+    if !eligible {
+        return None;
+    }
+
+    Some([
+        (rgb[0] - context[0]).clamp(-42.0, 42.0),
+        (rgb[1] - context[1]).clamp(-42.0, 42.0),
+        (rgb[2] - context[2]).clamp(-42.0, 42.0),
+    ])
+}
+
+fn build_reconstruct_texture_field(
+    seeded_crop: &RgbaImage,
+    engine_mask: &GrayImage,
+    context: [f32; 3],
+    strategy: ReconstructStrategy,
+) -> Option<ReconstructTextureField> {
+    let (w, h) = seeded_crop.dimensions();
+    if engine_mask.dimensions() != (w, h) {
+        return None;
+    }
+
+    let grid_w = ((w / 28).clamp(24, 128)) as usize;
+    let grid_h = ((h / 28).clamp(24, 128)) as usize;
+    let len = grid_w * grid_h;
+    let mut values = vec![[0.0f32; 3]; len];
+    let mut known = vec![false; len];
+    let mut known_count = 0usize;
+    let mut luma_delta_sum = 0.0f32;
+    let mut luma_delta_sq_sum = 0.0f32;
+
+    for gy in 0..grid_h {
+        for gx in 0..grid_w {
+            let x0 = (gx as u32 * w) / grid_w as u32;
+            let y0 = (gy as u32 * h) / grid_h as u32;
+            let x1 = (((gx + 1) as u32 * w) / grid_w as u32).min(w);
+            let y1 = (((gy + 1) as u32 * h) / grid_h as u32).min(h);
+            let step = ((x1.saturating_sub(x0)).max(y1.saturating_sub(y0)) / 6).max(1) as usize;
+            let mut sum = [0.0f32; 3];
+            let mut count = 0.0f32;
+            for y in (y0..y1).step_by(step) {
+                for x in (x0..x1).step_by(step) {
+                    if engine_mask.get_pixel(x, y)[0] > 127 {
+                        continue;
+                    }
+                    if let Some(delta) = reconstruct_texture_candidate(
+                        seeded_crop.get_pixel(x, y),
+                        context,
+                        strategy,
+                    ) {
+                        for c in 0..3 {
+                            sum[c] += delta[c];
+                        }
+                        count += 1.0;
+                    }
+                }
+            }
+            if count > 0.0 {
+                let idx = gy * grid_w + gx;
+                for c in 0..3 {
+                    values[idx][c] = sum[c] / count;
+                }
+                let luma_delta =
+                    0.2126 * values[idx][0] + 0.7152 * values[idx][1] + 0.0722 * values[idx][2];
+                luma_delta_sum += luma_delta;
+                luma_delta_sq_sum += luma_delta * luma_delta;
+                known[idx] = true;
+                known_count += 1;
+            }
+        }
+    }
+
+    if known_count < 8 {
+        return None;
+    }
+
+    let mut current = values;
+    for _ in 0..96 {
+        let prev = current.clone();
+        for gy in 0..grid_h {
+            for gx in 0..grid_w {
+                let idx = gy * grid_w + gx;
+                if known[idx] {
+                    continue;
+                }
+                let mut sum = [0.0f32; 3];
+                let mut weight = 0.0f32;
+                for dy in -1i32..=1 {
+                    for dx in -1i32..=1 {
+                        if dx == 0 && dy == 0 {
+                            continue;
+                        }
+                        let nx = gx as i32 + dx;
+                        let ny = gy as i32 + dy;
+                        if nx < 0 || ny < 0 || nx >= grid_w as i32 || ny >= grid_h as i32 {
+                            continue;
+                        }
+                        let nidx = ny as usize * grid_w + nx as usize;
+                        let wgt = if dx == 0 || dy == 0 { 1.0 } else { 0.62 };
+                        for c in 0..3 {
+                            sum[c] += prev[nidx][c] * wgt;
+                        }
+                        weight += wgt;
+                    }
+                }
+                if weight > 0.0 {
+                    for c in 0..3 {
+                        current[idx][c] = sum[c] / weight * 0.996;
+                    }
+                }
+            }
+        }
+    }
+
+    let mean_luma_delta = luma_delta_sum / known_count as f32;
+    let energy =
+        (luma_delta_sq_sum / known_count as f32 - mean_luma_delta * mean_luma_delta).sqrt();
+
+    Some(ReconstructTextureField {
+        width: grid_w,
+        height: grid_h,
+        energy: energy.clamp(2.0, 24.0),
+        values: current,
+    })
+}
+
+fn build_reconstruct_row_texture(
+    seeded_crop: &RgbaImage,
+    engine_mask: &GrayImage,
+    context: [f32; 3],
+    strategy: ReconstructStrategy,
+) -> Option<Vec<[f32; 3]>> {
+    let (w, h) = seeded_crop.dimensions();
+    if engine_mask.dimensions() != (w, h) {
+        return None;
+    }
+
+    let mut rows = vec![[0.0f32; 3]; h as usize];
+    let mut known = vec![false; h as usize];
+    let mut known_count = 0usize;
+    for y in 0..h {
+        let mut sum = [0.0f32; 3];
+        let mut count = 0.0f32;
+        for x in 0..w {
+            if engine_mask.get_pixel(x, y)[0] > 127 {
+                continue;
+            }
+            if let Some(delta) =
+                reconstruct_texture_candidate(seeded_crop.get_pixel(x, y), context, strategy)
+            {
+                for c in 0..3 {
+                    sum[c] += delta[c];
+                }
+                count += 1.0;
+            }
+        }
+        if count >= 3.0 {
+            for c in 0..3 {
+                rows[y as usize][c] = sum[c] / count;
+            }
+            known[y as usize] = true;
+            known_count += 1;
+        }
+    }
+    if known_count < 4 {
+        return None;
+    }
+
+    let mut current = rows;
+    for _ in 0..48 {
+        let prev = current.clone();
+        for y in 0..h as usize {
+            if known[y] {
+                continue;
+            }
+            let mut sum = [0.0f32; 3];
+            let mut weight = 0.0f32;
+            if y > 0 {
+                for c in 0..3 {
+                    sum[c] += prev[y - 1][c];
+                }
+                weight += 1.0;
+            }
+            if y + 1 < h as usize {
+                for c in 0..3 {
+                    sum[c] += prev[y + 1][c];
+                }
+                weight += 1.0;
+            }
+            if weight > 0.0 {
+                for c in 0..3 {
+                    current[y][c] = sum[c] / weight * 0.998;
+                }
+            }
+        }
+    }
+
+    Some(current)
+}
+
+fn render_reconstruct_fallback_crop(
+    seeded_crop: &RgbaImage,
+    engine_mask: &GrayImage,
+    prompt: &str,
+    strategy: ReconstructStrategy,
+) -> RgbaImage {
+    let (w, h) = seeded_crop.dimensions();
+    if engine_mask.dimensions() != (w, h) {
+        return seeded_crop.clone();
+    }
+
+    #[derive(Clone, Copy)]
+    struct Accum {
+        sum: [f32; 3],
+        count: f32,
+    }
+    impl Accum {
+        fn add(&mut self, p: &Rgba<u8>) {
+            self.sum[0] += p[0] as f32;
+            self.sum[1] += p[1] as f32;
+            self.sum[2] += p[2] as f32;
+            self.count += 1.0;
+        }
+        fn mean_or(&self, fallback: [f32; 3]) -> [f32; 3] {
+            if self.count > 0.0 {
+                [
+                    self.sum[0] / self.count,
+                    self.sum[1] / self.count,
+                    self.sum[2] / self.count,
+                ]
+            } else {
+                fallback
+            }
+        }
+    }
+
+    let ring = dilate_mask(engine_mask, (w.max(h) / 38).clamp(32, 96));
+    let mut all = Accum {
+        sum: [0.0; 3],
+        count: 0.0,
+    };
+    let mut top = all;
+    let mut bottom = all;
+    let mut min_x = w;
+    let mut min_y = h;
+    let mut max_x = 0u32;
+    let mut max_y = 0u32;
+    let mut masked = 0u32;
+
+    for y in 0..h {
+        for x in 0..w {
+            if engine_mask.get_pixel(x, y)[0] > 127 {
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+                masked += 1;
+            } else if ring.get_pixel(x, y)[0] > 127 {
+                let p = seeded_crop.get_pixel(x, y);
+                all.add(p);
+            }
+        }
+    }
+    if masked == 0 {
+        return seeded_crop.clone();
+    }
+
+    let center_y = (min_y + max_y) as f32 * 0.5;
+    for y in 0..h {
+        for x in 0..w {
+            if engine_mask.get_pixel(x, y)[0] > 127 || ring.get_pixel(x, y)[0] <= 127 {
+                continue;
+            }
+            let p = seeded_crop.get_pixel(x, y);
+            if y as f32 <= center_y {
+                top.add(p);
+            } else {
+                bottom.add(p);
+            }
+        }
+    }
+
+    let context = all.mean_or([190.0, 205.0, 212.0]);
+    let top_mean = top.mean_or(context);
+    let bottom_mean = bottom.mean_or(context);
+    let blue_requested = reconstruct_prompt_requests_blue_sky(prompt);
+    let prompt_lower = prompt.to_ascii_lowercase();
+    let prompt_mentions_sky =
+        blue_requested || prompt_lower.contains("sky") || prompt_lower.contains("cloud");
+    let prompt_color = if blue_requested {
+        [112.0, 174.0, 224.0]
+    } else if strategy == ReconstructStrategy::HighlightSky || prompt_mentions_sky {
+        [205.0, 220.0, 226.0]
+    } else if strategy == ReconstructStrategy::HighlightSurface {
+        [
+            (context[0] * 0.65 + 235.0 * 0.35).clamp(0.0, 255.0),
+            (context[1] * 0.65 + 235.0 * 0.35).clamp(0.0, 255.0),
+            (context[2] * 0.65 + 232.0 * 0.35).clamp(0.0, 255.0),
+        ]
+    } else if strategy == ReconstructStrategy::ShadowTexture {
+        [
+            (context[0] * 0.82).clamp(0.0, 255.0),
+            (context[1] * 0.82).clamp(0.0, 255.0),
+            (context[2] * 0.82).clamp(0.0, 255.0),
+        ]
+    } else {
+        context
+    };
+    let prompt_strength = match strategy {
+        ReconstructStrategy::PromptedSemantic if blue_requested => 0.78,
+        ReconstructStrategy::PromptedSemantic if prompt_mentions_sky => 0.56,
+        ReconstructStrategy::PromptedSemantic => 0.32,
+        ReconstructStrategy::HighlightSky => 0.22,
+        ReconstructStrategy::HighlightSurface => 0.12,
+        ReconstructStrategy::ShadowTexture => 0.18,
+        ReconstructStrategy::GenericContext => 0.10,
+    };
+    let texture_field =
+        build_reconstruct_texture_field(seeded_crop, engine_mask, context, strategy);
+    let row_texture = build_reconstruct_row_texture(seeded_crop, engine_mask, context, strategy);
+
+    let edge_sigma = (w.max(h) as f32 / 55.0).clamp(22.0, 72.0);
+    let soft_mask = image::imageops::blur(engine_mask, edge_sigma);
+    let bbox_w = (max_x.saturating_sub(min_x)).max(1) as f32;
+    let bbox_h = (max_y.saturating_sub(min_y)).max(1) as f32;
+    let mut out = seeded_crop.clone();
+
+    for y in 0..h {
+        for x in 0..w {
+            if engine_mask.get_pixel(x, y)[0] <= 127 {
+                continue;
+            }
+            let tx = ((x.saturating_sub(min_x)) as f32 / bbox_w).clamp(0.0, 1.0);
+            let ty = ((y.saturating_sub(min_y)) as f32 / bbox_h).clamp(0.0, 1.0);
+            let edge = soft_mask.get_pixel(x, y)[0] as f32 / 255.0;
+            let interior = smoothstep(0.30, 0.98, edge);
+            let vertical_context = [
+                top_mean[0] + (bottom_mean[0] - top_mean[0]) * ty,
+                top_mean[1] + (bottom_mean[1] - top_mean[1]) * ty,
+                top_mean[2] + (bottom_mean[2] - top_mean[2]) * ty,
+            ];
+            let seeded = seeded_crop.get_pixel(x, y);
+            let seeded_rgb = [seeded[0] as f32, seeded[1] as f32, seeded[2] as f32];
+            let n = soft_reconstruct_noise(x, y, w, h);
+            let cloud = smoothstep(-0.12, 0.82, n);
+            let shade = match strategy {
+                ReconstructStrategy::HighlightSky => 1.09 - ty * 0.04 + (tx - 0.5).abs() * 0.015,
+                ReconstructStrategy::HighlightSurface => 1.04 - ty * 0.02,
+                ReconstructStrategy::ShadowTexture => 0.96 - ty * 0.06 + (tx - 0.5).abs() * 0.025,
+                _ => 1.02 - ty * 0.06 + (tx - 0.5).abs() * 0.02,
+            };
+            let mut color = [0.0f32; 3];
+            for c in 0..3 {
+                let prompt_mix = vertical_context[c] * (1.0 - prompt_strength)
+                    + prompt_color[c] * prompt_strength;
+                let interior_base =
+                    seeded_rgb[c] * 0.55 + prompt_mix * 0.35 + vertical_context[c] * 0.10;
+                color[c] = vertical_context[c] * (1.0 - interior) + interior_base * interior;
+            }
+            let white_haze = [242.0, 245.0, 243.0];
+            let haze_strength = match strategy {
+                ReconstructStrategy::HighlightSky => 0.20,
+                ReconstructStrategy::HighlightSurface => 0.12,
+                ReconstructStrategy::ShadowTexture => 0.0,
+                ReconstructStrategy::PromptedSemantic if prompt_mentions_sky => 0.10,
+                _ => 0.04,
+            };
+            for c in 0..3 {
+                color[c] = color[c] * (1.0 - cloud * haze_strength)
+                    + white_haze[c] * (cloud * haze_strength);
+                color[c] *= shade;
+            }
+            if strategy.is_sky_like() || prompt_mentions_sky {
+                color[0] *= if blue_requested { 0.985 } else { 0.995 };
+                color[2] = (color[2]
+                    + interior
+                        * if strategy == ReconstructStrategy::HighlightSky && !blue_requested {
+                            1.5
+                        } else if blue_requested {
+                            8.0
+                        } else {
+                            3.0
+                        })
+                .clamp(0.0, 255.0);
+            }
+            if strategy.is_highlight() {
+                let highlight_floor = if strategy == ReconstructStrategy::HighlightSky {
+                    [205.0, 216.0, 218.0]
+                } else {
+                    [210.0, 210.0, 207.0]
+                };
+                for c in 0..3 {
+                    color[c] = color[c].max(highlight_floor[c] * interior * 0.72);
+                }
+            }
+            if let Some(field) = texture_field.as_ref() {
+                let texture = field.sample(x, y, w, h);
+                let texture_weight = smoothstep(0.40, 1.0, edge)
+                    * match strategy {
+                        ReconstructStrategy::HighlightSky => 0.95,
+                        ReconstructStrategy::HighlightSurface => 0.54,
+                        ReconstructStrategy::ShadowTexture => 0.62,
+                        ReconstructStrategy::PromptedSemantic => 0.36,
+                        ReconstructStrategy::GenericContext => 0.42,
+                    };
+                let contextual_detail = soft_reconstruct_noise(
+                    x.wrapping_mul(3).wrapping_add(19),
+                    y.wrapping_mul(2).wrapping_add(31),
+                    w,
+                    h,
+                ) * field.energy
+                    * match strategy {
+                        ReconstructStrategy::HighlightSky => 0.48,
+                        ReconstructStrategy::HighlightSurface => 0.32,
+                        ReconstructStrategy::ShadowTexture => 0.34,
+                        ReconstructStrategy::PromptedSemantic => 0.24,
+                        ReconstructStrategy::GenericContext => 0.26,
+                    };
+                let luma_delta = 0.2126 * texture[0]
+                    + 0.7152 * texture[1]
+                    + 0.0722 * texture[2]
+                    + contextual_detail;
+                for c in 0..3 {
+                    color[c] +=
+                        texture[c] * texture_weight * 0.54 + luma_delta * texture_weight * 0.68;
+                }
+            }
+            if let Some(rows) = row_texture.as_ref() {
+                let texture = rows[y as usize];
+                let texture_weight = interior
+                    * match strategy {
+                        ReconstructStrategy::HighlightSky => 0.42,
+                        ReconstructStrategy::HighlightSurface => 0.26,
+                        ReconstructStrategy::ShadowTexture => 0.30,
+                        ReconstructStrategy::PromptedSemantic => 0.20,
+                        ReconstructStrategy::GenericContext => 0.22,
+                    };
+                let luma_delta = 0.2126 * texture[0] + 0.7152 * texture[1] + 0.0722 * texture[2];
+                for c in 0..3 {
+                    color[c] +=
+                        texture[c] * texture_weight * 0.38 + luma_delta * texture_weight * 0.58;
+                }
+            }
+            let fine = crate::enhancement::grain_noise(y.wrapping_mul(w).wrapping_add(x));
+            for c in 0..3 {
+                color[c] = (color[c] + n * 5.0 * interior + fine * 2.2).clamp(0.0, 255.0);
+            }
+            out.put_pixel(
+                x,
+                y,
+                Rgba([
+                    color[0].round() as u8,
+                    color[1].round() as u8,
+                    color[2].round() as u8,
+                    255,
+                ]),
+            );
+        }
+    }
+
+    out
+}
+
+fn reconstruct_prompt_requests_blue_sky(prompt: &str) -> bool {
+    let prompt_lower = prompt.to_ascii_lowercase();
+    prompt_lower.contains("blue")
+        && (prompt_lower.contains("sky")
+            || prompt_lower.contains("cloud")
+            || prompt_lower.contains("backlit")
+            || prompt_lower.contains("bright"))
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ReconstructRegionStats {
+    mean_rgb: [f64; 3],
+    mean_luma: f64,
+    luma_std: f64,
+    mean_sat: f64,
+    count: f64,
+}
+
+impl ReconstructRegionStats {
+    fn blue_minus_red(&self) -> f64 {
+        self.mean_rgb[2] - self.mean_rgb[0]
+    }
+}
+
+fn reconstruct_region_stats(
+    crop: &RgbaImage,
+    crop_mask: &GrayImage,
+) -> Option<ReconstructRegionStats> {
+    if crop.dimensions() != crop_mask.dimensions() {
+        return None;
+    }
+
+    let mut count = 0f64;
+    let mut sum = [0.0f64; 3];
+    let mut luma_sum = 0.0f64;
+    let mut luma_sq_sum = 0.0f64;
+    let mut sat_sum = 0.0f64;
+
+    for (x, y, m) in crop_mask.enumerate_pixels() {
+        if m[0] <= 127 {
+            continue;
+        }
+        let p = crop.get_pixel(x, y);
+        let rgb = [p[0] as f64, p[1] as f64, p[2] as f64];
+        for c in 0..3 {
+            sum[c] += rgb[c];
+        }
+        let luma = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+        luma_sum += luma;
+        luma_sq_sum += luma * luma;
+        let max_c = rgb[0].max(rgb[1]).max(rgb[2]);
+        let min_c = rgb[0].min(rgb[1]).min(rgb[2]);
+        if max_c > 1.0 {
+            sat_sum += (max_c - min_c) / max_c;
+        }
+        count += 1.0;
+    }
+
+    if count < 1024.0 {
+        return None;
+    }
+
+    let mean_luma = luma_sum / count;
+    let variance = (luma_sq_sum / count - mean_luma * mean_luma).max(0.0);
+    Some(ReconstructRegionStats {
+        mean_rgb: [sum[0] / count, sum[1] / count, sum[2] / count],
+        mean_luma,
+        luma_std: variance.sqrt(),
+        mean_sat: sat_sum / count,
+        count,
+    })
+}
+
+fn reconstruct_output_looks_collapsed(
+    filled_crop: &RgbaImage,
+    crop_mask: &GrayImage,
+    prompt: &str,
+) -> bool {
+    let Some(stats) = reconstruct_region_stats(filled_crop, crop_mask) else {
+        return false;
+    };
+
+    let flat_gray = stats.luma_std < 10.0 && stats.mean_sat < 0.075;
+    let blue_prompt_missed = reconstruct_prompt_requests_blue_sky(prompt)
+        && stats.blue_minus_red() < 12.0
+        && stats.mean_sat < 0.16;
+
+    flat_gray || blue_prompt_missed
+}
+
+fn reconstruct_ai_result_lost_to_fallback(
+    ai_crop: &RgbaImage,
+    fallback_crop: &RgbaImage,
+    crop_mask: &GrayImage,
+    prompt: &str,
+    strategy: ReconstructStrategy,
+) -> bool {
+    let (Some(ai), Some(fallback)) = (
+        reconstruct_region_stats(ai_crop, crop_mask),
+        reconstruct_region_stats(fallback_crop, crop_mask),
+    ) else {
+        return false;
+    };
+
+    let sky_like = strategy.is_sky_like()
+        || prompt.to_ascii_lowercase().contains("sky")
+        || prompt.to_ascii_lowercase().contains("cloud")
+        || prompt.to_ascii_lowercase().contains("backlit")
+        || prompt.to_ascii_lowercase().contains("bright");
+    let washed_out = ai.mean_luma > 224.0
+        && ai.mean_luma > fallback.mean_luma + 14.0
+        && ai.mean_sat < fallback.mean_sat * 0.65
+        && ai.mean_sat < 0.08;
+    let lost_sky_color = sky_like
+        && fallback.blue_minus_red() > 12.0
+        && ai.blue_minus_red() < fallback.blue_minus_red() - 14.0
+        && ai.mean_sat < fallback.mean_sat * 0.72;
+    let low_color_large_sky = sky_like
+        && ai.count > 20_000.0
+        && ai.mean_luma > 218.0
+        && ai.mean_sat < 0.045
+        && fallback.mean_sat > 0.06;
+
+    let lost_highlight = strategy == ReconstructStrategy::HighlightSurface
+        && ai.mean_luma > 228.0
+        && ai.mean_sat < fallback.mean_sat * 0.7
+        && ai.luma_std < fallback.luma_std * 0.8;
+
+    washed_out || lost_sky_color || low_color_large_sky || lost_highlight
+}
+
+fn safe_debug_id(id: &str) -> String {
+    let mut out = String::with_capacity(id.len());
+    for ch in id.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "patch".to_string()
+    } else {
+        out
+    }
+}
+
+fn ai_fill_debug_dir(app_handle: &tauri::AppHandle, debug_run_id: &str) -> Option<PathBuf> {
+    if debug_run_id.is_empty() {
+        return None;
+    }
+    let dir = app_handle
+        .path()
+        .app_data_dir()
+        .ok()?
+        .join("ai-fill-debug")
+        .join(safe_debug_id(debug_run_id));
+    if let Err(e) = fs::create_dir_all(&dir) {
+        log::warn!(
+            "[fill] failed to create debug artifact dir {:?}: {}",
+            dir,
+            e
+        );
+        return None;
+    }
+    Some(dir)
+}
+
+fn save_debug_rgba(app_handle: &tauri::AppHandle, debug_run_id: &str, name: &str, img: &RgbaImage) {
+    let Some(dir) = ai_fill_debug_dir(app_handle, debug_run_id) else {
+        return;
+    };
+    let path = dir.join(format!("{name}.png"));
+    if let Err(e) = DynamicImage::ImageRgba8(img.clone()).save(&path) {
+        log::warn!("[fill] failed to save debug artifact {:?}: {}", path, e);
+    }
+}
+
+fn save_debug_gray(app_handle: &tauri::AppHandle, debug_run_id: &str, name: &str, img: &GrayImage) {
+    let Some(dir) = ai_fill_debug_dir(app_handle, debug_run_id) else {
+        return;
+    };
+    let path = dir.join(format!("{name}.png"));
+    if let Err(e) = DynamicImage::ImageLuma8(img.clone()).save(&path) {
+        log::warn!("[fill] failed to save debug artifact {:?}: {}", path, e);
+    }
+}
+
+fn save_debug_bytes(app_handle: &tauri::AppHandle, debug_run_id: &str, name: &str, bytes: &[u8]) {
+    let Some(dir) = ai_fill_debug_dir(app_handle, debug_run_id) else {
+        return;
+    };
+    let path = dir.join(format!("{name}.png"));
+    if let Err(e) = fs::write(&path, bytes) {
+        log::warn!("[fill] failed to save debug artifact {:?}: {}", path, e);
+    }
+}
+
+fn save_debug_json(app_handle: &tauri::AppHandle, debug_run_id: &str, name: &str, value: &Value) {
+    let Some(dir) = ai_fill_debug_dir(app_handle, debug_run_id) else {
+        return;
+    };
+    let path = dir.join(format!("{name}.json"));
+    let data = match serde_json::to_vec_pretty(value) {
+        Ok(data) => data,
+        Err(e) => {
+            log::warn!("[fill] failed to serialize debug json {:?}: {}", path, e);
+            return;
+        }
+    };
+    if let Err(e) = fs::write(&path, data) {
+        log::warn!("[fill] failed to save debug json {:?}: {}", path, e);
+    }
+}
+
 /// Extracts one component's mask values for a crop window: pixels keep
 /// their mask value only where the label map says they belong to `comp`.
 fn component_crop_mask(
@@ -841,6 +2285,16 @@ fn component_crop_mask(
             if labels[idx] == comp_id {
                 out.put_pixel(x, y, image::Luma([mask.get_pixel(x0 + x, y0 + y)[0]]));
             }
+        }
+    }
+    out
+}
+
+fn crop_mask_window(mask: &GrayImage, x0: u32, y0: u32, crop_w: u32, crop_h: u32) -> GrayImage {
+    let mut out = GrayImage::new(crop_w, crop_h);
+    for y in 0..crop_h {
+        for x in 0..crop_w {
+            out.put_pixel(x, y, image::Luma([mask.get_pixel(x0 + x, y0 + y)[0]]));
         }
     }
     out
@@ -1004,6 +2458,12 @@ fn blend_patch_into(
     }
 }
 
+struct EngineInpaintResult {
+    image: RgbaImage,
+    is_linear: bool,
+    active_kind: Option<&'static str>,
+}
+
 /// Engine-backed removal/replace: splits the mask into connected blobs and
 /// fills each in its own tight patch — small blobs heal via LaMa (ideal
 /// for speckle selections), large ones via the generative engine — then
@@ -1017,12 +2477,16 @@ async fn run_engine_inpaint_patch(
     prompt: &str,
     kind: crate::comfy_engine::FillKind,
     lama_only: bool,
+    reconstruct_fill: bool,
+    promptless_reconstruct: bool,
+    reconstruct_single_path: bool,
+    debug_run_id: &str,
+    orientation_steps: u8,
+    flip_horizontal: bool,
+    flip_vertical: bool,
     app_handle: &tauri::AppHandle,
     state: &tauri::State<'_, AppState>,
-) -> Result<(RgbaImage, bool), String> {
-    const SPOT_SPAN: u32 = 96;
-    const MAX_DIFFUSION_BLOBS: usize = 6;
-
+) -> Result<EngineInpaintResult, String> {
     // Linear-source detection must come from the SOURCE, not the pixel
     // format: compositing patches returns float pixels even for JPEGs,
     // and gamma-encoding an already-display-encoded JPEG double-brightens
@@ -1051,30 +2515,94 @@ async fn run_engine_inpaint_patch(
 
     let (labels, mut comps) = mask_components(mask, 127);
     if comps.is_empty() {
-        return Ok((encoded_full, is_linear));
+        return Ok(EngineInpaintResult {
+            image: encoded_full,
+            is_linear,
+            active_kind: None,
+        });
     }
     comps.sort_by_key(|c| std::cmp::Reverse(c.area));
     // Diffusion is for SOLID, object-like regions only. A blob that fills
     // little of its own bounding box is lace (scattered speckle bridged by
     // dilation, typical of color keys) — a diffusion model would repaint
     // the whole dilated region with invented content and read as blotches.
-    // LaMa's texture synthesis is the right tool for lace at any size.
-    const MIN_SOLID_DENSITY: f32 = 0.35;
-    let is_solid = |c: &MaskComponent| {
-        let bbox = ((c.max_x - c.min_x + 1) * (c.max_y - c.min_y + 1)).max(1);
-        c.area as f32 / bbox as f32 >= MIN_SOLID_DENSITY
+    // LaMa's texture synthesis is the right tool for lace at any size,
+    // except for clipped Reconstruct masks where the lacy pixels ARE the
+    // missing content and must stay on the prompt-conditioned engine path.
+    let max_diffusion_blobs = if reconstruct_fill {
+        MAX_RECONSTRUCT_DIFFUSION_BLOBS
+    } else {
+        MAX_DIFFUSION_BLOBS
     };
-    let (mut large, mut spots): (Vec<_>, Vec<_>) = comps
-        .into_iter()
-        .partition(|c| !lama_only && c.span() > SPOT_SPAN && is_solid(c));
-    if large.len() > MAX_DIFFUSION_BLOBS {
-        spots.extend(large.split_off(MAX_DIFFUSION_BLOBS));
-    }
+    let (large, spots): (Vec<MaskComponent>, Vec<MaskComponent>) = if reconstruct_single_path {
+        let mut whole = MaskComponent {
+            id: 0,
+            min_x: w,
+            min_y: h,
+            max_x: 0,
+            max_y: 0,
+            area: 0,
+        };
+        for c in comps {
+            whole.min_x = whole.min_x.min(c.min_x);
+            whole.min_y = whole.min_y.min(c.min_y);
+            whole.max_x = whole.max_x.max(c.max_x);
+            whole.max_y = whole.max_y.max(c.max_y);
+            whole.area += c.area;
+        }
+        (vec![whole], Vec::new())
+    } else {
+        let (mut large, mut spots): (Vec<MaskComponent>, Vec<MaskComponent>) = comps
+            .into_iter()
+            .partition(|c| component_goes_to_diffusion(c, lama_only, reconstruct_fill));
+        if large.len() > max_diffusion_blobs {
+            // Demotion is silent mush: LaMa has no text input, so a
+            // prompted region routed here CANNOT follow the prompt.
+            let demoted = large.split_off(max_diffusion_blobs);
+            for c in &demoted {
+                log::info!(
+                    "[fill] blob-cap demotion: span={} area={} -> LaMa spot (prompt is IGNORED on that path; cap={})",
+                    c.span(),
+                    c.area,
+                    max_diffusion_blobs
+                );
+            }
+            spots.extend(demoted);
+        }
+        (large, spots)
+    };
+    let route = if lama_only {
+        "fast-lama"
+    } else if reconstruct_fill {
+        "reconstruct"
+    } else {
+        "repair"
+    };
     log::info!(
-        "[fill] mask split into {} solid diffusion blob(s) + {} LaMa region(s)/spot(s)",
+        "[fill] route={route}, prompt={}, auto_prompt={}, engine_orientation=steps:{},flip_h:{},flip_v:{}, mask split into {} diffusion region(s) + {} LaMa region(s)/spot(s)",
+        if prompt.trim().is_empty() {
+            "empty"
+        } else {
+            "set"
+        },
+        promptless_reconstruct,
+        orientation_steps % 4,
+        flip_horizontal,
+        flip_vertical,
         large.len(),
-        spots.len()
+        spots.len(),
     );
+    if reconstruct_fill && !prompt.trim().is_empty() {
+        log::info!("[fill] reconstruct prompt text: {:?}", prompt.trim());
+    }
+    if reconstruct_fill {
+        log::info!(
+            "[fill] reconstruct routing: {} prompt-conditioned component(s), {} fast cleanup spot(s), single_path={}",
+            large.len(),
+            spots.len(),
+            reconstruct_single_path
+        );
+    }
 
     // LaMa serves both the spot heals and the SDXL prefill hint.
     let lama_session = match resolve_and_prepare(
@@ -1118,6 +2646,11 @@ async fn run_engine_inpaint_patch(
         }
     }
 
+    let mut reconstruct_raw_ai_full = reconstruct_fill.then(|| encoded_full.clone());
+    let mut reconstruct_fallback_full = reconstruct_fill.then(|| encoded_full.clone());
+    let mut reconstruct_rejected_any = false;
+    let mut blob_reports: Vec<BlobReport> = Vec::new();
+
     // Size-tiered model routing: tiny blobs already healed via LaMa above;
     // truly large areas auto-escalate to Flux (the strongest fill tier)
     // when its weights are installed, regardless of the selected model —
@@ -1127,13 +2660,23 @@ async fn run_engine_inpaint_patch(
     let flux_available =
         crate::comfy_engine::fill_files_present(app_handle, crate::comfy_engine::FillKind::Flux);
 
-    for comp in &large {
-        let blob_kind = if comp.span() >= FLUX_SPAN
+    for (blob_index, comp) in large.iter().enumerate() {
+        let blob_prefix = format!("blob-{blob_index:02}");
+        let mut blob_used_fallback = false;
+        let blob_kind = if reconstruct_single_path
             && flux_available
             && kind != crate::comfy_engine::FillKind::Flux
         {
             log::info!(
-                "[fill] blob span {} ≥ {} — escalating to Flux Fill",
+                "[fill] {blob_prefix} single-path Reconstruct — forcing Flux Fill for the whole selection"
+            );
+            crate::comfy_engine::FillKind::Flux
+        } else if comp.span() >= FLUX_SPAN
+            && flux_available
+            && kind != crate::comfy_engine::FillKind::Flux
+        {
+            log::info!(
+                "[fill] {blob_prefix} span {} ≥ {} — escalating to Flux Fill",
                 comp.span(),
                 FLUX_SPAN
             );
@@ -1143,13 +2686,20 @@ async fn run_engine_inpaint_patch(
         };
         let span_x = comp.max_x - comp.min_x + 1;
         let span_y = comp.max_y - comp.min_y + 1;
-        // REVERTED to the storm-cloud-era tight crop (proven prompted
-        // quality on the user's screen): wide context diluted prompt
-        // influence and shrank the rendered blob — and measurement showed
-        // promptless gains nothing from wide context anyway (a blown
-        // region bounded by wash yields wash at any context width).
-        let pad_x = 192.max((span_x as f32 * 1.5) as u32).min(520);
-        let pad_y = 192.max((span_y as f32 * 1.5) as u32).min(520);
+        // Reconstruct needs broader scene context than normal object
+        // removal. The model is not just deleting a thing; it is guessing
+        // plausible lost pixels from the surrounding photograph.
+        let (context_scale, context_cap) = if reconstruct_fill {
+            (1.9, 840)
+        } else {
+            (1.5, 520)
+        };
+        let pad_x = 192
+            .max((span_x as f32 * context_scale) as u32)
+            .min(context_cap);
+        let pad_y = 192
+            .max((span_y as f32 * context_scale) as u32)
+            .min(context_cap);
         let x0 = comp.min_x.saturating_sub(pad_x);
         let y0 = comp.min_y.saturating_sub(pad_y);
         let x1 = (comp.max_x + pad_x).min(w.saturating_sub(1));
@@ -1158,26 +2708,68 @@ async fn run_engine_inpaint_patch(
 
         let mut crop_img =
             image::imageops::crop_imm(&encoded_full, x0, y0, crop_w, crop_h).to_image();
-        let crop_mask = component_crop_mask(mask, &labels, comp.id, x0, y0, crop_w, crop_h);
+        let crop_mask = if reconstruct_single_path {
+            crop_mask_window(mask, x0, y0, crop_w, crop_h)
+        } else {
+            component_crop_mask(mask, &labels, comp.id, x0, y0, crop_w, crop_h)
+        };
+        save_debug_rgba(
+            app_handle,
+            debug_run_id,
+            &format!("{blob_prefix}-source-crop"),
+            &crop_img,
+        );
 
-        // Grow the mask: slivers of the object just outside the selection
-        // otherwise stay visible AND anchor the model to repaint the object.
-        let grow = (crop_w.max(crop_h) / 60).clamp(12, 32);
-        let crop_mask = dilate_mask(&crop_mask, grow);
-        // Square dilation reintroduces corners — round to organic curves.
-        let crop_mask = ai_processing::round_mask_geometry(&crop_mask, (grow as f32 / 2.0).max(6.0));
-        // The model paints a margin BEYOND the composite line, so the
-        // visible seam lands inside freshly painted content instead of
-        // exactly where the model stopped (the classic mask-expand trick).
-        let engine_mask = dilate_mask(&crop_mask, 16);
+        let crop_mask = if reconstruct_single_path {
+            log::info!(
+                "[fill] {blob_prefix} single-path Reconstruct uses hard full-strength mask with no grow/round step"
+            );
+            crop_mask
+        } else {
+            // Grow the mask: slivers of the object just outside the selection
+            // otherwise stay visible AND anchor the model to repaint the object.
+            let grow = (crop_w.max(crop_h) / 60).clamp(12, 32);
+            let crop_mask = dilate_mask(&crop_mask, grow);
+            // Square dilation reintroduces corners — round to organic curves.
+            ai_processing::round_mask_geometry(&crop_mask, (grow as f32 / 2.0).max(6.0))
+        };
+        // The normal path gives the model a paint margin beyond the final
+        // composite line. The single-path test deliberately does not: it
+        // proves whether the small-dot conditioning style itself scales.
+        let engine_mask = if reconstruct_single_path {
+            crop_mask.clone()
+        } else {
+            dilate_mask(&crop_mask, 16)
+        };
+        save_debug_gray(
+            app_handle,
+            debug_run_id,
+            &format!("{blob_prefix}-crop-mask"),
+            &crop_mask,
+        );
+        save_debug_gray(
+            app_handle,
+            debug_run_id,
+            &format!("{blob_prefix}-engine-mask-fullres"),
+            &engine_mask,
+        );
         // Ring stats must come from pre-fill pixels (the prefill below
         // rewrites the masked interior).
         let original_crop = crop_img.clone();
 
+        if reconstruct_fill {
+            let scrubbed = prefill_reconstruct_conditioning(&mut crop_img, &engine_mask);
+            log::info!(
+                "[fill] reconstruct conditioning prefill: {blob_prefix}, {scrubbed} masked px scrubbed before engine"
+            );
+        }
+
         // The sampler keeps a low-frequency imprint of whatever occupies
-        // the masked area, so the SDXL tiers get a LaMa prefill as a
-        // plausible starting hint. Flux conditions on the mask natively.
-        if blob_kind != crate::comfy_engine::FillKind::Flux
+        // the masked area, so non-Reconstruct SDXL tiers get a LaMa prefill
+        // as a plausible starting hint. Reconstruct uses the deterministic
+        // context prefill above so clipped pixels cannot anchor the model.
+        if !reconstruct_fill
+            && blob_kind != crate::comfy_engine::FillKind::Flux
             && let Some(session) = lama_session.as_ref()
             && let Ok((prefill, _)) = ai_processing::run_lama_inpainting(
                 &DynamicImage::ImageRgba8(crop_img.clone()),
@@ -1187,15 +2779,144 @@ async fn run_engine_inpaint_patch(
         {
             crop_img = prefill;
         }
+        save_debug_rgba(
+            app_handle,
+            debug_run_id,
+            &format!("{blob_prefix}-conditioning-crop"),
+            &crop_img,
+        );
 
-        let (img_png, mask_png, _, _) =
-            crate::expansion::engine_canvas_pngs_sized(
-                &crop_img,
+        let orient_for_engine = reconstruct_fill
+            && engine_orientation_active(orientation_steps, flip_horizontal, flip_vertical);
+        let mut engine_crop_img = if orient_for_engine {
+            orient_rgba_for_engine(&crop_img, orientation_steps, flip_horizontal, flip_vertical)
+        } else {
+            crop_img.clone()
+        };
+        let engine_mask_for_model = if orient_for_engine {
+            orient_gray_for_engine(
                 &engine_mask,
-                // Big reconstructions earn a bigger canvas (Flux handles
-                // 1536 comfortably on this hardware).
-                if comp.span() >= 900 { 1536 } else { 1216 },
-            )?;
+                orientation_steps,
+                flip_horizontal,
+                flip_vertical,
+            )
+        } else {
+            engine_mask.clone()
+        };
+        let reconstruct_strategy = if reconstruct_fill {
+            Some(ReconstructStrategy::from_prompt_and_stats(
+                prompt,
+                promptless_reconstruct,
+                &engine_crop_img,
+                &engine_mask_for_model,
+            ))
+        } else {
+            None
+        };
+        if reconstruct_fill {
+            let strategy = reconstruct_strategy.unwrap();
+            if reconstruct_single_path
+                || should_seed_reconstruct_engine_canvas(comp.span(), strategy, blob_kind)
+            {
+                let seeded = seed_reconstruct_engine_canvas(
+                    &mut engine_crop_img,
+                    &engine_mask_for_model,
+                    prompt,
+                );
+                log::info!(
+                    "[fill] reconstruct engine seed: {blob_prefix}, strategy={strategy:?}, {seeded} masked px seeded from prompt/context before engine"
+                );
+            } else {
+                log::info!(
+                    "[fill] reconstruct engine seed skipped: {blob_prefix}, strategy={strategy:?}, span={}, kind={blob_kind:?}; Flux gets scrubbed context + mask instead of a flat placeholder",
+                    comp.span()
+                );
+            }
+        }
+        if reconstruct_fill {
+            save_debug_rgba(
+                app_handle,
+                debug_run_id,
+                &format!("{blob_prefix}-engine-seeded-conditioning-crop"),
+                &engine_crop_img,
+            );
+        }
+        let fallback_engine_crop = if reconstruct_fill {
+            let fallback = render_reconstruct_fallback_crop(
+                &engine_crop_img,
+                &engine_mask_for_model,
+                prompt,
+                reconstruct_strategy.unwrap(),
+            );
+            save_debug_rgba(
+                app_handle,
+                debug_run_id,
+                &format!("{blob_prefix}-reconstruct-fallback-crop"),
+                &fallback,
+            );
+            Some(fallback)
+        } else {
+            None
+        };
+        if orient_for_engine {
+            save_debug_rgba(
+                app_handle,
+                debug_run_id,
+                &format!("{blob_prefix}-engine-view-conditioning-crop"),
+                &engine_crop_img,
+            );
+            save_debug_gray(
+                app_handle,
+                debug_run_id,
+                &format!("{blob_prefix}-engine-view-mask-fullres"),
+                &engine_mask_for_model,
+            );
+        }
+
+        // Big reconstructions earn a bigger canvas (Flux handles 1536
+        // comfortably on this hardware).
+        let canvas_long_edge = if comp.span() >= 900 { 1536 } else { 1216 };
+        // Mask coverage of the engine canvas is the prime suspect for
+        // "this blob ignored the prompt": an inpainting model with little
+        // surrounding context degenerates toward flat low-frequency output.
+        let engine_masked_px = engine_mask_for_model
+            .pixels()
+            .filter(|p| p[0] > 127)
+            .count() as u32;
+        let engine_crop_px = (engine_mask_for_model.width() * engine_mask_for_model.height()).max(1);
+        let blob_coverage = engine_masked_px as f32 / engine_crop_px as f32;
+        let canvas_scale = (canvas_long_edge as f32
+            / engine_crop_img.width().max(engine_crop_img.height()).max(1) as f32)
+            .min(1.0);
+        let blob_px_on_canvas = (comp.span() as f32 * canvas_scale) as u32;
+        log::info!(
+            "[fill] {blob_prefix} geometry: span={} area={} density={:.2} crop={}x{} canvas_long_edge={} mask_coverage={:.1}% blob_on_canvas~{}px",
+            comp.span(),
+            comp.area,
+            component_density(comp),
+            crop_w,
+            crop_h,
+            canvas_long_edge,
+            blob_coverage * 100.0,
+            blob_px_on_canvas
+        );
+        let (img_png, mask_png, _, _) = crate::expansion::engine_canvas_pngs_sized(
+            &engine_crop_img,
+            &engine_mask_for_model,
+            canvas_long_edge,
+        )?;
+        save_debug_bytes(
+            app_handle,
+            debug_run_id,
+            &format!("{blob_prefix}-engine-input"),
+            &img_png,
+        );
+        save_debug_bytes(
+            app_handle,
+            debug_run_id,
+            &format!("{blob_prefix}-engine-mask"),
+            &mask_png,
+        );
         let fill_png = crate::comfy_engine::run_generative_fill(
             app_handle,
             state,
@@ -1214,32 +2935,230 @@ async fn run_engine_inpaint_patch(
         )
         .await
         .map_err(|e| e.to_string())?;
+        save_debug_bytes(
+            app_handle,
+            debug_run_id,
+            &format!("{blob_prefix}-raw-engine-output"),
+            &fill_png,
+        );
 
         let filled = image::load_from_memory(&fill_png)
             .map_err(|e| e.to_string())?
             .to_rgba8();
-        let mut filled_crop = image::imageops::resize(
+        let filled_engine_crop = image::imageops::resize(
             &filled,
-            crop_w,
-            crop_h,
+            engine_crop_img.width(),
+            engine_crop_img.height(),
             image::imageops::FilterType::Lanczos3,
         );
-        // Prompted fills intentionally differ from their surroundings —
-        // barely touch them (ring-matching is what painted a bright halo
-        // gradient around generated clouds). Prompt-less LARGE blobs are
-        // reconstructions, not removals: full-strength matching forced
-        // them back to the wash they replaced; spots keep 1.0 elsewhere.
-        // Ring-matching belongs to spot REMOVALS (LaMa path keeps 1.0).
-        // Large-blob reconstructions replace defective regions — pulling
-        // their tone toward the (defective) ring beiged out the engine's
-        // clouds. Verified 2026-08-24: raw output had real clouds; the
-        // 0.65 pull was the last mush stage.
-        let tone_strength = 0.15;
+        let mut filled_crop = if orient_for_engine {
+            deorient_rgba_from_engine(
+                &filled_engine_crop,
+                orientation_steps,
+                flip_horizontal,
+                flip_vertical,
+            )
+        } else {
+            filled_engine_crop
+        };
+        if filled_crop.dimensions() != (crop_w, crop_h) {
+            filled_crop = image::imageops::resize(
+                &filled_crop,
+                crop_w,
+                crop_h,
+                image::imageops::FilterType::Lanczos3,
+            );
+        }
+        // Structure measured IN-MASK ONLY: whole-crop impressions are
+        // dominated by the surrounding photo and hide a blank fill.
+        let blob_src_std = reconstruct_region_stats(&original_crop, &crop_mask)
+            .map(|s| s.luma_std)
+            .unwrap_or(0.0);
+        let blob_ai_std = reconstruct_region_stats(&filled_crop, &crop_mask)
+            .map(|s| s.luma_std)
+            .unwrap_or(0.0);
+        log::info!(
+            "[fill] {blob_prefix} engine output in-mask: luma_std={blob_ai_std:.2} (source region {blob_src_std:.2}); flat below ~3.0"
+        );
+        if reconstruct_fill {
+            let fallback_engine_crop = fallback_engine_crop
+                .as_ref()
+                .expect("reconstruct fallback crop should exist");
+            let mut fallback_crop = if orient_for_engine {
+                deorient_rgba_from_engine(
+                    fallback_engine_crop,
+                    orientation_steps,
+                    flip_horizontal,
+                    flip_vertical,
+                )
+            } else {
+                fallback_engine_crop.clone()
+            };
+            if fallback_crop.dimensions() != (crop_w, crop_h) {
+                fallback_crop = image::imageops::resize(
+                    &fallback_crop,
+                    crop_w,
+                    crop_h,
+                    image::imageops::FilterType::Lanczos3,
+                );
+            }
+            let tone_strength = reconstruct_tone_strength(reconstruct_fill, promptless_reconstruct);
+            if let Some(raw_full) = reconstruct_raw_ai_full.as_mut() {
+                let mut raw_ai_crop = filled_crop.clone();
+                harmonize_patch(&original_crop, &mut raw_ai_crop, &crop_mask, tone_strength);
+                save_debug_rgba(
+                    app_handle,
+                    debug_run_id,
+                    &format!("{blob_prefix}-raw-ai-final-crop"),
+                    &raw_ai_crop,
+                );
+                blend_patch_into(raw_full, &raw_ai_crop, &crop_mask, x0, y0);
+            }
+            if let Some(fallback_full) = reconstruct_fallback_full.as_mut() {
+                let mut fallback_final_crop = fallback_crop.clone();
+                harmonize_patch(
+                    &original_crop,
+                    &mut fallback_final_crop,
+                    &crop_mask,
+                    tone_strength,
+                );
+                save_debug_rgba(
+                    app_handle,
+                    debug_run_id,
+                    &format!("{blob_prefix}-fallback-final-crop"),
+                    &fallback_final_crop,
+                );
+                blend_patch_into(fallback_full, &fallback_final_crop, &crop_mask, x0, y0);
+            }
+            if !reconstruct_single_path {
+                let collapsed =
+                    reconstruct_output_looks_collapsed(&filled_crop, &crop_mask, prompt);
+                let worse_than_fallback = reconstruct_ai_result_lost_to_fallback(
+                    &filled_crop,
+                    &fallback_crop,
+                    &crop_mask,
+                    prompt,
+                    reconstruct_strategy.unwrap(),
+                );
+                if collapsed || worse_than_fallback {
+                    log::info!(
+                        "[fill] reconstruct engine output rejected for {blob_prefix} (collapsed={collapsed}, worse_than_fallback={worse_than_fallback}); using reconstruct fallback"
+                    );
+                    reconstruct_rejected_any = true;
+                    blob_used_fallback = true;
+                    save_debug_rgba(
+                        app_handle,
+                        debug_run_id,
+                        &format!("{blob_prefix}-seeded-fallback-crop"),
+                        &fallback_crop,
+                    );
+                    filled_crop = fallback_crop;
+                }
+            } else {
+                log::info!(
+                    "[fill] single-path Reconstruct keeps raw engine output for {blob_prefix}; fallback rejection disabled for this test"
+                );
+            }
+        }
+        // Prompted Reconstruct should not have its intended content
+        // pulled back toward the defective clipped ring. Empty-prompt
+        // Reconstruct gets a modest pull because its purpose is invisible
+        // scene continuation, not semantic replacement.
+        let tone_strength = reconstruct_tone_strength(reconstruct_fill, promptless_reconstruct);
         harmonize_patch(&original_crop, &mut filled_crop, &crop_mask, tone_strength);
+        save_debug_rgba(
+            app_handle,
+            debug_run_id,
+            &format!("{blob_prefix}-final-crop"),
+            &filled_crop,
+        );
+        let blob_final_std = reconstruct_region_stats(&filled_crop, &crop_mask)
+            .map(|s| s.luma_std)
+            .unwrap_or(0.0);
+        blob_reports.push(BlobReport {
+            index: blob_index,
+            span: comp.span(),
+            area: comp.area,
+            density: component_density(comp),
+            coverage: blob_coverage,
+            canvas_long_edge,
+            blob_px_on_canvas,
+            src_std: blob_src_std,
+            ai_std: blob_ai_std,
+            final_std: blob_final_std,
+            used_fallback: blob_used_fallback,
+        });
         blend_patch_into(&mut encoded_full, &filled_crop, &crop_mask, x0, y0);
     }
 
-    Ok((encoded_full, is_linear))
+    if !blob_reports.is_empty() {
+        log::info!("[fill] ---- per-blob diagnostic table ----");
+        log::info!(
+            "[fill] idx  span   area  dens  cover%  canvas  blobpx  src_std  ai_std  fin_std  fallback  verdict"
+        );
+        for r in &blob_reports {
+            // Verdict names the suspected mechanism for this region.
+            let verdict = if r.used_fallback {
+                "AI REJECTED -> fallback"
+            } else if r.ai_std < 3.0 {
+                if r.coverage > 0.35 {
+                    "FLAT (mask covers too much canvas)"
+                } else if r.blob_px_on_canvas < 200 {
+                    "FLAT (blob rendered too small)"
+                } else {
+                    "FLAT (model returned no structure)"
+                }
+            } else if r.final_std < r.ai_std * 0.6 {
+                "structure lost after blending"
+            } else {
+                "ok"
+            };
+            log::info!(
+                "[fill] {:>3}  {:>4}  {:>6}  {:.2}  {:>5.1}  {:>6}  {:>6}  {:>7.2}  {:>6.2}  {:>7.2}  {:>8}  {}",
+                r.index,
+                r.span,
+                r.area,
+                r.density,
+                r.coverage * 100.0,
+                r.canvas_long_edge,
+                r.blob_px_on_canvas,
+                r.src_std,
+                r.ai_std,
+                r.final_std,
+                r.used_fallback,
+                verdict
+            );
+        }
+        let flat = blob_reports
+            .iter()
+            .filter(|r| r.ai_std < 3.0 || r.used_fallback)
+            .count();
+        log::info!(
+            "[fill] ---- {} of {} diffusion region(s) produced no usable structure ----",
+            flat,
+            blob_reports.len()
+        );
+    }
+
+    if reconstruct_fill {
+        save_debug_rgba(app_handle, debug_run_id, "run-final-full", &encoded_full);
+        if let Some(raw) = reconstruct_raw_ai_full.as_ref() {
+            save_debug_rgba(app_handle, debug_run_id, "run-raw-ai-full", raw);
+        }
+        if let Some(fallback) = reconstruct_fallback_full.as_ref() {
+            save_debug_rgba(app_handle, debug_run_id, "run-fallback-full", fallback);
+        }
+    }
+
+    Ok(EngineInpaintResult {
+        image: encoded_full,
+        is_linear,
+        active_kind: reconstruct_fill.then_some(if reconstruct_rejected_any {
+            "fallback"
+        } else {
+            "ai"
+        }),
+    })
 }
 
 #[tauri::command]
@@ -1253,6 +3172,39 @@ pub async fn invoke_generative_replace_with_mask_def(
     state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
     let settings = load_settings(app_handle.clone()).unwrap_or_default();
+    let reconstruct_fill = patch_uses_clipped_reconstruct(&patch_definition);
+    let reconstruct_single_path = reconstruct_fill && patch_definition.reconstruct_single_path;
+    let preserve_negative_refinements = patch_has_negative_refinement(&patch_definition);
+    let (orientation_steps, flip_horizontal, flip_vertical) =
+        ai_fill_orientation_from_adjustments(&current_adjustments);
+    let force_engine_for_reconstruct =
+        reconstruct_fill && (reconstruct_single_path || !patch_definition.prompt.trim().is_empty());
+    let effective_use_fast_inpaint = use_fast_inpaint && !force_engine_for_reconstruct;
+    if force_engine_for_reconstruct && use_fast_inpaint {
+        log::info!(
+            "[fill] Reconstruct requested fast mode; using prompt-conditioned engine instead"
+        );
+    }
+    if reconstruct_single_path {
+        log::info!("[fill] single-path Reconstruct test enabled");
+    }
+    let debug_run_id = if reconstruct_fill {
+        let millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        format!("{}-{millis}", patch_definition.id)
+    } else {
+        String::new()
+    };
+    let debug_dir = if !debug_run_id.is_empty() {
+        ai_fill_debug_dir(&app_handle, &debug_run_id).map(|dir| {
+            log::info!("[fill] debug artifacts: {:?}", dir);
+            dir.to_string_lossy().to_string()
+        })
+    } else {
+        None
+    };
 
     let mut source_image_adjustments = current_adjustments.clone();
     if let Some(patches) = source_image_adjustments
@@ -1323,17 +3275,25 @@ pub async fn invoke_generative_replace_with_mask_def(
         let boosted = ((v - 0.06) / (0.30 - 0.06)).clamp(0.0, 1.0);
         p[0] = (boosted * 255.0).round() as u8;
     }
-    let nonzero = mask_bitmap.pixels().filter(|p| p[0] > 0).count();
+    let mut nonzero = mask_bitmap.pixels().filter(|p| p[0] > 0).count();
     log::info!(
         "[fill] mask confidence boost: {pre_boost} px selected -> {nonzero} px at working strength"
     );
+
+    if reconstruct_fill && !effective_use_fast_inpaint {
+        let (selected, strong) = materialize_reconstruct_mask(&mut mask_bitmap);
+        log::info!(
+            "[fill] reconstruct mask materialized: {selected} selected px -> {strong} full-strength px"
+        );
+        consolidate_reconstruct_mask(&mut mask_bitmap, preserve_negative_refinements);
+    }
 
     // Consolidation guard: threshold-noise selections fragment into
     // thousands of specks, each of which would become its own LaMa job
     // (measured: 6,304 specks = ~an hour of compute for invisible dust
     // healing). When the mask is badly fragmented, close nearby specks
     // into solid regions and drop isolated dust outright.
-    {
+    if !(reconstruct_fill && preserve_negative_refinements) {
         let (_, comps) = mask_components(&mask_bitmap, 127);
         if comps.len() > 200 {
             let scale = (mask_bitmap.width().max(mask_bitmap.height()) as f32 / 2000.0).max(1.0);
@@ -1362,16 +3322,26 @@ pub async fn invoke_generative_replace_with_mask_def(
                 comps3.len()
             );
         }
+    } else {
+        let (_, comps) = mask_components(&mask_bitmap, 127);
+        if comps.len() > 200 {
+            log::info!(
+                "[fill] skipped fragmentation consolidation to preserve reconstruct refinements ({} regions)",
+                comps.len()
+            );
+        }
     }
+    nonzero = mask_bitmap.pixels().filter(|p| p[0] > 0).count();
     log::info!(
-        "generative_replace: image {}x{}, mask {}x{}, {} masked px, {} sub-masks, fast={}",
+        "generative_replace: image {}x{}, mask {}x{}, {} masked px, {} sub-masks, fast={}, reconstruct={}",
         img_w,
         img_h,
         mask_bitmap.width(),
         mask_bitmap.height(),
         nonzero,
         mask_def_for_generation.sub_masks.len(),
-        use_fast_inpaint
+        effective_use_fast_inpaint,
+        reconstruct_fill
     );
     // An empty selection previously slipped through to the model, which
     // returns the image unchanged — looking like a silent failure.
@@ -1380,6 +3350,28 @@ pub async fn invoke_generative_replace_with_mask_def(
             "The selection is empty — brush over the area to remove, then try again.".to_string(),
         );
     }
+    let composite_mask_bitmap = if reconstruct_fill && !effective_use_fast_inpaint {
+        let blend = reconstruct_composite_mask(&mask_bitmap, preserve_negative_refinements);
+        let blend_nonzero = blend.pixels().filter(|p| p[0] > 0).count();
+        let blend_strong = blend.pixels().filter(|p| p[0] > 127).count();
+        log::info!(
+            "[fill] reconstruct composite mask: {blend_nonzero} soft px, {blend_strong} strong px"
+        );
+        blend
+    } else {
+        mask_bitmap.clone()
+    };
+    let promptless_reconstruct = reconstruct_fill && patch_definition.prompt.trim().is_empty();
+    let auto_hint = if promptless_reconstruct {
+        infer_reconstruct_auto_hint(&source_image, &mask_bitmap)
+    } else {
+        ReconstructAutoHint::Generic
+    };
+    let prompt_for_engine =
+        effective_reconstruct_prompt(&patch_definition.prompt, reconstruct_fill, auto_hint);
+    if promptless_reconstruct {
+        log::info!("[fill] using automatic Reconstruct prompt: {:?}", auto_hint);
+    }
 
     // Which local inpaint model is selected decides the local paths: the
     // generative engine (SDXL fill) handles both plain removal and
@@ -1387,7 +3379,7 @@ pub async fn invoke_generative_replace_with_mask_def(
     // The Fast toggle is the user's word: honor it even when an engine
     // model is selected (previously the engine silently overrode it and
     // 'fast' runs took six diffusion round-trips).
-    let engine_model = if use_fast_inpaint {
+    let engine_model = if effective_use_fast_inpaint {
         None
     } else {
         resolve_and_prepare(
@@ -1395,26 +3387,37 @@ pub async fn invoke_generative_replace_with_mask_def(
             &state.model_registry,
             TaskType::Inpaint,
             "inpaint",
-            |_| true,
+            |m| m.params.get("engine").and_then(|v| v.as_str()) == Some("comfy"),
         )
         .await
         .ok()
-        .filter(|(_, m)| m.manifest.params.get("engine").and_then(|v| v.as_str()) == Some("comfy"))
     };
 
-    let (patch_rgba, patch_is_gamma) = if let Some((_, model)) = engine_model {
+    let patch_result = if let Some((_, model)) = engine_model {
         let kind = crate::comfy_engine::FillKind::from_params(&model.manifest.params);
+        log::info!(
+            "[fill] selected engine model {} ({})",
+            model.manifest.id,
+            model.manifest.display_name
+        );
         run_engine_inpaint_patch(
             &source_image,
             &mask_bitmap,
-            &patch_definition.prompt,
+            prompt_for_engine.as_ref(),
             kind,
             false,
+            reconstruct_fill,
+            promptless_reconstruct,
+            reconstruct_single_path,
+            &debug_run_id,
+            orientation_steps,
+            flip_horizontal,
+            flip_vertical,
             &app_handle,
             &state,
         )
         .await?
-    } else if use_fast_inpaint {
+    } else if effective_use_fast_inpaint {
         // Fast mode gets the same per-blob split + harmonization as the
         // engine path — every blob heals via LaMa. The old whole-mask
         // single LaMa pass is exactly what produced smeary results on
@@ -1422,9 +3425,16 @@ pub async fn invoke_generative_replace_with_mask_def(
         run_engine_inpaint_patch(
             &source_image,
             &mask_bitmap,
-            &patch_definition.prompt,
+            prompt_for_engine.as_ref(),
             crate::comfy_engine::FillKind::SdxlBase,
             true,
+            false,
+            false,
+            false,
+            "",
+            orientation_steps,
+            flip_horizontal,
+            flip_vertical,
             &app_handle,
             &state,
         )
@@ -1448,12 +3458,16 @@ pub async fn invoke_generative_replace_with_mask_def(
             &real_path_buf.to_string_lossy(),
             &source_image,
             &mask_image_dynamic,
-            patch_definition.prompt,
+            prompt_for_engine.to_string(),
             Some(&auth_token),
         )
         .await
         .map_err(|e| e.to_string())
-        .map(|img| (img, false))?
+        .map(|img| EngineInpaintResult {
+            image: img,
+            is_linear: false,
+            active_kind: None,
+        })?
     } else if settings.ai_provider.as_deref() == Some("ai-connector")
         && let Some(address) = settings.ai_connector_address
     {
@@ -1473,12 +3487,16 @@ pub async fn invoke_generative_replace_with_mask_def(
             &real_path_buf.to_string_lossy(),
             &source_image,
             &mask_image_dynamic,
-            patch_definition.prompt,
+            prompt_for_engine.to_string(),
             None,
         )
         .await
         .map_err(|e| e.to_string())
-        .map(|img| (img, false))?
+        .map(|img| EngineInpaintResult {
+            image: img,
+            is_linear: false,
+            active_kind: None,
+        })?
     } else {
         return Err(
             "No generative backend configured or connection invalid. Please check your AI settings."
@@ -1486,18 +3504,48 @@ pub async fn invoke_generative_replace_with_mask_def(
         );
     };
 
-    encode_patch_result(&patch_rgba, patch_is_gamma, &mask_bitmap)
+    let mut payload = encode_patch_result_value(
+        &patch_result.image,
+        patch_result.is_linear,
+        &composite_mask_bitmap,
+    )?;
+
+    if reconstruct_fill {
+        payload = attach_reconstruct_response_metadata(
+            payload,
+            ReconstructResponseInputs {
+                current_adjustments: &current_adjustments,
+                patch_id: &patch_definition.id,
+                prompt: &patch_definition.prompt,
+                debug_run_id: &debug_run_id,
+                debug_dir: debug_dir.clone(),
+                auto_hint,
+                effective_prompt: prompt_for_engine.as_ref(),
+                active_kind: patch_result.active_kind.unwrap_or("ai"),
+            },
+        );
+        save_debug_json(
+            &app_handle,
+            &debug_run_id,
+            "manifest",
+            payload
+                .get("reconstructManifest")
+                .unwrap_or(&serde_json::Value::Null),
+        );
+    }
+
+    Ok(payload.to_string())
 }
 
 /// Encodes a full-size result image + mask into the aiPatches payload the
 /// frontend stores in the sidecar (PNG, not JPEG: deep-shadow fills live at
 /// pixel values 0-5 where JPEG block noise becomes banding under exposure
 /// boosts; the patch is mostly black, so PNG stays small).
-fn encode_patch_result(
+fn encode_patch_result_value(
     patch_rgba: &RgbaImage,
     patch_is_gamma: bool,
     mask_bitmap: &GrayImage,
-) -> Result<String, String> {
+) -> Result<Value, String> {
     let (patch_w, patch_h) = patch_rgba.dimensions();
     let scaled_mask_bitmap = image::imageops::resize(
         mask_bitmap,
@@ -1533,14 +3581,153 @@ fn encode_patch_result(
         .map_err(|e| e.to_string())?;
     let mask_base64 = general_purpose::STANDARD.encode(mask_buf.get_ref());
 
-    let result_json = serde_json::json!({
+    Ok(serde_json::json!({
         "color": color_base64,
         "mask": mask_base64,
         "encoding": if patch_is_gamma { "gamma" } else { "linear" },
-    })
-    .to_string();
+    }))
+}
 
-    Ok(result_json)
+fn encode_patch_result(
+    patch_rgba: &RgbaImage,
+    patch_is_gamma: bool,
+    mask_bitmap: &GrayImage,
+) -> Result<String, String> {
+    Ok(encode_patch_result_value(patch_rgba, patch_is_gamma, mask_bitmap)?.to_string())
+}
+
+fn current_patch_data_value<'a>(
+    current_adjustments: &'a Value,
+    patch_id: &str,
+) -> Option<&'a Value> {
+    current_adjustments
+        .get("aiPatches")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|p| p.get("id").and_then(Value::as_str) == Some(patch_id))?
+        .get("patchData")
+}
+
+fn reconstruct_variant_from_payload(
+    id: String,
+    label: String,
+    kind: &str,
+    payload: &Value,
+    prompt: &str,
+    debug_run_id: &str,
+    debug_dir: Option<&str>,
+) -> Value {
+    serde_json::json!({
+        "id": id,
+        "label": label,
+        "kind": kind,
+        "color": payload.get("color").and_then(Value::as_str).unwrap_or_default(),
+        "mask": payload.get("mask").and_then(Value::as_str).unwrap_or_default(),
+        "encoding": payload.get("encoding").and_then(Value::as_str).unwrap_or("gamma"),
+        "prompt": prompt,
+        "debugRunId": debug_run_id,
+        "debugDir": debug_dir,
+        "createdAt": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0),
+    })
+}
+
+struct ReconstructResponseInputs<'a> {
+    current_adjustments: &'a Value,
+    patch_id: &'a str,
+    prompt: &'a str,
+    debug_run_id: &'a str,
+    debug_dir: Option<String>,
+    auto_hint: ReconstructAutoHint,
+    effective_prompt: &'a str,
+    active_kind: &'static str,
+}
+
+fn attach_reconstruct_response_metadata(
+    mut active_payload: Value,
+    inputs: ReconstructResponseInputs<'_>,
+) -> Value {
+    let previous_patch_data = current_patch_data_value(inputs.current_adjustments, inputs.patch_id);
+    let mut variants = previous_patch_data
+        .and_then(|pd| pd.get("reconstructVariants"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    if variants.is_empty()
+        && let Some(previous) = previous_patch_data
+        && previous
+            .get("color")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty())
+    {
+        variants.push(reconstruct_variant_from_payload(
+            "attempt-1".to_string(),
+            "Attempt 1".to_string(),
+            previous
+                .get("reconstructActiveKind")
+                .and_then(Value::as_str)
+                .unwrap_or("ai"),
+            previous,
+            previous
+                .get("reconstructPrompt")
+                .and_then(Value::as_str)
+                .unwrap_or(inputs.prompt),
+            previous
+                .get("reconstructDebugRunId")
+                .and_then(Value::as_str)
+                .unwrap_or(""),
+            previous.get("reconstructDebugDir").and_then(Value::as_str),
+        ));
+    }
+
+    let attempt_index = variants
+        .iter()
+        .filter(|v| {
+            v.get("id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| id.starts_with("attempt-"))
+        })
+        .count()
+        + 1;
+    let active_id = format!("attempt-{attempt_index}");
+    variants.push(reconstruct_variant_from_payload(
+        active_id.clone(),
+        format!("Attempt {attempt_index}"),
+        inputs.active_kind,
+        &active_payload,
+        inputs.prompt,
+        inputs.debug_run_id,
+        inputs.debug_dir.as_deref(),
+    ));
+
+    let manifest = serde_json::json!({
+        "patchId": inputs.patch_id,
+        "activeVariantId": active_id,
+        "activeKind": inputs.active_kind,
+        "debugRunId": inputs.debug_run_id,
+        "debugDir": inputs.debug_dir,
+        "prompt": inputs.prompt,
+        "effectivePrompt": inputs.effective_prompt,
+        "autoHint": format!("{:?}", inputs.auto_hint),
+        "variantCount": variants.len(),
+    });
+
+    active_payload["reconstructVariants"] = Value::Array(variants);
+    active_payload["reconstructActiveVariantId"] = Value::String(active_id);
+    active_payload["reconstructActiveKind"] = Value::String(inputs.active_kind.to_string());
+    active_payload["reconstructPrompt"] = Value::String(inputs.prompt.to_string());
+    active_payload["reconstructEffectivePrompt"] =
+        Value::String(inputs.effective_prompt.to_string());
+    active_payload["reconstructAutoHint"] = Value::String(format!("{:?}", inputs.auto_hint));
+    active_payload["reconstructDebugRunId"] = Value::String(inputs.debug_run_id.to_string());
+    active_payload["reconstructDebugDir"] =
+        inputs.debug_dir.map(Value::String).unwrap_or(Value::Null);
+    active_payload["reconstructManifest"] = manifest;
+
+    active_payload
 }
 
 /// Spot enhancement: runs the selected enhancement model (deblur / restore /
@@ -1975,6 +4162,555 @@ mod fill_component_tests {
             "lace density {:.2} must fail the solidity gate",
             c.area as f32 / bbox as f32
         );
+        assert!(
+            !component_goes_to_diffusion(c, false, false),
+            "ordinary repair keeps lacy masks on the texture-fill path"
+        );
+        assert!(
+            component_goes_to_diffusion(c, false, true),
+            "Reconstruct must keep lacy clipped masks on the prompt-conditioned engine path"
+        );
+        assert!(
+            !component_goes_to_diffusion(c, true, true),
+            "explicit fast mode remains LaMa-only"
+        );
+    }
+
+    #[test]
+    fn reconstruct_consolidation_merges_lacy_clipped_masks() {
+        let mut mask = GrayImage::new(200, 200);
+        for gy in 0..10 {
+            for gx in 0..10 {
+                let (bx, by) = (50 + gx * 10, 50 + gy * 10);
+                for y in by..by + 3 {
+                    for x in bx..bx + 3 {
+                        mask.put_pixel(x, y, image::Luma([255]));
+                    }
+                }
+            }
+        }
+
+        let (_, before) = mask_components(&mask, 127);
+        consolidate_reconstruct_mask(&mut mask, false);
+        let (_, after) = mask_components(&mask, 127);
+
+        assert!(
+            after.len() < before.len(),
+            "solidify should merge clipped speckle into fewer regions"
+        );
+        assert!(
+            mask.get_pixel(55, 55)[0] > 127,
+            "inter-dot gap should be selected after Reconstruct consolidation"
+        );
+    }
+
+    #[test]
+    fn reconstruct_consolidation_preserves_negative_refinements_when_requested() {
+        let mut mask = GrayImage::new(120, 120);
+        for gy in 0..8 {
+            for gx in 0..8 {
+                let (bx, by) = (20 + gx * 10, 20 + gy * 10);
+                for y in by..by + 3 {
+                    for x in bx..bx + 3 {
+                        mask.put_pixel(x, y, image::Luma([255]));
+                    }
+                }
+            }
+        }
+
+        let before = mask.clone();
+        consolidate_reconstruct_mask(&mut mask, true);
+        assert_eq!(
+            mask.as_raw(),
+            before.as_raw(),
+            "backend consolidation should not override eraser/subtractive refinements"
+        );
+    }
+
+    #[test]
+    fn reconstruct_materialization_turns_confidence_into_opacity() {
+        let mut mask = GrayImage::new(8, 1);
+        mask.put_pixel(0, 0, image::Luma([0]));
+        mask.put_pixel(1, 0, image::Luma([1]));
+        mask.put_pixel(2, 0, image::Luma([32]));
+        mask.put_pixel(3, 0, image::Luma([127]));
+        mask.put_pixel(4, 0, image::Luma([128]));
+
+        let (selected, strong) = materialize_reconstruct_mask(&mut mask);
+
+        assert_eq!(selected, 4);
+        assert_eq!(strong, 4);
+        assert_eq!(mask.get_pixel(0, 0)[0], 0);
+        for x in 1..=4 {
+            assert_eq!(
+                mask.get_pixel(x, 0)[0],
+                255,
+                "selected confidence pixel {x} should become full opacity"
+            );
+        }
+    }
+
+    #[test]
+    fn reconstruct_routing_keeps_components_independent() {
+        let large = MaskComponent {
+            id: 1,
+            min_x: 100,
+            min_y: 100,
+            max_x: 260,
+            max_y: 220,
+            area: 12_000,
+        };
+        let nearby_small = MaskComponent {
+            id: 2,
+            min_x: 310,
+            min_y: 145,
+            max_x: 322,
+            max_y: 157,
+            area: 40,
+        };
+
+        assert!(component_goes_to_diffusion(&large, false, true));
+        assert!(
+            !component_goes_to_diffusion(&nearby_small, false, true),
+            "tiny cleanup specks should stay fast instead of being merged into the large prompt path"
+        );
+    }
+
+    #[test]
+    fn large_flux_reconstruct_skips_flat_prompt_seed() {
+        assert!(!should_seed_reconstruct_engine_canvas(
+            480,
+            ReconstructStrategy::HighlightSky,
+            crate::comfy_engine::FillKind::Flux
+        ));
+        assert!(should_seed_reconstruct_engine_canvas(
+            64,
+            ReconstructStrategy::HighlightSky,
+            crate::comfy_engine::FillKind::Flux
+        ));
+        assert!(should_seed_reconstruct_engine_canvas(
+            480,
+            ReconstructStrategy::GenericContext,
+            crate::comfy_engine::FillKind::Flux
+        ));
+    }
+
+    #[test]
+    fn reconstruct_composite_mask_expands_and_softens_edges() {
+        let mut mask = GrayImage::new(80, 80);
+        for y in 30..50 {
+            for x in 30..50 {
+                mask.put_pixel(x, y, image::Luma([255]));
+            }
+        }
+
+        let blend = reconstruct_composite_mask(&mask, false);
+        let original_selected = mask.pixels().filter(|p| p[0] > 0).count();
+        let blend_selected = blend.pixels().filter(|p| p[0] > 0).count();
+        let blend_strong = blend.pixels().filter(|p| p[0] > 127).count();
+
+        assert!(
+            blend_selected > original_selected,
+            "composite mask should use the generated seam outside the clipped core"
+        );
+        assert!(
+            blend_selected > blend_strong,
+            "composite mask should include a soft edge, not only full-opacity pixels"
+        );
+    }
+
+    #[test]
+    fn empty_reconstruct_uses_internal_prompt() {
+        let prompt = effective_reconstruct_prompt("", true, ReconstructAutoHint::Generic);
+        assert!(
+            prompt.contains("seamlessly continue"),
+            "empty Reconstruct should still be semantically conditioned"
+        );
+        let sky_prompt = effective_reconstruct_prompt("", true, ReconstructAutoHint::HighlightSky);
+        assert!(
+            sky_prompt.contains("cloud detail"),
+            "sky-like clipped highlights should get a more useful prompt than generic continuation"
+        );
+        assert_eq!(
+            effective_reconstruct_prompt("storm clouds", true, ReconstructAutoHint::HighlightSky)
+                .as_ref(),
+            "storm clouds",
+            "user prompts must pass through unchanged"
+        );
+        assert_eq!(
+            effective_reconstruct_prompt("", false, ReconstructAutoHint::Generic).as_ref(),
+            "",
+            "non-Reconstruct empty prompts keep existing behavior"
+        );
+    }
+
+    #[test]
+    fn reconstruct_auto_hint_detects_large_upper_highlight_as_sky() {
+        let mut img = RgbaImage::from_pixel(200, 120, Rgba([180, 205, 215, 255]));
+        let mut mask = GrayImage::new(200, 120);
+        for y in 18..70 {
+            for x in 48..152 {
+                img.put_pixel(x, y, Rgba([252, 252, 250, 255]));
+                mask.put_pixel(x, y, image::Luma([255]));
+            }
+        }
+
+        assert_eq!(
+            infer_reconstruct_auto_hint_rgba(&img, &mask),
+            ReconstructAutoHint::HighlightSky
+        );
+    }
+
+    #[test]
+    fn promptless_reconstruct_gets_blend_tone_matching() {
+        assert!(reconstruct_tone_strength(true, true) > 0.0);
+        assert_eq!(reconstruct_tone_strength(true, false), 0.0);
+        assert_eq!(reconstruct_tone_strength(false, false), 0.15);
+    }
+
+    #[test]
+    fn reconstruct_prefill_scrubs_clipped_conditioning_pixels() {
+        let mut crop = RgbaImage::from_pixel(48, 48, Rgba([150, 190, 210, 255]));
+        let mut mask = GrayImage::new(48, 48);
+        for y in 16..32 {
+            for x in 16..32 {
+                crop.put_pixel(x, y, Rgba([255, 255, 255, 255]));
+                mask.put_pixel(x, y, image::Luma([255]));
+            }
+        }
+
+        let changed = prefill_reconstruct_conditioning(&mut crop, &mask);
+        let center = crop.get_pixel(24, 24);
+
+        assert_eq!(changed, 16 * 16);
+        assert!(
+            center[0] < 220 && center[1] < 230 && center[2] < 240,
+            "center should be scrubbed from clipped white into surrounding context, got {:?}",
+            center
+        );
+    }
+
+    #[test]
+    fn reconstruct_engine_seed_honors_blue_sky_prompt() {
+        let mut crop = RgbaImage::from_pixel(64, 64, Rgba([230, 230, 220, 255]));
+        let mut mask = GrayImage::new(64, 64);
+        for y in 18..46 {
+            for x in 18..46 {
+                crop.put_pixel(x, y, Rgba([250, 250, 250, 255]));
+                mask.put_pixel(x, y, image::Luma([255]));
+            }
+        }
+
+        let changed = seed_reconstruct_engine_canvas(&mut crop, &mask, "blue sky");
+        let center = crop.get_pixel(32, 32);
+
+        assert_eq!(changed, 28 * 28);
+        assert!(
+            center[2] > center[0] + 45 && center[1] > center[0] + 25,
+            "blue sky prompt should seed the engine canvas blue before Flux sees it, got {:?}",
+            center
+        );
+    }
+
+    #[test]
+    fn reconstruct_collapse_guard_rejects_flat_gray_large_fill() {
+        let (w, h) = (96u32, 96u32);
+        let filled = RgbaImage::from_pixel(w, h, Rgba([186, 187, 184, 255]));
+        let mask = GrayImage::from_pixel(w, h, image::Luma([255]));
+
+        assert!(
+            reconstruct_output_looks_collapsed(&filled, &mask, ""),
+            "large flat gray reconstruct output should be treated as collapsed"
+        );
+    }
+
+    #[test]
+    fn reconstruct_collapse_guard_rejects_blue_sky_prompt_that_returns_gray() {
+        let (w, h) = (96u32, 96u32);
+        let filled = RgbaImage::from_pixel(w, h, Rgba([170, 176, 181, 255]));
+        let mask = GrayImage::from_pixel(w, h, image::Luma([255]));
+
+        assert!(
+            reconstruct_output_looks_collapsed(&filled, &mask, "blue sky"),
+            "blue sky prompt should not accept a neutral gray fill"
+        );
+    }
+
+    #[test]
+    fn reconstruct_collapse_guard_keeps_colored_textured_fill() {
+        let (w, h) = (96u32, 96u32);
+        let mut filled = RgbaImage::new(w, h);
+        let mask = GrayImage::from_pixel(w, h, image::Luma([255]));
+        for y in 0..h {
+            for x in 0..w {
+                let v = ((x + y) % 21) as u8;
+                filled.put_pixel(x, y, Rgba([90 + v, 155 + v, 218 + v, 255]));
+            }
+        }
+
+        assert!(
+            !reconstruct_output_looks_collapsed(&filled, &mask, "blue sky"),
+            "colored, varied sky-like output should be accepted"
+        );
+    }
+
+    #[test]
+    fn reconstruct_fallback_renderer_adds_subtle_sky_variation() {
+        let (w, h) = (160u32, 120u32);
+        let mut seeded = RgbaImage::from_pixel(w, h, Rgba([190, 208, 216, 255]));
+        let mut mask = GrayImage::new(w, h);
+        for y in 24..96 {
+            for x in 32..128 {
+                seeded.put_pixel(x, y, Rgba([190, 208, 216, 255]));
+                mask.put_pixel(x, y, image::Luma([255]));
+            }
+        }
+
+        let rendered = render_reconstruct_fallback_crop(
+            &seeded,
+            &mask,
+            "bright backlit cloud detail and pale sky",
+            ReconstructStrategy::HighlightSky,
+        );
+        let stats = reconstruct_region_stats(&rendered, &mask).unwrap();
+
+        assert!(
+            stats.luma_std > 2.5,
+            "fallback should add subtle haze/cloud variation, got luma std {:.2}",
+            stats.luma_std
+        );
+        assert!(
+            stats.blue_minus_red() > 14.0,
+            "fallback should remain sky-like, got b-r {:.2}",
+            stats.blue_minus_red()
+        );
+    }
+
+    #[test]
+    fn reconstruct_fallback_carries_surrounding_sky_texture_into_mask() {
+        let (w, h) = (192u32, 144u32);
+        let mut seeded = RgbaImage::new(w, h);
+        let mut mask = GrayImage::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let wave = (((x as f32 / 13.0).sin() + (y as f32 / 17.0).cos()) * 9.0) as i16;
+                let cloud_band = if (y > 28 && y < 50) || (x > 142 && y > 82) {
+                    24
+                } else {
+                    0
+                };
+                let base = 184i16 + (y as i16 / 8) + wave + cloud_band;
+                seeded.put_pixel(
+                    x,
+                    y,
+                    Rgba([
+                        base.clamp(0, 255) as u8,
+                        (base + 18).clamp(0, 255) as u8,
+                        (base + 30).clamp(0, 255) as u8,
+                        255,
+                    ]),
+                );
+            }
+        }
+        for y in 36..116 {
+            for x in 42..150 {
+                seeded.put_pixel(x, y, Rgba([232, 233, 230, 255]));
+                mask.put_pixel(x, y, image::Luma([255]));
+            }
+        }
+
+        let rendered =
+            render_reconstruct_fallback_crop(&seeded, &mask, "", ReconstructStrategy::HighlightSky);
+        let stats = reconstruct_region_stats(&rendered, &mask).unwrap();
+        let mut upper = 0.0f64;
+        let mut lower = 0.0f64;
+        let mut upper_count = 0.0f64;
+        let mut lower_count = 0.0f64;
+        for y in 48..104 {
+            for x in 62..130 {
+                let p = rendered.get_pixel(x, y);
+                let luma = 0.2126 * p[0] as f64 + 0.7152 * p[1] as f64 + 0.0722 * p[2] as f64;
+                if y < 76 {
+                    upper += luma;
+                    upper_count += 1.0;
+                } else {
+                    lower += luma;
+                    lower_count += 1.0;
+                }
+            }
+        }
+
+        assert!(
+            stats.luma_std > 3.6,
+            "texture-guided fallback should stay meaningfully above a flat tone, got luma std {:.2}",
+            stats.luma_std
+        );
+        assert!(
+            ((upper / upper_count) - (lower / lower_count)).abs() > 2.0,
+            "surrounding tonal structure should carry through the interior"
+        );
+    }
+
+    #[test]
+    fn reconstruct_response_metadata_appends_attempt_without_losing_previous() {
+        let current = serde_json::json!({
+            "aiPatches": [{
+                "id": "patch-a",
+                "patchData": {
+                    "color": "old-color",
+                    "mask": "old-mask",
+                    "encoding": "gamma"
+                }
+            }]
+        });
+        let active = serde_json::json!({
+            "color": "new-color",
+            "mask": "new-mask",
+            "encoding": "gamma"
+        });
+        let payload = attach_reconstruct_response_metadata(
+            active,
+            ReconstructResponseInputs {
+                current_adjustments: &current,
+                patch_id: "patch-a",
+                prompt: "",
+                debug_run_id: "patch-a-1",
+                debug_dir: Some("/tmp/debug".to_string()),
+                auto_hint: ReconstructAutoHint::HighlightSky,
+                effective_prompt: "auto sky prompt",
+                active_kind: "ai",
+            },
+        );
+        let variants = payload
+            .get("reconstructVariants")
+            .and_then(Value::as_array)
+            .unwrap();
+
+        assert_eq!(
+            payload
+                .get("reconstructActiveVariantId")
+                .and_then(Value::as_str),
+            Some("attempt-2")
+        );
+        assert_eq!(variants.len(), 2);
+        assert_eq!(
+            variants[0].get("color").and_then(Value::as_str),
+            Some("old-color")
+        );
+        assert!(
+            variants.iter().all(|v| v
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .starts_with("attempt-")),
+            "normal patch history should contain user-facing attempts only"
+        );
+    }
+
+    #[test]
+    fn reconstruct_quality_gate_rejects_no_prompt_sky_washout() {
+        let (w, h) = (160u32, 160u32);
+        let fallback = RgbaImage::from_pixel(w, h, Rgba([191, 209, 215, 255]));
+        let ai = RgbaImage::from_pixel(w, h, Rgba([235, 235, 233, 255]));
+        let mask = GrayImage::from_pixel(w, h, image::Luma([255]));
+
+        assert!(
+            reconstruct_ai_result_lost_to_fallback(
+                &ai,
+                &fallback,
+                &mask,
+                "bright backlit cloud detail and pale sky continuing naturally",
+                ReconstructStrategy::HighlightSky
+            ),
+            "no-prompt sky Reconstruct should reject AI output that washes the seeded sky candidate back to white-gray"
+        );
+    }
+
+    #[test]
+    fn reconstruct_strategy_keeps_shadow_fallback_dark() {
+        let (w, h) = (140u32, 120u32);
+        let mut seeded = RgbaImage::from_pixel(w, h, Rgba([34, 38, 42, 255]));
+        let mut mask = GrayImage::new(w, h);
+        for y in 24..96 {
+            for x in 28..112 {
+                seeded.put_pixel(x, y, Rgba([18, 20, 22, 255]));
+                mask.put_pixel(x, y, image::Luma([255]));
+            }
+        }
+
+        let strategy = ReconstructStrategy::from_prompt_and_stats("", true, &seeded, &mask);
+        let rendered = render_reconstruct_fallback_crop(
+            &seeded,
+            &mask,
+            "",
+            ReconstructStrategy::ShadowTexture,
+        );
+        let stats = reconstruct_region_stats(&rendered, &mask).unwrap();
+
+        assert_eq!(strategy, ReconstructStrategy::ShadowTexture);
+        assert!(
+            stats.mean_luma < 55.0,
+            "shadow reconstruct should stay dark, got luma {:.1}",
+            stats.mean_luma
+        );
+    }
+
+    #[test]
+    fn reconstruct_generic_fallback_does_not_force_sky_color() {
+        let (w, h) = (140u32, 120u32);
+        let seeded = RgbaImage::from_pixel(w, h, Rgba([128, 112, 92, 255]));
+        let mut mask = GrayImage::new(w, h);
+        for y in 24..96 {
+            for x in 28..112 {
+                mask.put_pixel(x, y, image::Luma([255]));
+            }
+        }
+
+        let rendered = render_reconstruct_fallback_crop(
+            &seeded,
+            &mask,
+            "",
+            ReconstructStrategy::GenericContext,
+        );
+        let stats = reconstruct_region_stats(&rendered, &mask).unwrap();
+
+        assert!(
+            stats.blue_minus_red() < 0.0,
+            "generic context should keep warm local color instead of forcing blue, got b-r {:.1}",
+            stats.blue_minus_red()
+        );
+    }
+
+    #[test]
+    fn engine_orientation_round_trips_reconstruct_crops() {
+        let mut crop = RgbaImage::new(3, 2);
+        for y in 0..2 {
+            for x in 0..3 {
+                crop.put_pixel(x, y, Rgba([(x * 50) as u8, (y * 80) as u8, 17, 255]));
+            }
+        }
+
+        for steps in 0..4 {
+            for flip_h in [false, true] {
+                for flip_v in [false, true] {
+                    let oriented = orient_rgba_for_engine(&crop, steps, flip_h, flip_v);
+                    let restored = deorient_rgba_from_engine(&oriented, steps, flip_h, flip_v);
+                    assert_eq!(restored.dimensions(), crop.dimensions());
+                    assert_eq!(restored, crop);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn engine_orientation_keeps_mask_aligned_with_image() {
+        let mut mask = GrayImage::new(4, 3);
+        mask.put_pixel(0, 0, image::Luma([255]));
+        mask.put_pixel(3, 2, image::Luma([128]));
+
+        let oriented = orient_gray_for_engine(&mask, 0, true, true);
+        assert_eq!(oriented.get_pixel(3, 2)[0], 255);
+        assert_eq!(oriented.get_pixel(0, 0)[0], 128);
     }
 
     /// The "placed-in blotch" fingerprint is a fill that is brighter/

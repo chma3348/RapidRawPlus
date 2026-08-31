@@ -222,6 +222,22 @@ pub fn is_installed(app_handle: &tauri::AppHandle) -> bool {
         .unwrap_or(false)
 }
 
+fn engine_needs_cpu_flag(dir: &Path) -> bool {
+    let probe = r#"import torch
+has_mps = hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+has_cuda = torch.cuda.is_available()
+print("cpu" if not (has_mps or has_cuda) else "accelerated")
+"#;
+    std::process::Command::new(dir.join("venv/bin/python"))
+        .arg("-c")
+        .arg(probe)
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .is_some_and(|stdout| stdout.trim() == "cpu")
+}
+
 pub fn seedvr2_model_present(app_handle: &tauri::AppHandle, model_file: &str) -> bool {
     engine_dir(app_handle)
         .map(|d| {
@@ -259,15 +275,24 @@ pub async fn ensure_running(
     }
     let dir = engine_dir(app_handle)?;
     let _ = app_handle.emit("comfy-progress", "Starting generative engine...");
-    let child = std::process::Command::new(dir.join("venv/bin/python"))
-        .arg("main.py")
+    let force_cpu = engine_needs_cpu_flag(&dir);
+    if force_cpu {
+        log::info!("[engine] no MPS/CUDA accelerator reported by Torch; starting Comfy with --cpu");
+    }
+    let mut cmd = std::process::Command::new(dir.join("venv/bin/python"));
+    cmd.arg("main.py")
         .arg("--listen")
         .arg("127.0.0.1")
         .arg("--port")
         .arg(ENGINE_PORT.to_string())
+        .env("PYTORCH_ENABLE_MPS_FALLBACK", "1")
         .current_dir(dir.join("ComfyUI"))
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    if force_cpu {
+        cmd.arg("--cpu");
+    }
+    let child = cmd
         .spawn()
         .map_err(|e| anyhow!("Could not start the engine: {}", e))?;
     *engine_process.lock().unwrap() = Some(child);

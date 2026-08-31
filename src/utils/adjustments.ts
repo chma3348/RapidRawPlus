@@ -248,8 +248,22 @@ export interface AiPatch {
   name: string;
   patchData: any | null;
   prompt: string;
+  reconstructSinglePath?: boolean;
   subMasks: Array<SubMask>;
   visible: boolean;
+}
+
+export interface AiPatchResultVariant {
+  id: string;
+  label: string;
+  kind: 'ai' | 'fallback' | 'raw-ai' | string;
+  color: string;
+  mask: string;
+  encoding?: 'gamma' | 'linear' | string;
+  prompt?: string;
+  debugRunId?: string;
+  debugDir?: string | null;
+  createdAt?: number;
 }
 
 export interface Color {

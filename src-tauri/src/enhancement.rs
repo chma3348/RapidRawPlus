@@ -743,7 +743,9 @@ pub async fn apply_enhancement(
         enhancement_cache_key(&path, &task, &model.manifest.id, js_adjustments.as_ref()),
         chain_step,
         engine_scale,
-        depixelate.map(|c| c.to_string()).unwrap_or_else(|| "off".into())
+        depixelate
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "off".into())
     );
     {
         let raw_handle = state.enhancement_raw.clone();
@@ -1078,7 +1080,9 @@ pub async fn preview_enhancement(
         center_y.to_bits(),
         region_size.map(|v| v.to_bits()).unwrap_or(0),
         engine_scale,
-        depixelate.map(|c| c.to_string()).unwrap_or_else(|| "off".into())
+        depixelate
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "off".into())
     );
     {
         let cache = state.enhancement_preview_raw.clone();
@@ -1714,7 +1718,11 @@ fn detect_windowed(img: &Rgb32FImage, gx_full: &[f32], gy_full: &[f32]) -> Optio
         return None;
     }
     let positions = |len: u32| -> Vec<u32> {
-        if len <= win { vec![0] } else { vec![0, (len - win) / 2, len - win] }
+        if len <= win {
+            vec![0]
+        } else {
+            vec![0, (len - win) / 2, len - win]
+        }
     };
     let mut xs_pitches: Vec<f32> = Vec::new();
     let mut ys_pitches: Vec<f32> = Vec::new();
@@ -1793,10 +1801,8 @@ pub fn detect_mosaic_grid(img: &Rgb32FImage) -> Option<MosaicGrid> {
         let (sgx, sgy) = mosaic_gradient_profiles(&small);
         if let Some(sg) = detect_from_profiles(&sgx, &sgy) {
             let range = 0.8 * scale as f32;
-            let (pitch_x, phase_x, sx) =
-                refine_pitch_range(&gx, sg.pitch_x * scale as f32, range);
-            let (pitch_y, phase_y, sy) =
-                refine_pitch_range(&gy, sg.pitch_y * scale as f32, range);
+            let (pitch_x, phase_x, sx) = refine_pitch_range(&gx, sg.pitch_x * scale as f32, range);
+            let (pitch_y, phase_y, sy) = refine_pitch_range(&gy, sg.pitch_y * scale as f32, range);
             if sx.min(sy) >= DEPIX_MIN_COMB_SCORE * 0.9 {
                 log::info!(
                     "[enhance] de-pixelate detect at 1/{scale}: pitch=({pitch_x:.2},{pitch_y:.2})"
@@ -2082,7 +2088,11 @@ mod depixelate_tests {
         let mosaic = mosaic_of(&original, 10.0, 2.0, 6.0);
         let soft = image::imageops::blur(&mosaic, 0.8);
         let grid = detect_mosaic_grid(&soft).expect("soft grid not detected");
-        assert!((grid.pitch_x - 10.0).abs() < 0.6, "pitch_x {}", grid.pitch_x);
+        assert!(
+            (grid.pitch_x - 10.0).abs() < 0.6,
+            "pitch_x {}",
+            grid.pitch_x
+        );
     }
 
     /// A mosaic that covers only part of the frame: global profiles are
@@ -2116,7 +2126,10 @@ mod depixelate_tests {
             let v = (state >> 16) as f32 / 65535.0;
             *p = Rgb([v, 1.0 - v, v * 0.5 + 0.25]);
         }
-        assert!(detect_mosaic_grid(&img).is_none(), "noise misread as a grid");
+        assert!(
+            detect_mosaic_grid(&img).is_none(),
+            "noise misread as a grid"
+        );
         assert!(apply_depixelate(&img, 0).is_err());
     }
 }

@@ -118,9 +118,15 @@ pub fn calculate_transform_hash(adjustments: &serde_json::Value) -> u64 {
             // cached preview, making the Feather/Opacity sliders dead.
             let feather = patch.get("feather").and_then(|v| v.as_f64()).unwrap_or(0.0);
             feather.to_bits().hash(&mut hasher);
-            let opacity = patch.get("opacity").and_then(|v| v.as_f64()).unwrap_or(100.0);
+            let opacity = patch
+                .get("opacity")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(100.0);
             opacity.to_bits().hash(&mut hasher);
-            let invert = patch.get("invert").and_then(|v| v.as_bool()).unwrap_or(false);
+            let invert = patch
+                .get("invert")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             invert.hash(&mut hasher);
 
             if let Some(patch_data) = patch.get("patchData") {
@@ -267,7 +273,15 @@ mod patch_blend_hash_tests {
         let mut with_opacity = base.clone();
         with_opacity["aiPatches"][0]["opacity"] = serde_json::json!(55.0);
         let h0 = calculate_transform_hash(&base);
-        assert_ne!(h0, calculate_transform_hash(&with_feather), "feather ignored by hash");
-        assert_ne!(h0, calculate_transform_hash(&with_opacity), "opacity ignored by hash");
+        assert_ne!(
+            h0,
+            calculate_transform_hash(&with_feather),
+            "feather ignored by hash"
+        );
+        assert_ne!(
+            h0,
+            calculate_transform_hash(&with_opacity),
+            "opacity ignored by hash"
+        );
     }
 }

@@ -711,14 +711,38 @@ fn measure_tonal_dial_response() {
 
     let dials: Vec<(&str, Box<dyn Fn(&mut AllAdjustments)>)> = vec![
         ("base      ", Box::new(|_: &mut AllAdjustments| {})),
-        ("high -100 ", Box::new(|a: &mut AllAdjustments| a.global.highlights = -1.0)),
-        ("high +100 ", Box::new(|a: &mut AllAdjustments| a.global.highlights = 1.0)),
-        ("shad +100 ", Box::new(|a: &mut AllAdjustments| a.global.shadows = 1.0)),
-        ("shad -100 ", Box::new(|a: &mut AllAdjustments| a.global.shadows = -1.0)),
-        ("white+100 ", Box::new(|a: &mut AllAdjustments| a.global.whites = 1.0)),
-        ("white-100 ", Box::new(|a: &mut AllAdjustments| a.global.whites = -1.0)),
-        ("black+100 ", Box::new(|a: &mut AllAdjustments| a.global.blacks = 1.0)),
-        ("black-100 ", Box::new(|a: &mut AllAdjustments| a.global.blacks = -1.0)),
+        (
+            "high -100 ",
+            Box::new(|a: &mut AllAdjustments| a.global.highlights = -1.0),
+        ),
+        (
+            "high +100 ",
+            Box::new(|a: &mut AllAdjustments| a.global.highlights = 1.0),
+        ),
+        (
+            "shad +100 ",
+            Box::new(|a: &mut AllAdjustments| a.global.shadows = 1.0),
+        ),
+        (
+            "shad -100 ",
+            Box::new(|a: &mut AllAdjustments| a.global.shadows = -1.0),
+        ),
+        (
+            "white+100 ",
+            Box::new(|a: &mut AllAdjustments| a.global.whites = 1.0),
+        ),
+        (
+            "white-100 ",
+            Box::new(|a: &mut AllAdjustments| a.global.whites = -1.0),
+        ),
+        (
+            "black+100 ",
+            Box::new(|a: &mut AllAdjustments| a.global.blacks = 1.0),
+        ),
+        (
+            "black-100 ",
+            Box::new(|a: &mut AllAdjustments| a.global.blacks = -1.0),
+        ),
     ];
 
     eprint!("linear:    ");
@@ -741,7 +765,11 @@ fn measure_tonal_dial_response() {
     for y in 0..H {
         for x in 0..W {
             let i = ((y * W + x) * 4) as usize;
-            let v = if (x + y) % 2 == 0 { level * 1.35 } else { level * 0.65 };
+            let v = if (x + y) % 2 == 0 {
+                level * 1.35
+            } else {
+                level * 0.65
+            };
             img[i] = v;
             img[i + 1] = v;
             img[i + 2] = v;
@@ -758,7 +786,11 @@ fn measure_tonal_dial_response() {
         for y in 8..H - 8 {
             for x in 8..W - 8 {
                 let v = buf[((y * W + x) * 4) as usize] as f32;
-                if (x + y) % 2 == 0 { hi += v } else { lo += v }
+                if (x + y) % 2 == 0 {
+                    hi += v
+                } else {
+                    lo += v
+                }
                 n += 1;
             }
         }
@@ -808,14 +840,38 @@ fn tonal_dials_zone_contract() {
     // 1. Monotonicity across a dense ramp for every dial extreme. The old
     //    highlights -100 pulled a 0.85 patch BELOW a 0.6 patch.
     let dials: Vec<(&str, Box<dyn Fn(&mut AllAdjustments)>)> = vec![
-        ("highlights -100", Box::new(|a: &mut AllAdjustments| a.global.highlights = -1.0)),
-        ("highlights +100", Box::new(|a: &mut AllAdjustments| a.global.highlights = 1.0)),
-        ("shadows +100", Box::new(|a: &mut AllAdjustments| a.global.shadows = 1.0)),
-        ("shadows -100", Box::new(|a: &mut AllAdjustments| a.global.shadows = -1.0)),
-        ("whites +100", Box::new(|a: &mut AllAdjustments| a.global.whites = 1.0)),
-        ("whites -100", Box::new(|a: &mut AllAdjustments| a.global.whites = -1.0)),
-        ("blacks +100", Box::new(|a: &mut AllAdjustments| a.global.blacks = 1.0)),
-        ("blacks -100", Box::new(|a: &mut AllAdjustments| a.global.blacks = -1.0)),
+        (
+            "highlights -100",
+            Box::new(|a: &mut AllAdjustments| a.global.highlights = -1.0),
+        ),
+        (
+            "highlights +100",
+            Box::new(|a: &mut AllAdjustments| a.global.highlights = 1.0),
+        ),
+        (
+            "shadows +100",
+            Box::new(|a: &mut AllAdjustments| a.global.shadows = 1.0),
+        ),
+        (
+            "shadows -100",
+            Box::new(|a: &mut AllAdjustments| a.global.shadows = -1.0),
+        ),
+        (
+            "whites +100",
+            Box::new(|a: &mut AllAdjustments| a.global.whites = 1.0),
+        ),
+        (
+            "whites -100",
+            Box::new(|a: &mut AllAdjustments| a.global.whites = -1.0),
+        ),
+        (
+            "blacks +100",
+            Box::new(|a: &mut AllAdjustments| a.global.blacks = 1.0),
+        ),
+        (
+            "blacks -100",
+            Box::new(|a: &mut AllAdjustments| a.global.blacks = -1.0),
+        ),
     ];
     for (name, set) in &dials {
         let mut prev = 0i32;
@@ -841,9 +897,18 @@ fn tonal_dials_zone_contract() {
     let r_10 = render_level(1.0, &h) as f32;
     let r_06 = render_level(0.6, &h) as f32;
     let r_018 = render_level(0.18, &h) as f32;
-    assert!(r_085 <= base_085 * 0.82, "highlight pull too weak: {base_085} -> {r_085}");
-    assert!(r_10 - r_06 >= 15.0, "highlight separation collapsed: 0.6->{r_06}, 1.0->{r_10}");
-    assert!((r_018 - base_018).abs() <= 2.0, "highlights moved midtones: {base_018} -> {r_018}");
+    assert!(
+        r_085 <= base_085 * 0.82,
+        "highlight pull too weak: {base_085} -> {r_085}"
+    );
+    assert!(
+        r_10 - r_06 >= 15.0,
+        "highlight separation collapsed: 0.6->{r_06}, 1.0->{r_10}"
+    );
+    assert!(
+        (r_018 - base_018).abs() <= 2.0,
+        "highlights moved midtones: {base_018} -> {r_018}"
+    );
     let _ = base_06;
     let _ = base_10;
 
@@ -855,17 +920,32 @@ fn tonal_dials_zone_contract() {
     let s_0005 = render_level(0.005, &s) as f32;
     let base_005 = render_level(0.05, &|_| {}) as f32;
     let base_035 = render_level(0.35, &|_| {}) as f32;
-    assert!(s_005 >= base_005 * 2.4, "shadow lift too weak: {base_005} -> {s_005}");
-    assert!((s_035 - base_035).abs() <= 6.0, "shadows moved midtones: {base_035} -> {s_035}");
-    assert!(s_0005 <= 12.0, "deep floor launched (mist): 0.005 -> {s_0005}");
+    assert!(
+        s_005 >= base_005 * 2.4,
+        "shadow lift too weak: {base_005} -> {s_005}"
+    );
+    assert!(
+        (s_035 - base_035).abs() <= 6.0,
+        "shadows moved midtones: {base_035} -> {s_035}"
+    );
+    assert!(
+        s_0005 <= 12.0,
+        "deep floor launched (mist): 0.005 -> {s_0005}"
+    );
 
     // 4. Blacks stay in their end zone. (Whites reverted to uniform
     //    expansion 2026-08-24 after two zone designs damaged faces —
     //    no end-zone assertion until a portrait-tested design ships.)
     let b = |a: &mut AllAdjustments| a.global.blacks = 1.0;
     let b_0005 = render_level(0.005, &b) as f32;
-    assert!((6.0..=22.0).contains(&b_0005), "blacks +100 floor lift off target: {b_0005}");
-    assert!((render_level(0.18, &b) as f32 - base_018).abs() <= 2.0, "blacks moved midtones");
+    assert!(
+        (6.0..=22.0).contains(&b_0005),
+        "blacks +100 floor lift off target: {b_0005}"
+    );
+    assert!(
+        (render_level(0.18, &b) as f32 - base_018).abs() <= 2.0,
+        "blacks moved midtones"
+    );
 
     // 5. Texture survives a full shadow lift: relative amplitude keeps
     //    at least 55% (flat mist = detail gone).
@@ -874,7 +954,11 @@ fn tonal_dials_zone_contract() {
     for y in 0..H {
         for x in 0..W {
             let i = ((y * W + x) * 4) as usize;
-            let v = if (x + y) % 2 == 0 { level * 1.35 } else { level * 0.65 };
+            let v = if (x + y) % 2 == 0 {
+                level * 1.35
+            } else {
+                level * 0.65
+            };
             img[i] = v;
             img[i + 1] = v;
             img[i + 2] = v;
@@ -891,7 +975,11 @@ fn tonal_dials_zone_contract() {
         for y in 8..H - 8 {
             for x in 8..W - 8 {
                 let v = buf[((y * W + x) * 4) as usize] as f32;
-                if (x + y) % 2 == 0 { hi += v } else { lo += v }
+                if (x + y) % 2 == 0 {
+                    hi += v
+                } else {
+                    lo += v
+                }
                 n += 1;
             }
         }
@@ -973,7 +1061,11 @@ fn whites_no_halo_no_chroma_bloom() {
     let sat = |b: &[u8]| -> f32 {
         let (r, g, bl) = (b[c] as f32, b[c + 1] as f32, b[c + 2] as f32);
         let mx = r.max(g).max(bl);
-        if mx < 1.0 { 0.0 } else { (mx - r.min(g).min(bl)) / mx }
+        if mx < 1.0 {
+            0.0
+        } else {
+            (mx - r.min(g).min(bl)) / mx
+        }
     };
     assert!(
         sat(&sd) <= sat(&sb) + 0.02,
