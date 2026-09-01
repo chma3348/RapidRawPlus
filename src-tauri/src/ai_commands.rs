@@ -3742,9 +3742,12 @@ pub async fn apply_clone_patch(
         patches.retain(|p| p.get("id").and_then(|id| id.as_str()) != Some(&patch_definition.id));
     }
 
+    let t_total = std::time::Instant::now();
+    let t_source = std::time::Instant::now();
     let (base_image, _) = get_full_image_for_processing(&state)?;
     let source_image = composite_patches_on_image(&base_image, &source_adjustments)
         .map_err(|e| format!("Failed to prepare source image: {}", e))?;
+    let ms_source = t_source.elapsed().as_millis();
     let (img_w, img_h) = source_image.dimensions();
 
     let mut sub_masks = patch_definition.sub_masks.clone();
@@ -3869,7 +3872,9 @@ pub async fn apply_clone_patch(
     let mut union_mask = image::GrayImage::new(img_w, img_h);
     let mut healed_spots = 0usize;
     let mut auto_sourced = 0usize;
+    let (mut ms_masks, mut ms_heal) = (0u128, 0u128);
     for (unit, unit_offset) in units {
+        let t_mask = std::time::Instant::now();
         let unit_def = build_def(vec![unit]);
         let Some(bitmap) = generate_mask_bitmap(
             &unit_def,
@@ -3901,6 +3906,8 @@ pub async fn apply_clone_patch(
                 auto_clone_offset(&encoded_full, &spot_mask, spot_bounds)
             }
         };
+        ms_masks += t_mask.elapsed().as_millis();
+        let t_heal = std::time::Instant::now();
         working = if heal {
             crate::heal_blend::heal_blend(&working, &spot_mask, ox, oy)
         } else {
@@ -3908,6 +3915,7 @@ pub async fn apply_clone_patch(
             harmonize_patch(&working, &mut c, &spot_mask, 1.0);
             c
         };
+        ms_heal += t_heal.elapsed().as_millis();
         for (u, s) in union_mask.pixels_mut().zip(spot_mask.pixels()) {
             u[0] = u[0].max(s[0]);
         }
@@ -3920,14 +3928,24 @@ pub async fn apply_clone_patch(
         // previous composite in place, so a deleted repair stayed on screen
         // after its marker had gone. Hand back an explicit empty result so
         // the caller clears it.
-        log::info!("[clone] no spots left — clearing the patch");
+        // Evict the cached bitmap too: the preview sends a null patchData
+        // for a cleared patch, and hydrate_adjustments would otherwise
+        // rehydrate the deleted repair straight back onto the photo.
+        if let Ok(mut cache) = state.patch_cache.lock() {
+            cache.remove(&patch_definition.id);
+        }
+        log::info!("[clone] no spots left — patch and cached bitmap cleared");
         return Ok("null".to_string());
     }
-    log::info!(
-        "[clone] {healed_spots} spot(s) ({auto_sourced} auto-sourced), {masked_px} px total (heal={heal})"
-    );
-
+    let t_encode = std::time::Instant::now();
     let patch_json = encode_patch_result(&working, is_linear, &union_mask)?;
+    log::info!(
+        "[clone] {healed_spots} spot(s) ({auto_sourced} auto-sourced), {masked_px} px total \
+         (heal={heal}) | source {ms_source}ms, masks {ms_masks}ms, blend {ms_heal}ms, \
+         encode {}ms, total {}ms",
+        t_encode.elapsed().as_millis(),
+        t_total.elapsed().as_millis()
+    );
     let _ = path;
     let _ = app_handle;
     Ok(patch_json)

@@ -138,7 +138,8 @@ export function useAiMasking() {
   /// work — fine repeating structure, or anything that must stay real.
   const handleCloneStamp = useCallback(
     async (patchId: string) => {
-      const { selectedImage, adjustments, isGeneratingAi } = useEditorStore.getState();
+      const { selectedImage, adjustments, isGeneratingAi, patchesSentToBackend } =
+        useEditorStore.getState();
       if (!selectedImage?.path) return;
       if (isGeneratingAi) {
         console.error('[clone] blocked: another AI operation is running');
@@ -159,16 +160,35 @@ export function useAiMasking() {
         aiPatches: prev.aiPatches.map((p: AiPatch) => (p.id === patchId ? { ...p, isLoading: true } : p)),
       }));
 
+      // Heal re-runs on every stroke, drag and delete, and each run ships
+      // currentAdjustments across the IPC bridge. A single hidden AI fill
+      // patch on this photo measured 37.4 MB of base64 in that payload —
+      // data the backend provably never reads: composite_patches_on_image
+      // skips invisible patches outright, and the patch being healed is
+      // removed from the source adjustments before compositing anyway.
+      // Strip both so the round trip carries geometry, not dead megabytes.
+      const slimAdjustments = {
+        ...adjustments,
+        aiPatches: (adjustments.aiPatches || []).map((p: AiPatch) =>
+          p.id === patchId || !p.visible ? { ...p, patchData: null } : p,
+        ),
+      };
+
       try {
         const patchJson: any = await invoke(Invokes.ApplyClonePatch, {
           path: selectedImage.path,
           patchDefinition: container,
           heal: isHeal,
-          currentAdjustments: adjustments,
+          currentAdjustments: slimAdjustments,
         });
         // A "null" body means every spot was deleted: patchData becomes
         // null and the repair comes off the photo with its markers.
         const patchData = JSON.parse(patchJson);
+        // The preview strips patchData for any patch the backend has
+        // already cached, and hydrate_adjustments then fills the gap from
+        // that cache. Without this the next redraw rebuilt the PREVIOUS
+        // heal — every other AI path drops the id here for the same reason.
+        patchesSentToBackend.delete(patchId);
         setAdjustments((prev: Adjustments) => ({
           ...prev,
           aiPatches: prev.aiPatches.map((p: AiPatch) =>
