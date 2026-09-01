@@ -125,16 +125,86 @@ fn solve_correction(diff: &[f32], inside_in: &[bool], w: usize, h: usize, level:
     c
 }
 
-/// Heals `mask` from `offset`, returning a copy of `image` with the masked
-/// region replaced by seamlessly blended source content.
-pub fn heal_blend(image: &RgbaImage, mask: &GrayImage, offset_x: i32, offset_y: i32) -> RgbaImage {
+/// How much of the destination's tone the blended result should take on.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SeamMode {
+    /// Match the destination everywhere inside the mask. Correct for heal:
+    /// the repair is meant to belong to its new surroundings completely.
+    FullMatch,
+    /// Match at the seam and fade to none over `band` pixels inward, so the
+    /// source keeps its own tone in the interior.
+    ///
+    /// This is what generated content needs. A full match would drag a
+    /// generated cloud back toward the blown-out white rim it is replacing —
+    /// recreating the exact wash the generation was meant to fix.
+    SeamOnly { band: f32 },
+}
+
+/// Distance from each interior cell to the nearest boundary cell, by a
+/// two-pass chamfer sweep. Used to fade the correction inward.
+fn boundary_distance(inside: &[bool], w: usize, h: usize) -> Vec<f32> {
+    const FAR: f32 = 1.0e9;
+    const D1: f32 = 1.0;
+    const D2: f32 = std::f32::consts::SQRT_2;
+    let mut d: Vec<f32> = inside.iter().map(|i| if *i { FAR } else { 0.0 }).collect();
+    for y in 0..h {
+        for x in 0..w {
+            let i = y * w + x;
+            if d[i] == 0.0 {
+                continue;
+            }
+            let mut best = d[i];
+            if x > 0 {
+                best = best.min(d[i - 1] + D1);
+            }
+            if y > 0 {
+                best = best.min(d[i - w] + D1);
+                if x > 0 {
+                    best = best.min(d[i - w - 1] + D2);
+                }
+                if x + 1 < w {
+                    best = best.min(d[i - w + 1] + D2);
+                }
+            }
+            d[i] = best;
+        }
+    }
+    for y in (0..h).rev() {
+        for x in (0..w).rev() {
+            let i = y * w + x;
+            if d[i] == 0.0 {
+                continue;
+            }
+            let mut best = d[i];
+            if x + 1 < w {
+                best = best.min(d[i + 1] + D1);
+            }
+            if y + 1 < h {
+                best = best.min(d[i + w] + D1);
+                if x + 1 < w {
+                    best = best.min(d[i + w + 1] + D2);
+                }
+                if x > 0 {
+                    best = best.min(d[i + w - 1] + D2);
+                }
+            }
+            d[i] = best;
+        }
+    }
+    d
+}
+
+/// Shared machinery behind both blends: `src_at` supplies the replacement
+/// colour for a destination pixel, in image coordinates.
+fn blend_with_source(
+    image: &RgbaImage,
+    mask: &GrayImage,
+    src_at: impl Fn(i64, i64) -> [f32; 3],
+    mode: SeamMode,
+) -> RgbaImage {
     let (w, h) = image.dimensions();
     let mut out = image.clone();
-    if offset_x == 0 && offset_y == 0 {
-        return out;
-    }
 
-    // Work on the mask's bounding box plus a ring of context.
     let (mut x0, mut y0, mut x1, mut y1) = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
     for y in 0..h {
         for x in 0..w {
@@ -156,12 +226,6 @@ pub fn heal_blend(image: &RgbaImage, mask: &GrayImage, offset_x: i32, offset_y: 
     let bw = (x1 - x0 + 1) as usize;
     let bh = (y1 - y0 + 1) as usize;
 
-    let at = |x: i64, y: i64| {
-        let cx = x.clamp(0, w as i64 - 1) as u32;
-        let cy = y.clamp(0, h as i64 - 1) as u32;
-        *image.get_pixel(cx, cy)
-    };
-
     let mut inside = vec![false; bw * bh];
     let mut alpha = vec![0.0f32; bw * bh];
     for iy in 0..bh {
@@ -169,8 +233,9 @@ pub fn heal_blend(image: &RgbaImage, mask: &GrayImage, offset_x: i32, offset_y: 
             let m = mask.get_pixel((x0 + ix as i64) as u32, (y0 + iy as i64) as u32)[0];
             let i = iy * bw + ix;
             alpha[i] = m as f32 / 255.0;
-            // Border cells are always treated as boundary so the relaxation
-            // (which skips the outermost ring) always has data to pull from.
+            // The relaxation skips the outermost ring, so border cells are
+            // always boundary — otherwise they are never written nor pinned
+            // and leak a stale value inward.
             let on_border = ix == 0 || iy == 0 || ix == bw - 1 || iy == bh - 1;
             inside[i] = m > 127 && !on_border;
         }
@@ -182,15 +247,27 @@ pub fn heal_blend(image: &RgbaImage, mask: &GrayImage, offset_x: i32, offset_y: 
         for ix in 0..bw {
             let x = x0 + ix as i64;
             let y = y0 + iy as i64;
-            let d = at(x, y);
-            let s = at(x + offset_x as i64, y + offset_y as i64);
+            let d = *image.get_pixel(x as u32, y as u32);
+            let s = src_at(x, y);
             let i = iy * bw + ix;
             for ch in 0..3 {
-                src[i][ch] = s[ch] as f32;
-                diff[i][ch] = d[ch] as f32 - s[ch] as f32;
+                src[i][ch] = s[ch];
+                diff[i][ch] = d[ch] as f32 - s[ch];
             }
         }
     }
+
+    // Weight the correction by distance from the seam when asked to.
+    let weight: Vec<f32> = match mode {
+        SeamMode::FullMatch => vec![1.0; bw * bh],
+        SeamMode::SeamOnly { band } => {
+            let dist = boundary_distance(&inside, bw, bh);
+            let band = band.max(1.0);
+            dist.iter()
+                .map(|d| (1.0 - d / band).clamp(0.0, 1.0))
+                .collect()
+        }
+    };
 
     for ch in 0..3 {
         let plane: Vec<f32> = diff.iter().map(|d| d[ch]).collect();
@@ -202,14 +279,62 @@ pub fn heal_blend(image: &RgbaImage, mask: &GrayImage, offset_x: i32, offset_y: 
                 if a <= 0.0 {
                     continue;
                 }
-                let healed = src[i][ch] + c[i];
+                let blended = src[i][ch] + c[i] * weight[i];
                 let px = out.get_pixel_mut((x0 + ix as i64) as u32, (y0 + iy as i64) as u32);
                 let base = px[ch] as f32;
-                px[ch] = (base * (1.0 - a) + healed * a).clamp(0.0, 255.0).round() as u8;
+                px[ch] = (base * (1.0 - a) + blended * a).clamp(0.0, 255.0).round() as u8;
             }
         }
     }
     out
+}
+
+/// Heals `mask` from `offset`, returning a copy of `image` with the masked
+/// region replaced by seamlessly blended source content.
+pub fn heal_blend(image: &RgbaImage, mask: &GrayImage, offset_x: i32, offset_y: i32) -> RgbaImage {
+    let (w, h) = image.dimensions();
+    if offset_x == 0 && offset_y == 0 {
+        return image.clone();
+    }
+    blend_with_source(
+        image,
+        mask,
+        |x, y| {
+            // A source point outside the frame reuses the edge rather than
+            // leaving a hole.
+            let cx = (x + offset_x as i64).clamp(0, w as i64 - 1) as u32;
+            let cy = (y + offset_y as i64).clamp(0, h as i64 - 1) as u32;
+            let p = image.get_pixel(cx, cy);
+            [p[0] as f32, p[1] as f32, p[2] as f32]
+        },
+        SeamMode::FullMatch,
+    )
+}
+
+/// Composites freely generated content into `image` through `mask`, hiding
+/// the seam without flattening what was generated.
+///
+/// `generated` must already be the size of `image`. The correction fades out
+/// over `band` pixels from the mask edge: full tone match at the seam so it
+/// joins the photograph, none in the middle so the generated content keeps
+/// its own contrast.
+pub fn blend_generated(
+    image: &RgbaImage,
+    generated: &RgbaImage,
+    mask: &GrayImage,
+    band: f32,
+) -> RgbaImage {
+    blend_with_source(
+        image,
+        mask,
+        |x, y| {
+            let cx = (x as u32).min(generated.width().saturating_sub(1));
+            let cy = (y as u32).min(generated.height().saturating_sub(1));
+            let p = generated.get_pixel(cx, cy);
+            [p[0] as f32, p[1] as f32, p[2] as f32]
+        },
+        SeamMode::SeamOnly { band },
+    )
 }
 
 #[cfg(test)]
@@ -324,6 +449,82 @@ mod tests {
                         healed.get_pixel(x, y),
                         "pixel ({x},{y}) outside the mask was modified"
                     );
+                }
+            }
+        }
+    }
+
+    /// A blown-white photo with a hole, and generated content that is much
+    /// darker and full of contrast — the cloud-into-white-sky case.
+    fn generated_case() -> (RgbaImage, RgbaImage, GrayImage) {
+        let base = RgbaImage::from_pixel(200, 200, Rgba([245, 245, 245, 255]));
+        let mut generated = RgbaImage::new(200, 200);
+        for y in 0..200 {
+            for x in 0..200 {
+                let v = (110.0 + texture(x, y) * 2.0).clamp(0.0, 255.0) as u8;
+                generated.put_pixel(x, y, Rgba([v, v, v, 255]));
+            }
+        }
+        let mut mask = GrayImage::new(200, 200);
+        for y in 50..150 {
+            for x in 50..150 {
+                mask.put_pixel(x, y, Luma([255]));
+            }
+        }
+        (base, generated, mask)
+    }
+
+    fn interior_stats(img: &RgbaImage) -> (f32, f32) {
+        let mut vals = Vec::new();
+        for y in 80..120 {
+            for x in 80..120 {
+                vals.push(img.get_pixel(x, y)[0] as f32);
+            }
+        }
+        let mean = vals.iter().sum::<f32>() / vals.len() as f32;
+        let std = (vals.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / vals.len() as f32).sqrt();
+        (mean, std)
+    }
+
+    /// The whole point of SeamOnly: generated content must keep its own tone
+    /// and contrast away from the edge. Matching the destination throughout
+    /// would drag it back to the blown-white rim.
+    #[test]
+    fn generated_content_keeps_its_tone_in_the_interior() {
+        let (base, generated, mask) = generated_case();
+        let out = blend_generated(&base, &generated, &mask, 12.0);
+        let (mean, std) = interior_stats(&out);
+        assert!(
+            (mean - 140.0).abs() < 30.0,
+            "interior mean {mean:.1} should stay near the generated tone (~140), not the \
+             blown surroundings (245)"
+        );
+        assert!(std > 8.0, "generated contrast was flattened to std {std:.2}");
+    }
+
+    /// Control for the test above: widen the band past the region and the
+    /// correction reaches the middle, washing it out. This is the failure
+    /// mode SeamOnly exists to avoid.
+    #[test]
+    fn a_band_wider_than_the_region_washes_it_out() {
+        let (base, generated, mask) = generated_case();
+        let narrow = interior_stats(&blend_generated(&base, &generated, &mask, 12.0)).0;
+        let wide = interior_stats(&blend_generated(&base, &generated, &mask, 1000.0)).0;
+        assert!(
+            wide > narrow + 40.0,
+            "a full-width band should pull the interior toward white: narrow {narrow:.1}, \
+             wide {wide:.1}"
+        );
+    }
+
+    #[test]
+    fn generated_blend_leaves_unmasked_pixels_untouched() {
+        let (base, generated, mask) = generated_case();
+        let out = blend_generated(&base, &generated, &mask, 12.0);
+        for y in 0..base.height() {
+            for x in 0..base.width() {
+                if mask.get_pixel(x, y)[0] == 0 {
+                    assert_eq!(base.get_pixel(x, y), out.get_pixel(x, y), "({x},{y}) changed");
                 }
             }
         }

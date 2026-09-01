@@ -2807,27 +2807,23 @@ async fn run_engine_inpaint_patch(
     for (blob_index, (comp, tile_rect)) in units.iter().enumerate() {
         let blob_prefix = format!("blob-{blob_index:02}");
         let mut blob_used_fallback = false;
-        let blob_kind = if reconstruct_single_path
-            && flux_available
-            && kind != crate::comfy_engine::FillKind::Flux
+        // The engine the user picked is the engine that runs. Two branches
+        // here used to force Flux — one whenever a Reconstruct patch was
+        // single-path, one for any blob spanning FLUX_SPAN or more — which
+        // left the model picker inert on exactly the selections people care
+        // about: a run logged "selected engine model sdxl-fill-fooocus" and
+        // then "forcing Flux Fill" on every tile. Flux may still be the
+        // better choice on large context-continuation fills, so say so in
+        // the log rather than overriding the choice silently.
+        if comp.span() >= FLUX_SPAN && flux_available && kind != crate::comfy_engine::FillKind::Flux
         {
             log::info!(
-                "[fill] {blob_prefix} single-path Reconstruct — forcing Flux Fill for the whole selection"
-            );
-            crate::comfy_engine::FillKind::Flux
-        } else if comp.span() >= FLUX_SPAN
-            && flux_available
-            && kind != crate::comfy_engine::FillKind::Flux
-        {
-            log::info!(
-                "[fill] {blob_prefix} span {} ≥ {} — escalating to Flux Fill",
+                "[fill] {blob_prefix} span {} ≥ {} — honouring the selected engine; Flux Fill often does better on continuation fills this large",
                 comp.span(),
                 FLUX_SPAN
             );
-            crate::comfy_engine::FillKind::Flux
-        } else {
-            kind
-        };
+        }
+        let blob_kind = kind;
         let span_x = comp.max_x - comp.min_x + 1;
         let span_y = comp.max_y - comp.min_y + 1;
         // Reconstruct needs broader scene context than normal object

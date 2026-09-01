@@ -596,6 +596,108 @@ pub async fn run_generative_fill(
     run_workflow(workflow, &mut on_progress).await
 }
 
+/// Free generation: builds an image from `prompt` alone at `width`x`height`,
+/// with no photograph to continue.
+///
+/// This is the regime where these models actually produce content. Measured
+/// 2026-09-01: the same flux1-fill-dev Q8 weights, guidance and cfg that
+/// return grey mush when 96% of their canvas is blown-white context paint
+/// photorealistic backlit cumulus once the mask is opened. An inpainting
+/// model's objective is consistency with its surroundings, so the fix for a
+/// featureless surround is to remove it, not to argue with it via the prompt.
+///
+/// Flux runs its normal Fill graph with the mask wide open. SDXL runs a plain
+/// text-to-image graph at real CFG, which is roughly five times faster.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_free_generation(
+    app_handle: &tauri::AppHandle,
+    state: &AppState,
+    kind: FillKind,
+    prompt: &str,
+    width: u32,
+    height: u32,
+    seed: u64,
+    mut on_progress: impl FnMut(String),
+) -> Result<Vec<u8>> {
+    if !fill_files_present(app_handle, kind) {
+        return Err(anyhow!(
+            "The selected fill model's files are missing from the engine's models folder."
+        ));
+    }
+    ensure_running(app_handle, &state.comfy_process).await?;
+
+    // Latent geometry wants multiples of 8.
+    let w = (width.max(256) / 8) * 8;
+    let h = (height.max(256) / 8) * 8;
+    let positive = prompt.trim().to_string();
+    let negative = "blurry, low quality, artifacts, watermark, text, flat grey haze";
+
+    let workflow = match kind {
+        FillKind::Flux => {
+            // Flux Fill needs an image and a mask; give it a neutral canvas
+            // and a fully open mask so there is nothing to continue.
+            on_progress("Preparing canvas...".to_string());
+            let client = reqwest::Client::new();
+            let grey = image::RgbImage::from_pixel(w, h, image::Rgb([128, 128, 128]));
+            let mut grey_png = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgb8(grey)
+                .write_to(&mut grey_png, image::ImageFormat::Png)?;
+            let open = image::GrayImage::from_pixel(w, h, image::Luma([255]));
+            let mut open_png = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageLuma8(open)
+                .write_to(&mut open_png, image::ImageFormat::Png)?;
+            upload_image(&client, "rapidraw_gen_canvas.png", grey_png.into_inner()).await?;
+            upload_image(&client, "rapidraw_gen_openmask.png", open_png.into_inner()).await?;
+            json!({
+                "1": {"class_type": "LoadImage", "inputs": {"image": "rapidraw_gen_canvas.png"}},
+                "2": {"class_type": "LoadImageMask",
+                      "inputs": {"image": "rapidraw_gen_openmask.png", "channel": "red"}},
+                "3": {"class_type": "UnetLoaderGGUF",
+                      "inputs": {"unet_name": "flux1-fill-dev-Q8_0.gguf"}},
+                "3d": {"class_type": "DifferentialDiffusion", "inputs": {"model": ["3", 0]}},
+                "3c": {"class_type": "DualCLIPLoaderGGUF",
+                       "inputs": {"clip_name1": "t5-v1_1-xxl-encoder-Q8_0.gguf",
+                                   "clip_name2": "clip_l.safetensors", "type": "flux"}},
+                "3v": {"class_type": "VAELoader", "inputs": {"vae_name": "ae.safetensors"}},
+                "4": {"class_type": "CLIPTextEncode", "inputs": {"text": positive, "clip": ["3c", 0]}},
+                "4g": {"class_type": "FluxGuidance",
+                       "inputs": {"conditioning": ["4", 0], "guidance": 30.0}},
+                "5": {"class_type": "CLIPTextEncode", "inputs": {"text": "", "clip": ["3c", 0]}},
+                "6": {"class_type": "InpaintModelConditioning",
+                      "inputs": {"positive": ["4g", 0], "negative": ["5", 0], "vae": ["3v", 0],
+                                  "pixels": ["1", 0], "mask": ["2", 0], "noise_mask": true}},
+                "7": {"class_type": "KSampler",
+                      "inputs": {"model": ["3d", 0], "positive": ["6", 0], "negative": ["6", 1],
+                                  "latent_image": ["6", 2], "seed": seed, "steps": 28, "cfg": 1.0,
+                                  "sampler_name": "euler", "scheduler": "normal", "denoise": 1.0}},
+                "8": {"class_type": "VAEDecode", "inputs": {"samples": ["7", 0], "vae": ["3v", 0]}},
+                "9": {"class_type": "SaveImage",
+                      "inputs": {"images": ["8", 0], "filename_prefix": "rapidraw_gen"}}
+            })
+        }
+        // Both SDXL tiers generate the same way; the Fooocus patch is an
+        // inpainting aid and has nothing to contribute without a hole.
+        FillKind::SdxlBase | FillKind::SdxlFooocus => json!({
+            "3": {"class_type": "CheckpointLoaderSimple",
+                  "inputs": {"ckpt_name": "sd_xl_base_1.0.safetensors"}},
+            "4": {"class_type": "CLIPTextEncode", "inputs": {"text": positive, "clip": ["3", 1]}},
+            "5": {"class_type": "CLIPTextEncode", "inputs": {"text": negative, "clip": ["3", 1]}},
+            "6": {"class_type": "EmptyLatentImage",
+                  "inputs": {"width": w, "height": h, "batch_size": 1}},
+            "7": {"class_type": "KSampler",
+                  "inputs": {"model": ["3", 0], "positive": ["4", 0], "negative": ["5", 0],
+                              "latent_image": ["6", 0], "seed": seed, "steps": 28, "cfg": 7.0,
+                              "sampler_name": "dpmpp_2m", "scheduler": "karras", "denoise": 1.0}},
+            "8": {"class_type": "VAEDecode", "inputs": {"samples": ["7", 0], "vae": ["3", 2]}},
+            "9": {"class_type": "SaveImage",
+                  "inputs": {"images": ["8", 0], "filename_prefix": "rapidraw_gen"}}
+        }),
+    };
+
+    on_progress("Generating...".to_string());
+    run_workflow(workflow, &mut on_progress).await
+}
+
 /// SeedVR2 restoration: upscales/restores the whole image to
 /// `target_short_edge` using the 3B fp16 model.
 #[allow(clippy::too_many_arguments)]
