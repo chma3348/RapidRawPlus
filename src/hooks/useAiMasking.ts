@@ -137,7 +137,7 @@ export function useAiMasking() {
   /// it returns in a moment and is the right tool where generation cannot
   /// work — fine repeating structure, or anything that must stay real.
   const handleCloneStamp = useCallback(
-    async (patchId: string, offsetX: number, offsetY: number) => {
+    async (patchId: string) => {
       const { selectedImage, adjustments, isGeneratingAi } = useEditorStore.getState();
       if (!selectedImage?.path) return;
       if (isGeneratingAi) {
@@ -163,11 +163,11 @@ export function useAiMasking() {
         const patchJson: any = await invoke(Invokes.ApplyClonePatch, {
           path: selectedImage.path,
           patchDefinition: container,
-          offsetX: Math.round(offsetX),
-          offsetY: Math.round(offsetY),
           heal: isHeal,
           currentAdjustments: adjustments,
         });
+        // A "null" body means every spot was deleted: patchData becomes
+        // null and the repair comes off the photo with its markers.
         const patchData = JSON.parse(patchJson);
         setAdjustments((prev: Adjustments) => ({
           ...prev,

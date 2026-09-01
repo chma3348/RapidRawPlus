@@ -1883,16 +1883,19 @@ function SettingsPanel({
       : '';
   useEffect(() => {
     if (!container || (container as any).patchType !== 'heal') return;
-    // Only after a first apply — otherwise painting would fire the clone
-    // on every stroke before the user has chosen a source.
-    if (!container.patchData || isGeneratingAi || container.isLoading) return;
+    if (isGeneratingAi || container.isLoading) return;
+    const strokes = (container.subMasks || []).reduce(
+      (n: number, sm: any) => n + (((sm.parameters as any)?.lines || []).length),
+      0,
+    );
+    // Nothing painted and nothing left over to clear.
+    if (strokes === 0 && !container.patchData) return;
+    // Heal runs itself: every stroke, every marker drag and every deletion
+    // re-applies. The source is chosen automatically, so there is nothing
+    // to set up first and no button to press.
     clearTimeout(healTimer.current);
     healTimer.current = setTimeout(() => {
-      onCloneStamp?.(
-        container.id,
-        (container as any)?.cloneOffset?.x ?? 0,
-        (container as any)?.cloneOffset?.y ?? -220,
-      );
+      onCloneStamp?.(container.id);
     }, 450);
     return () => clearTimeout(healTimer.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2075,51 +2078,9 @@ function SettingsPanel({
         <Text variant={TextVariants.heading} className="mb-2">
           {t('editor.ai.settings.cloneTitle')}
         </Text>
-        <Text variant={TextVariants.small} className="mb-2 block text-text-secondary">
+        <Text variant={TextVariants.small} className="block text-text-secondary">
           {t('editor.ai.settings.cloneHint')}
         </Text>
-        <Slider
-          label={t('editor.ai.settings.cloneOffsetX')}
-          min={-1500}
-          max={1500}
-          step={5}
-          defaultValue={0}
-          value={(container as any)?.cloneOffset?.x ?? 0}
-          onChange={(e: any) =>
-            container &&
-            updateContainer(container.id, {
-              cloneOffset: { x: Number(e.target.value), y: (container as any)?.cloneOffset?.y ?? 0 },
-            })
-          }
-        />
-        <Slider
-          label={t('editor.ai.settings.cloneOffsetY')}
-          min={-1500}
-          max={1500}
-          step={5}
-          defaultValue={-200}
-          value={(container as any)?.cloneOffset?.y ?? -220}
-          onChange={(e: any) =>
-            container &&
-            updateContainer(container.id, {
-              cloneOffset: { x: (container as any)?.cloneOffset?.x ?? 0, y: Number(e.target.value) },
-            })
-          }
-        />
-        <button
-          className="w-full mt-2 px-3 py-2 bg-accent text-button-text rounded-md hover:bg-accent-hover transition-colors text-sm disabled:opacity-40"
-          disabled={!container || isGeneratingAi}
-          onClick={() =>
-            container &&
-            onCloneStamp?.(
-              container.id,
-              (container as any)?.cloneOffset?.x ?? 0,
-              (container as any)?.cloneOffset?.y ?? -220,
-            )
-          }
-        >
-          {t('editor.ai.settings.cloneApply')}
-        </button>
       </div>
       )}
 
