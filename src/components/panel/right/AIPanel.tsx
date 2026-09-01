@@ -1881,25 +1881,35 @@ function SettingsPanel({
           ),
         ])
       : '';
+  const healApplied = useRef<string>('');
   useEffect(() => {
     if (!container || (container as any).patchType !== 'heal') return;
-    if (isGeneratingAi || container.isLoading) return;
     const strokes = (container.subMasks || []).reduce(
       (n: number, sm: any) => n + (((sm.parameters as any)?.lines || []).length),
       0,
     );
     // Nothing painted and nothing left over to clear.
     if (strokes === 0 && !container.patchData) return;
+    // Already applied exactly this arrangement of strokes and sources.
+    // This is also what stops the retry below from looping: once a run
+    // lands, the flip back to idle re-enters here and finds nothing to do.
+    if (healSignature === healApplied.current) return;
+    // A change made while a heal was in flight must not be dropped — with
+    // every stroke auto-applying, deleting a spot mid-run is easy to do.
+    // isGeneratingAi is a dependency, so this re-enters when the run ends.
+    if (isGeneratingAi || container.isLoading) return;
     // Heal runs itself: every stroke, every marker drag and every deletion
     // re-applies. The source is chosen automatically, so there is nothing
     // to set up first and no button to press.
     clearTimeout(healTimer.current);
+    const applying = healSignature;
     healTimer.current = setTimeout(() => {
+      healApplied.current = applying;
       onCloneStamp?.(container.id);
     }, 450);
     return () => clearTimeout(healTimer.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [healSignature]);
+  }, [healSignature, isGeneratingAi, container?.isLoading]);
 
   const spotRespotTimer = useRef<any>(null);
   useEffect(() => {

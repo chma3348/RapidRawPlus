@@ -1398,19 +1398,14 @@ const ImageCanvas = memo(
                 },
               } as SubMask;
             });
-            const strokesLeft = subMasks.reduce(
-              (n: number, sm: SubMask) => n + (((sm.parameters as any)?.lines || []).length),
-              0,
-            );
-            // Deleting the last spot leaves an empty mask, which the backend
-            // rejects — and a rejected re-run leaves the previous composite
-            // in place, so the repair stayed on screen after its marker had
-            // gone. Drop the result along with the last spot.
-            return {
-              ...patch,
-              subMasks,
-              patchData: strokesLeft === 0 ? null : patch.patchData,
-            } as AiPatch;
+            // patchData is deliberately left alone, even when this was the
+            // last spot. Clearing it here looks like instant feedback but
+            // silences the re-run — the auto-apply effect skips a patch with
+            // no strokes AND no data — and only that round trip evicts the
+            // backend's cached bitmap, which hydrate_adjustments would
+            // otherwise paint straight back. The backend decides when the
+            // repair is gone; this just removes the stroke.
+            return { ...patch, subMasks } as AiPatch;
           }),
         }));
       },
