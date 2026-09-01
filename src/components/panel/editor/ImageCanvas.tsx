@@ -1386,20 +1386,30 @@ const ImageCanvas = memo(
           ...prev,
           aiPatches: prev.aiPatches.map((patch: AiPatch) => {
             if (patch.id !== spot.patchId) return patch;
+            const subMasks = patch.subMasks.map((sm: SubMask) => {
+              if (sm.id !== spot.subMaskId) return sm;
+              const lines = (sm.parameters as any)?.lines;
+              if (!Array.isArray(lines)) return sm;
+              return {
+                ...sm,
+                parameters: {
+                  ...(sm.parameters as any),
+                  lines: lines.filter((_: any, i: number) => i !== spot.lineIndex),
+                },
+              } as SubMask;
+            });
+            const strokesLeft = subMasks.reduce(
+              (n: number, sm: SubMask) => n + (((sm.parameters as any)?.lines || []).length),
+              0,
+            );
+            // Deleting the last spot leaves an empty mask, which the backend
+            // rejects — and a rejected re-run leaves the previous composite
+            // in place, so the repair stayed on screen after its marker had
+            // gone. Drop the result along with the last spot.
             return {
               ...patch,
-              subMasks: patch.subMasks.map((sm: SubMask) => {
-                if (sm.id !== spot.subMaskId) return sm;
-                const lines = (sm.parameters as any)?.lines;
-                if (!Array.isArray(lines)) return sm;
-                return {
-                  ...sm,
-                  parameters: {
-                    ...(sm.parameters as any),
-                    lines: lines.filter((_: any, i: number) => i !== spot.lineIndex),
-                  },
-                } as SubMask;
-              }),
+              subMasks,
+              patchData: strokesLeft === 0 ? null : patch.patchData,
             } as AiPatch;
           }),
         }));
