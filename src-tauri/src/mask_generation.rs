@@ -90,6 +90,13 @@ pub struct AiPatchDefinition {
     pub prompt: String,
     #[serde(default)]
     pub reconstruct_single_path: bool,
+    /// Build the fill from the prompt alone instead of continuing the
+    /// surrounding photograph. For blown-out regions the surroundings carry
+    /// no information to continue, so an inpainting model faithfully
+    /// reproduces the blowout; generating and compositing instead is what
+    /// actually puts content there.
+    #[serde(default)]
+    pub generate_mode: bool,
     #[serde(default)]
     pub patch_data: Option<PatchData>,
     #[serde(default = "default_opacity")]

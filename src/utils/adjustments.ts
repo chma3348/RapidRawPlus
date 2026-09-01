@@ -249,6 +249,10 @@ export interface AiPatch {
   patchData: any | null;
   prompt: string;
   reconstructSinglePath?: boolean;
+  /// Build the fill from the prompt alone instead of continuing the
+  /// surrounding photograph — for blown-out areas that carry nothing to
+  /// continue.
+  generateMode?: boolean;
   subMasks: Array<SubMask>;
   visible: boolean;
   /** 'heal' patches clone from a source offset and stay editable. */

@@ -51,7 +51,13 @@ export function useAiMasking() {
   );
 
   const handleGenerativeReplace = useCallback(
-    async (patchId: string, prompt: string, useFastInpaint: boolean, reconstructSinglePath = false) => {
+    async (
+      patchId: string,
+      prompt: string,
+      useFastInpaint: boolean,
+      reconstructSinglePath = false,
+      generateMode = false,
+    ) => {
       const { selectedImage, adjustments, isGeneratingAi, patchesSentToBackend } = useEditorStore.getState();
       // Every early exit must be LOUD: silent returns here read as "the
       // button does nothing" (console.error reaches app.log).
@@ -71,14 +77,17 @@ export function useAiMasking() {
         return;
       }
 
-      const patchDefinition = { ...patch, prompt, reconstructSinglePath };
+      // Threaded explicitly rather than read back from the store: the panel
+      // calls updateContainer immediately before this, and that state is not
+      // visible to getState() yet.
+      const patchDefinition = { ...patch, prompt, reconstructSinglePath, generateMode };
 
       // Visible feedback FIRST — the token fetch used to run before any
       // state change, so a hung auth lookup looked like a dead button.
       setAdjustments((prev: Adjustments) => ({
         ...prev,
         aiPatches: prev.aiPatches.map((p: AiPatch) =>
-          p.id === patchId ? { ...p, isLoading: true, prompt, reconstructSinglePath } : p,
+          p.id === patchId ? { ...p, isLoading: true, prompt, reconstructSinglePath, generateMode } : p,
         ),
       }));
       setEditor({ isGeneratingAi: true });

@@ -1845,6 +1845,7 @@ function SettingsPanel({
   const isReconstructPatch = displayContainer.subMasks?.some((sm: SubMask) => sm.type === Mask.Clipped);
   const [prompt, setPrompt] = useState(displayContainer.prompt || '');
   const [useFastInpaint, setUseFastInpaint] = useState(!isGenerativeAvailable);
+  const [generateMode, setGenerateMode] = useState(false);
   const [reconstructSinglePath, setReconstructSinglePath] = useState(
     isReconstructPatch && displayContainer.reconstructSinglePath !== false,
   );
@@ -1956,6 +1957,7 @@ function SettingsPanel({
       setPrompt(container.prompt || '');
       const hasClippedMask = container.subMasks?.some((sm: SubMask) => sm.type === Mask.Clipped);
       setReconstructSinglePath(hasClippedMask && container.reconstructSinglePath !== false);
+      setGenerateMode(!!container.generateMode);
     }
   }, [container?.id]);
 
@@ -1992,8 +1994,8 @@ function SettingsPanel({
       console.error('[ai] generate blocked: no active patch container');
       return;
     }
-    updateContainer(container.id, { prompt, reconstructSinglePath });
-    onGenerativeReplace(container.id, prompt, useFastInpaint, reconstructSinglePath);
+    updateContainer(container.id, { prompt, reconstructSinglePath, generateMode });
+    onGenerativeReplace(container.id, prompt, useFastInpaint, reconstructSinglePath, generateMode);
   };
 
   const handleVariantClick = (variantId: string) => {
@@ -2152,6 +2154,16 @@ function SettingsPanel({
                 }
               />
             )}
+
+            <div className="mt-3">
+              <Switch
+                checked={generateMode}
+                disabled={isGeneratingAi || displayContainer.isLoading}
+                label="Generate new content"
+                onChange={setGenerateMode}
+                tooltip="Build the fill from your prompt instead of continuing the surrounding photo. Use this where the area is blown out and has nothing left to continue — an inpainting model faithfully reproduces a blowout, so it has to generate instead."
+              />
+            </div>
 
             {isReconstructPatch && (
               <div className="mt-3">

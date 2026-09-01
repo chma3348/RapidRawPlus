@@ -2520,6 +2520,132 @@ struct EngineInpaintResult {
 /// flag for float sources. One whole-mask bounding box would balloon to
 /// the entire image for scattered selections (e.g. color keys) and force
 /// the model to repaint everything at reduced resolution.
+/// Generated content placed on a full-size canvas, ready to composite.
+struct GeneratedRegion {
+    canvas: RgbaImage,
+    width: u32,
+    height: u32,
+    band: f32,
+}
+
+/// Generates content for `mask` from the prompt alone, at the mask's own
+/// aspect ratio, and places it on a full-size canvas.
+///
+/// Deliberately does NOT tone-match the result to the surrounding ring
+/// first. On the case this exists for, that ring is the blown-out area
+/// being replaced — matching to it would wash the generated content back
+/// out. The seam blend handles the join; the patch's opacity control is
+/// how the user dials it toward the photograph.
+#[allow(clippy::too_many_arguments)]
+async fn generate_region(
+    encoded_full: &RgbaImage,
+    mask: &GrayImage,
+    prompt: &str,
+    kind: crate::comfy_engine::FillKind,
+    orientation_steps: u8,
+    flip_horizontal: bool,
+    flip_vertical: bool,
+    app_handle: &tauri::AppHandle,
+    state: &tauri::State<'_, AppState>,
+) -> Result<GeneratedRegion, String> {
+    let (fw, fh) = encoded_full.dimensions();
+    let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
+    for y in 0..fh {
+        for x in 0..fw {
+            if mask.get_pixel(x, y)[0] > 0 {
+                x0 = x0.min(x);
+                y0 = y0.min(y);
+                x1 = x1.max(x);
+                y1 = y1.max(y);
+            }
+        }
+    }
+    if x0 == u32::MAX {
+        return Err("nothing selected".to_string());
+    }
+    let bw = x1 - x0 + 1;
+    let bh = y1 - y0 + 1;
+
+    // Generate at the region's aspect ratio. 1024 is where these models are
+    // happiest and is what the ceiling test used; the result is resized to
+    // the region afterwards.
+    const GEN_LONG_EDGE: f32 = 1024.0;
+    let scale = GEN_LONG_EDGE / bw.max(bh) as f32;
+    let gw = ((bw as f32 * scale) as u32).max(256);
+    let gh = ((bh as f32 * scale) as u32).max(256);
+
+    // Random per run so re-rolling gives genuine variants; logged so a
+    // result that works can be identified and reproduced.
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64 ^ (d.as_secs() << 20))
+        .unwrap_or(42);
+    log::info!(
+        "[fill] generate mode: {gw}x{gh} from prompt on {kind:?}, seed {seed}, \
+         region {bw}x{bh} at ({x0}, {y0})"
+    );
+
+    let png = crate::comfy_engine::run_free_generation(
+        app_handle,
+        state.inner(),
+        kind,
+        prompt,
+        gw,
+        gh,
+        seed,
+        |_| {},
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let decoded = image::load_from_memory(&png).map_err(|e| e.to_string())?;
+    let mut fitted = image::imageops::resize(
+        &decoded.to_rgba8(),
+        bw,
+        bh,
+        image::imageops::FilterType::Lanczos3,
+    );
+
+    // Patches composite in ORIGINAL image space, but the user sees the photo
+    // after its flips and coarse rotation. Generated content is upright in
+    // the frame the model made it in, so without this it lands upside down
+    // on a flipped photo — clouds lit from below. Undo the display transform
+    // so it reads correctly on screen: display(S) = flip(R^steps(S)), so
+    // S = R^(4-steps)(flip(G)). Flips are their own inverse.
+    if flip_horizontal {
+        image::imageops::flip_horizontal_in_place(&mut fitted);
+    }
+    if flip_vertical {
+        image::imageops::flip_vertical_in_place(&mut fitted);
+    }
+    let fitted = match orientation_steps % 4 {
+        1 => image::imageops::rotate270(&fitted),
+        2 => image::imageops::rotate180(&fitted),
+        3 => image::imageops::rotate90(&fitted),
+        _ => fitted,
+    };
+    // A quarter turn swaps the axes, so refit to the region.
+    let fitted = if fitted.width() != bw || fitted.height() != bh {
+        image::imageops::resize(&fitted, bw, bh, image::imageops::FilterType::Lanczos3)
+    } else {
+        fitted
+    };
+
+    let mut canvas = RgbaImage::new(fw, fh);
+    image::imageops::replace(&mut canvas, &fitted, x0 as i64, y0 as i64);
+
+    // Fade the seam correction over a small fraction of the region so the
+    // join reads as continuous while the interior keeps what was generated.
+    let band = (bw.min(bh) as f32 * 0.06).clamp(8.0, 96.0);
+    Ok(GeneratedRegion {
+        canvas,
+        width: bw,
+        height: bh,
+        band,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn run_engine_inpaint_patch(
     source_image: &DynamicImage,
     mask: &GrayImage,
@@ -2529,6 +2655,7 @@ async fn run_engine_inpaint_patch(
     reconstruct_fill: bool,
     promptless_reconstruct: bool,
     reconstruct_single_path: bool,
+    generate_mode: bool,
     debug_run_id: &str,
     orientation_steps: u8,
     flip_horizontal: bool,
@@ -2561,6 +2688,53 @@ async fn run_engine_inpaint_patch(
     } else {
         source_image.to_rgba8()
     };
+
+    // Generate mode: build the content from the prompt alone and composite
+    // it, rather than asking an inpainting model to continue surroundings
+    // that carry no information.
+    //
+    // Measured 2026-09-01: the same flux1-fill-dev Q8 weights, guidance and
+    // cfg that return grey mush inside a blown-out selection paint
+    // photorealistic cumulus once the mask is opened and there is nothing
+    // to continue. The limit was never the model, the quantization, the
+    // guidance or the prompt — it was asking a continuation model to invent.
+    //
+    // No tiling here: the region is made in one pass, which also removes the
+    // cascade, the tile seams and the ordering problem, all of which were
+    // artefacts of tiling a job the model could not do anyway.
+    if generate_mode && !prompt.trim().is_empty() {
+        let generated = generate_region(
+            &encoded_full,
+            mask,
+            prompt,
+            kind,
+            orientation_steps,
+            flip_horizontal,
+            flip_vertical,
+            app_handle,
+            state,
+        )
+            .await
+            .map_err(|e| format!("Generation failed: {e}"))?;
+        let band = generated.band;
+        save_debug_rgba(app_handle, debug_run_id, "generate-raw", &generated.canvas);
+        let blended =
+            crate::heal_blend::blend_generated(&encoded_full, &generated.canvas, mask, band);
+        log::info!(
+            "[fill] generate mode: composited {}x{} generated region, seam band {band:.0}px",
+            generated.width,
+            generated.height
+        );
+        return Ok(EngineInpaintResult {
+            image: blended,
+            is_linear,
+            active_kind: Some(match kind {
+                crate::comfy_engine::FillKind::Flux => "flux-generate",
+                crate::comfy_engine::FillKind::SdxlFooocus => "sdxl-generate",
+                crate::comfy_engine::FillKind::SdxlBase => "sdxl-generate",
+            }),
+        });
+    }
 
     let (labels, mut comps) = mask_components(mask, 127);
     if comps.is_empty() {
@@ -4144,6 +4318,7 @@ pub async fn invoke_generative_replace_with_mask_def(
             reconstruct_fill,
             promptless_reconstruct,
             reconstruct_single_path,
+            patch_definition.generate_mode,
             &debug_run_id,
             orientation_steps,
             flip_horizontal,
@@ -4163,6 +4338,7 @@ pub async fn invoke_generative_replace_with_mask_def(
             prompt_for_engine.as_ref(),
             crate::comfy_engine::FillKind::SdxlBase,
             true,
+            false,
             false,
             false,
             false,
