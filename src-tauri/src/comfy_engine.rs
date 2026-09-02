@@ -464,6 +464,39 @@ pub struct LoraSpec {
     pub strength: f32,
 }
 
+/// Cheap sanity check before a file is offered as a LoRA.
+///
+/// A gated Civitai download returns a 106-byte JSON error with the
+/// filename you asked for, which would otherwise sit in the folder looking
+/// like a LoRA and fail at generation time — long after the mistake. Real
+/// adapters are tens to hundreds of megabytes, and a safetensors file
+/// starts with a little-endian u64 header length that must fit inside it.
+fn looks_like_a_model(path: &std::path::Path) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    const MIN_PLAUSIBLE_BYTES: u64 = 1_048_576;
+    if meta.len() < MIN_PLAUSIBLE_BYTES {
+        return false;
+    }
+    if path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase())
+        != Some("safetensors".to_string())
+    {
+        // Only safetensors has a header we can cheaply verify.
+        return true;
+    }
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut len = [0u8; 8];
+    if f.read_exact(&mut len).is_err() {
+        return false;
+    }
+    let header_len = u64::from_le_bytes(len);
+    header_len > 0 && header_len < meta.len()
+}
+
 /// Where LoRAs live, and what is currently in there.
 ///
 /// The folder path comes back too so the panel can tell the user where to
@@ -492,11 +525,14 @@ pub fn list_engine_loras(app_handle: tauri::AppHandle) -> LoraLibrary {
         .filter_map(|e| {
             let path = e.path();
             let ext = path.extension()?.to_str()?.to_ascii_lowercase();
-            if matches!(ext.as_str(), "safetensors" | "ckpt" | "pt") {
-                Some(path.file_name()?.to_str()?.to_string())
-            } else {
-                None
+            if !matches!(ext.as_str(), "safetensors" | "ckpt" | "pt") {
+                return None;
             }
+            if !looks_like_a_model(&path) {
+                log::info!("[engine] ignoring {:?} — not a usable model file", path.file_name());
+                return None;
+            }
+            Some(path.file_name()?.to_str()?.to_string())
         })
         .collect();
     out.sort();
@@ -892,6 +928,61 @@ pub async fn install_ai_engine(app_handle: tauri::AppHandle) -> Result<(), Strin
     .map_err(|e| e.to_string())?;
     let _ = app_handle.emit("engine-install-complete", ());
     Ok(())
+}
+
+#[cfg(test)]
+mod lora_file_tests {
+    use super::looks_like_a_model;
+    use std::io::Write;
+
+    fn write(dir: &std::path::Path, name: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let p = dir.join(name);
+        let mut f = std::fs::File::create(&p).unwrap();
+        f.write_all(bytes).unwrap();
+        p
+    }
+
+    /// A gated Civitai download writes a small JSON error under the name you
+    /// asked for. It must never be offered as a LoRA — it would look fine in
+    /// the picker and fail much later, during generation.
+    #[test]
+    fn an_error_page_is_not_a_model() {
+        let dir = std::env::temp_dir().join("rr_lora_test_err");
+        let _ = std::fs::create_dir_all(&dir);
+        let p = write(
+            &dir,
+            "gated.safetensors",
+            br#"{"error":"Unauthorized","message":"requires you to be logged in"}"#,
+        );
+        assert!(!looks_like_a_model(&p));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_plausible_safetensors_is_accepted() {
+        let dir = std::env::temp_dir().join("rr_lora_test_ok");
+        let _ = std::fs::create_dir_all(&dir);
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&64u64.to_le_bytes());
+        bytes.extend_from_slice(&[b'{'; 64]);
+        bytes.resize(2_000_000, 0);
+        let p = write(&dir, "real.safetensors", &bytes);
+        assert!(looks_like_a_model(&p));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Big enough, but the declared header runs past the end of the file.
+    #[test]
+    fn a_corrupt_header_is_rejected() {
+        let dir = std::env::temp_dir().join("rr_lora_test_bad");
+        let _ = std::fs::create_dir_all(&dir);
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&u64::MAX.to_le_bytes());
+        bytes.resize(2_000_000, 0);
+        let p = write(&dir, "truncated.safetensors", &bytes);
+        assert!(!looks_like_a_model(&p));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg(test)]
