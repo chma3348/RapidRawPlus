@@ -5929,9 +5929,19 @@ pub(crate) fn informative_fraction(
         while x <= x1.min(image.width().saturating_sub(1)) {
             total += 1;
             if !masked(x, y) {
-                let p = image.get_pixel(x, y);
-                let l = (p[0] as u32 + p[1] as u32 + p[2] as u32) / 3;
-                if (12..=246).contains(&l) {
+                let lum = |xx: u32, yy: u32| {
+                    let q = image.get_pixel(xx.min(image.width() - 1), yy.min(image.height() - 1));
+                    (q[0] as i32 + q[1] as i32 + q[2] as i32) / 3
+                };
+                let l = lum(x, y);
+                // Brightness alone is not information. A blown sky sits at
+                // 245 and sailed through a 12..=246 test, so a region of
+                // pure blowout reported 91% usable scene and the widening
+                // stopped before it had found anything. What matters is
+                // whether the neighbourhood VARIES: flat is flat, at any
+                // level.
+                let local = (l - lum(x + 8, y)).abs() + (l - lum(x, y + 8)).abs();
+                if l < 244 && local >= 4 {
                     usable += 1;
                 }
             }
@@ -6087,6 +6097,25 @@ mod context_growth_tests {
             }
         }
         img
+    }
+
+    /// The bug this metric shipped with: a blown sky sits at 245 and passed
+    /// a brightness-range test, so a region of pure blowout reported 91%
+    /// usable scene. Flat is flat regardless of level.
+    #[test]
+    fn a_flat_bright_region_is_not_context() {
+        let img = RgbaImage::from_pixel(400, 300, Rgba([245, 245, 245, 255]));
+        let none = |_x: u32, _y: u32| false;
+        let f = informative_fraction(&img, none, (50, 50, 350, 250));
+        assert!(f < 0.05, "flat blowout scored {f:.2} usable, should be ~0");
+    }
+
+    /// And flat DARK is equally uninformative — the same trap at the other end.
+    #[test]
+    fn a_flat_dark_region_is_not_context() {
+        let img = RgbaImage::from_pixel(400, 300, Rgba([30, 30, 30, 255]));
+        let none = |_x: u32, _y: u32| false;
+        assert!(informative_fraction(&img, none, (50, 50, 350, 250)) < 0.05);
     }
 
     #[test]
