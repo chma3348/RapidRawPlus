@@ -3078,24 +3078,61 @@ async fn run_engine_inpaint_patch(
     const TILE_SPAN_THRESHOLD: u32 = 900;
     const TILE_TARGET: u32 = 700;
     const MIN_TILE_AREA: u32 = 4000;
+    // The same context window the per-blob pass will use, so the tiling
+    // decision is made on what the model will actually see.
+    let context_bounds_for = |comp: &MaskComponent| -> (u32, u32, u32, u32) {
+        let (scale, cap) = if reconstruct_fill { (1.9, 840) } else { (1.5, 520) };
+        let span_x = comp.max_x - comp.min_x + 1;
+        let span_y = comp.max_y - comp.min_y + 1;
+        let pad_x = 192.max((span_x as f32 * scale) as u32).min(cap);
+        let pad_y = 192.max((span_y as f32 * scale) as u32).min(cap);
+        (
+            comp.min_x.saturating_sub(pad_x),
+            comp.min_y.saturating_sub(pad_y),
+            (comp.max_x + pad_x).min(w.saturating_sub(1)),
+            (comp.max_y + pad_y).min(h.saturating_sub(1)),
+        )
+    };
+
     let mut units: Vec<FillUnit> = Vec::new();
     for comp in &large {
-        // Removal is a context job: the model has to see what surrounds the
-        // hole to continue it. Tiling hands each pass only its own corner,
-        // which is the opposite of what that needs — and the cascade it
-        // creates is where flat output and hallucinations propagated from.
-        // Reconstruct keeps tiling; it is filling from a prompt, not
-        // continuing a scene.
-        if comp.span() <= TILE_SPAN_THRESHOLD || !reconstruct_fill {
+        // Tiling exists for one reason: a large region returned flat wash in
+        // a single pass. But that was measured when the crop was starved —
+        // 73% blown sky on the edit that motivated it — so the model was
+        // being asked to continue a white wall, and splitting it up at least
+        // gave each pass a filled neighbour to lean on.
+        //
+        // Now that the crop widens until it finds real scene, that reason
+        // may not hold. So tile only when widening CANNOT find enough: if
+        // the model can see the photograph, give it the whole region in one
+        // pass, because tiling hands each pass its own corner and its
+        // cascade is where both the flat output and the hallucinated bird
+        // propagated from.
+        let ctx = context_bounds_for(comp);
+        let widened = grow_context_for_information(
+            &encoded_full,
+            |x, y| mask.get_pixel(x, y)[0] > 127,
+            ctx,
+            0.35,
+        );
+        let usable =
+            informative_fraction(&encoded_full, |x, y| mask.get_pixel(x, y)[0] > 127, widened);
+        if comp.span() <= TILE_SPAN_THRESHOLD || usable >= 0.35 {
             if comp.span() > TILE_SPAN_THRESHOLD {
                 log::info!(
-                    "[fill] repair span {} — filling in one pass so the model keeps whole-scene context",
-                    comp.span()
+                    "[fill] span {} filled in ONE pass — widening found {:.0}% usable scene, so the model keeps whole-region context",
+                    comp.span(),
+                    usable * 100.0
                 );
             }
             units.push((*comp, None));
             continue;
         }
+        log::info!(
+            "[fill] span {} tiled — even widened, only {:.0}% of the view is usable scene",
+            comp.span(),
+            usable * 100.0
+        );
         let bbox_w = comp.max_x - comp.min_x + 1;
         let bbox_h = comp.max_y - comp.min_y + 1;
         let cols = bbox_w.div_ceil(TILE_TARGET).max(1);
