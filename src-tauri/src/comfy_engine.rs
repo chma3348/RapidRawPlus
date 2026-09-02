@@ -464,14 +464,28 @@ pub struct LoraSpec {
     pub strength: f32,
 }
 
+/// Where LoRAs live, and what is currently in there.
+///
+/// The folder path comes back too so the panel can tell the user where to
+/// put files — an empty list is otherwise indistinguishable from a missing
+/// feature.
+#[derive(serde::Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct LoraLibrary {
+    pub folder: String,
+    pub files: Vec<String>,
+}
+
 /// LoRA files sitting in the engine's `models/loras` folder.
 #[tauri::command]
-pub fn list_engine_loras(app_handle: tauri::AppHandle) -> Vec<String> {
+pub fn list_engine_loras(app_handle: tauri::AppHandle) -> LoraLibrary {
     let Ok(dir) = engine_dir(&app_handle) else {
-        return Vec::new();
+        return LoraLibrary::default();
     };
-    let Ok(entries) = std::fs::read_dir(dir.join("ComfyUI/models/loras")) else {
-        return Vec::new();
+    let folder = dir.join("ComfyUI/models/loras");
+    let folder_str = folder.to_string_lossy().to_string();
+    let Ok(entries) = std::fs::read_dir(&folder) else {
+        return LoraLibrary { folder: folder_str, files: Vec::new() };
     };
     let mut out: Vec<String> = entries
         .filter_map(|e| e.ok())
@@ -486,7 +500,7 @@ pub fn list_engine_loras(app_handle: tauri::AppHandle) -> Vec<String> {
         })
         .collect();
     out.sort();
-    out
+    LoraLibrary { folder: folder_str, files: out }
 }
 
 /// Chains LoRA loaders onto a model node, returning the id of the node that

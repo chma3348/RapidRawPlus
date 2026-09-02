@@ -1849,6 +1849,7 @@ function SettingsPanel({
   const [contentScale, setContentScale] = useState(1.0);
   const [matchPhoto, setMatchPhoto] = useState(0.8);
   const [availableLoras, setAvailableLoras] = useState<Array<string>>([]);
+  const [loraFolder, setLoraFolder] = useState<string>('');
   const [loras, setLoras] = useState<Array<{ name: string; strength: number }>>([]);
   // Slider fires onDragStateChange from a useEffect whose deps include the
   // callback itself, so an inline closure re-runs it on EVERY render — and
@@ -1936,11 +1937,19 @@ function SettingsPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [spotStrength, spotTexture, spotGrain]);
 
+  // Re-read when the engine choice changes, so dropping a file into the
+  // folder and switching models is enough to pick it up — no restart.
   useEffect(() => {
     invoke(Invokes.ListEngineLoras)
-      .then((l: any) => setAvailableLoras(l || []))
-      .catch(() => setAvailableLoras([]));
-  }, []);
+      .then((l: any) => {
+        setAvailableLoras(l?.files || []);
+        setLoraFolder(l?.folder || '');
+      })
+      .catch(() => {
+        setAvailableLoras([]);
+        setLoraFolder('');
+      });
+  }, [appSettings?.preferredModels?.inpaint]);
 
   useEffect(() => {
     invoke(Invokes.ListRegisteredModels, { taskType: 'inpaint' })
@@ -2251,7 +2260,7 @@ function SettingsPanel({
               </div>
             )}
 
-            {isFluxSelected && availableLoras.length > 0 && (
+            {isFluxSelected && (
               <div className="mt-3 p-2 bg-bg-tertiary rounded-md">
                 <Text variant={TextVariants.heading} className="mb-1">
                   LoRAs
@@ -2260,6 +2269,13 @@ function SettingsPanel({
                   Flux only. Each one nudges the model's style; strength 0.5–0.8 is
                   usually plenty.
                 </Text>
+                {availableLoras.length === 0 && (
+                  <Text variant={TextVariants.small} className="block text-text-secondary">
+                    None installed. Drop <code>.safetensors</code> files into{' '}
+                    <span className="break-all">{loraFolder || 'the engine models/loras folder'}</span>{' '}
+                    and switch the model picker away and back to refresh.
+                  </Text>
+                )}
                 {availableLoras.map((name: string) => {
                   const active = loras.find((l) => l.name === name);
                   return (
