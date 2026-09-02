@@ -1937,9 +1937,12 @@ function SettingsPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [spotStrength, spotTexture, spotGrain]);
 
-  // Re-read when the engine choice changes, so dropping a file into the
-  // folder and switching models is enough to pick it up — no restart.
-  useEffect(() => {
+  // Files get dropped into the folder while the app is running, so re-read
+  // on anything that means "the user is about to look at this list": mount,
+  // an engine change, opening a patch, turning generate mode on — plus an
+  // explicit refresh, since none of those fire if they add a file with the
+  // panel already open.
+  const refreshLoras = useCallback(() => {
     invoke(Invokes.ListEngineLoras)
       .then((l: any) => {
         setAvailableLoras(l?.files || []);
@@ -1949,7 +1952,11 @@ function SettingsPanel({
         setAvailableLoras([]);
         setLoraFolder('');
       });
-  }, [appSettings?.preferredModels?.inpaint]);
+  }, []);
+
+  useEffect(() => {
+    refreshLoras();
+  }, [refreshLoras, appSettings?.preferredModels?.inpaint, container?.id, generateMode]);
 
   useEffect(() => {
     invoke(Invokes.ListRegisteredModels, { taskType: 'inpaint' })
@@ -2262,9 +2269,16 @@ function SettingsPanel({
 
             {isFluxSelected && (
               <div className="mt-3 p-2 bg-bg-tertiary rounded-md">
-                <Text variant={TextVariants.heading} className="mb-1">
-                  LoRAs
-                </Text>
+                <div className="flex items-center justify-between mb-1">
+                  <Text variant={TextVariants.heading}>LoRAs</Text>
+                  <button
+                    className="text-xs px-2 py-1 rounded-md bg-bg-primary text-text-secondary hover:text-text-primary transition-colors"
+                    onClick={refreshLoras}
+                    title="Re-read the loras folder"
+                  >
+                    Refresh
+                  </button>
+                </div>
                 <Text variant={TextVariants.small} className="mb-2 block text-text-secondary">
                   Flux only. Each one nudges the model's style; strength 0.5–0.8 is
                   usually plenty.
