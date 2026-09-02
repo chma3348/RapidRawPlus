@@ -1850,6 +1850,14 @@ function SettingsPanel({
   const [matchPhoto, setMatchPhoto] = useState(0.8);
   const [availableLoras, setAvailableLoras] = useState<Array<string>>([]);
   const [loras, setLoras] = useState<Array<{ name: string; strength: number }>>([]);
+  // Slider fires onDragStateChange from a useEffect whose deps include the
+  // callback itself, so an inline closure re-runs it on EVERY render — and
+  // with `false`, including on mount. Writing to the store there re-renders
+  // and fires it again: an infinite loop, not a race. Persist only on a real
+  // true -> false transition.
+  const scaleDrag = useRef(false);
+  const matchDrag = useRef(false);
+  const loraDrag = useRef(false);
   const [reconstructSinglePath, setReconstructSinglePath] = useState(
     isReconstructPatch && displayContainer.reconstructSinglePath !== false,
   );
@@ -2205,7 +2213,13 @@ function SettingsPanel({
                   onDragStateChange={(dragging: boolean) => {
                     // Persist on release, not on every tick: the adjustments
                     // object carries the patch bitmaps and is autosaved.
-                    if (!dragging && container) updateContainer(container.id, { contentScale });
+                    if (dragging) {
+                      scaleDrag.current = true;
+                      return;
+                    }
+                    if (!scaleDrag.current) return;
+                    scaleDrag.current = false;
+                    if (container) updateContainer(container.id, { contentScale });
                   }}
                   suffix="%"
                 />
@@ -2218,7 +2232,13 @@ function SettingsPanel({
                   value={Math.round(matchPhoto * 100)}
                   onChange={(e: any) => setMatchPhoto(Number(e.target.value) / 100)}
                   onDragStateChange={(dragging: boolean) => {
-                    if (!dragging && container) updateContainer(container.id, { matchPhoto });
+                    if (dragging) {
+                      matchDrag.current = true;
+                      return;
+                    }
+                    if (!matchDrag.current) return;
+                    matchDrag.current = false;
+                    if (container) updateContainer(container.id, { matchPhoto });
                   }}
                   suffix="%"
                 />
@@ -2274,7 +2294,13 @@ function SettingsPanel({
                             )
                           }
                           onDragStateChange={(dragging: boolean) => {
-                            if (!dragging && container) updateContainer(container.id, { loras });
+                            if (dragging) {
+                              loraDrag.current = true;
+                              return;
+                            }
+                            if (!loraDrag.current) return;
+                            loraDrag.current = false;
+                            if (container) updateContainer(container.id, { loras });
                           }}
                           suffix="%"
                         />
