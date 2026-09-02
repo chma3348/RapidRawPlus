@@ -4486,16 +4486,76 @@ pub async fn invoke_generative_replace_with_mask_def(
     } else {
         mask_bitmap.clone()
     };
-    let promptless_reconstruct = reconstruct_fill && patch_definition.prompt.trim().is_empty();
-    let auto_hint = if promptless_reconstruct {
+    // The prompt decides the job, not the selection type.
+    //
+    // Written  -> use it, whatever was selected and however blown the area is.
+    // Empty    -> repair: rebuild from the scene, promptlessly.
+    //
+    // The invented "automatic Reconstruct prompt" is gone. It asked for
+    // "pale sky ... subtle atmospheric haze ... match the existing exposure",
+    // every one of which a white wash satisfies perfectly, and its negative
+    // clauses ("no flat gray patch") are inert at cfg 1.0 where there is no
+    // classifier-free guidance to push away from anything. It was asking for
+    // the failure mode.
+    let user_prompt = patch_definition.prompt.trim().to_string();
+    let promptless_reconstruct = user_prompt.is_empty() && reconstruct_fill;
+    // Still inferred: it drives how the masked canvas is SEEDED before the
+    // engine runs, and is reported back as diagnostics. Only its use as an
+    // invented prompt is retired.
+    let auto_hint = if user_prompt.is_empty() {
         infer_reconstruct_auto_hint(&source_image, &mask_bitmap)
     } else {
         ReconstructAutoHint::Generic
     };
-    let prompt_for_engine =
-        effective_reconstruct_prompt(&patch_definition.prompt, reconstruct_fill, auto_hint);
-    if promptless_reconstruct {
-        log::info!("[fill] using automatic Reconstruct prompt: {:?}", auto_hint);
+    let prompt_for_engine: Cow<'_, str> = Cow::Owned(user_prompt.clone());
+
+    // Repair can only continue what it can see. With no prompt to fall back
+    // on, check there is real scene around the selection before spending
+    // minutes producing a wash — and say so in a form the UI can act on.
+    if user_prompt.is_empty() {
+        let usable = {
+            let (mw, mh) = mask_bitmap.dimensions();
+            let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
+            for y in 0..mh {
+                for x in 0..mw {
+                    if mask_bitmap.get_pixel(x, y)[0] > 127 {
+                        x0 = x0.min(x);
+                        y0 = y0.min(y);
+                        x1 = x1.max(x);
+                        y1 = y1.max(y);
+                    }
+                }
+            }
+            if x0 == u32::MAX {
+                1.0
+            } else {
+                let probe = source_image.to_rgba8();
+                let start = context_window_around(&probe, (x0, y0, x1, y1));
+                let widened = grow_context_for_information(
+                    &probe,
+                    |x, y| mask_bitmap.get_pixel(x, y)[0] > 127,
+                    start,
+                    NEEDS_PROMPT_BELOW,
+                );
+                informative_fraction(
+                    &probe,
+                    |x, y| mask_bitmap.get_pixel(x, y)[0] > 127,
+                    widened,
+                )
+            }
+        };
+        log::info!(
+            "[fill] promptless repair: {:.0}% usable scene around the selection",
+            usable * 100.0
+        );
+        if usable < NEEDS_PROMPT_BELOW {
+            log::info!("[fill] not enough to rebuild from — asking for a prompt");
+            return Ok(serde_json::json!({
+                "needsPrompt": true,
+                "usableFraction": usable,
+            })
+            .to_string());
+        }
     }
 
     // Which local inpaint model is selected decides the local paths: the
@@ -5909,6 +5969,32 @@ mod fill_component_tests {
 /// Strips display-orientation parameters from value-derived sub-masks so
 /// their bitmaps stay in full-image space (see the comment at the call
 /// site in `invoke_generative_replace_with_mask_def`).
+/// Below this share of usable scene, a promptless repair has nothing to
+/// rebuild from and the user is asked what should be there instead.
+///
+/// A guess, not a measurement. Every run logs the number it saw so this can
+/// be tuned against real selections.
+pub(crate) const NEEDS_PROMPT_BELOW: f32 = 0.35;
+
+/// The context window a fill would use around a region, before widening.
+pub(crate) fn context_window_around(
+    image: &RgbaImage,
+    region: (u32, u32, u32, u32),
+) -> (u32, u32, u32, u32) {
+    let (w, h) = image.dimensions();
+    let (min_x, min_y, max_x, max_y) = region;
+    let span_x = max_x - min_x + 1;
+    let span_y = max_y - min_y + 1;
+    let pad_x = 192.max((span_x as f32 * 1.9) as u32).min(840);
+    let pad_y = 192.max((span_y as f32 * 1.9) as u32).min(840);
+    (
+        min_x.saturating_sub(pad_x),
+        min_y.saturating_sub(pad_y),
+        (max_x + pad_x).min(w.saturating_sub(1)),
+        (max_y + pad_y).min(h.saturating_sub(1)),
+    )
+}
+
 /// How much of a crop is scene the model can actually learn from.
 ///
 /// Pixels inside the selection are being replaced, and clipped ones carry
@@ -6012,7 +6098,7 @@ pub(crate) fn map_strokes_to_image_space(
     let flip_h = adjustments["flipHorizontal"].as_bool().unwrap_or(false);
     let flip_v = adjustments["flipVertical"].as_bool().unwrap_or(false);
     let rotation = adjustments["rotation"].as_f64().unwrap_or(0.0);
-    if steps % 4 == 0 && !flip_h && !flip_v && rotation.abs() <= 1e-6 {
+    if steps.is_multiple_of(4) && !flip_h && !flip_v && rotation.abs() <= 1e-6 {
         return false;
     }
     for sm in sub_masks.iter_mut() {

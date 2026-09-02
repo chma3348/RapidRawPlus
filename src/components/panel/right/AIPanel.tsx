@@ -326,6 +326,7 @@ export default function AIPanel() {
   const { setAdjustments } = useEditorActions();
   const {
     handleGenerativeReplace,
+    handleAdjustFillArea,
     handleCloneStamp,
     handleSpotEnhance,
     handleRespotEnhance,
@@ -1207,6 +1208,7 @@ export default function AIPanel() {
                   isGeneratingAiMask={isGeneratingAiMask}
                   onGenerativeReplace={handleGenerativeReplace}
                   onSelectAiPatchVariant={handleSelectAiPatchVariant}
+                  onAdjustFillArea={handleAdjustFillArea}
                   onCloneStamp={handleCloneStamp}
                   onSpotEnhance={handleSpotEnhance}
                   onRespotEnhance={handleRespotEnhance}
@@ -1829,6 +1831,7 @@ function SettingsPanel({
   isGeneratingAiMask: _isGeneratingAiMask,
   onGenerativeReplace,
   onSelectAiPatchVariant,
+  onAdjustFillArea,
   onCloneStamp,
   onSpotEnhance,
   onRespotEnhance,
@@ -2405,6 +2408,29 @@ function SettingsPanel({
                     : t('editor.ai.settings.generateWithAiButton')}
             </span>
           </Button>
+
+          {displayContainer.needsPromptReason !== undefined && !displayContainer.patchData && (
+            <Text variant={TextVariants.small} className="block mt-2 text-text-secondary">
+              Only {displayContainer.needsPromptReason}% of the area around this selection has
+              usable detail, so there is nothing to rebuild from. Describe what should be here and
+              run it again.
+            </Text>
+          )}
+
+          {displayContainer.patchData && onAdjustFillArea && (
+            <>
+              <button
+                className="w-full mt-2 px-3 py-2 bg-bg-primary text-text-secondary rounded-md hover:text-text-primary transition-colors text-sm"
+                onClick={() => container && onAdjustFillArea(container.id)}
+              >
+                Adjust this area
+              </button>
+              <Text variant={TextVariants.small} className="block mt-1 text-text-secondary">
+                Adds a mask over the filled area so you can set its exposure, colour and contrast
+                by eye in the Masks panel.
+              </Text>
+            </>
+          )}
         </div>
       </CollapsibleSection>
       )}

@@ -3,7 +3,15 @@ import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'react-toastify';
 import { useEditorStore } from '../store/useEditorStore';
 import { useEditorActions } from './useEditorActions';
-import { Adjustments, AiPatch, AiPatchResultVariant, MaskContainer, Coord } from '../utils/adjustments';
+import {
+  Adjustments,
+  AiPatch,
+  AiPatchResultVariant,
+  MaskContainer,
+  Coord,
+  INITIAL_MASK_CONTAINER,
+} from '../utils/adjustments';
+import { v4 as uuidv4 } from 'uuid';
 import { SubMask } from '../components/panel/right/Masks';
 import { Invokes } from '../components/ui/AppProperties';
 import { useAuth } from '@clerk/react';
@@ -121,6 +129,25 @@ export function useAiMasking() {
         });
 
         const newPatchData = JSON.parse(newPatchDataJson);
+
+        // A promptless repair with nothing to rebuild from comes back asking
+        // for direction rather than spending minutes producing a wash. The
+        // prompt field is already on screen; this just says why it is needed.
+        if (newPatchData && newPatchData.needsPrompt) {
+          const pct = Math.round((newPatchData.usableFraction ?? 0) * 100);
+          setAdjustments((prev: Adjustments) => ({
+            ...prev,
+            aiPatches: prev.aiPatches.map((p: AiPatch) =>
+              p.id === patchId ? { ...p, isLoading: false, needsPromptReason: pct } : p,
+            ),
+          }));
+          toast.info(
+            `Only ${pct}% of the area around this selection has usable detail, so there is nothing to rebuild from. Describe what should be here.`,
+            { autoClose: 8000 },
+          );
+          return;
+        }
+
         patchesSentToBackend.delete(patchId);
 
         setAdjustments((prev: Adjustments) => ({
@@ -132,6 +159,7 @@ export function useAiMasking() {
                   patchData: newPatchData,
                   isLoading: false,
                   reconstructSinglePath,
+                  needsPromptReason: undefined,
                   name: useFastInpaint ? 'Inpaint' : prompt && prompt.trim() ? prompt.trim() : p.name,
                 }
               : p,
@@ -153,6 +181,62 @@ export function useAiMasking() {
       }
     },
     [setAdjustments, setEditor],
+  );
+
+  /// Turns a finished fill into an ordinary editable mask.
+  ///
+  /// Patches are composited into the image BEFORE any adjustment or mask
+  /// processing runs (load_and_composite), so a mask covering the fill
+  /// region adjusts the FILLED pixels. That means the whole existing mask
+  /// panel — exposure, contrast, colour, curves — works on the fill for
+  /// free, and the user's eye decides whether it sits in the photo instead
+  /// of a statistic deciding for them.
+  const handleAdjustFillArea = useCallback(
+    (patchId: string) => {
+      const { adjustments } = useEditorStore.getState();
+      const patch: AiPatch | undefined = adjustments.aiPatches.find((p: AiPatch) => p.id === patchId);
+      const maskData = patch?.patchData?.mask;
+      if (!patch || !maskData) {
+        toast.error('Run the fill first — there is no filled area to adjust yet.');
+        return;
+      }
+
+      const subMask: any = {
+        id: uuidv4(),
+        type: 'ai-paint',
+        visible: true,
+        mode: 'additive',
+        parameters: {
+          maskDataBase64: maskData,
+          // The patch mask is in ORIGINAL image space. Carry the photo's
+          // current orientation so the display path transforms it into view
+          // space — exactly the convention ai-subject masks use. Leaving
+          // these at identity puts the mask in the wrong place on any
+          // flipped or rotated photo.
+          rotation: adjustments.rotation ?? 0,
+          flipHorizontal: !!adjustments.flipHorizontal,
+          flipVertical: !!adjustments.flipVertical,
+          orientationSteps: adjustments.orientationSteps ?? 0,
+          grow: 0,
+          feather: 0,
+        },
+      };
+
+      const container: any = {
+        ...INITIAL_MASK_CONTAINER,
+        id: uuidv4(),
+        name: `Fill: ${patch.name || 'AI area'}`,
+        subMasks: [subMask],
+      };
+
+      setAdjustments((prev: Adjustments) => ({
+        ...prev,
+        masks: [...(prev.masks || []), container],
+      }));
+      toast.success('Added a mask over the filled area — adjust it in the Masks panel.');
+      return container.id;
+    },
+    [setAdjustments],
   );
 
   /// Clone/heal: deterministic copy from a source offset. No engine, so
@@ -663,6 +747,7 @@ export function useAiMasking() {
   return {
     updateSubMask,
     handleGenerativeReplace,
+    handleAdjustFillArea,
     handleCloneStamp,
     handleSpotEnhance,
     handleRespotEnhance,

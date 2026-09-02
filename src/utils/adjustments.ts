@@ -261,6 +261,9 @@ export interface AiPatch {
   matchPhoto?: number;
   /// LoRAs to apply, in order. Flux only.
   loras?: Array<{ name: string; strength: number }>;
+  /// Set when a promptless repair found too little surrounding detail to
+  /// rebuild from; the value is the percentage it did find.
+  needsPromptReason?: number;
   subMasks: Array<SubMask>;
   visible: boolean;
   /** 'heal' patches clone from a source offset and stay editable. */
