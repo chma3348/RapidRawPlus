@@ -3080,7 +3080,19 @@ async fn run_engine_inpaint_patch(
     const MIN_TILE_AREA: u32 = 4000;
     let mut units: Vec<FillUnit> = Vec::new();
     for comp in &large {
-        if comp.span() <= TILE_SPAN_THRESHOLD {
+        // Removal is a context job: the model has to see what surrounds the
+        // hole to continue it. Tiling hands each pass only its own corner,
+        // which is the opposite of what that needs — and the cascade it
+        // creates is where flat output and hallucinations propagated from.
+        // Reconstruct keeps tiling; it is filling from a prompt, not
+        // continuing a scene.
+        if comp.span() <= TILE_SPAN_THRESHOLD || !reconstruct_fill {
+            if comp.span() > TILE_SPAN_THRESHOLD {
+                log::info!(
+                    "[fill] repair span {} — filling in one pass so the model keeps whole-scene context",
+                    comp.span()
+                );
+            }
             units.push((*comp, None));
             continue;
         }
@@ -3182,6 +3194,32 @@ async fn run_engine_inpaint_patch(
         let y0 = comp.min_y.saturating_sub(pad_y);
         let x1 = (comp.max_x + pad_x).min(w.saturating_sub(1));
         let y1 = (comp.max_y + pad_y).min(h.saturating_sub(1));
+
+        // A removal can only continue what it can see. Where the fixed pad
+        // lands mostly on the selection itself or on blown-out pixels, widen
+        // the view until there is real scene in it.
+        const WANT_INFORMATIVE: f32 = 0.35;
+        let before = informative_fraction(&encoded_full, |x, y| mask.get_pixel(x, y)[0] > 127, (x0, y0, x1, y1));
+        let (x0, y0, x1, y1) = if before < WANT_INFORMATIVE {
+            let grown = grow_context_for_information(
+                &encoded_full,
+                |x, y| mask.get_pixel(x, y)[0] > 127,
+                (x0, y0, x1, y1),
+                WANT_INFORMATIVE,
+            );
+            log::info!(
+                "[fill] {blob_prefix} context widened for information: {}x{} -> {}x{} ({:.0}% -> {:.0}% usable scene)",
+                x1 - x0 + 1,
+                y1 - y0 + 1,
+                grown.2 - grown.0 + 1,
+                grown.3 - grown.1 + 1,
+                before * 100.0,
+                informative_fraction(&encoded_full, |x, y| mask.get_pixel(x, y)[0] > 127, grown) * 100.0
+            );
+            grown
+        } else {
+            (x0, y0, x1, y1)
+        };
         let (crop_w, crop_h) = (x1 - x0 + 1, y1 - y0 + 1);
 
         let mut crop_img =
@@ -5834,6 +5872,81 @@ mod fill_component_tests {
 /// Strips display-orientation parameters from value-derived sub-masks so
 /// their bitmaps stay in full-image space (see the comment at the call
 /// site in `invoke_generative_replace_with_mask_def`).
+/// How much of a crop is scene the model can actually learn from.
+///
+/// Pixels inside the selection are being replaced, and clipped ones carry
+/// no information — a blown sky is a white wall, not context. Everything
+/// else is usable.
+pub(crate) fn informative_fraction(
+    image: &RgbaImage,
+    masked: impl Fn(u32, u32) -> bool,
+    bounds: (u32, u32, u32, u32),
+) -> f32 {
+    let (x0, y0, x1, y1) = bounds;
+    let (mut usable, mut total) = (0u64, 0u64);
+    // Sampling every 4th pixel: this only steers a crop decision, and the
+    // full scan is meaningful time on a 32MP frame.
+    let mut y = y0;
+    while y <= y1.min(image.height().saturating_sub(1)) {
+        let mut x = x0;
+        while x <= x1.min(image.width().saturating_sub(1)) {
+            total += 1;
+            if !masked(x, y) {
+                let p = image.get_pixel(x, y);
+                let l = (p[0] as u32 + p[1] as u32 + p[2] as u32) / 3;
+                if (12..=246).contains(&l) {
+                    usable += 1;
+                }
+            }
+            x += 4;
+        }
+        y += 4;
+    }
+    if total == 0 {
+        return 0.0;
+    }
+    usable as f32 / total as f32
+}
+
+/// Grows a crop until it holds enough real scene for the model to continue
+/// from, or until it runs out of photograph.
+///
+/// A removal only works if the model can see what surrounds the hole. With
+/// a fixed pad that assumption silently fails on a large blown selection:
+/// on a real edit the crop was 73% blown sky, so "continue the
+/// surroundings" meant continuing a white wall. Small objects keep their
+/// tight crop — a stop sign against real scenery already passes on the
+/// first try, and a wider crop would only cost it resolution.
+pub(crate) fn grow_context_for_information(
+    image: &RgbaImage,
+    masked: impl Fn(u32, u32) -> bool,
+    start: (u32, u32, u32, u32),
+    want: f32,
+) -> (u32, u32, u32, u32) {
+    let (w, h) = image.dimensions();
+    let mut bounds = start;
+    for _ in 0..6 {
+        if informative_fraction(image, &masked, bounds) >= want {
+            break;
+        }
+        let (x0, y0, x1, y1) = bounds;
+        if x0 == 0 && y0 == 0 && x1 >= w - 1 && y1 >= h - 1 {
+            break;
+        }
+        let width = x1 - x0 + 1;
+        let height = y1 - y0 + 1;
+        let grow_x = (width / 2).max(64);
+        let grow_y = (height / 2).max(64);
+        bounds = (
+            x0.saturating_sub(grow_x),
+            y0.saturating_sub(grow_y),
+            (x1 + grow_x).min(w - 1),
+            (y1 + grow_y).min(h - 1),
+        );
+    }
+    bounds
+}
+
 /// Maps brush strokes from DISPLAY space into ORIGINAL image space.
 ///
 /// Strokes are recorded as the user paints, in the space they see — the
@@ -5913,6 +6026,74 @@ pub(crate) fn neutralize_display_orientation(sub_masks: &mut [crate::mask_genera
             params.insert("flipVertical".into(), serde_json::json!(false));
             params.insert("orientationSteps".into(), serde_json::json!(0));
         }
+    }
+}
+
+#[cfg(test)]
+mod context_growth_tests {
+    use super::{grow_context_for_information, informative_fraction};
+    use image::{Rgba, RgbaImage};
+
+    /// Left third is real scene, the rest is blown white — the shape of the
+    /// photo this exists for.
+    fn scene() -> RgbaImage {
+        let mut img = RgbaImage::new(600, 400);
+        for y in 0..400 {
+            for x in 0..600 {
+                let v = if x < 200 {
+                    let n = ((x as f32 * 12.9898 + y as f32 * 78.233).sin() * 43758.547).fract();
+                    (60.0 + n.abs() * 120.0) as u8
+                } else {
+                    252
+                };
+                img.put_pixel(x, y, Rgba([v, v, v, 255]));
+            }
+        }
+        img
+    }
+
+    #[test]
+    fn clipped_pixels_do_not_count_as_context() {
+        let img = scene();
+        let none = |_x: u32, _y: u32| false;
+        let blown = informative_fraction(&img, none, (300, 100, 560, 300));
+        let real = informative_fraction(&img, none, (10, 100, 190, 300));
+        assert!(blown < 0.05, "blown region scored {blown:.2}, should be ~0");
+        assert!(real > 0.9, "real scene scored {real:.2}, should be ~1");
+    }
+
+    #[test]
+    fn masked_pixels_do_not_count_either() {
+        let img = scene();
+        let all = |_x: u32, _y: u32| true;
+        assert_eq!(informative_fraction(&img, all, (10, 100, 190, 300)), 0.0);
+    }
+
+    /// A crop sitting in the blown area must widen until it reaches scene.
+    #[test]
+    fn a_starved_crop_grows_toward_the_scene() {
+        let img = scene();
+        let none = |_x: u32, _y: u32| false;
+        let start = (380, 150, 520, 250);
+        let grown = grow_context_for_information(&img, none, start, 0.35);
+        assert!(
+            grown.0 < start.0 && grown.2 > start.2,
+            "crop did not widen: {start:?} -> {grown:?}"
+        );
+        assert!(
+            informative_fraction(&img, none, grown) > informative_fraction(&img, none, start),
+            "widening did not find more scene"
+        );
+    }
+
+    /// A crop already full of scene must be left alone — widening it would
+    /// only cost resolution on a small object like a stop sign.
+    #[test]
+    fn a_healthy_crop_is_left_alone() {
+        let img = scene();
+        let none = |_x: u32, _y: u32| false;
+        let start = (10, 100, 190, 300);
+        assert_eq!(grow_context_for_information(&img, none, start, 0.35), start);
     }
 }
 
