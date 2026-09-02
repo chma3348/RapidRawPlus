@@ -4047,42 +4047,9 @@ pub async fn apply_clone_patch(
     let flip_h = current_adjustments["flipHorizontal"].as_bool().unwrap_or(false);
     let flip_v = current_adjustments["flipVertical"].as_bool().unwrap_or(false);
     let rotation = current_adjustments["rotation"].as_f64().unwrap_or(0.0);
-    let needs_mapping = steps % 4 != 0 || flip_h || flip_v || rotation.abs() > 1e-6;
+    let needs_mapping =
+        map_strokes_to_image_space(&mut sub_masks, img_w, img_h, &current_adjustments);
     if needs_mapping {
-        for sm in sub_masks.iter_mut() {
-            let Some(lines) = sm
-                .parameters
-                .get_mut("lines")
-                .and_then(|v| v.as_array_mut())
-            else {
-                continue;
-            };
-            for line in lines.iter_mut() {
-                let Some(points) = line.get_mut("points").and_then(|v| v.as_array_mut()) else {
-                    continue;
-                };
-                for point in points.iter_mut() {
-                    let (Some(px), Some(py)) = (
-                        point.get("x").and_then(|v| v.as_f64()),
-                        point.get("y").and_then(|v| v.as_f64()),
-                    ) else {
-                        continue;
-                    };
-                    let (mx, my) = display_to_image_point(
-                        px,
-                        py,
-                        img_w as f64,
-                        img_h as f64,
-                        steps,
-                        flip_h,
-                        flip_v,
-                        rotation,
-                    );
-                    point["x"] = serde_json::json!(mx);
-                    point["y"] = serde_json::json!(my);
-                }
-            }
-        }
         log::info!(
             "[clone] mapped strokes from display space (steps={steps}, flipH={flip_h}, flipV={flip_v}, rot={rotation})"
         );
@@ -4306,6 +4273,15 @@ pub async fn invoke_generative_replace_with_mask_def(
     // mirror-image position ("found the highlights, edited the foliage").
     let mut sub_masks = patch_definition.sub_masks;
     neutralize_display_orientation(&mut sub_masks);
+    // Brush strokes are the other half of the story: they carry no
+    // orientation at all, so generate_mask_bitmap applies none and the
+    // display-space points are read as image-space. A stroke painted at
+    // display (3307..3944, 2571..2902) on a flipH+flipV photo filled that
+    // same box in the original instead of its mirror. The clone path has
+    // mapped them since the heal fix; the generative path never did.
+    if map_strokes_to_image_space(&mut sub_masks, img_w, img_h, &current_adjustments) {
+        log::info!("[fill] mapped brush strokes from display space");
+    }
     let mask_def_for_generation = MaskDefinition {
         id: patch_definition.id.clone(),
         name: patch_definition.name.clone(),
@@ -5858,6 +5834,60 @@ mod fill_component_tests {
 /// Strips display-orientation parameters from value-derived sub-masks so
 /// their bitmaps stay in full-image space (see the comment at the call
 /// site in `invoke_generative_replace_with_mask_def`).
+/// Maps brush strokes from DISPLAY space into ORIGINAL image space.
+///
+/// Strokes are recorded as the user paints, in the space they see — the
+/// photo after its flips and rotation. Patches composite in original space,
+/// so on a flipped or rotated photo the two differ and an unmapped stroke
+/// edits the mirror-image position.
+///
+/// Returns true when a mapping was needed, so callers can log it.
+pub(crate) fn map_strokes_to_image_space(
+    sub_masks: &mut [crate::mask_generation::SubMask],
+    img_w: u32,
+    img_h: u32,
+    adjustments: &Value,
+) -> bool {
+    let steps = adjustments["orientationSteps"].as_u64().unwrap_or(0) as u32;
+    let flip_h = adjustments["flipHorizontal"].as_bool().unwrap_or(false);
+    let flip_v = adjustments["flipVertical"].as_bool().unwrap_or(false);
+    let rotation = adjustments["rotation"].as_f64().unwrap_or(0.0);
+    if steps % 4 == 0 && !flip_h && !flip_v && rotation.abs() <= 1e-6 {
+        return false;
+    }
+    for sm in sub_masks.iter_mut() {
+        let Some(lines) = sm.parameters.get_mut("lines").and_then(|v| v.as_array_mut()) else {
+            continue;
+        };
+        for line in lines.iter_mut() {
+            let Some(points) = line.get_mut("points").and_then(|v| v.as_array_mut()) else {
+                continue;
+            };
+            for point in points.iter_mut() {
+                let (Some(px), Some(py)) = (
+                    point.get("x").and_then(|v| v.as_f64()),
+                    point.get("y").and_then(|v| v.as_f64()),
+                ) else {
+                    continue;
+                };
+                let (mx, my) = display_to_image_point(
+                    px,
+                    py,
+                    img_w as f64,
+                    img_h as f64,
+                    steps,
+                    flip_h,
+                    flip_v,
+                    rotation,
+                );
+                point["x"] = serde_json::json!(mx);
+                point["y"] = serde_json::json!(my);
+            }
+        }
+    }
+    true
+}
+
 pub(crate) fn neutralize_display_orientation(sub_masks: &mut [crate::mask_generation::SubMask]) {
     for sm in sub_masks {
         if matches!(
@@ -5883,6 +5913,65 @@ pub(crate) fn neutralize_display_orientation(sub_masks: &mut [crate::mask_genera
             params.insert("flipVertical".into(), serde_json::json!(false));
             params.insert("orientationSteps".into(), serde_json::json!(0));
         }
+    }
+}
+
+#[cfg(test)]
+mod stroke_mapping_tests {
+    use super::map_strokes_to_image_space;
+    use crate::mask_generation::{SubMask, SubMaskMode};
+    use serde_json::json;
+
+    fn brush_at(x: f64, y: f64) -> SubMask {
+        SubMask {
+            id: "b".into(),
+            mask_type: "brush".into(),
+            visible: true,
+            invert: false,
+            opacity: 100.0,
+            mode: SubMaskMode::Additive,
+            parameters: json!({ "lines": [{ "points": [{ "x": x, "y": y }] }] }),
+        }
+    }
+
+    fn point(sm: &SubMask) -> (f64, f64) {
+        let p = &sm.parameters["lines"][0]["points"][0];
+        (p["x"].as_f64().unwrap(), p["y"].as_f64().unwrap())
+    }
+
+    /// The real case: a stroke painted at display (3688, 2841) on a photo
+    /// flipped both ways must fill the mirrored spot in the original, not
+    /// the same coordinates. Unmapped, the fill edited the far side.
+    #[test]
+    fn flipped_photo_mirrors_the_stroke() {
+        let mut masks = [brush_at(3688.0, 2841.0)];
+        let adj = json!({ "flipHorizontal": true, "flipVertical": true, "rotation": 0.0 });
+        assert!(map_strokes_to_image_space(&mut masks, 7008, 4672, &adj));
+        let (x, y) = point(&masks[0]);
+        assert!((x - 3320.0).abs() < 1.0, "x mapped to {x}, expected 3320");
+        assert!((y - 1831.0).abs() < 1.0, "y mapped to {y}, expected 1831");
+    }
+
+    /// An unflipped, unrotated photo needs no mapping — and must not be
+    /// touched, or every ordinary edit would move.
+    #[test]
+    fn an_upright_photo_is_left_alone() {
+        let mut masks = [brush_at(1000.0, 900.0)];
+        let adj = json!({ "flipHorizontal": false, "flipVertical": false, "rotation": 0.0 });
+        assert!(!map_strokes_to_image_space(&mut masks, 7008, 4672, &adj));
+        assert_eq!(point(&masks[0]), (1000.0, 900.0));
+    }
+
+    #[test]
+    fn rotation_alone_still_maps() {
+        let mut masks = [brush_at(3000.0, 2000.0)];
+        let adj = json!({ "flipHorizontal": false, "flipVertical": false, "rotation": 1.4 });
+        assert!(map_strokes_to_image_space(&mut masks, 7008, 4672, &adj));
+        let (x, y) = point(&masks[0]);
+        assert!(
+            (x - 3000.0).abs() > 1.0 || (y - 2000.0).abs() > 1.0,
+            "a rotated photo must move the stroke"
+        );
     }
 }
 
