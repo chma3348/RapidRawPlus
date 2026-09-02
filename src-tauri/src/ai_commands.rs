@@ -5860,14 +5860,92 @@ mod fill_component_tests {
 /// site in `invoke_generative_replace_with_mask_def`).
 pub(crate) fn neutralize_display_orientation(sub_masks: &mut [crate::mask_generation::SubMask]) {
     for sm in sub_masks {
-        if matches!(sm.mask_type.as_str(), "clipped" | "color" | "luminance")
-            && let Some(params) = sm.parameters.as_object_mut()
+        if matches!(
+            sm.mask_type.as_str(),
+            // Value-derived: computed from the warped image, already in
+            // original space.
+            "clipped" | "color" | "luminance"
+                // Detector-derived: generate_ai_subject_mask unflips the
+                // click, embeds the WARPED image, and stores the resulting
+                // bitmap — so these are already in original space too. The
+                // orientation is recorded alongside for the display path,
+                // which does need it, and applying it here flipped a spot
+                // fix to the far side of the frame: a click at display
+                // (3688, 2841) on a flipH+flipV photo detected correctly at
+                // (3320, 1831) and then landed at (3616, 2835).
+                | "ai-subject"
+                | "ai-foreground"
+                | "ai-sky"
+        ) && let Some(params) = sm.parameters.as_object_mut()
         {
             params.insert("rotation".into(), serde_json::json!(0.0));
             params.insert("flipHorizontal".into(), serde_json::json!(false));
             params.insert("flipVertical".into(), serde_json::json!(false));
             params.insert("orientationSteps".into(), serde_json::json!(0));
         }
+    }
+}
+
+#[cfg(test)]
+mod neutralize_orientation_tests {
+    use super::neutralize_display_orientation;
+    use crate::mask_generation::{SubMask, SubMaskMode};
+    use serde_json::json;
+
+    fn sub(kind: &str) -> SubMask {
+        SubMask {
+            id: "s".into(),
+            mask_type: kind.into(),
+            visible: true,
+            invert: false,
+            opacity: 100.0,
+            mode: SubMaskMode::Additive,
+            parameters: json!({
+                "flipHorizontal": true,
+                "flipVertical": true,
+                "rotation": 1.4,
+                "orientationSteps": 1,
+            }),
+        }
+    }
+
+    fn is_neutral(sm: &SubMask) -> bool {
+        sm.parameters["flipHorizontal"] == json!(false)
+            && sm.parameters["flipVertical"] == json!(false)
+            && sm.parameters["rotation"] == json!(0.0)
+            && sm.parameters["orientationSteps"] == json!(0)
+    }
+
+    /// Detector masks are stored in ORIGINAL space: generate_ai_subject_mask
+    /// unflips the click and embeds the warped image. Re-applying the
+    /// recorded orientation in the fill path mirrors them — a spot fix on a
+    /// flipped photo landed on the far side of the frame.
+    #[test]
+    fn detector_masks_are_neutralized() {
+        for kind in ["ai-subject", "ai-foreground", "ai-sky"] {
+            let mut masks = [sub(kind)];
+            neutralize_display_orientation(&mut masks);
+            assert!(is_neutral(&masks[0]), "{kind} kept its orientation");
+        }
+    }
+
+    #[test]
+    fn value_derived_masks_are_still_neutralized() {
+        for kind in ["clipped", "color", "luminance"] {
+            let mut masks = [sub(kind)];
+            neutralize_display_orientation(&mut masks);
+            assert!(is_neutral(&masks[0]), "{kind} kept its orientation");
+        }
+    }
+
+    /// Brush strokes are recorded in DISPLAY space and are mapped
+    /// separately, so their orientation must survive untouched — clearing
+    /// it here would break the path that maps them.
+    #[test]
+    fn brush_masks_keep_their_orientation() {
+        let mut masks = [sub("brush")];
+        neutralize_display_orientation(&mut masks);
+        assert!(!is_neutral(&masks[0]), "a brush mask must keep its orientation");
     }
 }
 
