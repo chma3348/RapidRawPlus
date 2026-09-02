@@ -456,6 +456,103 @@ impl FillKind {
     }
 }
 
+/// One LoRA to apply, as chosen in the panel.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct LoraSpec {
+    pub name: String,
+    pub strength: f32,
+}
+
+/// LoRA files sitting in the engine's `models/loras` folder.
+#[tauri::command]
+pub fn list_engine_loras(app_handle: tauri::AppHandle) -> Vec<String> {
+    let Ok(dir) = engine_dir(&app_handle) else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(dir.join("ComfyUI/models/loras")) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let path = e.path();
+            let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+            if matches!(ext.as_str(), "safetensors" | "ckpt" | "pt") {
+                Some(path.file_name()?.to_str()?.to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// Chains LoRA loaders onto a model node, returning the id of the node that
+/// now carries the patched model.
+///
+/// Flux only. These are UNet-side loaders, which is what the GGUF path
+/// needs; SDXL is a different architecture entirely and a Flux LoRA will
+/// not load onto it, so callers must not apply these to the SDXL graphs.
+fn chain_loras(
+    workflow: &mut serde_json::Map<String, Value>,
+    from_node: &str,
+    loras: &[LoraSpec],
+) -> String {
+    let mut current = from_node.to_string();
+    for (i, lora) in loras.iter().enumerate() {
+        if lora.strength.abs() < 0.001 || lora.name.trim().is_empty() {
+            continue;
+        }
+        let id = format!("lora{i}");
+        workflow.insert(
+            id.clone(),
+            json!({
+                "class_type": "LoraLoaderModelOnly",
+                "inputs": {
+                    "model": [current, 0],
+                    "lora_name": lora.name,
+                    "strength_model": lora.strength,
+                }
+            }),
+        );
+        current = id;
+    }
+    current
+}
+
+/// Rewires `consumer`'s model input through any LoRAs. No-op when the list
+/// is empty or every entry is at zero strength.
+fn apply_loras(workflow: &mut Value, loras: &[LoraSpec], from_node: &str, consumer: &str) {
+    if loras.is_empty() {
+        return;
+    }
+    let Some(obj) = workflow.as_object_mut() else {
+        return;
+    };
+    let last = chain_loras(obj, from_node, loras);
+    if last == from_node {
+        return;
+    }
+    if let Some(inputs) = obj
+        .get_mut(consumer)
+        .and_then(|n| n.get_mut("inputs"))
+        .and_then(|i| i.as_object_mut())
+    {
+        inputs.insert("model".to_string(), json!([last, 0]));
+    }
+    log::info!(
+        "[engine] applied {} LoRA(s): {}",
+        loras.len(),
+        loras
+            .iter()
+            .map(|l| format!("{}@{:.2}", l.name, l.strength))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+}
+
 pub(crate) fn fill_files_present(app_handle: &tauri::AppHandle, kind: FillKind) -> bool {
     let Ok(dir) = engine_dir(app_handle) else {
         return false;
@@ -489,6 +586,7 @@ pub async fn run_generative_fill(
     mask_png: Vec<u8>,
     prompt: &str,
     seed: u64,
+    loras: &[LoraSpec],
     mut on_progress: impl FnMut(String),
 ) -> Result<Vec<u8>> {
     if !fill_files_present(app_handle, kind) {
@@ -593,6 +691,14 @@ pub async fn run_generative_fill(
                   "inputs": {"images": ["8", 0], "filename_prefix": "rapidraw_fill"}}
         }),
     };
+
+    // Flux only: these are Flux LoRAs on a Flux UNet. The SDXL graphs are a
+    // different architecture and must not be patched with them.
+    let mut workflow = workflow;
+    if kind == FillKind::Flux {
+        apply_loras(&mut workflow, loras, "3", "3d");
+    }
+
     run_workflow(workflow, &mut on_progress).await
 }
 
@@ -617,6 +723,7 @@ pub async fn run_free_generation(
     width: u32,
     height: u32,
     seed: u64,
+    loras: &[LoraSpec],
     mut on_progress: impl FnMut(String),
 ) -> Result<Vec<u8>> {
     if !fill_files_present(app_handle, kind) {
@@ -694,6 +801,11 @@ pub async fn run_free_generation(
         }),
     };
 
+    let mut workflow = workflow;
+    if kind == FillKind::Flux {
+        apply_loras(&mut workflow, loras, "3", "3d");
+    }
+
     on_progress("Generating...".to_string());
     run_workflow(workflow, &mut on_progress).await
 }
@@ -767,3 +879,72 @@ pub async fn install_ai_engine(app_handle: tauri::AppHandle) -> Result<(), Strin
     let _ = app_handle.emit("engine-install-complete", ());
     Ok(())
 }
+
+#[cfg(test)]
+mod lora_tests {
+    use super::{apply_loras, LoraSpec};
+    use serde_json::json;
+
+    fn graph() -> serde_json::Value {
+        json!({
+            "3": {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": "flux1-fill-dev-Q8_0.gguf"}},
+            "3d": {"class_type": "DifferentialDiffusion", "inputs": {"model": ["3", 0]}},
+        })
+    }
+
+    #[test]
+    fn no_loras_leaves_the_graph_alone() {
+        let mut g = graph();
+        apply_loras(&mut g, &[], "3", "3d");
+        assert_eq!(g, graph());
+    }
+
+    /// The consumer must be rewired to the LoRA, not left on the raw model —
+    /// otherwise the node loads and is silently ignored.
+    #[test]
+    fn one_lora_is_inserted_and_consumed() {
+        let mut g = graph();
+        apply_loras(
+            &mut g,
+            &[LoraSpec { name: "ultrareal.safetensors".into(), strength: 0.8 }],
+            "3",
+            "3d",
+        );
+        assert_eq!(g["lora0"]["class_type"], "LoraLoaderModelOnly");
+        assert_eq!(g["lora0"]["inputs"]["model"], json!(["3", 0]));
+        assert_eq!(g["lora0"]["inputs"]["lora_name"], "ultrareal.safetensors");
+        assert_eq!(g["3d"]["inputs"]["model"], json!(["lora0", 0]));
+    }
+
+    #[test]
+    fn several_chain_in_order() {
+        let mut g = graph();
+        apply_loras(
+            &mut g,
+            &[
+                LoraSpec { name: "a.safetensors".into(), strength: 0.6 },
+                LoraSpec { name: "b.safetensors".into(), strength: 0.4 },
+            ],
+            "3",
+            "3d",
+        );
+        assert_eq!(g["lora0"]["inputs"]["model"], json!(["3", 0]));
+        assert_eq!(g["lora1"]["inputs"]["model"], json!(["lora0", 0]));
+        assert_eq!(g["3d"]["inputs"]["model"], json!(["lora1", 0]));
+    }
+
+    /// A LoRA toggled on but dialled to zero should cost nothing at all.
+    #[test]
+    fn zero_strength_is_skipped_entirely() {
+        let mut g = graph();
+        apply_loras(
+            &mut g,
+            &[LoraSpec { name: "a.safetensors".into(), strength: 0.0 }],
+            "3",
+            "3d",
+        );
+        assert!(g.get("lora0").is_none(), "a zero-strength LoRA should not be loaded");
+        assert_eq!(g["3d"]["inputs"]["model"], json!(["3", 0]));
+    }
+}
+

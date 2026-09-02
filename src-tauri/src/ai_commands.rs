@@ -2627,6 +2627,7 @@ async fn generate_region(
     kind: crate::comfy_engine::FillKind,
     content_scale: f32,
     match_photo: f32,
+    loras: &[crate::comfy_engine::LoraSpec],
     orientation_steps: u8,
     flip_horizontal: bool,
     flip_vertical: bool,
@@ -2685,6 +2686,7 @@ async fn generate_region(
         gw,
         gh,
         seed,
+        loras,
         |_| {},
     )
     .await
@@ -2814,6 +2816,7 @@ async fn run_engine_inpaint_patch(
     generate_mode: bool,
     content_scale: f32,
     match_photo: f32,
+    loras: &[crate::comfy_engine::LoraSpec],
     debug_run_id: &str,
     orientation_steps: u8,
     flip_horizontal: bool,
@@ -2868,6 +2871,7 @@ async fn run_engine_inpaint_patch(
             kind,
             content_scale,
             match_photo,
+            loras,
             orientation_steps,
             flip_horizontal,
             flip_vertical,
@@ -3466,6 +3470,7 @@ async fn run_engine_inpaint_patch(
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.subsec_nanos() as u64 ^ (d.as_secs() << 20))
                 .unwrap_or(42),
+            loras,
             |_| {},
         )
         .await
@@ -4481,6 +4486,7 @@ pub async fn invoke_generative_replace_with_mask_def(
             patch_definition.generate_mode,
             patch_definition.content_scale,
             patch_definition.match_photo,
+            &patch_definition.loras,
             &debug_run_id,
             orientation_steps,
             flip_horizontal,
@@ -4506,6 +4512,7 @@ pub async fn invoke_generative_replace_with_mask_def(
             false,
             1.0,
             0.8,
+            &[],
             "",
             orientation_steps,
             flip_horizontal,

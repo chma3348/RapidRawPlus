@@ -259,6 +259,8 @@ export interface AiPatch {
   /// Generate mode: 0..1, how far the result is moved toward the tone of the
   /// photograph around the selection.
   matchPhoto?: number;
+  /// LoRAs to apply, in order. Flux only.
+  loras?: Array<{ name: string; strength: number }>;
   subMasks: Array<SubMask>;
   visible: boolean;
   /** 'heal' patches clone from a source offset and stay editable. */

@@ -57,7 +57,11 @@ export function useAiMasking() {
       useFastInpaint: boolean,
       reconstructSinglePath = false,
       generateMode = false,
-      generateOptions?: { contentScale?: number; matchPhoto?: number },
+      generateOptions?: {
+        contentScale?: number;
+        matchPhoto?: number;
+        loras?: Array<{ name: string; strength: number }>;
+      },
     ) => {
       const { selectedImage, adjustments, isGeneratingAi, patchesSentToBackend } = useEditorStore.getState();
       // Every early exit must be LOUD: silent returns here read as "the
@@ -88,6 +92,7 @@ export function useAiMasking() {
         generateMode,
         contentScale: generateOptions?.contentScale ?? patch.contentScale ?? 1.0,
         matchPhoto: generateOptions?.matchPhoto ?? patch.matchPhoto ?? 0.8,
+        loras: generateOptions?.loras ?? patch.loras ?? [],
       };
 
       // Visible feedback FIRST — the token fetch used to run before any

@@ -114,6 +114,10 @@ pub struct AiPatchDefinition {
     /// the tone of the photograph around the selection.
     #[serde(default = "default_match_photo")]
     pub match_photo: f32,
+    /// LoRAs to apply, in order. Flux only — these are Flux-architecture
+    /// adapters and will not load onto the SDXL graphs.
+    #[serde(default)]
+    pub loras: Vec<crate::comfy_engine::LoraSpec>,
     #[serde(default)]
     pub patch_data: Option<PatchData>,
     #[serde(default = "default_opacity")]

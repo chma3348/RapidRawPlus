@@ -1848,6 +1848,8 @@ function SettingsPanel({
   const [generateMode, setGenerateMode] = useState(false);
   const [contentScale, setContentScale] = useState(1.0);
   const [matchPhoto, setMatchPhoto] = useState(0.8);
+  const [availableLoras, setAvailableLoras] = useState<Array<string>>([]);
+  const [loras, setLoras] = useState<Array<{ name: string; strength: number }>>([]);
   const [reconstructSinglePath, setReconstructSinglePath] = useState(
     isReconstructPatch && displayContainer.reconstructSinglePath !== false,
   );
@@ -1927,6 +1929,12 @@ function SettingsPanel({
   }, [spotStrength, spotTexture, spotGrain]);
 
   useEffect(() => {
+    invoke(Invokes.ListEngineLoras)
+      .then((l: any) => setAvailableLoras(l || []))
+      .catch(() => setAvailableLoras([]));
+  }, []);
+
+  useEffect(() => {
     invoke(Invokes.ListRegisteredModels, { taskType: 'inpaint' })
       .then((m: any) => setInpaintModels(m || []))
       .catch(() => setInpaintModels([]));
@@ -1939,6 +1947,9 @@ function SettingsPanel({
       : inpaintModels.find((m) => m.available)?.id;
   const selectedInpaint = inpaintModels.find((m) => m.id === selectedInpaintId);
   const isEngineFill = selectedInpaint?.params?.engine === 'comfy';
+  // LoRAs here are Flux-architecture adapters; they will not load onto SDXL,
+  // so the picker only appears when a Flux engine is selected.
+  const isFluxSelected = selectedInpaint?.params?.fill_workflow === 'flux';
   const reconstructVariants = ((displayContainer.patchData?.reconstructVariants || []) as AiPatchResultVariant[]).filter(
     (variant) => variant?.id?.startsWith('attempt-') && variant?.color && variant?.mask,
   );
@@ -1962,6 +1973,7 @@ function SettingsPanel({
       setGenerateMode(!!container.generateMode);
       setContentScale(container.contentScale ?? 1.0);
       setMatchPhoto(container.matchPhoto ?? 0.8);
+      setLoras(container.loras ?? []);
     }
   }, [container?.id]);
 
@@ -2004,10 +2016,12 @@ function SettingsPanel({
       generateMode,
       contentScale,
       matchPhoto,
+      loras,
     });
     onGenerativeReplace(container.id, prompt, useFastInpaint, reconstructSinglePath, generateMode, {
       contentScale,
       matchPhoto,
+      loras,
     });
   };
 
@@ -2214,6 +2228,60 @@ function SettingsPanel({
                   around your selection — at 0 you get the raw generation, which will
                   sit darker than the photo.
                 </Text>
+              </div>
+            )}
+
+            {isFluxSelected && availableLoras.length > 0 && (
+              <div className="mt-3 p-2 bg-bg-tertiary rounded-md">
+                <Text variant={TextVariants.heading} className="mb-1">
+                  LoRAs
+                </Text>
+                <Text variant={TextVariants.small} className="mb-2 block text-text-secondary">
+                  Flux only. Each one nudges the model's style; strength 0.5–0.8 is
+                  usually plenty.
+                </Text>
+                {availableLoras.map((name: string) => {
+                  const active = loras.find((l) => l.name === name);
+                  return (
+                    <div key={name} className="mb-2">
+                      <Switch
+                        checked={!!active}
+                        disabled={isGeneratingAi || displayContainer.isLoading}
+                        label={name.replace(/\.(safetensors|ckpt|pt)$/i, '')}
+                        onChange={(on: boolean) =>
+                          setLoras((prev) =>
+                            on
+                              ? [...prev, { name, strength: 0.8 }]
+                              : prev.filter((l) => l.name !== name),
+                          )
+                        }
+                      />
+                      {active && (
+                        <Slider
+                          label="Strength"
+                          min={0}
+                          max={150}
+                          step={5}
+                          defaultValue={80}
+                          value={Math.round(active.strength * 100)}
+                          onChange={(e: any) =>
+                            setLoras((prev) =>
+                              prev.map((l) =>
+                                l.name === name
+                                  ? { ...l, strength: Number(e.target.value) / 100 }
+                                  : l,
+                              ),
+                            )
+                          }
+                          onDragStateChange={(dragging: boolean) => {
+                            if (!dragging && container) updateContainer(container.id, { loras });
+                          }}
+                          suffix="%"
+                        />
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             )}
 

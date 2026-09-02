@@ -2283,6 +2283,7 @@ pub fn run() {
             model_library::get_model_library,
             ai_commands::invoke_spot_enhance_with_mask_def,
             comfy_engine::get_engine_status,
+            comfy_engine::list_engine_loras,
             comfy_engine::install_ai_engine,
             model_library::download_library_model,
             model_library::delete_library_model,

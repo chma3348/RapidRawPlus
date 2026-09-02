@@ -79,6 +79,7 @@ export enum Invokes {
   RespotEnhance = 'respot_enhance',
   ListImagesInDir = 'list_images_in_dir',
   ListImagesRecursive = 'list_images_recursive',
+  ListEngineLoras = 'list_engine_loras',
   ListRegisteredModels = 'list_registered_models',
   LoadImage = 'load_image',
   LoadMetadata = 'load_metadata',

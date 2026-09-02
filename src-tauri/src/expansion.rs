@@ -385,6 +385,8 @@ async fn apply_expansion_engine(
             mask_png.clone(),
             "",
             *seed,
+            // Outpainting has no patch, so no LoRA selection to apply.
+            &[],
             move |msg| {
                 let _ = progress_handle.emit("expand-progress", format!("{label} — {msg}"));
             },
