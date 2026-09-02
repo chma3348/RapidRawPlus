@@ -2520,6 +2520,89 @@ struct EngineInpaintResult {
 /// flag for float sources. One whole-mask bounding box would balloon to
 /// the entire image for scattered selections (e.g. color keys) and force
 /// the model to repaint everything at reduced resolution.
+/// Per-channel mean plus luma standard deviation over the selected pixels.
+pub(crate) fn tone_stats(
+    image: &RgbaImage,
+    bounds: (u32, u32, u32, u32),
+    select: impl Fn(u32, u32) -> bool,
+) -> Option<([f32; 3], f32)> {
+    let (x0, y0, x1, y1) = bounds;
+    let (mut sum, mut n) = ([0.0f64; 3], 0u64);
+    let (mut lsum, mut lsq) = (0.0f64, 0.0f64);
+    for y in y0..=y1.min(image.height().saturating_sub(1)) {
+        for x in x0..=x1.min(image.width().saturating_sub(1)) {
+            if !select(x, y) {
+                continue;
+            }
+            let p = image.get_pixel(x, y);
+            let l = (p[0] as f64 + p[1] as f64 + p[2] as f64) / 3.0;
+            for c in 0..3 {
+                sum[c] += p[c] as f64;
+            }
+            lsum += l;
+            lsq += l * l;
+            n += 1;
+        }
+    }
+    if n < 256 {
+        return None;
+    }
+    let mean = [
+        (sum[0] / n as f64) as f32,
+        (sum[1] / n as f64) as f32,
+        (sum[2] / n as f64) as f32,
+    ];
+    let lmean = lsum / n as f64;
+    let std = ((lsq / n as f64) - lmean * lmean).max(0.0).sqrt() as f32;
+    Some((mean, std))
+}
+
+/// Moves generated content toward the photograph's tone.
+///
+/// Per-channel means are matched, which carries both exposure and colour
+/// cast; contrast is scaled by a single factor taken from luma, so colour
+/// relationships inside the content survive. `strength` runs 0 (leave the
+/// generated tone alone) to 1 (go all the way to the target).
+///
+/// Measured on DSC08212: generated sky sat at mean 109.6 against real sky
+/// beside it at 226.3, which is why it read as a hole punched in the photo,
+/// and why the seam solver produced a bright halo reconciling a 135-level
+/// step across 56px.
+pub(crate) fn match_tone(
+    generated: &mut RgbaImage,
+    bounds: (u32, u32, u32, u32),
+    from: ([f32; 3], f32),
+    to: ([f32; 3], f32),
+    strength: f32,
+) {
+    let s = strength.clamp(0.0, 1.0);
+    if s <= 0.0 {
+        return;
+    }
+    let (from_mean, from_std) = from;
+    let (to_mean, to_std) = to;
+    if from_std <= 0.001 {
+        return;
+    }
+    let target_std = from_std + (to_std - from_std) * s;
+    let gain = (target_std / from_std).clamp(0.15, 4.0);
+    let new_mean = [
+        from_mean[0] + (to_mean[0] - from_mean[0]) * s,
+        from_mean[1] + (to_mean[1] - from_mean[1]) * s,
+        from_mean[2] + (to_mean[2] - from_mean[2]) * s,
+    ];
+    let (x0, y0, x1, y1) = bounds;
+    for y in y0..=y1.min(generated.height().saturating_sub(1)) {
+        for x in x0..=x1.min(generated.width().saturating_sub(1)) {
+            let p = generated.get_pixel_mut(x, y);
+            for c in 0..3 {
+                let v = (p[c] as f32 - from_mean[c]) * gain + new_mean[c];
+                p[c] = v.clamp(0.0, 255.0).round() as u8;
+            }
+        }
+    }
+}
+
 /// Generated content placed on a full-size canvas, ready to composite.
 struct GeneratedRegion {
     canvas: RgbaImage,
@@ -2542,6 +2625,8 @@ async fn generate_region(
     mask: &GrayImage,
     prompt: &str,
     kind: crate::comfy_engine::FillKind,
+    content_scale: f32,
+    match_photo: f32,
     orientation_steps: u8,
     flip_horizontal: bool,
     flip_vertical: bool,
@@ -2567,12 +2652,19 @@ async fn generate_region(
     let bh = y1 - y0 + 1;
 
     // Generate at the region's aspect ratio. 1024 is where these models are
-    // happiest and is what the ceiling test used; the result is resized to
-    // the region afterwards.
+    // happiest and is what the ceiling test used.
+    //
+    // content_scale > 1 makes cloud forms larger by generating MORE sky than
+    // the region needs and using only the middle of it. Generating bigger at
+    // the same time keeps the crop's own resolution constant, so bigger
+    // features do not cost sharpness.
     const GEN_LONG_EDGE: f32 = 1024.0;
-    let scale = GEN_LONG_EDGE / bw.max(bh) as f32;
-    let gw = ((bw as f32 * scale) as u32).max(256);
-    let gh = ((bh as f32 * scale) as u32).max(256);
+    const GEN_MAX_EDGE: f32 = 1536.0;
+    let zoom = content_scale.clamp(1.0, 2.0);
+    let long_edge = (GEN_LONG_EDGE * zoom).min(GEN_MAX_EDGE);
+    let scale = long_edge / bw.max(bh) as f32;
+    let gw = (((bw as f32 * scale) as u32).max(256) / 8) * 8;
+    let gh = (((bh as f32 * scale) as u32).max(256) / 8) * 8;
 
     // Random per run so re-rolling gives genuine variants; logged so a
     // result that works can be identified and reproduced.
@@ -2599,12 +2691,76 @@ async fn generate_region(
     .map_err(|e| e.to_string())?;
 
     let decoded = image::load_from_memory(&png).map_err(|e| e.to_string())?;
-    let mut fitted = image::imageops::resize(
-        &decoded.to_rgba8(),
-        bw,
-        bh,
-        image::imageops::FilterType::Lanczos3,
-    );
+    let mut generated = decoded.to_rgba8();
+
+    // Use only the middle of the generated frame when zoomed in: what is
+    // discarded is sky we did not need, and what remains lands larger.
+    if zoom > 1.001 {
+        let cw = ((generated.width() as f32 / zoom) as u32).max(64);
+        let ch = ((generated.height() as f32 / zoom) as u32).max(64);
+        let cx = (generated.width() - cw) / 2;
+        let cy = (generated.height() - ch) / 2;
+        generated = image::imageops::crop_imm(&generated, cx, cy, cw, ch).to_image();
+    }
+
+    let mut fitted =
+        image::imageops::resize(&generated, bw, bh, image::imageops::FilterType::Lanczos3);
+
+    // Sit it in the photograph's tone before it is composited, so the seam
+    // solver has almost nothing left to reconcile. The reference is the
+    // photo just OUTSIDE the selection with clipped pixels excluded — the
+    // rim inside is the blowout being replaced, and matching to that would
+    // wash the content straight back out.
+    let ring = 240u32;
+    let rx0 = x0.saturating_sub(ring);
+    let ry0 = y0.saturating_sub(ring);
+    let rx1 = (x1 + ring).min(fw - 1);
+    let ry1 = (y1 + ring).min(fh - 1);
+    let reference = tone_stats(encoded_full, (rx0, ry0, rx1, ry1), |x, y| {
+        if mask.get_pixel(x, y)[0] > 0 {
+            return false;
+        }
+        // Skip clipped pixels: they carry no tone information.
+        let p = encoded_full.get_pixel(x, y);
+        let l = (p[0] as u32 + p[1] as u32 + p[2] as u32) / 3;
+        (60..=250).contains(&l)
+    });
+    if let (Some(reference), Some(source)) = (
+        reference,
+        tone_stats(&fitted, (0, 0, bw - 1, bh - 1), |_, _| true),
+    ) {
+        // Do not match outright: the surrounding sky's own spread is small
+        // (13.8 measured), and adopting it would flatten the clouds back to
+        // a gradient. Aim a little under the surroundings in level, with
+        // more contrast than they have — recovered highlight detail should
+        // read slightly darker than the blowout it replaces.
+        let target_mean = [
+            reference.0[0] * 0.90,
+            reference.0[1] * 0.90,
+            reference.0[2] * 0.90,
+        ];
+        let target_std = (reference.1 * 1.8).clamp(18.0, 30.0);
+        log::info!(
+            "[fill] generate mode: tone match {:.0}% — generated mean {:.0}/std {:.0} -> \
+             target {:.0}/std {:.0} (surroundings {:.0}/std {:.0})",
+            match_photo * 100.0,
+            source.0.iter().sum::<f32>() / 3.0,
+            source.1,
+            target_mean.iter().sum::<f32>() / 3.0,
+            target_std,
+            reference.0.iter().sum::<f32>() / 3.0,
+            reference.1
+        );
+        match_tone(
+            &mut fitted,
+            (0, 0, bw - 1, bh - 1),
+            source,
+            (target_mean, target_std),
+            match_photo,
+        );
+    } else {
+        log::info!("[fill] generate mode: no usable tone reference nearby; leaving tone as generated");
+    }
 
     // Patches composite in ORIGINAL image space, but the user sees the photo
     // after its flips and coarse rotation. Generated content is upright in
@@ -2656,6 +2812,8 @@ async fn run_engine_inpaint_patch(
     promptless_reconstruct: bool,
     reconstruct_single_path: bool,
     generate_mode: bool,
+    content_scale: f32,
+    match_photo: f32,
     debug_run_id: &str,
     orientation_steps: u8,
     flip_horizontal: bool,
@@ -2708,6 +2866,8 @@ async fn run_engine_inpaint_patch(
             mask,
             prompt,
             kind,
+            content_scale,
+            match_photo,
             orientation_steps,
             flip_horizontal,
             flip_vertical,
@@ -4319,6 +4479,8 @@ pub async fn invoke_generative_replace_with_mask_def(
             promptless_reconstruct,
             reconstruct_single_path,
             patch_definition.generate_mode,
+            patch_definition.content_scale,
+            patch_definition.match_photo,
             &debug_run_id,
             orientation_steps,
             flip_horizontal,
@@ -4342,6 +4504,8 @@ pub async fn invoke_generative_replace_with_mask_def(
             false,
             false,
             false,
+            1.0,
+            0.8,
             "",
             orientation_steps,
             flip_horizontal,
@@ -5959,6 +6123,101 @@ mod auto_source_tests {
         let m = spot(10, 20, 30, 45);
         assert_eq!(mask_bounds(&m), Some((10, 20, 30, 45)));
         assert_eq!(mask_bounds(&GrayImage::new(40, 40)), None);
+    }
+}
+
+#[cfg(test)]
+mod tone_match_tests {
+    use super::{match_tone, tone_stats};
+    use image::{Rgba, RgbaImage};
+
+    /// Stand-in for generated sky: dark, contrasty, cloud-like variation.
+    fn generated() -> RgbaImage {
+        let mut img = RgbaImage::new(120, 120);
+        for y in 0..120 {
+            for x in 0..120 {
+                let n = ((x as f32 * 12.9898 + y as f32 * 78.233).sin() * 43758.547).fract();
+                let v = (110.0 + n.abs() * 80.0 - 40.0).clamp(0.0, 255.0) as u8;
+                img.put_pixel(x, y, Rgba([v, v, v, 255]));
+            }
+        }
+        img
+    }
+
+    const FULL: (u32, u32, u32, u32) = (0, 0, 119, 119);
+
+    #[test]
+    fn full_strength_lands_on_the_target_tone() {
+        let mut img = generated();
+        let before = tone_stats(&img, FULL, |_, _| true).unwrap();
+        match_tone(&mut img, FULL, before, ([203.0, 203.0, 203.0], 25.0), 1.0);
+        let after = tone_stats(&img, FULL, |_, _| true).unwrap();
+        let mean = after.0.iter().sum::<f32>() / 3.0;
+        assert!(
+            (mean - 203.0).abs() < 6.0,
+            "mean landed at {mean:.1}, expected ~203"
+        );
+        assert!(
+            (after.1 - 25.0).abs() < 5.0,
+            "std landed at {:.1}, expected ~25",
+            after.1
+        );
+    }
+
+    /// The point of the strength control: partway must be partway, not a
+    /// switch between "dark hole" and "washed out".
+    #[test]
+    fn half_strength_lands_between() {
+        let mut img = generated();
+        let before = tone_stats(&img, FULL, |_, _| true).unwrap();
+        let start = before.0.iter().sum::<f32>() / 3.0;
+        match_tone(&mut img, FULL, before, ([203.0, 203.0, 203.0], 25.0), 0.5);
+        let mean = tone_stats(&img, FULL, |_, _| true).unwrap().0.iter().sum::<f32>() / 3.0;
+        let midpoint = (start + 203.0) / 2.0;
+        assert!(
+            (mean - midpoint).abs() < 8.0,
+            "half strength gave {mean:.1}, expected near the midpoint {midpoint:.1}"
+        );
+    }
+
+    #[test]
+    fn zero_strength_changes_nothing() {
+        let mut img = generated();
+        let original = img.clone();
+        let before = tone_stats(&img, FULL, |_, _| true).unwrap();
+        match_tone(&mut img, FULL, before, ([203.0, 203.0, 203.0], 25.0), 0.0);
+        assert_eq!(original, img);
+    }
+
+    /// Matching must lift the tone without flattening the cloud detail —
+    /// the failure this whole feature exists to avoid.
+    #[test]
+    fn detail_survives_the_match() {
+        let mut img = generated();
+        let before = tone_stats(&img, FULL, |_, _| true).unwrap();
+        match_tone(&mut img, FULL, before, ([203.0, 203.0, 203.0], 25.0), 1.0);
+        let after = tone_stats(&img, FULL, |_, _| true).unwrap();
+        assert!(
+            after.1 > 15.0,
+            "contrast collapsed to std {:.1}; the clouds would be gone",
+            after.1
+        );
+    }
+
+    /// Clipped and near-black pixels carry no tone information, so the
+    /// reference must be sampled from what the caller selects.
+    #[test]
+    fn stats_honour_the_selection() {
+        let mut img = RgbaImage::from_pixel(60, 60, Rgba([255, 255, 255, 255]));
+        for y in 0..30 {
+            for x in 0..60 {
+                img.put_pixel(x, y, Rgba([100, 100, 100, 255]));
+            }
+        }
+        let only_dark = tone_stats(&img, (0, 0, 59, 59), |_, y| y < 30).unwrap();
+        assert!((only_dark.0[0] - 100.0).abs() < 1.0);
+        let everything = tone_stats(&img, (0, 0, 59, 59), |_, _| true).unwrap();
+        assert!(everything.0[0] > 150.0, "unfiltered stats should include the white half");
     }
 }
 

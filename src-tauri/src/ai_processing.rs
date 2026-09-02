@@ -1618,7 +1618,6 @@ pub struct AiDepthMaskParameters {
 /// resolution, so slider drags stay instant. Outside the mask the
 /// distance is zero, so feather can never paint outside the selection.
 pub fn feather_mask_inward(mask: &image::GrayImage, feather: f32) -> image::GrayImage {
-    use image::imageops::FilterType;
     let (w, h) = mask.dimensions();
     let (mut min_x, mut min_y, mut max_x, mut max_y) = (w, h, 0u32, 0u32);
     for (x, y, p) in mask.enumerate_pixels() {
@@ -1641,7 +1640,28 @@ pub fn feather_mask_inward(mask: &image::GrayImage, feather: f32) -> image::Gray
     // Chamfer 3-4 distance transform at 1/4 resolution.
     let ds = 4u32;
     let (sw, sh) = ((w.div_ceil(ds)).max(1), (h.div_ceil(ds)).max(1));
-    let small = image::imageops::resize(mask, sw, sh, FilterType::Triangle);
+    // Min-pool rather than average when downsampling. A Triangle resize
+    // averages a small hole away — anything under ~8px came back above the
+    // 127 threshold and was treated as solid, so internal edges never
+    // feathered while the outer contour did. Taking the minimum of each
+    // block means any gap survives to seed the transform, at the cost of
+    // feathering marginally more generously near thin structure.
+    let mut small = image::GrayImage::new(sw, sh);
+    for sy in 0..sh {
+        for sx in 0..sw {
+            let mut lowest = 255u8;
+            for oy in 0..ds {
+                for ox in 0..ds {
+                    let px = sx * ds + ox;
+                    let py = sy * ds + oy;
+                    if px < w && py < h {
+                        lowest = lowest.min(mask.get_pixel(px, py)[0]);
+                    }
+                }
+            }
+            small.put_pixel(sx, sy, image::Luma([lowest]));
+        }
+    }
     let (swi, shi) = (sw as i64, sh as i64);
     const INF: f32 = 1e9;
     let mut dist = vec![0f32; (swi * shi) as usize];
@@ -1715,6 +1735,48 @@ pub fn round_mask_geometry(mask: &image::GrayImage, radius: f32) -> image::GrayI
         p[0] = if p[0] >= 128 { 255 } else { 0 };
     }
     out
+}
+
+#[cfg(test)]
+mod feather_hole_tests {
+    use super::feather_mask_inward;
+    use image::{GrayImage, Luma};
+
+    /// A small hole inside the selection must soften its edges just like the
+    /// outer contour. The transform runs at 1/4 resolution, and averaging the
+    /// downsample used to erase anything under ~8px — so internal edges never
+    /// feathered while the outside did.
+    #[test]
+    fn a_small_internal_hole_still_feathers() {
+        let mut mask = GrayImage::from_pixel(400, 400, Luma([255]));
+        for y in 198..204 {
+            for x in 198..204 {
+                mask.put_pixel(x, y, Luma([0]));
+            }
+        }
+        let out = feather_mask_inward(&mask, 100.0);
+        // Just outside that 6px hole the mask must be partly transparent.
+        let ring = out.get_pixel(206, 201)[0];
+        assert!(
+            ring < 250,
+            "pixel beside a 6px hole is {ring}/255 — the hole did not feather"
+        );
+        // Far from any edge it must stay fully opaque.
+        assert_eq!(out.get_pixel(40, 40)[0], 255, "interior should stay solid");
+    }
+
+    #[test]
+    fn the_outer_edge_still_feathers() {
+        let mut mask = GrayImage::new(400, 400);
+        for y in 100..300 {
+            for x in 100..300 {
+                mask.put_pixel(x, y, Luma([255]));
+            }
+        }
+        let out = feather_mask_inward(&mask, 100.0);
+        assert!(out.get_pixel(102, 200)[0] < 250, "outer edge should soften");
+        assert_eq!(out.get_pixel(200, 200)[0], 255, "centre should stay solid");
+    }
 }
 
 #[cfg(test)]

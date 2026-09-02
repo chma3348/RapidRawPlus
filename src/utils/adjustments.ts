@@ -253,6 +253,12 @@ export interface AiPatch {
   /// surrounding photograph — for blown-out areas that carry nothing to
   /// continue.
   generateMode?: boolean;
+  /// Generate mode: how much more content to make than the region needs, so
+  /// only the middle is used and forms land larger. 1.0 = fit exactly.
+  contentScale?: number;
+  /// Generate mode: 0..1, how far the result is moved toward the tone of the
+  /// photograph around the selection.
+  matchPhoto?: number;
   subMasks: Array<SubMask>;
   visible: boolean;
   /** 'heal' patches clone from a source offset and stay editable. */

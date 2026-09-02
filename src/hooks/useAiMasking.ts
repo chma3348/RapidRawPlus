@@ -57,6 +57,7 @@ export function useAiMasking() {
       useFastInpaint: boolean,
       reconstructSinglePath = false,
       generateMode = false,
+      generateOptions?: { contentScale?: number; matchPhoto?: number },
     ) => {
       const { selectedImage, adjustments, isGeneratingAi, patchesSentToBackend } = useEditorStore.getState();
       // Every early exit must be LOUD: silent returns here read as "the
@@ -80,7 +81,14 @@ export function useAiMasking() {
       // Threaded explicitly rather than read back from the store: the panel
       // calls updateContainer immediately before this, and that state is not
       // visible to getState() yet.
-      const patchDefinition = { ...patch, prompt, reconstructSinglePath, generateMode };
+      const patchDefinition = {
+        ...patch,
+        prompt,
+        reconstructSinglePath,
+        generateMode,
+        contentScale: generateOptions?.contentScale ?? patch.contentScale ?? 1.0,
+        matchPhoto: generateOptions?.matchPhoto ?? patch.matchPhoto ?? 0.8,
+      };
 
       // Visible feedback FIRST — the token fetch used to run before any
       // state change, so a hung auth lookup looked like a dead button.

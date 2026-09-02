@@ -40,6 +40,14 @@ pub struct SubMask {
     pub parameters: Value,
 }
 
+fn default_content_scale() -> f32 {
+    1.0
+}
+
+fn default_match_photo() -> f32 {
+    0.8
+}
+
 fn default_opacity() -> f32 {
     100.0
 }
@@ -97,6 +105,15 @@ pub struct AiPatchDefinition {
     /// actually puts content there.
     #[serde(default)]
     pub generate_mode: bool,
+    /// Generate mode: how much more sky to make than the region needs, so
+    /// only the middle is used and cloud forms land larger. 1.0 = fit the
+    /// whole generated frame to the region.
+    #[serde(default = "default_content_scale")]
+    pub content_scale: f32,
+    /// Generate mode: 0..1, how far the generated content is moved toward
+    /// the tone of the photograph around the selection.
+    #[serde(default = "default_match_photo")]
+    pub match_photo: f32,
     #[serde(default)]
     pub patch_data: Option<PatchData>,
     #[serde(default = "default_opacity")]

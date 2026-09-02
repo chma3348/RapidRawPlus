@@ -1846,6 +1846,8 @@ function SettingsPanel({
   const [prompt, setPrompt] = useState(displayContainer.prompt || '');
   const [useFastInpaint, setUseFastInpaint] = useState(!isGenerativeAvailable);
   const [generateMode, setGenerateMode] = useState(false);
+  const [contentScale, setContentScale] = useState(1.0);
+  const [matchPhoto, setMatchPhoto] = useState(0.8);
   const [reconstructSinglePath, setReconstructSinglePath] = useState(
     isReconstructPatch && displayContainer.reconstructSinglePath !== false,
   );
@@ -1958,6 +1960,8 @@ function SettingsPanel({
       const hasClippedMask = container.subMasks?.some((sm: SubMask) => sm.type === Mask.Clipped);
       setReconstructSinglePath(hasClippedMask && container.reconstructSinglePath !== false);
       setGenerateMode(!!container.generateMode);
+      setContentScale(container.contentScale ?? 1.0);
+      setMatchPhoto(container.matchPhoto ?? 0.8);
     }
   }, [container?.id]);
 
@@ -1994,8 +1998,17 @@ function SettingsPanel({
       console.error('[ai] generate blocked: no active patch container');
       return;
     }
-    updateContainer(container.id, { prompt, reconstructSinglePath, generateMode });
-    onGenerativeReplace(container.id, prompt, useFastInpaint, reconstructSinglePath, generateMode);
+    updateContainer(container.id, {
+      prompt,
+      reconstructSinglePath,
+      generateMode,
+      contentScale,
+      matchPhoto,
+    });
+    onGenerativeReplace(container.id, prompt, useFastInpaint, reconstructSinglePath, generateMode, {
+      contentScale,
+      matchPhoto,
+    });
   };
 
   const handleVariantClick = (variantId: string) => {
@@ -2141,7 +2154,7 @@ function SettingsPanel({
               />
             </div>
 
-            {!isEngineFill && (
+            {!isEngineFill && !generateMode && (
               <Switch
                 checked={useFastInpaint}
                 disabled={!isGenerativeAvailable}
@@ -2165,7 +2178,46 @@ function SettingsPanel({
               />
             </div>
 
-            {isReconstructPatch && (
+            {generateMode && (
+              <div className="mt-3 p-2 bg-bg-tertiary rounded-md">
+                <Slider
+                  label="Content scale"
+                  min={100}
+                  max={200}
+                  step={5}
+                  defaultValue={100}
+                  value={Math.round(contentScale * 100)}
+                  onChange={(e: any) => setContentScale(Number(e.target.value) / 100)}
+                  onDragStateChange={(dragging: boolean) => {
+                    // Persist on release, not on every tick: the adjustments
+                    // object carries the patch bitmaps and is autosaved.
+                    if (!dragging && container) updateContainer(container.id, { contentScale });
+                  }}
+                  suffix="%"
+                />
+                <Slider
+                  label="Match photo"
+                  min={0}
+                  max={100}
+                  step={5}
+                  defaultValue={80}
+                  value={Math.round(matchPhoto * 100)}
+                  onChange={(e: any) => setMatchPhoto(Number(e.target.value) / 100)}
+                  onDragStateChange={(dragging: boolean) => {
+                    if (!dragging && container) updateContainer(container.id, { matchPhoto });
+                  }}
+                  suffix="%"
+                />
+                <Text variant={TextVariants.small} className="block text-text-secondary mt-1">
+                  Scale makes cloud forms larger by using only the middle of a bigger
+                  generation. Match photo lifts the result toward the tone of the sky
+                  around your selection — at 0 you get the raw generation, which will
+                  sit darker than the photo.
+                </Text>
+              </div>
+            )}
+
+            {isReconstructPatch && !generateMode && (
               <div className="mt-3">
                 <Switch
                   checked={reconstructSinglePath}
