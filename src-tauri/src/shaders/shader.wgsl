@@ -840,7 +840,23 @@ fn apply_tonal_adjustments_v2(
     // takes L 0.01 to 0.11, a ratio of 11, which would amplify the chroma
     // noise sitting in the shadows. Real lifts stay near 1.5.
     let l_ratio = l_new / max(l_ok, 1e-4);
-    let chroma_follow = clamp(pow(max(l_ratio, 1e-4), 0.9), 0.25, 2.5);
+    // 1.15, measured — not the 0.9 I picked by reasoning.
+    //
+    // Fitted across 72 colour patches (12 hues x 3 shadow levels x 2
+    // saturations) put through both applications:
+    //
+    //   chroma_ratio = lightness_ratio ^ k
+    //   Resolve   k = 1.15   (quartiles 1.00-1.29)
+    //   ours      k = 0.90   (quartiles 0.88-0.92)
+    //
+    // Above 1.0 chroma GAINS on lightness; below it, colour drains as the
+    // tone rises. Resolve gains, we drained — worst in the deepest patches,
+    // where our chroma came out 36% short of theirs. That is the "dull and
+    // lifeless" complaint, and it is separate from the tone curve.
+    //
+    // The same fit recovered our own 0.90 to within a hundredth, which is
+    // the check that the method is measuring what it claims to.
+    let chroma_follow = clamp(pow(max(l_ratio, 1e-4), 1.15), 0.25, 2.5);
     lab.y *= chroma_follow;
     lab.z *= chroma_follow;
 
