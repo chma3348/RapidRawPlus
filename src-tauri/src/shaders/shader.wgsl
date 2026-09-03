@@ -856,7 +856,12 @@ fn apply_tonal_adjustments_v2(
     //
     // The same fit recovered our own 0.90 to within a hundredth, which is
     // the check that the method is measuring what it claims to.
-    let chroma_follow = clamp(pow(max(l_ratio, 1e-4), 1.15), 0.25, 2.5);
+    // Set 1.29 to MEASURE 1.15. The knob is not 1:1 — measured across the
+    // 72 patches, setting 0.90 gave 0.90 but setting 1.15 gave only 1.06,
+    // so roughly a third of what is asked for is eaten downstream, where
+    // gamut and tonemapping pull saturated colour back. 1.29 lands the
+    // measured value on Resolve's 1.15.
+    let chroma_follow = clamp(pow(max(l_ratio, 1e-4), 1.29), 0.25, 2.5);
     lab.y *= chroma_follow;
     lab.z *= chroma_follow;
 
