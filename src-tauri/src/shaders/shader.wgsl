@@ -749,7 +749,18 @@ fn apply_tonal_adjustments_v2(
         let sh_fade = select(0.46, 0.62, is_raw == 1u);
         let zone = 1.0 - smoothstep(0.04, sh_fade, driver);
         if (sh > 0.0) {
-            let ground = 0.45 + 0.55 * smoothstep(0.0, 0.30, driver);
+            // Anchor the floor. The intent here was always that deep
+            // blacks take a reduced share — "a floor launched upward reads
+            // as mist" — but a 0.45 base is not an anchor: at full lift it
+            // multiplied an L=0.02 pixel by 1.53, raising the darkest tone
+            // in the frame by 53%. With nothing left properly black the
+            // image reads veiled and flat however saturated it is, which is
+            // the milky look that survived the chroma fix.
+            //
+            // 0.10 lifts that darkest tone by 11% instead, while the peak
+            // only softens from x1.76 to x1.62 and stays where it was, at
+            // L~0.2. Almost all the shadow recovery, none of the fog.
+            let ground = 0.10 + 0.90 * smoothstep(0.0, 0.30, driver);
             let stops = sh * 1.35 * zone * ground;
             l_new = l_new * pow(2.0, stops);
         } else {
