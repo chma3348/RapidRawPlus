@@ -761,19 +761,33 @@ fn apply_tonal_adjustments_v2(
         let sh_fade = select(0.46, 0.62, is_raw == 1u);
         let zone = 1.0 - smoothstep(0.04, sh_fade, driver);
         if (sh > 0.0) {
-            // Anchor the floor. The intent here was always that deep
-            // blacks take a reduced share — "a floor launched upward reads
-            // as mist" — but a 0.45 base is not an anchor: at full lift it
-            // multiplied an L=0.02 pixel by 1.53, raising the darkest tone
-            // in the frame by 53%. With nothing left properly black the
-            // image reads veiled and flat however saturated it is, which is
-            // the milky look that survived the chroma fix.
+            // Fitted to a MEASURED DaVinci Resolve shadow lift (maxed),
+            // read off a 22-step ramp through both applications.
             //
-            // 0.10 lifts that darkest tone by 11% instead, while the peak
-            // only softens from x1.76 to x1.62 and stays where it was, at
-            // L~0.2. Almost all the shadow recovery, none of the fog.
-            let ground = 0.10 + 0.90 * smoothstep(0.0, 0.30, driver);
-            let stops = sh * 1.35 * zone * ground;
+            // Expressed as stops, Resolve's lift decays smoothly from ~0.9
+            // near black to zero at white, and is still lifting at L=0.92.
+            // Ours died at L=0.46 by construction, which forced the whole
+            // falloff into a narrow band: between code 42 and 78 the local
+            // slope collapsed to 0.29 against Resolve's ~1.0, squashing
+            // those tones to a third of their separation. That compression
+            // is the "dull, lifeless, toneless" look — not saturation, and
+            // not the black point.
+            //
+            //   L      Resolve stops    ours (before)
+            //   0.09       0.91             0.32
+            //   0.29       0.65             0.43
+            //   0.42       0.43             0.02
+            //   0.61       0.22             0.00
+            //   0.84       0.06             0.00
+            //
+            // 0.77*(1-L)^1.6 tracks that to within a few hundredths across
+            // the whole range. The lift stays multiplicative, so true black
+            // is still exactly black however hard it is pushed — the floor
+            // anchoring added earlier was solving a problem the measurement
+            // says does not exist: Resolve lifts an L=0.085 tone by x6.5
+            // and looks fine, because it holds the SLOPE.
+            let reach = 0.77 * pow(max(1.0 - driver, 0.0), 1.6);
+            let stops = sh * 1.35 * reach;
             l_new = l_new * pow(2.0, stops);
         } else {
             l_new = l_new * pow(2.0, sh * 1.1 * zone);
