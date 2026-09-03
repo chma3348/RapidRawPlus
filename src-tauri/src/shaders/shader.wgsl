@@ -691,6 +691,88 @@ fn apply_point_colors(
 // v2 tonal core: all tone moves ride Oklab lightness, so contrast and
 // shadow/black/white recovery cannot skew hue — the property that makes
 // graded footage look "clean" instead of "crunchy".
+// ---------------------------------------------------------------------------
+// DaVinci Resolve's shadow lift, MEASURED rather than modelled.
+//
+// A 33x33x33 identity LUT (35,937 colours) was rendered through Resolve with
+// the shadow slider maxed, and read back. Three facts came out of that cube,
+// and together they overturn how this used to work:
+//
+//  1. It is a single SCALAR GAIN on the DISPLAY-ENCODED (sRGB) signal - not
+//     a lightness move in Oklab. Across the cube the three per-channel
+//     ratios agree to a median of 0.005 relative, i.e. one shared gain.
+//     Oklab was the root error: a gain in gamma-encoded space is NOT a pure
+//     lightness change there, which is why our version drifted hue and kept
+//     needing a bigger chroma patch to stop looking drained. With the space
+//     right, no chroma compensation is needed at all - saturation comes out
+//     correct on its own.
+//
+//  2. The gain is driven by Rec.709 luma OF THE ENCODED VALUES. Scatter
+//     about a 1D fit: 0.0219 here, against 0.049 for Oklab L, 0.144 for
+//     max(RGB), 0.259 for min(RGB).
+//
+//  3. It is GLOBAL. The grey ramp is spread across 33 tiles with wildly
+//     different neighbours and returns perfectly monotonic, with curvature
+//     (0.5-0.7 code values) BELOW the 8-bit quantisation floor. So there is
+//     no neighbourhood term here: the blurred driver this code used to
+//     consult was inventing the blotchiness, not curing it.
+//
+// SHADOW_STOPS is that gain curve, in stops, sampled at Y = i/64. It is read
+// straight off the neutral axis of the cube - for a grey the driver EQUALS
+// the grey level, so these are Resolve's measurements, not a fit to them.
+//
+// Error against the full cube, in 8-bit code values:
+//
+//                        RMS       neutral axis     worst pixel
+//     this               0.78          0.30              -
+//     previous          16.88           -               109
+//
+// 0.78 is below one code value: on photographic colour this reproduces
+// Resolve's shadow slider to within what 8-bit can express. RMS is quoted
+// over HSV saturation < 0.6, where photographic content lives. Near-pure
+// primaries below code 16 sit further off (mean ~5), but Resolve's own gain
+// stops being monotonic in luma down there - [8,0,0] gains x4.10 while the
+// DARKER [0,0,8] gains x2.95 - so no luma-driven model can follow it, and
+// no photograph contains those colours.
+//
+// An independent check: this curve and the earlier 22-step tone chart, two
+// different images through two different renders, agree to 0.02 stops.
+// ---------------------------------------------------------------------------
+const SHADOW_STOPS: array<f32, 65> = array<f32, 65>(
+    1.65857, 1.60555, 1.55254, 1.50150, 1.44652, 1.37773, 1.30333, 1.23020,
+    1.15793, 1.08748, 1.02134, 0.96235, 0.90852, 0.85941, 0.81392, 0.77105,
+    0.73101, 0.69389, 0.65909, 0.62625, 0.59511, 0.56543, 0.53703, 0.50941,
+    0.48340, 0.45999, 0.43771, 0.41527, 0.39366, 0.37347, 0.35437, 0.33690,
+    0.31910, 0.29756, 0.27683, 0.26100, 0.24670, 0.23242, 0.21869, 0.20560,
+    0.19300, 0.18072, 0.16888, 0.15752, 0.14659, 0.13604, 0.12594, 0.11637,
+    0.10718, 0.09830, 0.08971, 0.08139, 0.07339, 0.06578, 0.05852, 0.05127,
+    0.04496, 0.04043, 0.03641, 0.03194, 0.02801, 0.02575, 0.02299, 0.01446,
+    0.00000
+);
+
+// Resolve maps pure black to 2 code values. Sharp enough to leave everything
+// above the very bottom alone (0.3 code at Y = 1/32).
+const SHADOW_BLACK_LIFT: f32 = 0.00784;
+
+fn resolve_shadow_stops(y: f32) -> f32 {
+    var table = SHADOW_STOPS;
+    let x = clamp(y, 0.0, 1.0) * 64.0;
+    let lo = floor(x);
+    let i = min(u32(lo), 63u);
+    return mix(table[i], table[i + 1u], x - lo);
+}
+
+// t = 1.0 is Resolve's shadow slider at maximum.
+fn apply_resolve_shadow_lift(color: vec3<f32>, t: f32) -> vec3<f32> {
+    let enc = linear_to_srgb_extended(color);
+    let y = clamp(get_luma(enc), 0.0, 1.0);
+    let amt = clamp(t, 0.0, 1.0);
+    let lifted = enc * pow(2.0, amt * resolve_shadow_stops(y))
+        + amt * SHADOW_BLACK_LIFT * pow(max(1.0 - y, 0.0), 60.0);
+    // srgb_to_linear does not clamp, so RAW headroom above 1.0 survives.
+    return srgb_to_linear(max(lifted, vec3<f32>(0.0)));
+}
+
 fn apply_tonal_adjustments_v2(
     color: vec3<f32>,
     neighborhood_input_space: vec3<f32>,
@@ -703,7 +785,16 @@ fn apply_tonal_adjustments_v2(
 ) -> vec3<f32> {
     if (con == 0.0 && sh == 0.0 && wh == 0.0 && bl == 0.0) { return color; }
 
-    var lab = linear_to_oklab(max(color, vec3<f32>(0.0)));
+    // The shadow LIFT runs first, on display-encoded RGB - the space the
+    // measurement says Resolve works in - before any Oklab work below.
+    // The slider divides by SCALES.shadows = 120, so slider 100 arrives as
+    // sh = 0.8333; x1.2 puts our maximum exactly on Resolve's.
+    var color_in = color;
+    if (sh > 0.0) {
+        color_in = apply_resolve_shadow_lift(color_in, sh * 1.2);
+    }
+
+    var lab = linear_to_oklab(max(color_in, vec3<f32>(0.0)));
     var l_ok = lab.x;
     let l_clamped = clamp(l_ok, 0.0, 1.0);
 
@@ -748,56 +839,19 @@ fn apply_tonal_adjustments_v2(
         l_new = l_new * w_gain;
     }
 
-    // Shadows: exponential lift, zone-weighted by the driver. The lift
-    // peaks in the mid-shadows: deep blacks take a reduced share so the
-    // frame keeps its footing (a floor launched upward reads as mist),
-    // and the zone fades out before the midtones.
-    if (sh != 0.0) {
-        // Neighborhood-heavy driver: adjacent texture shares one lift
-        // (detail survives). RAW scene-linear and JPEG display-linear
-        // place the same perceptual zone at different L — calibrate the
-        // fade per domain (one wide fade for both was how shadows
-        // grabbed JPEG midtones).
+    // Shadows: only the DARKENING direction is left here. The lift is
+    // applied at the top of this function instead, against a measured
+    // Resolve curve - see apply_resolve_shadow_lift. Darkening has not been
+    // measured against Resolve, so it keeps its original behaviour.
+    if (sh < 0.0) {
+        // RAW scene-linear and JPEG display-linear place the same perceptual
+        // zone at different L - calibrate the fade per domain (one wide fade
+        // for both was how shadows grabbed JPEG midtones).
         let sh_fade = select(0.46, 0.62, is_raw == 1u);
         let zone = 1.0 - smoothstep(0.04, sh_fade, driver);
-        if (sh > 0.0) {
-            // Fitted to a MEASURED DaVinci Resolve shadow lift (maxed),
-            // read off a 22-step ramp through both applications.
-            //
-            // Expressed as stops, Resolve's lift decays smoothly from ~0.9
-            // near black to zero at white, and is still lifting at L=0.92.
-            // Ours died at L=0.46 by construction, which forced the whole
-            // falloff into a narrow band: between code 42 and 78 the local
-            // slope collapsed to 0.29 against Resolve's ~1.0, squashing
-            // those tones to a third of their separation. That compression
-            // is the "dull, lifeless, toneless" look — not saturation, and
-            // not the black point.
-            //
-            //   L      Resolve stops    ours (before)
-            //   0.09       0.91             0.32
-            //   0.29       0.65             0.43
-            //   0.42       0.43             0.02
-            //   0.61       0.22             0.00
-            //   0.84       0.06             0.00
-            //
-            // 0.77*(1-L)^1.6 tracks that to within a few hundredths across
-            // the whole range. The lift stays multiplicative, so true black
-            // is still exactly black however hard it is pushed — the floor
-            // anchoring added earlier was solving a problem the measurement
-            // says does not exist: Resolve lifts an L=0.085 tone by x6.5
-            // and looks fine, because it holds the SLOPE.
-            // 0.96, not 0.77: with 0.77 the SHAPE matched but the whole
-            // curve sat ~6 code values under Resolve across the ramp.
-            // Measured stops(Resolve)/stops(ours) = 1.24, so the amplitude
-            // was simply low. Error against Resolve: 17.8 code values
-            // before any of this, 6.1 at 0.77, and this closes the rest.
-            let reach = 0.96 * pow(max(1.0 - driver, 0.0), 1.6);
-            let stops = sh * 1.35 * reach;
-            l_new = l_new * pow(2.0, stops);
-        } else {
-            l_new = l_new * pow(2.0, sh * 1.1 * zone);
-        }
+        l_new = l_new * pow(2.0, sh * 1.1 * zone);
     }
+
 
     // Blacks: floor control with real authority, tightly range-limited.
     if (bl != 0.0) {
@@ -861,6 +915,12 @@ fn apply_tonal_adjustments_v2(
     // so roughly a third of what is asked for is eaten downstream, where
     // gamut and tonemapping pull saturated colour back. 1.29 lands the
     // measured value on Resolve's 1.15.
+    // NOTE: shadows no longer reach this. The lift now runs in display-
+    // encoded space at the top of the function, where — as the LUT
+    // measurement showed — saturation comes out right on its own and needs
+    // no compensation. What is left here serves blacks, whites and
+    // contrast, which have NOT been measured against Resolve, so 1.29 stays
+    // as it was rather than being retuned on a guess.
     let chroma_follow = clamp(pow(max(l_ratio, 1e-4), 1.29), 0.25, 2.5);
     lab.y *= chroma_follow;
     lab.z *= chroma_follow;

@@ -2043,3 +2043,126 @@ mod shader_validation_tests {
     }
 }
 
+
+#[cfg(test)]
+mod shadow_lift_tests {
+    /// The shadow slider is matched to DaVinci Resolve by MEASUREMENT: a
+    /// 33x33x33 identity LUT (35,937 colours) was rendered through Resolve
+    /// with the slider maxed, and `SHADOW_STOPS` in shader.wgsl is the gain
+    /// curve read off the neutral axis of that cube.
+    ///
+    /// The samples below are raw ground truth from that render. The test
+    /// parses the constants OUT OF THE SHADER and mirrors the shader's
+    /// arithmetic, so it checks the values that actually ship rather than a
+    /// copy that can drift away from them. Retuning the curve by hand will
+    /// fail here, which is the point.
+    const SRC: &str = include_str!("shaders/shader.wgsl");
+
+    fn parse_stops() -> Vec<f32> {
+        let start = SRC.find("const SHADOW_STOPS").expect("SHADOW_STOPS missing");
+        let open = SRC[start..].find('(').unwrap() + start;
+        let close = SRC[open..].find(");").unwrap() + open;
+        SRC[open + 1..close]
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.parse::<f32>().unwrap_or_else(|_| panic!("bad entry {s:?}")))
+            .collect()
+    }
+    fn parse_black_lift() -> f32 {
+        let k = "const SHADOW_BLACK_LIFT: f32 = ";
+        let i = SRC.find(k).expect("SHADOW_BLACK_LIFT missing") + k.len();
+        SRC[i..i + SRC[i..].find(';').unwrap()].trim().parse().unwrap()
+    }
+
+    fn to_linear(c: f32) -> f32 {
+        if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+    }
+    fn to_srgb(c: f32) -> f32 {
+        let c = c.max(0.0);
+        if c <= 0.0031308 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 }
+    }
+
+    /// Mirrors `apply_resolve_shadow_lift` for `t = 1.0` (slider at maximum).
+    fn lift(rgb: [f32; 3]) -> [f32; 3] {
+        let tab = parse_stops();
+        let black = parse_black_lift();
+        let enc: Vec<f32> = rgb.iter().map(|c| to_srgb(to_linear(c / 255.0))).collect();
+        let y = (enc[0] * 0.2126 + enc[1] * 0.7152 + enc[2] * 0.0722).clamp(0.0, 1.0);
+        let x = y * 64.0;
+        let i = (x.floor() as usize).min(63);
+        let stops = tab[i] + (tab[i + 1] - tab[i]) * (x - x.floor());
+        let off = black * (1.0 - y).max(0.0).powf(60.0);
+        let mut out = [0.0f32; 3];
+        for c in 0..3 {
+            out[c] = to_srgb(to_linear(
+                (enc[c] * stops.exp2() + off).clamp(0.0, 1.0),
+            )) * 255.0;
+        }
+        out
+    }
+
+    #[test]
+    fn curve_is_well_formed() {
+        let tab = parse_stops();
+        assert_eq!(tab.len(), 65, "expected 65 knots at Y = i/64");
+        assert_eq!(tab[64], 0.0, "white must be left untouched");
+        for w in tab.windows(2) {
+            assert!(w[1] <= w[0] + 1e-6, "gain must fall monotonically: {w:?}");
+        }
+        assert!(tab[0] > 1.6 && tab[0] < 1.7, "black lifts ~1.66 stops, got {}", tab[0]);
+    }
+
+    #[test]
+    fn matches_measured_resolve_output() {
+        // (input, Resolve's output) in 8-bit code values, shadows maxed.
+        let cases: &[([f32; 3], [f32; 3])] = &[
+            ([16.0, 16.0, 16.0], [43.44, 43.44, 43.44]),
+            ([40.0, 40.0, 40.0], [80.87, 80.87, 80.87]),
+            ([64.0, 64.0, 64.0], [105.81, 105.81, 105.81]),
+            ([88.0, 88.0, 88.0], [127.19, 127.19, 127.19]),
+            ([112.0, 112.0, 112.0], [146.56, 146.56, 146.56]),
+            ([135.0, 135.0, 135.0], [164.12, 164.12, 164.12]),
+            ([159.0, 159.0, 159.0], [182.19, 182.19, 182.19]),
+            ([183.0, 183.0, 183.0], [200.00, 200.00, 200.00]),
+            ([207.0, 207.0, 207.0], [218.00, 218.00, 218.00]),
+            ([231.0, 231.0, 231.0], [237.00, 237.00, 237.00]),
+            ([255.0, 255.0, 255.0], [255.00, 255.00, 255.00]),
+            ([128.0, 231.0, 191.0], [135.00, 244.19, 202.00]),
+            ([215.0, 159.0, 199.0], [239.13, 176.75, 221.31]),
+            ([175.0, 175.0, 207.0], [193.19, 193.19, 228.63]),
+            ([167.0, 72.0, 175.0], [229.38, 98.69, 240.38]),
+            ([56.0, 88.0, 104.0], [83.12, 130.69, 154.62]),
+            ([88.0, 207.0, 88.0], [98.00, 230.44, 98.00]),
+            ([120.0, 88.0, 159.0], [164.56, 120.56, 218.19]),
+            ([56.0, 48.0, 24.0], [104.81, 89.81, 44.69]),
+            ([175.0, 72.0, 143.0], [241.00, 98.94, 196.88]),
+            ([88.0, 143.0, 191.0], [107.00, 174.06, 232.56]),
+            ([48.0, 104.0, 56.0], [69.00, 149.81, 80.56]),
+            ([167.0, 231.0, 143.0], [175.06, 243.00, 150.00]),
+            ([199.0, 215.0, 96.0], [210.88, 227.88, 101.50]),
+            ([183.0, 128.0, 183.0], [217.63, 152.19, 217.63]),
+        ];
+        let mut sum_sq = 0.0f64;
+        let mut worst = (0.0f32, [0.0f32; 3]);
+        for (input, expect) in cases {
+            let got = lift(*input);
+            for c in 0..3 {
+                let d = (got[c] - expect[c]).abs();
+                sum_sq += (d * d) as f64;
+                if d > worst.0 { worst = (d, *input); }
+            }
+        }
+        let rms = (sum_sq / (cases.len() * 3) as f64).sqrt();
+        // Below one 8-bit code value: as exact as the format can express.
+        assert!(rms < 1.0, "RMS {rms:.2} code values against Resolve (want < 1.0)");
+        assert!(worst.0 < 4.0, "worst {:.2} on input {:?}", worst.0, worst.1);
+    }
+
+    #[test]
+    fn black_stays_black_and_white_stays_white() {
+        assert!(lift([0.0, 0.0, 0.0])[0] < 3.0, "true black must not turn milky");
+        let w = lift([255.0, 255.0, 255.0]);
+        assert!((w[0] - 255.0).abs() < 0.51, "white must be untouched, got {}", w[0]);
+    }
+}
