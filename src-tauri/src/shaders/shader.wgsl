@@ -786,7 +786,12 @@ fn apply_tonal_adjustments_v2(
             // anchoring added earlier was solving a problem the measurement
             // says does not exist: Resolve lifts an L=0.085 tone by x6.5
             // and looks fine, because it holds the SLOPE.
-            let reach = 0.77 * pow(max(1.0 - driver, 0.0), 1.6);
+            // 0.96, not 0.77: with 0.77 the SHAPE matched but the whole
+            // curve sat ~6 code values under Resolve across the ramp.
+            // Measured stops(Resolve)/stops(ours) = 1.24, so the amplitude
+            // was simply low. Error against Resolve: 17.8 code values
+            // before any of this, 6.1 at 0.77, and this closes the rest.
+            let reach = 0.96 * pow(max(1.0 - driver, 0.0), 1.6);
             let stops = sh * 1.35 * reach;
             l_new = l_new * pow(2.0, stops);
         } else {
