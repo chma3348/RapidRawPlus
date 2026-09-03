@@ -718,7 +718,19 @@ fn apply_tonal_adjustments_v2(
         neighborhood_linear = srgb_to_linear(neighborhood_input_space);
     }
     let l_base = clamp(linear_to_oklab(max(neighborhood_linear, vec3<f32>(0.0))).x, 0.0, 1.0);
-    let driver = mix(l_clamped, l_base, 0.75);
+    // Mostly the pixel's OWN lightness. At 0.75 the neighbourhood decided
+    // almost everything, and identical tones got wildly different
+    // treatment: measured at full shadow lift, an L=0.10 pixel was lifted
+    // x1.34 in a dark area, x1.55 in a mid one, and x1.00 — untouched —
+    // next to something bright. A 1.6x spread across the same tone reads
+    // as patches rather than a tone curve, which is the blotchy,
+    // inconsistent look next to Resolve's global one.
+    //
+    // Some neighbourhood weighting is still worth keeping: it is what lets
+    // texture inside a lifted region ride along instead of flattening. At
+    // 0.25 the spread falls to 1.2x and nothing is left unlifted, which
+    // keeps that benefit without the patchwork.
+    let driver = mix(l_clamped, l_base, 0.25);
 
     // Whites: true white-point control — the gain fades in above the
     // midtones so the lower half of the image stays pinned (the old
