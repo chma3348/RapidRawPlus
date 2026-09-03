@@ -1184,31 +1184,6 @@ fn infer_reconstruct_auto_hint_rgba(source: &RgbaImage, mask: &GrayImage) -> Rec
     }
 }
 
-fn effective_reconstruct_prompt<'a>(
-    user_prompt: &'a str,
-    reconstruct_fill: bool,
-    auto_hint: ReconstructAutoHint,
-) -> Cow<'a, str> {
-    if !reconstruct_fill || !user_prompt.trim().is_empty() {
-        return Cow::Borrowed(user_prompt);
-    }
-    let prompt = match auto_hint {
-        ReconstructAutoHint::HighlightSky => {
-            "bright backlit cloud detail and pale sky continuing naturally from the surrounding photograph, realistic soft cloud texture, subtle atmospheric haze, match the existing lighting, exposure, color, lens softness, perspective, and camera grain, seamless edge, no flat gray patch, no beige patch, no text, no borders"
-        }
-        ReconstructAutoHint::Highlight => {
-            "plausible recovered highlight detail continuing naturally from the surrounding photograph, realistic texture in the overexposed area, match the existing scene, lighting, exposure, color, lens softness, perspective, and camera grain, seamless edge, no new objects, no flat gray patch, no beige patch, no text, no borders"
-        }
-        ReconstructAutoHint::Shadow => {
-            "plausible recovered shadow detail continuing naturally from the surrounding photograph, realistic dark texture in the underexposed area, preserve the existing low light, color, lens softness, perspective, and camera grain, seamless edge, no new objects, no flat gray patch, no text, no borders"
-        }
-        ReconstructAutoHint::Generic => {
-            "seamlessly continue the surrounding photograph into the selected overexposed or underexposed area, realistic natural background texture, match the existing scene, lighting, exposure, color, camera grain, lens softness, and perspective, no new objects, no text, no borders, no flat gray patch"
-        }
-    };
-    Cow::Borrowed(prompt)
-}
-
 fn reconstruct_tone_strength(reconstruct_fill: bool, promptless_reconstruct: bool) -> f32 {
     if promptless_reconstruct {
         0.35
@@ -3078,22 +3053,6 @@ async fn run_engine_inpaint_patch(
     const TILE_SPAN_THRESHOLD: u32 = 900;
     const TILE_TARGET: u32 = 700;
     const MIN_TILE_AREA: u32 = 4000;
-    // The same context window the per-blob pass will use, so the tiling
-    // decision is made on what the model will actually see.
-    let context_bounds_for = |comp: &MaskComponent| -> (u32, u32, u32, u32) {
-        let (scale, cap) = if reconstruct_fill { (1.9, 840) } else { (1.5, 520) };
-        let span_x = comp.max_x - comp.min_x + 1;
-        let span_y = comp.max_y - comp.min_y + 1;
-        let pad_x = 192.max((span_x as f32 * scale) as u32).min(cap);
-        let pad_y = 192.max((span_y as f32 * scale) as u32).min(cap);
-        (
-            comp.min_x.saturating_sub(pad_x),
-            comp.min_y.saturating_sub(pad_y),
-            (comp.max_x + pad_x).min(w.saturating_sub(1)),
-            (comp.max_y + pad_y).min(h.saturating_sub(1)),
-        )
-    };
-
     let mut units: Vec<FillUnit> = Vec::new();
     for comp in &large {
         // Tiling exists for one reason: a large region returned flat wash in
@@ -3108,19 +3067,16 @@ async fn run_engine_inpaint_patch(
         // pass, because tiling hands each pass its own corner and its
         // cascade is where both the flat output and the hallucinated bird
         // propagated from.
-        let ctx = context_bounds_for(comp);
-        let widened = grow_context_for_information(
+        let usable = ring_informative_fraction(
             &encoded_full,
             |x, y| mask.get_pixel(x, y)[0] > 127,
-            ctx,
-            0.35,
+            (comp.min_x, comp.min_y, comp.max_x, comp.max_y),
+            ring_width_for_span(comp.span()),
         );
-        let usable =
-            informative_fraction(&encoded_full, |x, y| mask.get_pixel(x, y)[0] > 127, widened);
-        if comp.span() <= TILE_SPAN_THRESHOLD || usable >= 0.35 {
+        if comp.span() <= TILE_SPAN_THRESHOLD || usable >= NEEDS_PROMPT_BELOW {
             if comp.span() > TILE_SPAN_THRESHOLD {
                 log::info!(
-                    "[fill] span {} filled in ONE pass — widening found {:.0}% usable scene, so the model keeps whole-region context",
+                    "[fill] span {} filled in ONE pass — {:.0}% usable scene at the boundary, so the model has something to continue",
                     comp.span(),
                     usable * 100.0
                 );
@@ -3129,7 +3085,7 @@ async fn run_engine_inpaint_patch(
             continue;
         }
         log::info!(
-            "[fill] span {} tiled — even widened, only {:.0}% of the view is usable scene",
+            "[fill] span {} tiled — only {:.0}% usable scene at the boundary, so each tile continues into the one before it",
             comp.span(),
             usable * 100.0
         );
@@ -4529,23 +4485,21 @@ pub async fn invoke_generative_replace_with_mask_def(
             if x0 == u32::MAX {
                 1.0
             } else {
+                // The BOUNDARY, not the crop. A wider crop does not bring the
+                // photograph any closer to the hole, so widening cannot fix a
+                // starved edge and must not be allowed to disguise one.
                 let probe = source_image.to_rgba8();
-                let start = context_window_around(&probe, (x0, y0, x1, y1));
-                let widened = grow_context_for_information(
+                let span = (x1 - x0 + 1).max(y1 - y0 + 1);
+                ring_informative_fraction(
                     &probe,
                     |x, y| mask_bitmap.get_pixel(x, y)[0] > 127,
-                    start,
-                    NEEDS_PROMPT_BELOW,
-                );
-                informative_fraction(
-                    &probe,
-                    |x, y| mask_bitmap.get_pixel(x, y)[0] > 127,
-                    widened,
+                    (x0, y0, x1, y1),
+                    ring_width_for_span(span),
                 )
             }
         };
         log::info!(
-            "[fill] promptless repair: {:.0}% usable scene around the selection",
+            "[fill] promptless repair: {:.0}% usable scene in the ring around the selection",
             usable * 100.0
         );
         if usable < NEEDS_PROMPT_BELOW {
@@ -5512,30 +5466,12 @@ mod fill_component_tests {
         );
     }
 
-    #[test]
-    fn empty_reconstruct_uses_internal_prompt() {
-        let prompt = effective_reconstruct_prompt("", true, ReconstructAutoHint::Generic);
-        assert!(
-            prompt.contains("seamlessly continue"),
-            "empty Reconstruct should still be semantically conditioned"
-        );
-        let sky_prompt = effective_reconstruct_prompt("", true, ReconstructAutoHint::HighlightSky);
-        assert!(
-            sky_prompt.contains("cloud detail"),
-            "sky-like clipped highlights should get a more useful prompt than generic continuation"
-        );
-        assert_eq!(
-            effective_reconstruct_prompt("storm clouds", true, ReconstructAutoHint::HighlightSky)
-                .as_ref(),
-            "storm clouds",
-            "user prompts must pass through unchanged"
-        );
-        assert_eq!(
-            effective_reconstruct_prompt("", false, ReconstructAutoHint::Generic).as_ref(),
-            "",
-            "non-Reconstruct empty prompts keep existing behavior"
-        );
-    }
+    // `empty_reconstruct_uses_internal_prompt` lived here and asserted that an
+    // empty Reconstruct prompt got an invented one ("cloud detail", "seamlessly
+    // continue"). That behaviour is retired: the invented prompt asked for
+    // "pale sky ... subtle atmospheric haze ... match the existing exposure",
+    // every one of which a white wash satisfies, and its negative clauses were
+    // inert at cfg 1.0. An empty prompt now means promptless repair.
 
     #[test]
     fn reconstruct_auto_hint_detects_large_upper_highlight_as_sky() {
@@ -5976,25 +5912,6 @@ mod fill_component_tests {
 /// be tuned against real selections.
 pub(crate) const NEEDS_PROMPT_BELOW: f32 = 0.35;
 
-/// The context window a fill would use around a region, before widening.
-pub(crate) fn context_window_around(
-    image: &RgbaImage,
-    region: (u32, u32, u32, u32),
-) -> (u32, u32, u32, u32) {
-    let (w, h) = image.dimensions();
-    let (min_x, min_y, max_x, max_y) = region;
-    let span_x = max_x - min_x + 1;
-    let span_y = max_y - min_y + 1;
-    let pad_x = 192.max((span_x as f32 * 1.9) as u32).min(840);
-    let pad_y = 192.max((span_y as f32 * 1.9) as u32).min(840);
-    (
-        min_x.saturating_sub(pad_x),
-        min_y.saturating_sub(pad_y),
-        (max_x + pad_x).min(w.saturating_sub(1)),
-        (max_y + pad_y).min(h.saturating_sub(1)),
-    )
-}
-
 /// How much of a crop is scene the model can actually learn from.
 ///
 /// Pixels inside the selection are being replaced, and clipped ones carry
@@ -6039,6 +5956,95 @@ pub(crate) fn informative_fraction(
         return 0.0;
     }
     usable as f32 / total as f32
+}
+
+/// Usable scene in a band hugging the mask — the boundary the model actually
+/// continues from.
+///
+/// Measuring the whole crop answers the wrong question. On a real edit the
+/// crop was 87% usable while the 100px ring around the hole was 8%: plenty of
+/// hillside and trees, all of it far away, with nothing but blown sky against
+/// the hole itself. That 87% let a hopeless run proceed AND switched off the
+/// tiling that was the model's only source of structure.
+///
+/// The band follows the mask's shape rather than its bounding box, so a
+/// concave selection is measured where it actually borders the photograph.
+pub(crate) fn ring_informative_fraction(
+    image: &RgbaImage,
+    masked: impl Fn(u32, u32) -> bool,
+    region: (u32, u32, u32, u32),
+    ring: u32,
+) -> f32 {
+    let (w, h) = image.dimensions();
+    let (min_x, min_y, max_x, max_y) = region;
+    let x0 = min_x.saturating_sub(ring);
+    let y0 = min_y.saturating_sub(ring);
+    let x1 = (max_x + ring).min(w.saturating_sub(1));
+    let y1 = (max_y + ring).min(h.saturating_sub(1));
+    let ring = ring.max(8) as i64;
+    // Eight directions at two radii: enough to tell "is the mask nearby" for
+    // a fraction of the cost of a distance transform over 32 megapixels.
+    let probes: [(i64, i64); 8] = [
+        (1, 0),
+        (-1, 0),
+        (0, 1),
+        (0, -1),
+        (1, 1),
+        (1, -1),
+        (-1, 1),
+        (-1, -1),
+    ];
+    let (mut usable, mut total) = (0u64, 0u64);
+    let mut y = y0;
+    while y <= y1 {
+        let mut x = x0;
+        while x <= x1 {
+            if masked(x, y) {
+                x += 4;
+                continue;
+            }
+            let near = probes.iter().any(|(dx, dy)| {
+                [ring / 2, ring].iter().any(|r| {
+                    let px = (x as i64 + dx * r).clamp(0, w as i64 - 1) as u32;
+                    let py = (y as i64 + dy * r).clamp(0, h as i64 - 1) as u32;
+                    masked(px, py)
+                })
+            });
+            if near {
+                total += 1;
+                let lum = |xx: u32, yy: u32| {
+                    let q = image.get_pixel(xx.min(w - 1), yy.min(h - 1));
+                    (q[0] as i32 + q[1] as i32 + q[2] as i32) / 3
+                };
+                let l = lum(x, y);
+                let local = (l - lum(x + 8, y)).abs() + (l - lum(x, y + 8)).abs();
+                if l < 244 && local >= 4 {
+                    usable += 1;
+                }
+            }
+            x += 4;
+        }
+        y += 4;
+    }
+    if total == 0 {
+        return 0.0;
+    }
+    usable as f32 / total as f32
+}
+
+/// Width of that band for a region of the given span.
+///
+/// Deliberately narrow. What a diffusion fill continues from is the pixels
+/// immediately against the hole, and a wide band averages that away:
+/// measured on a real blown-sky selection the boundary reads 9% usable at
+/// 24px, 22% at 48px, 40% at 100px and 53% at 158px. A 10%-of-span band came
+/// out at 158px, reported 54%, and waved through a run that produced nothing.
+///
+/// A distance transform on the same selection showed no masked pixel is more
+/// than 263px from real detail (median 107px), so this is not about detail
+/// being far away — it is about what sits against the edge.
+pub(crate) fn ring_width_for_span(span: u32) -> u32 {
+    ((span as f32 * 0.02) as u32).clamp(24, 64)
 }
 
 /// Grows a crop until it holds enough real scene for the model to continue
@@ -6164,7 +6170,10 @@ pub(crate) fn neutralize_display_orientation(sub_masks: &mut [crate::mask_genera
 
 #[cfg(test)]
 mod context_growth_tests {
-    use super::{grow_context_for_information, informative_fraction};
+    use super::{
+        grow_context_for_information, informative_fraction, ring_informative_fraction,
+        ring_width_for_span,
+    };
     use image::{Rgba, RgbaImage};
 
     /// Left third is real scene, the rest is blown white — the shape of the
@@ -6188,6 +6197,86 @@ mod context_growth_tests {
     /// The bug this metric shipped with: a blown sky sits at 245 and passed
     /// a brightness-range test, so a region of pure blowout reported 91%
     /// usable scene. Flat is flat regardless of level.
+    /// The shape of the real failure, and the case no previous test covered.
+    ///
+    /// A hole surrounded by blown sky, with genuine detail far away at the
+    /// bottom of the frame — exactly DSC08212. Measured across the crop this
+    /// reads as plenty of context (the hillside counts); measured at the
+    /// boundary it reads as almost none, which is what the model actually
+    /// has to continue from.
+    #[test]
+    fn far_away_detail_does_not_count_as_boundary_context() {
+        let (w, h) = (900u32, 700u32);
+        let mut img = RgbaImage::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                // Bottom third is real scene; everything above is blown flat.
+                let v = if y > 470 {
+                    let n = ((x as f32 * 12.9898 + y as f32 * 78.233).sin() * 43758.547).fract();
+                    (50.0 + n.abs() * 150.0) as u8
+                } else {
+                    245
+                };
+                img.put_pixel(x, y, Rgba([v, v, v, 255]));
+            }
+        }
+        // The hole sits up in the blown area, well clear of the scene.
+        let hole = (250u32, 90u32, 650u32, 330u32);
+        let masked = |x: u32, y: u32| {
+            x >= hole.0 && x <= hole.2 && y >= hole.1 && y <= hole.3
+        };
+
+        // A crop-wide measure sweeps in the textured bottom third and is
+        // reassured by it.
+        let crop_wide = informative_fraction(&img, masked, (0, 0, w - 1, h - 1));
+        // The boundary measure only looks where the hole meets the photo.
+        let at_boundary =
+            ring_informative_fraction(&img, masked, hole, ring_width_for_span(400));
+
+        assert!(
+            crop_wide > 0.25,
+            "crop-wide read {crop_wide:.2}; the fixture is meant to look fine that way"
+        );
+        assert!(
+            at_boundary < 0.10,
+            "boundary read {at_boundary:.2}, should be near zero — this is the 87% vs 8% bug"
+        );
+    }
+
+    #[test]
+    fn a_boundary_in_real_scene_reads_as_usable() {
+        let (w, h) = (600u32, 600u32);
+        let mut img = RgbaImage::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let n = ((x as f32 * 12.9898 + y as f32 * 78.233).sin() * 43758.547).fract();
+                let v = (50.0 + n.abs() * 150.0) as u8;
+                img.put_pixel(x, y, Rgba([v, v, v, 255]));
+            }
+        }
+        // A small object entirely inside real scenery — the stop sign case.
+        let hole = (280u32, 280u32, 340u32, 340u32);
+        let masked = |x: u32, y: u32| {
+            x >= hole.0 && x <= hole.2 && y >= hole.1 && y <= hole.3
+        };
+        let at_boundary = ring_informative_fraction(&img, masked, hole, ring_width_for_span(60));
+        assert!(
+            at_boundary > 0.8,
+            "boundary read {at_boundary:.2}; a removal in real scenery must not be gated"
+        );
+    }
+
+    #[test]
+    fn ring_width_scales_but_stays_sane() {
+        assert_eq!(ring_width_for_span(200), 24, "small objects get the floor");
+        assert_eq!(
+            ring_width_for_span(1584),
+            31,
+            "the real sky selection — narrow enough to see that its edge is blown"
+        );
+        assert_eq!(ring_width_for_span(9000), 64, "capped");
+    }
+
     #[test]
     fn a_flat_bright_region_is_not_context() {
         let img = RgbaImage::from_pixel(400, 300, Rgba([245, 245, 245, 255]));
