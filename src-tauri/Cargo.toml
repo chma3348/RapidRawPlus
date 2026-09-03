@@ -16,6 +16,11 @@ unexpected_cfgs = { level = "warn", check-cfg = [
     'cfg(feature, values("cargo-clippy"))',
 ] }
 
+[dev-dependencies]
+# Already in the tree via wgpu. WGSL is compiled at RUNTIME, so without this
+# a broken shader edit ships and only fails when the GPU path first runs.
+naga = { version = "29.0", features = ["wgsl-in"] }
+
 [dependencies]
 tauri = { version = "2.11", features = [ "macos-private-api", "rustls-tls" ] }
 tauri-plugin-dialog = "2.7.1"

@@ -2017,3 +2017,29 @@ fn process_and_get_dynamic_image_inner(
         .ok_or("Failed to create image buffer from GPU data")?;
     Ok(DynamicImage::ImageRgba8(img_buf))
 }
+
+#[cfg(test)]
+mod shader_validation_tests {
+    /// WGSL is compiled at runtime, so nothing in `cargo build` catches a
+    /// broken shader — it surfaces as a blank or panicking GPU path the
+    /// first time someone opens an image. Parse and validate every shader
+    /// here instead.
+    #[test]
+    fn every_shader_parses_and_validates() {
+        for name in ["shader.wgsl", "display.wgsl", "blur.wgsl", "flare.wgsl"] {
+            let path = format!("src/shaders/{name}");
+            let src = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("{path}: {e}"));
+            let module = naga::front::wgsl::parse_str(&src)
+                .unwrap_or_else(|e| panic!("{name} failed to parse:\n{}", e.emit_to_string(&src)));
+            let mut validator = naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            );
+            validator
+                .validate(&module)
+                .unwrap_or_else(|e| panic!("{name} failed validation: {e:?}"));
+        }
+    }
+}
+
