@@ -1646,7 +1646,7 @@ impl GpuProcessor {
 
 pub fn process_and_get_dynamic_image(
     context: &GpuContext,
-    state: &tauri::State<AppState>,
+    state: &AppState,
     base_image: &DynamicImage,
     transform_hash: u64,
     request: RenderRequest,
@@ -1667,7 +1667,7 @@ pub fn process_and_get_dynamic_image(
 #[allow(clippy::too_many_arguments)]
 pub fn process_and_get_dynamic_image_with_analytics(
     context: &GpuContext,
-    state: &tauri::State<AppState>,
+    state: &AppState,
     base_image: &DynamicImage,
     transform_hash: u64,
     request: RenderRequest,
@@ -1688,9 +1688,12 @@ pub fn process_and_get_dynamic_image_with_analytics(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Takes `&AppState` rather than `tauri::State` so the render pipeline can be
+/// driven from a test. Everything it touches on the state is a cache or a
+/// handle, none of it Tauri-specific.
 fn process_and_get_dynamic_image_inner(
     context: &GpuContext,
-    state: &tauri::State<AppState>,
+    state: &AppState,
     base_image: &DynamicImage,
     transform_hash: u64,
     request: RenderRequest,
@@ -2270,5 +2273,112 @@ mod shadow_lift_tests {
         assert!(lift([0.0, 0.0, 0.0])[0] < 3.0, "true black must not turn milky");
         let w = lift([255.0, 255.0, 255.0]);
         assert!((w[0] - 255.0).abs() < 0.51, "white must be untouched, got {}", w[0]);
+    }
+}
+
+#[cfg(test)]
+mod render_harness {
+    //! Runs the REAL pipeline headlessly.
+    //!
+    //! Every colour change before this was verified against a Python
+    //! reconstruction of the shader, which turned out not to match what
+    //! actually executes -- a base-curve change predicted to cut the error
+    //! from 4.28 to 1.55 code values instead pushed it to 34.50. Predictions
+    //! from a model nobody has validated are worse than useless, because they
+    //! read as measurements. This renders through the actual shader on the
+    //! actual GPU so a change can be measured before it ships.
+    //!
+    //!   RAPIDRAW_TEST_RAW=/path/to.ARW RAPIDRAW_RENDER_OUT=/tmp/out.png \
+    //!     RAPIDRAW_RENDER_W=1440 \
+    //!     cargo test --lib render_harness -- --ignored --nocapture
+    //!
+    //! Set RAPIDRAW_ADJ to a JSON object to apply adjustments; the default is
+    //! `{}`, i.e. every slider at zero.
+    use super::*;
+
+    fn headless_context() -> Option<GpuContext> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            ..Default::default()
+        }))
+        .ok()?;
+        let limits = adapter.limits();
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("Headless Test Device"),
+            required_features: wgpu::Features::empty(),
+            required_limits: limits.clone(),
+            experimental_features: wgpu::ExperimentalFeatures::default(),
+            memory_hints: wgpu::MemoryHints::Performance,
+            trace: wgpu::Trace::Off,
+        }))
+        .ok()?;
+        Some(GpuContext {
+            device: Arc::new(device),
+            queue: Arc::new(queue),
+            limits,
+            display: Arc::new(std::sync::Mutex::new(None)),
+        })
+    }
+
+    #[test]
+    #[ignore]
+    fn render() {
+        let Ok(path) = std::env::var("RAPIDRAW_TEST_RAW") else {
+            eprintln!("set RAPIDRAW_TEST_RAW");
+            return;
+        };
+        let out = std::env::var("RAPIDRAW_RENDER_OUT").unwrap_or("/tmp/render.png".into());
+        let width: u32 = std::env::var("RAPIDRAW_RENDER_W")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1440);
+        let adj_src = std::env::var("RAPIDRAW_ADJ").unwrap_or("{}".into());
+        let Some(context) = headless_context() else {
+            eprintln!("no GPU adapter available");
+            return;
+        };
+
+        let bytes = std::fs::read(&path).expect("read image");
+        let settings = crate::AppSettings::default();
+        let mut base =
+            crate::image_loader::load_base_image_from_bytes(&bytes, &path, false, &settings, None)
+                .expect("load");
+        if base.width() > width {
+            let h = (width as u64 * base.height() as u64 / base.width() as u64) as u32;
+            base = DynamicImage::ImageRgb32F(image::imageops::resize(
+                &base.to_rgb32f(),
+                width,
+                h,
+                image::imageops::FilterType::Lanczos3,
+            ));
+        }
+
+        let is_raw = std::path::Path::new(&path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| !matches!(e.to_ascii_lowercase().as_str(), "jpg" | "jpeg" | "png" | "tif" | "tiff" | "webp"))
+            .unwrap_or(true);
+        let js: serde_json::Value = serde_json::from_str(&adj_src).expect("RAPIDRAW_ADJ json");
+        let adjustments =
+            crate::image_processing::get_all_adjustments_from_json(&js, is_raw, None);
+        let state = AppState::default();
+        let result = process_and_get_dynamic_image(
+            &context,
+            &state,
+            &base,
+            0,
+            RenderRequest {
+                adjustments,
+                mask_bitmaps: &[],
+                lut: None,
+                roi: None,
+            },
+            "render_harness",
+        )
+        .expect("render");
+        result.to_rgba8().save(&out).expect("save");
+        println!("  rendered {}x{} -> {out}", result.width(), result.height());
     }
 }

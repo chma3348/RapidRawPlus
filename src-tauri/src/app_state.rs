@@ -186,3 +186,51 @@ pub struct AppState {
     pub model_registry: Mutex<Option<Arc<ModelRegistry>>>,
     pub comfy_process: Mutex<Option<std::process::Child>>,
 }
+
+impl Default for AppState {
+    /// Every field is an empty cache, handle or lock, so a default instance is
+    /// a perfectly usable state -- which is what lets the render pipeline be
+    /// driven from a test instead of only from a live Tauri app.
+    fn default() -> Self {
+        AppState {
+            window_setup_complete: AtomicBool::new(false),
+            gpu_crash_flag_path: Mutex::new(None),
+            original_image: Mutex::new(None),
+            cached_preview: Mutex::new(None),
+            gpu_context: Mutex::new(None),
+            gpu_image_cache: Mutex::new(None),
+            gpu_processor: Mutex::new(None),
+            ai_state: Mutex::new(None),
+            ai_init_lock: TokioMutex::new(()),
+            export_task_handle: Mutex::new(None),
+            hdr_result: Arc::new(Mutex::new(None)),
+            panorama_result: Arc::new(Mutex::new(None)),
+            denoise_result: Arc::new(Mutex::new(None)),
+            enhancement_result: Arc::new(Mutex::new(None)),
+            enhancement_raw: Arc::new(Mutex::new(None)),
+            enhancement_preview_raw: Arc::new(Mutex::new(None)),
+            spot_raw: Arc::new(Mutex::new(None)),
+            enhancement_chain_input: Arc::new(Mutex::new(None)),
+            expansion_results: Arc::new(Mutex::new(Vec::new())),
+            indexing_task_handle: Mutex::new(None),
+            lut_cache: Mutex::new(HashMap::new()),
+            initial_file_path: Mutex::new(None),
+            thumbnail_cancellation_token: Arc::new(AtomicBool::new(false)),
+            thumbnail_progress: Mutex::new(ThumbnailProgressTracker { total: 0, completed: 0 }),
+            preview_worker_tx: Mutex::new(None),
+            analytics_worker_tx: Mutex::new(None),
+            mask_cache: Mutex::new(HashMap::new()),
+            patch_cache: Mutex::new(HashMap::new()),
+            geometry_cache: Mutex::new(HashMap::new()),
+            thumbnail_geometry_cache: Mutex::new(HashMap::new()),
+            lens_db: Mutex::new(None),
+            load_image_generation: Arc::new(AtomicUsize::new(0)),
+            full_warped_cache: Mutex::new(None),
+            full_transformed_cache: Mutex::new(None),
+            decoded_image_cache: Mutex::new(DecodedImageCache::new(5)),
+            thumbnail_manager: ThumbnailManager::new(),
+            model_registry: Mutex::new(None),
+            comfy_process: Mutex::new(None),
+        }
+    }
+}
