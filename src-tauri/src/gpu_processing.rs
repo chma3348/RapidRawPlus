@@ -2292,15 +2292,16 @@ mod render_harness {
     //!     RAPIDRAW_RENDER_W=1440 \
     //!     cargo test --lib render_harness -- --ignored --nocapture
     //!
-    //! Set RAPIDRAW_ADJ to a JSON object to apply adjustments; the default is
-    //! `{}`, i.e. every slider at zero.
+    //! Set RAPIDRAW_ADJ to a JSON object, or RAPIDRAW_ADJ_FILE to a sidecar
+    //! file, to apply adjustments; the default is `{}`, i.e. the current
+    //! neutral render (`processVersion: 2`).
+    use crate::image_processing::render_adjustments_for_empty;
+
     use super::*;
 
     fn headless_context() -> Option<GpuContext> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let instance = wgpu::Instance::default();
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: None,
             ..Default::default()
         }))
         .ok()?;
@@ -2334,7 +2335,6 @@ mod render_harness {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(1440);
-        let adj_src = std::env::var("RAPIDRAW_ADJ").unwrap_or("{}".into());
         let Some(context) = headless_context() else {
             eprintln!("no GPU adapter available");
             return;
@@ -2360,9 +2360,25 @@ mod render_harness {
             .and_then(|e| e.to_str())
             .map(|e| !matches!(e.to_ascii_lowercase().as_str(), "jpg" | "jpeg" | "png" | "tif" | "tiff" | "webp"))
             .unwrap_or(true);
-        let js: serde_json::Value = serde_json::from_str(&adj_src).expect("RAPIDRAW_ADJ json");
+        let js_raw: serde_json::Value = if let Ok(adj_file) = std::env::var("RAPIDRAW_ADJ_FILE") {
+            let sidecar_src = std::fs::read_to_string(adj_file).expect("read RAPIDRAW_ADJ_FILE");
+            let sidecar: serde_json::Value =
+                serde_json::from_str(&sidecar_src).expect("RAPIDRAW_ADJ_FILE json");
+            sidecar
+                .get("adjustments")
+                .cloned()
+                .unwrap_or(sidecar)
+        } else {
+            let adj_src = std::env::var("RAPIDRAW_ADJ").unwrap_or("{}".into());
+            serde_json::from_str(&adj_src).expect("RAPIDRAW_ADJ json")
+        };
+        let js = render_adjustments_for_empty(&js_raw);
         let adjustments =
             crate::image_processing::get_all_adjustments_from_json(&js, is_raw, None);
+        let lut = js["lutPath"]
+            .as_str()
+            .and_then(|p| crate::lut_processing::parse_lut_file(p).ok())
+            .map(Arc::new);
         let state = AppState::default();
         let result = process_and_get_dynamic_image(
             &context,
@@ -2372,7 +2388,7 @@ mod render_harness {
             RenderRequest {
                 adjustments,
                 mask_bitmaps: &[],
-                lut: None,
+                lut,
                 roi: None,
             },
             "render_harness",

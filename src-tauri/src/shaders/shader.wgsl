@@ -797,8 +797,7 @@ fn resolve_shadow_correction(enc: vec3<f32>) -> f32 {
 }
 
 // t = 1.0 is Resolve's shadow slider at maximum.
-fn apply_resolve_shadow_lift(color: vec3<f32>, t: f32) -> vec3<f32> {
-    let enc = linear_to_srgb_extended(color);
+fn apply_resolve_shadow_lift_encoded(enc: vec3<f32>, t: f32) -> vec3<f32> {
     let y = clamp(get_luma(enc), 0.0, 1.0);
     let amt = clamp(t, 0.0, 1.0);
     // Both the curve and its correction fade out together with the slider, so
@@ -807,8 +806,26 @@ fn apply_resolve_shadow_lift(color: vec3<f32>, t: f32) -> vec3<f32> {
     let corr = mix(1.0, resolve_shadow_correction(enc), amt);
     let lifted = enc * (pow(2.0, amt * resolve_shadow_stops(y)) * corr)
         + amt * SHADOW_BLACK_LIFT * pow(max(1.0 - y, 0.0), 60.0);
+    return max(lifted, vec3<f32>(0.0));
+}
+
+fn apply_resolve_shadow_lift(color: vec3<f32>, t: f32) -> vec3<f32> {
+    let lifted = apply_resolve_shadow_lift_encoded(linear_to_srgb_extended(color), t);
     // srgb_to_linear does not clamp, so RAW headroom above 1.0 survives.
-    return srgb_to_linear(max(lifted, vec3<f32>(0.0)));
+    return srgb_to_linear(lifted);
+}
+
+fn apply_highlight_compression_scalar_encoded(enc: vec3<f32>, t: f32) -> vec3<f32> {
+    let source = clamp(enc, vec3<f32>(0.0), vec3<f32>(1.0));
+    let y = clamp(get_luma(source), 0.0, 1.0);
+    let amt = clamp(t, 0.0, 1.0);
+    let target_y = max(0.0, y - amt * 0.275 * pow(y, 1.88));
+    let gain = target_y / max(y, 1.0e-4);
+    return source * gain;
+}
+
+fn apply_highlight_compression_scalar(color: vec3<f32>, t: f32) -> vec3<f32> {
+    return srgb_to_linear(apply_highlight_compression_scalar_encoded(linear_to_srgb_extended(color), t));
 }
 
 fn apply_tonal_adjustments_v2(
@@ -1075,12 +1092,23 @@ fn apply_highlights_adjustment(
 ) -> vec3<f32> {
     if (highlights_adj == 0.0) { return color_in; }
     if (adjustments.global.process_version >= 2u) {
+        if (highlights_adj < 0.0) {
+            // The compression constants were fitted against Resolve's
+            // highlight slider at MINIMUM, i.e. amt = 1.0 -- measured on the
+            // grey ramps of the reference chart, the fit lands within a few
+            // thousandths of their curve (1.0 -> 0.725 exactly). But the UI
+            // slider divides by SCALES.highlights = 120, so -100 arrives
+            // here as -0.8333 and the curve under-compressed by up to 12
+            // code values near white. x1.2 puts slider minimum exactly on
+            // Resolve's, the same convention the shadow lift uses.
+            return apply_highlight_compression_scalar(color_in, -highlights_adj * 1.2);
+        }
+
         var lab = linear_to_oklab(max(color_in, vec3<f32>(0.0)));
         let t = clamp(lab.x, 0.0, 1.0);
-        // Wide, smooth zone weight: the blotch-maker was a steep mask edge
-        // meeting clipped, chroma-less pixels.
-        // Zone weight from the NEIGHBORHOOD, so compression is locally
-        // uniform and texture inside bright regions survives.
+
+        // Positive highlights still use the local lightness driver so bright
+        // regions glow together instead of clipping pixel-by-pixel.
         var nb_linear: vec3<f32>;
         if (is_raw == 1u) {
             nb_linear = neighborhood_input_space;
@@ -1090,59 +1118,10 @@ fn apply_highlights_adjustment(
         let l_base_h = clamp(linear_to_oklab(max(nb_linear, vec3<f32>(0.0))).x, 0.0, 1.2);
         let driver_h = mix(t, l_base_h, 0.75);
         let mask = smoothstep(0.45, 1.0, driver_h);
-        if (highlights_adj < 0.0) {
-            // Monotone shoulder: L above the knee is remapped through a
-            // rational compressor with unit slope at the knee. Tone order
-            // can never invert (the old mask-scaled gain pulled brighter
-            // pixels BELOW darker ones at strong settings) and midtones
-            // sit below the knee, untouched.
-            let amt = min(-highlights_adj, 1.0);
-            let knee = select(0.56, 0.70, is_raw == 1u);
-            let span = 0.30;
-            if (lab.x > knee) {
-                let x = (lab.x - knee) / span;
-                let c = 0.60 * amt;
-                let shoulder = knee + span * (x / (1.0 + c * x * (2.0 + x) / (1.0 + x)));
-                // The compressor's top-end slope flattens texture inside
-                // bright regions; restore part of the pixel-vs-neighborhood
-                // detail so recovered skies keep their clouds. The term
-                // fades in ABOVE the knee (a hard gate speckled cloud
-                // edges) and the detail is clamped so partially-clipped
-                // edge pixels can't take individual jolts.
-                let restore_zone = smoothstep(0.68, 0.92, l_base_h)
-                    * smoothstep(knee, knee + 0.14, lab.x);
-                let detail = clamp(t - min(l_base_h, 1.0), -0.12, 0.12);
-                lab.x = shoulder + detail * 0.5 * amt * restore_zone;
-            }
 
-            // Clipped pixels carry no color of their own — when pulled
-            // down they'd surface as gray/white blotches. Reconstruct
-            // their chroma from the local neighborhood instead (the
-            // blurred image is already on hand), scaled by how clipped
-            // the pixel actually is.
-            var neighborhood_linear: vec3<f32>;
-            if (is_raw == 1u) {
-                neighborhood_linear = neighborhood_input_space;
-            } else {
-                neighborhood_linear = srgb_to_linear(neighborhood_input_space);
-            }
-            let min_ch = min(color_in.r, min(color_in.g, color_in.b));
-            let clipped = smoothstep(0.82, 1.0, min_ch);
-            if (clipped > 0.001) {
-                let blab = linear_to_oklab(max(neighborhood_linear, vec3<f32>(0.0)));
-                // The neighborhood blur includes the blown region itself,
-                // diluting its chroma — amplify to compensate. Near truly
-                // neutral surroundings the absolute chroma stays tiny, so
-                // this cannot invent color that is not there.
-                let inherit = clipped * min(-highlights_adj, 1.0);
-                lab.y = mix(lab.y, blab.y * 3.2, inherit);
-                lab.z = mix(lab.z, blab.z * 3.2, inherit);
-            }
-        } else {
-            // Brighten with a clip-resistant approach: the push fades as
-            // L nears white, so +100 glows instead of blowing out.
-            lab.x = lab.x + highlights_adj * 0.7 * mask * max(1.02 - t, 0.0);
-        }
+        // Brighten with a clip-resistant approach: the push fades as
+        // L nears white, so +100 glows instead of blowing out.
+        lab.x = lab.x + highlights_adj * 0.7 * mask * max(1.02 - t, 0.0);
         return compress_gamut_soft(oklab_to_linear(lab));
     }
 
@@ -1892,6 +1871,43 @@ fn no_tonemap(c: vec3<f32>) -> vec3<f32> {
     return c;
 }
 
+fn apply_raw_resolve_display_match(c: vec3<f32>) -> vec3<f32> {
+    // Fitted from a no-edit RAW pair exported through DaVinci Resolve and
+    // RapidRAW. The main error was display-space chroma, not scene-linear
+    // exposure: Resolve's render was about 23% more saturated overall, with
+    // much warmer yellow/orange highlights.
+    let source = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
+    var matched = vec3<f32>(
+        dot(source, vec3<f32>(1.23379687, -0.08049921, -0.04131304)) - 0.02269294,
+        dot(source, vec3<f32>(-0.03429803, 1.08902969, 0.05548705)) - 0.01958838,
+        dot(source, vec3<f32>(0.38266230, -1.08934827, 1.72959885)) - 0.01445909,
+    );
+    matched = clamp(matched, vec3<f32>(0.0), vec3<f32>(1.0));
+
+    let source_luma = get_luma(source);
+    let highlight = smoothstep(0.70, 0.88, source_luma);
+    let clipped_core = smoothstep(0.94, 0.995, source_luma);
+    var max_c = max(matched.r, max(matched.g, matched.b));
+    var min_c = min(matched.r, min(matched.g, matched.b));
+    var chroma = (max_c - min_c) / max(max_c, 1.0e-5);
+
+    // Near-white clipped highlights in RapidRAW were landing pink/gray
+    // while Resolve keeps a luminous white-yellow core.
+    let neutral_core = clipped_core * (1.0 - smoothstep(0.08, 0.18, chroma)) * 0.65;
+    matched = mix(matched, vec3<f32>(1.0), neutral_core);
+
+    max_c = max(matched.r, max(matched.g, matched.b));
+    min_c = min(matched.r, min(matched.g, matched.b));
+    chroma = (max_c - min_c) / max(max_c, 1.0e-5);
+    let warm_hue = clamp((matched.r - matched.b) * 2.0 + (matched.g - matched.b) * 0.8, 0.0, 1.0);
+    let warm_highlight = warm_hue * clipped_core * smoothstep(0.08, 0.42, chroma);
+    matched.r = mix(matched.r, 1.0, warm_highlight * 0.30);
+    matched.g = mix(matched.g, 1.0, warm_highlight * 0.72);
+    matched.b *= 1.0 - warm_highlight * 0.28;
+
+    return clamp(matched, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
 fn is_default_curve(points: array<Point, 16>, count: u32) -> bool {
     if (count < 2u) {
         return false;
@@ -2285,6 +2301,19 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         HslColor(h6_h, h6_s, h6_l, 0.0), HslColor(h7_h, h7_s, h7_l, 0.0)
     );
 
+    let raw_film_sim_display_pipeline =
+        is_raw == 1u &&
+        adjustments.global.tonemapper_mode == 0u &&
+        adjustments.global.process_version >= 2u &&
+        adjustments.global.has_lut == 1u &&
+        adjustments.global.lut_input_space == 1u;
+    let apply_late_shadow_lift = raw_film_sim_display_pipeline && t_shadows > 0.0;
+    let apply_late_highlight_compression = raw_film_sim_display_pipeline && t_highlights < 0.0;
+    let tonal_shadows = select(t_shadows, 0.0, apply_late_shadow_lift);
+    let tonal_highlights = select(t_highlights, 0.0, apply_late_highlight_compression);
+    let late_shadow_lift = select(0.0, t_shadows, apply_late_shadow_lift);
+    let late_highlight_compression = select(0.0, -t_highlights, apply_late_highlight_compression);
+
     initial_linear_rgb = apply_noise_reduction(
         initial_linear_rgb, absolute_coord_i,
         t_luma_nr, t_color_nr, scale, is_raw
@@ -2363,8 +2392,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     composite_rgb_linear = apply_white_balance(composite_rgb_linear, t_temperature, t_tint);
     composite_rgb_linear = apply_color_wheels(composite_rgb_linear, t_cw_lift, t_cw_gamma, t_cw_gain, t_cw_offset);
     composite_rgb_linear = apply_filmic_exposure(composite_rgb_linear, t_brightness);
-    composite_rgb_linear = apply_tonal_adjustments(composite_rgb_linear, tonal_blurred, structure_blurred, is_raw, t_contrast, t_shadows, t_whites, t_blacks, t_pivot);
-    composite_rgb_linear = apply_highlights_adjustment(composite_rgb_linear, tonal_blurred, structure_blurred, is_raw, t_highlights);
+    composite_rgb_linear = apply_tonal_adjustments(composite_rgb_linear, tonal_blurred, structure_blurred, is_raw, t_contrast, tonal_shadows, t_whites, t_blacks, t_pivot);
+    composite_rgb_linear = apply_highlights_adjustment(composite_rgb_linear, tonal_blurred, structure_blurred, is_raw, tonal_highlights);
     composite_rgb_linear = apply_color_calibration(composite_rgb_linear, adjustments.global.color_calibration);
     composite_rgb_linear = apply_hsl_panel(composite_rgb_linear, final_hsl, absolute_coord_i);
     composite_rgb_linear = apply_hue_shift(composite_rgb_linear, t_hue);
@@ -2465,6 +2494,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         const CONTRAST_MIX: f32 = 0.75;
         let contrast_curve = srgb_emulated * srgb_emulated * (3.0 - 2.0 * srgb_emulated);
         base_srgb = mix(srgb_emulated, contrast_curve, CONTRAST_MIX);
+        if (adjustments.global.process_version >= 2u && !raw_film_sim_display_pipeline) {
+            base_srgb = apply_raw_resolve_display_match(base_srgb);
+        }
     } else {
         base_srgb = linear_to_srgb(composite_rgb_linear);
     }
@@ -2509,6 +2541,20 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             lut_color = sample_lut_tetrahedral(final_rgb);
         }
         final_rgb = mix(final_rgb, lut_color, adjustments.global.lut_intensity);
+    }
+
+    if (raw_film_sim_display_pipeline) {
+        final_rgb = apply_raw_resolve_display_match(final_rgb);
+    }
+
+    if (late_shadow_lift > 0.0) {
+        final_rgb = apply_resolve_shadow_lift_encoded(final_rgb, late_shadow_lift * 1.2);
+    }
+
+    if (late_highlight_compression > 0.0) {
+        // x1.2 for the same reason as the late shadow lift above: the slider
+        // divides by 120, and the curve was fitted with slider-min == 1.0.
+        final_rgb = apply_highlight_compression_scalar_encoded(final_rgb, late_highlight_compression * 1.2);
     }
 
     if (adjustments.global.grain_amount > 0.0) {

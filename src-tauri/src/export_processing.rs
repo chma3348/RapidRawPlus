@@ -26,7 +26,7 @@ use crate::image_loader::{
 use crate::image_processing::{
     AllAdjustments, Crop, GpuContext, RenderRequest, downscale_f32_image,
     get_all_adjustments_from_json, get_or_init_gpu_context, process_and_get_dynamic_image,
-    resolve_tonemapper_override_from_handle,
+    render_adjustments_for_empty, resolve_tonemapper_override_from_handle,
 };
 use crate::lut_processing::{
     convert_image_to_cube_lut, generate_identity_lut_image, get_or_load_lut,
@@ -223,16 +223,18 @@ pub(crate) fn process_image_for_export_pipeline(
     debug_tag: &str,
     app_handle: &tauri::AppHandle,
 ) -> Result<DynamicImage, String> {
+    let render_adjustments_cow = render_adjustments_for_empty(js_adjustments);
+    let render_adjustments = render_adjustments_cow.as_ref();
     let (transformed_image, unscaled_crop_offset) =
-        apply_all_transformations(Cow::Borrowed(base_image), js_adjustments);
+        apply_all_transformations(Cow::Borrowed(base_image), render_adjustments);
     let (img_w, img_h) = transformed_image.dimensions();
 
-    let mask_definitions: Vec<MaskDefinition> = js_adjustments
+    let mask_definitions: Vec<MaskDefinition> = render_adjustments
         .get("masks")
         .and_then(|m| serde_json::from_value(m.clone()).ok())
         .unwrap_or_default();
 
-    let warped_image = resolve_warped_image_for_masks(state, js_adjustments, &mask_definitions);
+    let warped_image = resolve_warped_image_for_masks(state, render_adjustments, &mask_definitions);
     let mask_bitmaps: Vec<ImageBuffer<Luma<u8>, Vec<u8>>> = mask_definitions
         .iter()
         .filter_map(|def| {
@@ -248,13 +250,14 @@ pub(crate) fn process_image_for_export_pipeline(
         .collect();
 
     let tm_override = resolve_tonemapper_override_from_handle(app_handle, is_raw);
-    let mut all_adjustments = get_all_adjustments_from_json(js_adjustments, is_raw, tm_override);
+    let mut all_adjustments =
+        get_all_adjustments_from_json(render_adjustments, is_raw, tm_override);
     all_adjustments.global.show_clipping = 0;
 
-    let lut_path = js_adjustments["lutPath"].as_str();
+    let lut_path = render_adjustments["lutPath"].as_str();
     let lut = lut_path.and_then(|p| get_or_load_lut(state, p).ok());
 
-    let unique_hash = calculate_full_job_hash(path, js_adjustments);
+    let unique_hash = calculate_full_job_hash(path, render_adjustments);
 
     process_and_get_dynamic_image(
         context,
@@ -482,15 +485,17 @@ fn export_masks_for_image(
     is_raw: bool,
     app_handle: &tauri::AppHandle,
 ) -> Result<(), String> {
+    let render_adjustments_cow = render_adjustments_for_empty(js_adjustments);
+    let render_adjustments = render_adjustments_cow.as_ref();
     let (transformed_image, unscaled_crop_offset) =
-        apply_all_transformations(Cow::Borrowed(base_image), js_adjustments);
+        apply_all_transformations(Cow::Borrowed(base_image), render_adjustments);
     let (img_w, img_h) = transformed_image.dimensions();
-    let mask_definitions: Vec<MaskDefinition> = js_adjustments
+    let mask_definitions: Vec<MaskDefinition> = render_adjustments
         .get("masks")
         .and_then(|m| serde_json::from_value(m.clone()).ok())
         .unwrap_or_default();
 
-    let warped_image = resolve_warped_image_for_masks(state, js_adjustments, &mask_definitions);
+    let warped_image = resolve_warped_image_for_masks(state, render_adjustments, &mask_definitions);
     let mask_bitmaps: Vec<ImageBuffer<Luma<u8>, Vec<u8>>> = mask_definitions
         .iter()
         .filter_map(|def| {
@@ -507,10 +512,11 @@ fn export_masks_for_image(
 
     if !mask_bitmaps.is_empty() {
         let tm_override = resolve_tonemapper_override_from_handle(app_handle, is_raw);
-        let all_adjustments = get_all_adjustments_from_json(js_adjustments, is_raw, tm_override);
-        let lut_path = js_adjustments["lutPath"].as_str();
+        let all_adjustments =
+            get_all_adjustments_from_json(render_adjustments, is_raw, tm_override);
+        let lut_path = render_adjustments["lutPath"].as_str();
         let lut = lut_path.and_then(|p| get_or_load_lut(state, p).ok());
-        let unique_hash = calculate_full_job_hash(source_path_str, js_adjustments);
+        let unique_hash = calculate_full_job_hash(source_path_str, render_adjustments);
         let output_dir = output_path_obj.parent().unwrap_or(output_path_obj);
         let stem = output_path_obj
             .file_stem()
@@ -595,9 +601,11 @@ fn export_adjustments_as_lut(
 ) -> Result<Vec<u8>, String> {
     let lut_size = 33;
     let identity_image = generate_identity_lut_image(lut_size);
+    let render_adjustments_cow = render_adjustments_for_empty(js_adjustments);
+    let render_adjustments = render_adjustments_cow.as_ref();
 
     let tm_override = resolve_tonemapper_override_from_handle(app_handle, false);
-    let mut all_adjustments = get_all_adjustments_from_json(js_adjustments, false, tm_override);
+    let mut all_adjustments = get_all_adjustments_from_json(render_adjustments, false, tm_override);
 
     all_adjustments.global.show_clipping = 0;
     all_adjustments.global.vignette_amount = 0.0;
@@ -615,9 +623,9 @@ fn export_adjustments_as_lut(
     all_adjustments.global.chromatic_aberration_red_cyan = 0.0;
     all_adjustments.global.chromatic_aberration_blue_yellow = 0.0;
 
-    let lut_path = js_adjustments["lutPath"].as_str();
+    let lut_path = render_adjustments["lutPath"].as_str();
     let lut = lut_path.and_then(|p| get_or_load_lut(state, p).ok());
-    let unique_hash = calculate_full_job_hash(source_path_str, js_adjustments);
+    let unique_hash = calculate_full_job_hash(source_path_str, render_adjustments);
 
     let processed_lut = process_and_get_dynamic_image(
         context,
@@ -1057,6 +1065,7 @@ pub async fn estimate_export_sizes(
             .ok_or("No original image loaded")?;
         let mut adjustments_clone = current_edit_adjustments.clone().unwrap();
         hydrate_adjustments(&state, &mut adjustments_clone);
+        let adjustments_clone = render_adjustments_for_empty(&adjustments_clone).into_owned();
 
         let new_transform_hash = calculate_transform_hash(&adjustments_clone);
         let cached_preview_lock = state.cached_preview.lock().unwrap();
@@ -1165,7 +1174,7 @@ pub async fn estimate_export_sizes(
         (preview_byte_size as f64 * pixel_ratio) as usize
     } else {
         let metadata = crate::exif_processing::load_sidecar(&sidecar_path);
-        let mut js_adjustments = metadata.adjustments;
+        let mut js_adjustments = render_adjustments_for_empty(&metadata.adjustments).into_owned();
 
         const ESTIMATE_DIM: u32 = 1280;
 

@@ -33,12 +33,12 @@ use crate::exif_processing;
 use crate::formats::{is_raw_file, is_supported_image_file};
 use crate::gpu_processing;
 use crate::image_loader;
-use crate::image_processing::GpuContext;
 use crate::image_processing::{
     Crop, ImageMetadata, apply_coarse_rotation, apply_cpu_default_raw_processing, apply_crop,
     apply_flip, apply_geometry_warp, apply_rotation, auto_results_to_json,
-    get_all_adjustments_from_json, perform_auto_analysis,
+    get_all_adjustments_from_json, perform_auto_analysis, render_adjustments_for_empty,
 };
+use crate::image_processing::{GpuContext, RenderRequest};
 use crate::mask_generation::MaskDefinition;
 use crate::preset_converter;
 use crate::tagging::COLOR_TAG_PREFIX;
@@ -1085,16 +1085,19 @@ pub fn generate_thumbnail_data(
         .as_ref()
         .map_or(serde_json::Value::Null, |m| m.adjustments.clone());
 
-    if let (Some(context), Some(meta)) = (gpu_context, metadata)
-        && !meta.adjustments.is_null()
+    if let Some(context) = gpu_context
+        && metadata.is_some()
     {
         let state = app_handle.state::<AppState>();
         let settings = load_settings(app_handle.clone()).unwrap_or_default();
         let target_res = settings.thumbnail_resolution.unwrap_or(720);
+        let render_adjustments_cow = render_adjustments_for_empty(&adjustments);
+        let render_adjustments = render_adjustments_cow.as_ref();
 
-        let geometry_hash = calculate_geometry_hash(&meta.adjustments);
+        let geometry_hash = calculate_geometry_hash(render_adjustments);
 
-        let crop_data: Option<Crop> = serde_json::from_value(meta.adjustments["crop"].clone()).ok();
+        let crop_data: Option<Crop> =
+            serde_json::from_value(render_adjustments["crop"].clone()).ok();
 
         let cached_base: Option<(DynamicImage, f32)> = {
             let cache = state.thumbnail_geometry_cache.lock().unwrap();
@@ -1174,9 +1177,9 @@ pub fn generate_thumbnail_data(
             };
 
             let warped_image =
-                apply_geometry_warp(Cow::Borrowed(&composite_image), &meta.adjustments);
+                apply_geometry_warp(Cow::Borrowed(&composite_image), render_adjustments);
             let orientation_steps =
-                meta.adjustments["orientationSteps"].as_u64().unwrap_or(0) as u8;
+                render_adjustments["orientationSteps"].as_u64().unwrap_or(0) as u8;
             let coarse_rotated_image = apply_coarse_rotation(warped_image, orientation_steps);
 
             let (full_w, full_h) = coarse_rotated_image.dimensions();
@@ -1225,11 +1228,11 @@ pub fn generate_thumbnail_data(
             (base, total_scale)
         };
 
-        let rotation_degrees = meta.adjustments["rotation"].as_f64().unwrap_or(0.0) as f32;
-        let flip_horizontal = meta.adjustments["flipHorizontal"]
+        let rotation_degrees = render_adjustments["rotation"].as_f64().unwrap_or(0.0) as f32;
+        let flip_horizontal = render_adjustments["flipHorizontal"]
             .as_bool()
             .unwrap_or(false);
-        let flip_vertical = meta.adjustments["flipVertical"].as_bool().unwrap_or(false);
+        let flip_vertical = render_adjustments["flipVertical"].as_bool().unwrap_or(false);
 
         let flipped_image = apply_flip(Cow::Owned(processing_base), flip_horizontal, flip_vertical);
         let rotated_image = apply_rotation(flipped_image, rotation_degrees);
@@ -1250,8 +1253,7 @@ pub fn generate_thumbnail_data(
         let (preview_w, preview_h) = cropped_preview.dimensions();
         let unscaled_crop_offset = crop_data.map_or((0.0, 0.0), |c| (c.x as f32, c.y as f32));
 
-        let mask_definitions: Vec<MaskDefinition> = meta
-            .adjustments
+        let mask_definitions: Vec<MaskDefinition> = render_adjustments
             .get("masks")
             .and_then(|m| serde_json::from_value(m.clone()).ok())
             .unwrap_or_else(Vec::new);
@@ -1269,14 +1271,15 @@ pub fn generate_thumbnail_data(
                         unscaled_crop_offset.0 * total_scale,
                         unscaled_crop_offset.1 * total_scale,
                     ),
-                    &meta.adjustments,
+                    render_adjustments,
                 )
             })
             .collect();
 
         let tm_override = crate::image_processing::resolve_tonemapper_override(&settings, is_raw);
-        let gpu_adjustments = get_all_adjustments_from_json(&meta.adjustments, is_raw, tm_override);
-        let lut_path = meta.adjustments["lutPath"].as_str();
+        let gpu_adjustments =
+            get_all_adjustments_from_json(render_adjustments, is_raw, tm_override);
+        let lut_path = render_adjustments["lutPath"].as_str();
         let lut = lut_path.and_then(|p| {
             let mut cache = state.lut_cache.lock().unwrap();
             if let Some(cached_lut) = cache.get(p) {
@@ -1292,7 +1295,7 @@ pub fn generate_thumbnail_data(
 
         let mut hasher = DefaultHasher::new();
         path_str.hash(&mut hasher);
-        meta.adjustments.to_string().hash(&mut hasher);
+        render_adjustments.to_string().hash(&mut hasher);
         let unique_hash = hasher.finish();
 
         if let Ok(processed_image) = gpu_processing::process_and_get_dynamic_image(
@@ -1343,7 +1346,49 @@ pub fn generate_thumbnail_data(
         }
     };
 
-    if adjustments.is_null() {
+    let adjustments_are_empty =
+        adjustments.is_null() || adjustments.as_object().is_some_and(|obj| obj.is_empty());
+    let mut rendered_neutral_on_gpu = false;
+
+    if adjustments_are_empty
+        && let Some(context) = gpu_context
+    {
+        let state = app_handle.state::<AppState>();
+        let render_adjustments_cow = render_adjustments_for_empty(&adjustments);
+        let render_adjustments = render_adjustments_cow.as_ref();
+        let tm_override = crate::image_processing::resolve_tonemapper_override(&settings, is_raw);
+        let gpu_adjustments =
+            get_all_adjustments_from_json(render_adjustments, is_raw, tm_override);
+
+        let mut hasher = DefaultHasher::new();
+        source_path_str.hash(&mut hasher);
+        render_adjustments.to_string().hash(&mut hasher);
+        let unique_hash = hasher.finish();
+
+        match gpu_processing::process_and_get_dynamic_image(
+            context,
+            &state,
+            &final_image,
+            unique_hash,
+            RenderRequest {
+                adjustments: gpu_adjustments,
+                mask_bitmaps: &[],
+                lut: None,
+                roi: None,
+            },
+            "generate_thumbnail_data_neutral",
+        ) {
+            Ok(processed_image) => {
+                final_image = processed_image;
+                rendered_neutral_on_gpu = true;
+            }
+            Err(e) => {
+                log::warn!("Failed to render neutral thumbnail on GPU: {}", e);
+            }
+        }
+    }
+
+    if adjustments_are_empty && !rendered_neutral_on_gpu {
         let default_tm = if is_raw {
             settings.default_raw_tonemapper.as_deref().unwrap_or("agx")
         } else {

@@ -22,8 +22,8 @@ use tauri::{AppHandle, Manager, State};
 use crate::AppState;
 use crate::cache_utils::calculate_transform_hash;
 use crate::image_processing::{
-    RenderRequest, get_all_adjustments_from_json, process_and_get_dynamic_image,
-    resolve_tonemapper_override_from_handle,
+    RenderRequest, default_render_adjustments_json, get_all_adjustments_from_json,
+    process_and_get_dynamic_image, resolve_tonemapper_override_from_handle,
 };
 
 #[derive(Debug, Clone)]
@@ -538,12 +538,14 @@ pub fn generate_lut_previews(
         .ok_or("No original image loaded for LUT previews")?;
     let is_raw = loaded_image.is_raw;
 
-    let base_json = serde_json::json!({});
+    let base_json = default_render_adjustments_json();
     let (base_image, _scale, _offset) =
         crate::generate_transformed_preview(&state, &loaded_image, &base_json, size)?;
 
     let tm_override = resolve_tonemapper_override_from_handle(&app_handle, is_raw);
     let lut_json = serde_json::json!({
+        "toneMapper": "basic",
+        "processVersion": 2,
         "lutPath": "preview",
         "lutIntensity": 100,
         "sectionVisibility": { "effects": true }

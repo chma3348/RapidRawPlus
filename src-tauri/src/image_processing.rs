@@ -1857,6 +1857,23 @@ pub fn apply_cpu_agx_tonemap(image: &mut DynamicImage) {
     *image = DynamicImage::ImageRgb32F(f32_image);
 }
 
+pub fn default_render_adjustments_json() -> serde_json::Value {
+    serde_json::json!({
+        "toneMapper": "basic",
+        "processVersion": 2
+    })
+}
+
+pub fn render_adjustments_for_empty(
+    adj: &serde_json::Value,
+) -> std::borrow::Cow<'_, serde_json::Value> {
+    if adj.is_null() || adj.as_object().is_some_and(|obj| obj.is_empty()) {
+        std::borrow::Cow::Owned(default_render_adjustments_json())
+    } else {
+        std::borrow::Cow::Borrowed(adj)
+    }
+}
+
 pub fn is_image_edited(
     adj: &serde_json::Value,
     is_raw: bool,
@@ -1922,9 +1939,12 @@ pub fn is_image_edited(
         return true;
     }
 
-    let current_adj = get_all_adjustments_from_json(adj, is_raw, tonemapper_override);
+    let current_render_adj = render_adjustments_for_empty(adj);
+    let default_render_adj = default_render_adjustments_json();
+    let current_adj =
+        get_all_adjustments_from_json(&current_render_adj, is_raw, tonemapper_override);
     let default_adj =
-        get_all_adjustments_from_json(&serde_json::json!({}), is_raw, tonemapper_override);
+        get_all_adjustments_from_json(&default_render_adj, is_raw, tonemapper_override);
 
     bytemuck::bytes_of(&current_adj) != bytemuck::bytes_of(&default_adj)
 }
@@ -3604,5 +3624,22 @@ mod pro_color_tests {
         assert!((m.contrast_pivot - 0.25).abs() < 1e-5);
         let m2 = get_mask_adjustments_from_json(&json!({}));
         assert_eq!(m2.contrast_pivot, 0.0, "absent pivot must be neutral");
+    }
+
+    #[test]
+    fn empty_adjustments_are_current_neutral_render() {
+        for adj in [serde_json::Value::Null, json!({})] {
+            let render = render_adjustments_for_empty(&adj);
+            assert_eq!(render["toneMapper"], "basic");
+            assert_eq!(render["processVersion"], 2);
+            assert!(!is_image_edited(&adj, true, None));
+        }
+
+        let legacy = json!({"brightness": 0.0});
+        let render = render_adjustments_for_empty(&legacy);
+        assert!(
+            render.get("processVersion").is_none(),
+            "non-empty legacy sidecars must keep their implicit v1 render"
+        );
     }
 }

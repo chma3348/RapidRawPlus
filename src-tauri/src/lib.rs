@@ -87,8 +87,9 @@ use crate::image_loader::{
 use crate::image_processing::{
     Crop, GeometryParams, RenderRequest, apply_coarse_rotation, apply_cpu_default_raw_processing,
     apply_flip, apply_geometry_warp, apply_linear_to_srgb, apply_srgb_to_linear,
-    downscale_f32_image, get_all_adjustments_from_json, get_or_init_gpu_context,
-    process_and_get_dynamic_image, resolve_tonemapper_override,
+    default_render_adjustments_json, downscale_f32_image, get_all_adjustments_from_json,
+    get_or_init_gpu_context, process_and_get_dynamic_image, render_adjustments_for_empty,
+    resolve_tonemapper_override,
     resolve_tonemapper_override_from_handle, warp_image_geometry,
 };
 use crate::mask_generation::{
@@ -329,7 +330,7 @@ fn process_preview_job(
     let fn_start = std::time::Instant::now();
     let context = get_or_init_gpu_context(&state, app_handle)?;
     hydrate_adjustments(&state, &mut adjustments_json);
-    let adjustments_clone = adjustments_json;
+    let adjustments_clone = render_adjustments_for_empty(&adjustments_json).into_owned();
 
     let loaded_image_guard = state.original_image.lock().unwrap();
     let loaded_image = loaded_image_guard
@@ -718,6 +719,7 @@ fn generate_uncropped_preview(
     let context = get_or_init_gpu_context(&state, &app_handle)?;
     let mut adjustments_clone = js_adjustments.clone();
     hydrate_adjustments(&state, &mut adjustments_clone);
+    let adjustments_clone = render_adjustments_for_empty(&adjustments_clone).into_owned();
 
     let loaded_image = state
         .original_image
@@ -858,15 +860,10 @@ fn generate_original_transformed_preview(
     let mut adjustments_clone = js_adjustments.clone();
     hydrate_adjustments(&state, &mut adjustments_clone);
 
-    let mut image_for_preview = loaded_image.image.as_ref().clone();
-    if loaded_image.is_raw {
-        apply_cpu_default_raw_processing(&mut image_for_preview);
-    }
-
     let (transformed_full_res, _unscaled_crop_offset) =
-        apply_all_transformations(Cow::Borrowed(&image_for_preview), &adjustments_clone);
+        apply_all_transformations(Cow::Borrowed(loaded_image.image.as_ref()), &adjustments_clone);
 
-    let settings = load_settings(app_handle).unwrap_or_default();
+    let settings = load_settings(app_handle.clone()).unwrap_or_default();
     let default_dim = settings.editor_preview_resolution.unwrap_or(1920);
     let preview_dim = target_resolution.unwrap_or(default_dim);
 
@@ -877,8 +874,32 @@ fn generate_original_transformed_preview(
         transformed_full_res.into_owned()
     };
 
-    let (width, height) = transformed_image.dimensions();
-    let rgb_pixels = transformed_image.to_rgb8().into_vec();
+    let display_image = if loaded_image.is_raw {
+        let context = get_or_init_gpu_context(&state, &app_handle)?;
+        let neutral_adjustments = default_render_adjustments_json();
+        let tm_override = resolve_tonemapper_override_from_handle(&app_handle, true);
+        let render_adjustments =
+            get_all_adjustments_from_json(&neutral_adjustments, true, tm_override);
+        let visual_hash = calculate_visual_hash(&loaded_image.path, &adjustments_clone);
+        process_and_get_dynamic_image(
+            &context,
+            &state,
+            &transformed_image,
+            visual_hash,
+            RenderRequest {
+                adjustments: render_adjustments,
+                mask_bitmaps: &[],
+                lut: None,
+                roi: None,
+            },
+            "generate_original_transformed_preview",
+        )?
+    } else {
+        transformed_image
+    };
+
+    let (width, height) = display_image.dimensions();
+    let rgb_pixels = display_image.to_rgb8().into_vec();
 
     let bytes = Encoder::new(Preset::BaselineFastest)
         .quality(80)
@@ -964,6 +985,7 @@ async fn preview_geometry_transform(
                     }
                 }
             }
+            let temp_adjustments = render_adjustments_for_empty(&temp_adjustments).into_owned();
 
             let tm_override = resolve_tonemapper_override_from_handle(&app_handle, is_raw);
             let all_adjustments =
@@ -1107,6 +1129,8 @@ fn generate_preset_preview(
     app_handle: tauri::AppHandle,
 ) -> Result<Response, String> {
     let context = get_or_init_gpu_context(&state, &app_handle)?;
+    let render_adjustments_cow = render_adjustments_for_empty(&js_adjustments);
+    let render_adjustments = render_adjustments_cow.as_ref();
 
     let loaded_image = state
         .original_image
@@ -1115,16 +1139,16 @@ fn generate_preset_preview(
         .clone()
         .ok_or("No original image loaded for preset preview")?;
     let is_raw = loaded_image.is_raw;
-    let unique_hash = calculate_full_job_hash(&loaded_image.path, &js_adjustments);
+    let unique_hash = calculate_full_job_hash(&loaded_image.path, render_adjustments);
 
     const PRESET_PREVIEW_DIM: u32 = 400;
 
     let (preview_image, scale_for_gpu, unscaled_crop_offset) =
-        generate_transformed_preview(&state, &loaded_image, &js_adjustments, PRESET_PREVIEW_DIM)?;
+        generate_transformed_preview(&state, &loaded_image, render_adjustments, PRESET_PREVIEW_DIM)?;
 
     let (img_w, img_h) = preview_image.dimensions();
 
-    let mask_definitions: Vec<MaskDefinition> = js_adjustments
+    let mask_definitions: Vec<MaskDefinition> = render_adjustments
         .get("masks")
         .and_then(|m| serde_json::from_value(m.clone()).ok())
         .unwrap_or_default();
@@ -1144,14 +1168,14 @@ fn generate_preset_preview(
                 img_h,
                 scale_for_gpu,
                 scaled_crop_offset,
-                &js_adjustments,
+                render_adjustments,
             )
         })
         .collect();
 
     let tm_override = resolve_tonemapper_override_from_handle(&app_handle, is_raw);
-    let all_adjustments = get_all_adjustments_from_json(&js_adjustments, is_raw, tm_override);
-    let lut_path = js_adjustments["lutPath"].as_str();
+    let all_adjustments = get_all_adjustments_from_json(render_adjustments, is_raw, tm_override);
+    let lut_path = render_adjustments["lutPath"].as_str();
     let lut = lut_path.and_then(|p| lut_processing::get_or_load_lut(&state, p).ok());
 
     let processed_image = process_and_get_dynamic_image(
@@ -1252,7 +1276,7 @@ async fn generate_all_community_previews(
         let preset_hash = preset_hasher.finish();
 
         for (i, (base_image, is_raw, base_scale)) in base_thumbnails.iter().enumerate() {
-            let mut scaled_adjustments = js_adjustments.clone();
+            let mut scaled_adjustments = render_adjustments_for_empty(js_adjustments).into_owned();
             if let Some(crop_val) = scaled_adjustments.get_mut("crop")
                 && let Ok(c) = serde_json::from_value::<Crop>(crop_val.clone())
             {
@@ -1272,7 +1296,7 @@ async fn generate_all_community_previews(
             let mask_definitions: Vec<MaskDefinition> = scaled_adjustments
                 .get("masks")
                 .and_then(|m| serde_json::from_value(m.clone()).ok())
-                .unwrap_or_else(Vec::new);
+                .unwrap_or_default();
 
             let unscaled_crop_offset = js_adjustments
                 .get("crop")
@@ -1300,7 +1324,7 @@ async fn generate_all_community_previews(
             let tm_override = resolve_tonemapper_override_from_handle(&app_handle, *is_raw);
             let all_adjustments =
                 get_all_adjustments_from_json(&scaled_adjustments, *is_raw, tm_override);
-            let lut_path = js_adjustments["lutPath"].as_str();
+            let lut_path = scaled_adjustments["lutPath"].as_str();
             let lut = lut_path.and_then(|p| lut_processing::get_or_load_lut(&state, p).ok());
 
             let unique_hash = preset_hash.wrapping_add(i as u64);
@@ -1601,6 +1625,8 @@ fn generate_preview_for_path(
     app_handle: tauri::AppHandle,
 ) -> Result<Response, String> {
     let context = get_or_init_gpu_context(&state, &app_handle)?;
+    let render_adjustments_cow = render_adjustments_for_empty(&js_adjustments);
+    let render_adjustments = render_adjustments_cow.as_ref();
     let (source_path, _) = parse_virtual_path(&path);
     let source_path_str = source_path.to_string_lossy().to_string();
     let is_raw = is_raw_file(&source_path_str);
@@ -1610,7 +1636,7 @@ fn generate_preview_for_path(
         Ok(mmap) => load_and_composite(
             &mmap,
             &source_path_str,
-            &js_adjustments,
+            render_adjustments,
             false,
             &settings,
             None,
@@ -1626,7 +1652,7 @@ fn generate_preview_for_path(
             load_and_composite(
                 &bytes,
                 &source_path_str,
-                &js_adjustments,
+                render_adjustments,
                 false,
                 &settings,
                 None,
@@ -1636,14 +1662,14 @@ fn generate_preview_for_path(
     };
 
     let (transformed_image, unscaled_crop_offset) =
-        apply_all_transformations(Cow::Borrowed(&base_image), &js_adjustments);
+        apply_all_transformations(Cow::Borrowed(&base_image), render_adjustments);
     let (img_w, img_h) = transformed_image.dimensions();
-    let mask_definitions: Vec<MaskDefinition> = js_adjustments
+    let mask_definitions: Vec<MaskDefinition> = render_adjustments
         .get("masks")
         .and_then(|m| serde_json::from_value(m.clone()).ok())
         .unwrap_or_default();
 
-    let warped_image = resolve_warped_image_for_masks(&state, &js_adjustments, &mask_definitions);
+    let warped_image = resolve_warped_image_for_masks(&state, render_adjustments, &mask_definitions);
     let mask_bitmaps: Vec<ImageBuffer<Luma<u8>, Vec<u8>>> = mask_definitions
         .iter()
         .filter_map(|def| {
@@ -1659,10 +1685,10 @@ fn generate_preview_for_path(
         .collect();
 
     let tm_override = resolve_tonemapper_override(&settings, is_raw);
-    let all_adjustments = get_all_adjustments_from_json(&js_adjustments, is_raw, tm_override);
-    let lut_path = js_adjustments["lutPath"].as_str();
+    let all_adjustments = get_all_adjustments_from_json(render_adjustments, is_raw, tm_override);
+    let lut_path = render_adjustments["lutPath"].as_str();
     let lut = lut_path.and_then(|p| lut_processing::get_or_load_lut(&state, p).ok());
-    let unique_hash = calculate_full_job_hash(&source_path_str, &js_adjustments);
+    let unique_hash = calculate_full_job_hash(&source_path_str, render_adjustments);
     let final_image = process_and_get_dynamic_image(
         &context,
         &state,
