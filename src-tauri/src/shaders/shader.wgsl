@@ -815,17 +815,60 @@ fn apply_resolve_shadow_lift(color: vec3<f32>, t: f32) -> vec3<f32> {
     return srgb_to_linear(lifted);
 }
 
+// The fitted curve: how far a display-encoded luma is pulled down at strength
+// `amt`. Matches Resolve's highlight slider on the grey ramp to a few
+// thousandths (1.0 -> 0.725 at amt = 1.0).
+fn highlight_compressed_luma(y: f32, amt: f32) -> f32 {
+    return max(0.0, y - amt * 0.275 * pow(clamp(y, 0.0, 1.0), 1.88));
+}
+
 fn apply_highlight_compression_scalar_encoded(enc: vec3<f32>, t: f32) -> vec3<f32> {
     let source = clamp(enc, vec3<f32>(0.0), vec3<f32>(1.0));
     let y = clamp(get_luma(source), 0.0, 1.0);
     let amt = clamp(t, 0.0, 1.0);
-    let target_y = max(0.0, y - amt * 0.275 * pow(y, 1.88));
+    let gain = highlight_compressed_luma(y, amt) / max(y, 1.0e-4);
+    return source * gain;
+}
+
+// Detail-preserving compression. The plain curve above has slope ~0.55 across
+// the bright plateau, so it multiplies texture there by 0.55 -- a lit curtain
+// or cloud loses ~40% of its detail and turns to mush. Resolve keeps the
+// texture because it compresses the low-frequency TONE while leaving local
+// detail alone.
+//
+// So split the signal: `base` is a small-radius blur (the tonal blur already
+// bound for the tone tools), `detail` is the pixel's departure from it.
+// Compress only the base with the curve, then add the detail back at full
+// strength. On a flat plateau detail is ~0 and this equals the plain curve
+// (same tone match to Resolve); on textured highlights the detail rides
+// through undimmed, which is the 95%+ retention the plain curve throws away.
+fn apply_highlight_compression_detail_encoded(
+    enc: vec3<f32>,
+    base_enc: vec3<f32>,
+    t: f32,
+) -> vec3<f32> {
+    let source = clamp(enc, vec3<f32>(0.0), vec3<f32>(1.0));
+    let amt = clamp(t, 0.0, 1.0);
+    let y = clamp(get_luma(source), 0.0, 1.0);
+    let y_base = clamp(get_luma(clamp(base_enc, vec3<f32>(0.0), vec3<f32>(1.0))), 0.0, 1.0);
+    let detail = y - y_base;
+    // Compress the base tone, carry the detail through undimmed. Clamp keeps a
+    // bright textured peak from running away past white.
+    let target_y = clamp(highlight_compressed_luma(y_base, amt) + detail, 0.0, 1.0);
     let gain = target_y / max(y, 1.0e-4);
     return source * gain;
 }
 
 fn apply_highlight_compression_scalar(color: vec3<f32>, t: f32) -> vec3<f32> {
     return srgb_to_linear(apply_highlight_compression_scalar_encoded(linear_to_srgb_extended(color), t));
+}
+
+fn apply_highlight_compression_detail(color: vec3<f32>, base_linear: vec3<f32>, t: f32) -> vec3<f32> {
+    return srgb_to_linear(apply_highlight_compression_detail_encoded(
+        linear_to_srgb_extended(color),
+        linear_to_srgb_extended(base_linear),
+        t,
+    ));
 }
 
 fn apply_tonal_adjustments_v2(
@@ -1101,7 +1144,19 @@ fn apply_highlights_adjustment(
             // here as -0.8333 and the curve under-compressed by up to 12
             // code values near white. x1.2 puts slider minimum exactly on
             // Resolve's, the same convention the shadow lift uses.
-            return apply_highlight_compression_scalar(color_in, -highlights_adj * 1.2);
+            //
+            // Detail-preserving: compress the blurred base tone and add the
+            // pixel's local detail back undimmed, so bright texture (curtains,
+            // clouds) keeps ~95% of its contrast instead of the ~65% the plain
+            // per-pixel curve leaves. blurred_color_input_space is the r=3.5
+            // tonal blur.
+            var base_hc: vec3<f32>;
+            if (is_raw == 1u) {
+                base_hc = blurred_color_input_space;
+            } else {
+                base_hc = srgb_to_linear(blurred_color_input_space);
+            }
+            return apply_highlight_compression_detail(color_in, base_hc, -highlights_adj * 1.2);
         }
 
         var lab = linear_to_oklab(max(color_in, vec3<f32>(0.0)));
@@ -2554,7 +2609,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     if (late_highlight_compression > 0.0) {
         // x1.2 for the same reason as the late shadow lift above: the slider
         // divides by 120, and the curve was fitted with slider-min == 1.0.
-        final_rgb = apply_highlight_compression_scalar_encoded(final_rgb, late_highlight_compression * 1.2);
+        // Detail-preserving: final_rgb is display-encoded here, tonal_blurred
+        // is linear, so encode it as the base.
+        let base_hc = linear_to_srgb_extended(tonal_blurred);
+        final_rgb = apply_highlight_compression_detail_encoded(final_rgb, base_hc, late_highlight_compression * 1.2);
     }
 
     if (adjustments.global.grain_amount > 0.0) {

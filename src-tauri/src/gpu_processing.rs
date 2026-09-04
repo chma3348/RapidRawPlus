@@ -2427,3 +2427,79 @@ mod render_harness {
         println!("  rendered {}x{} -> {out}", result.width(), result.height());
     }
 }
+
+#[cfg(test)]
+mod highlight_detail_tests {
+    //! The negative-highlights path compresses the blurred BASE tone and adds
+    //! the pixel's local detail back undimmed, so bright texture survives
+    //! instead of turning to mush. These mirror the shader arithmetic (parsing
+    //! its constants) and assert the two properties that must hold together:
+    //! flat regions match the plain fitted curve (Resolve's grey ramp), and
+    //! textured regions keep their local contrast.
+    const SRC: &str = include_str!("shaders/shader.wgsl");
+
+    /// Parse `y - amt * A * y^E` constants out of `highlight_compressed_luma`.
+    fn curve_constants() -> (f32, f32) {
+        let i = SRC.find("fn highlight_compressed_luma").expect("fn missing");
+        let body = &SRC[i..i + 400];
+        let mul = body.find("amt * ").expect("amt term") + 6;
+        let a: f32 = body[mul..body[mul..].find(" *").unwrap() + mul].trim().parse().unwrap();
+        let powi = body.find("pow(clamp(y, 0.0, 1.0), ").expect("pow term") + 24;
+        let e: f32 = body[powi..body[powi..].find(')').unwrap() + powi].trim().parse().unwrap();
+        (a, e)
+    }
+
+    fn compressed(y: f32, amt: f32) -> f32 {
+        let (a, e) = curve_constants();
+        (y - amt * a * y.clamp(0.0, 1.0).powf(e)).max(0.0)
+    }
+
+    // Mirror of apply_highlight_compression_detail_encoded on luma.
+    fn detail_target(y: f32, y_base: f32, amt: f32) -> f32 {
+        (compressed(y_base, amt) + (y - y_base)).clamp(0.0, 1.0)
+    }
+
+    #[test]
+    fn flat_region_matches_the_plain_curve() {
+        // base == pixel on a flat region: detail is zero, so this must reduce
+        // to the fitted curve that matches Resolve's grey ramp.
+        for y in [0.5f32, 0.7, 0.85, 0.95, 1.0] {
+            assert!(
+                (detail_target(y, y, 1.0) - compressed(y, 1.0)).abs() < 1e-6,
+                "flat region must equal the plain curve at y={y}"
+            );
+        }
+    }
+
+    #[test]
+    fn texture_survives_better_than_the_plain_curve() {
+        // A small ripple on a bright plateau: measure the peak-to-trough it
+        // keeps. The plain per-pixel curve scales it by the curve slope
+        // (~0.55); the detail path carries it through nearly intact.
+        let amt = 1.0;
+        let base = 0.85f32;
+        let hi = base + 0.04;
+        let lo = base - 0.04;
+
+        let plain_contrast = compressed(hi, amt) - compressed(lo, amt);
+        let detail_contrast = detail_target(hi, base, amt) - detail_target(lo, base, amt);
+        let source_contrast = hi - lo;
+
+        assert!(
+            detail_contrast > plain_contrast * 1.4,
+            "detail path ({detail_contrast:.4}) must keep far more contrast than plain ({plain_contrast:.4})"
+        );
+        // ...but never amplify past the source (that would be a sharpening halo).
+        assert!(
+            detail_contrast <= source_contrast + 1e-6,
+            "detail must not exceed source contrast ({detail_contrast:.4} vs {source_contrast:.4})"
+        );
+    }
+
+    #[test]
+    fn still_compresses_the_overall_tone() {
+        // The whole point is compression: a bright plateau must still come
+        // down, detail preservation notwithstanding.
+        assert!(detail_target(0.95, 0.95, 1.0) < 0.90, "plateau must compress");
+    }
+}
