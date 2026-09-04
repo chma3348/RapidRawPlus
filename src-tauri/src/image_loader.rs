@@ -101,6 +101,7 @@ pub fn load_base_image_from_bytes(
                         &mut image,
                         color_nr_amount,
                         sharpening_amount,
+                        highlight_compression,
                     );
                     let duration = start.elapsed();
                     log::info!(
@@ -136,7 +137,8 @@ pub fn load_base_image_from_bytes(
             && (color_nr_amount > 0.0 || sharpening_amount > 0.0)
         {
             let start = Instant::now();
-            remove_raw_artifacts_and_enhance(&mut image, color_nr_amount, sharpening_amount);
+            // Display-referred: no headroom above 1.0 to protect.
+            remove_raw_artifacts_and_enhance(&mut image, color_nr_amount, sharpening_amount, 1.0);
             let duration = start.elapsed();
             log::info!(
                 "Enhancing non-RAW '{}' took {:?}",

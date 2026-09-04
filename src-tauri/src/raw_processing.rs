@@ -277,6 +277,34 @@ mod decode_probe {
     /// report what happens to the brightest pixels. Needs a real file, so it
     /// is ignored by default:
     ///   RAPIDRAW_TEST_RAW=/path/to.ARW cargo test --lib decode_probe -- --ignored --nocapture
+    /// Where does the brightness go? Report the max at each stage of loading.
+    #[test]
+    #[ignore]
+    fn brightness_bisect() {
+        let Ok(path) = std::env::var("RAPIDRAW_TEST_RAW") else { return };
+        let bytes = std::fs::read(&path).expect("read raw");
+        let stats = |label: &str, img: &image::DynamicImage| {
+            let rgb = img.to_rgba32f();
+            let mut mx: Vec<f32> = rgb.pixels().map(|p| p.0[0].max(p.0[1]).max(p.0[2])).collect();
+            mx.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let q = |f: f64| mx[((mx.len() - 1) as f64 * f) as usize];
+            println!(
+                "  {label:28} max {:.3}  p99.9 {:.3}  p99 {:.3}  p50 {:.3}  above 1.0: {:.3}%",
+                mx[mx.len() - 1], q(0.999), q(0.99), q(0.50),
+                100.0 * mx.iter().filter(|v| **v > 1.0).count() as f64 / mx.len() as f64
+            );
+        };
+        let developed = super::develop_raw_image(&bytes, false, 2.5, "auto".to_string(), None)
+            .expect("develop");
+        stats("after develop_raw_image", &developed);
+        let settings = crate::AppSettings::default();
+        let loaded = crate::image_loader::load_base_image_from_bytes(
+            &bytes, &path, false, &settings, None,
+        )
+        .expect("load");
+        stats("after load_base_image", &loaded);
+    }
+
     #[test]
     #[ignore]
     fn highlight_recovery_sweep() {

@@ -2628,11 +2628,20 @@ fn yc_to_rgb(y: f32, cb: f32, cr: f32) -> (f32, f32, f32) {
     (r, g, b)
 }
 
+/// `ceiling` is the largest value the image is allowed to hold. RAW carries
+/// highlight headroom above 1.0 -- that is the whole point of the recovery
+/// step in raw_processing -- and clamping to 1.0 here silently threw it away:
+/// measured on a sunset frame, develop_raw_image returned a max of 2.500 with
+/// 2% of pixels above 1.0, and this function handed back a max of exactly
+/// 1.000 with none. Everything highlight recovery reconstructed died one call
+/// later. Pass the recovery limit for RAW; display-referred images pass 1.0.
 pub fn remove_raw_artifacts_and_enhance(
     image: &mut DynamicImage,
     color_nr_inv_sigma: f32,
     sharpening_amount: f32,
+    ceiling: f32,
 ) {
+    let ceiling = ceiling.max(1.0);
     let mut buffer = image.to_rgb32f();
     let w = buffer.width() as usize;
     let h = buffer.height() as usize;
@@ -2728,15 +2737,15 @@ pub fn remove_raw_artifacts_and_enhance(
                     let (r, g, b) = yc_to_rgb(cy, out_cb, out_cr);
 
                     let o = x * 3;
-                    row[o] = r.clamp(0.0, 1.0);
-                    row[o + 1] = g.clamp(0.0, 1.0);
-                    row[o + 2] = b.clamp(0.0, 1.0);
+                    row[o] = r.clamp(0.0, ceiling);
+                    row[o + 1] = g.clamp(0.0, ceiling);
+                    row[o + 2] = b.clamp(0.0, ceiling);
                 }
             });
     }
 
     if sharpening_amount > 0.0 {
-        apply_gentle_detail_enhance(&mut buffer, &ycbcr_buffer, sharpening_amount);
+        apply_gentle_detail_enhance(&mut buffer, &ycbcr_buffer, sharpening_amount, ceiling);
     }
 
     *image = DynamicImage::ImageRgb32F(buffer);
@@ -2746,6 +2755,7 @@ fn apply_gentle_detail_enhance(
     buffer: &mut image::ImageBuffer<image::Rgb<f32>, Vec<f32>>,
     ycbcr_source: &[f32],
     amount: f32,
+    ceiling: f32,
 ) {
     let w = buffer.width() as usize;
     let h = buffer.height() as usize;
@@ -2817,7 +2827,7 @@ fn apply_gentle_detail_enhance(
                     if max_val > 1.0 && min_val < 0.0 {
                         0.0
                     } else if max_val > 1.0 {
-                        (1.0 - r.max(g).max(b)) / boost.max(0.001)
+                        (ceiling - r.max(g).max(b)) / boost.max(0.001)
                     } else {
                         r.min(g).min(b) / (-boost).max(0.001)
                     }
@@ -2827,9 +2837,9 @@ fn apply_gentle_detail_enhance(
 
                 let safe_boost = boost * scale.clamp(0.0, 1.0);
 
-                rgb_row[r_idx] = (r + safe_boost).clamp(0.0, 1.0);
-                rgb_row[g_idx] = (g + safe_boost).clamp(0.0, 1.0);
-                rgb_row[b_idx] = (b + safe_boost).clamp(0.0, 1.0);
+                rgb_row[r_idx] = (r + safe_boost).clamp(0.0, ceiling);
+                rgb_row[g_idx] = (g + safe_boost).clamp(0.0, ceiling);
+                rgb_row[b_idx] = (b + safe_boost).clamp(0.0, ceiling);
             }
         });
 }
