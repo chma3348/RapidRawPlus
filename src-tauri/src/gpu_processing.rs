@@ -2345,6 +2345,7 @@ mod render_harness {
         let mut base =
             crate::image_loader::load_base_image_from_bytes(&bytes, &path, false, &settings, None)
                 .expect("load");
+        let full_res_width = base.width();
         if base.width() > width {
             let h = (width as u64 * base.height() as u64 / base.width() as u64) as u32;
             base = DynamicImage::ImageRgb32F(image::imageops::resize(
@@ -2379,6 +2380,34 @@ mod render_harness {
             .as_str()
             .and_then(|p| crate::lut_processing::parse_lut_file(p).ok())
             .map(Arc::new);
+        // Masks, same construction the app uses -- a halo was once chased
+        // through the tone stages when it actually came from a masked
+        // adjustment, invisible here because the harness dropped masks.
+        let mask_definitions: Vec<crate::mask_generation::MaskDefinition> = js
+            .get("masks")
+            .and_then(|m| serde_json::from_value(m.clone()).ok())
+            .unwrap_or_default();
+        let scale = base.width() as f32 / full_res_width as f32;
+        let mask_bitmaps: Vec<image::ImageBuffer<image::Luma<u8>, Vec<u8>>> = mask_definitions
+            .iter()
+            .filter_map(|def| {
+                crate::mask_generation::generate_mask_bitmap(
+                    def,
+                    base.width(),
+                    base.height(),
+                    scale,
+                    (0.0, 0.0),
+                    None,
+                )
+            })
+            .collect();
+        if !mask_definitions.is_empty() {
+            println!(
+                "  masks: {} definitions -> {} bitmaps",
+                mask_definitions.len(),
+                mask_bitmaps.len()
+            );
+        }
         let state = AppState::default();
         let result = process_and_get_dynamic_image(
             &context,
@@ -2387,7 +2416,7 @@ mod render_harness {
             0,
             RenderRequest {
                 adjustments,
-                mask_bitmaps: &[],
+                mask_bitmaps: &mask_bitmaps,
                 lut,
                 roi: None,
             },
