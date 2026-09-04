@@ -41,7 +41,9 @@ fn srgb_to_linear(value: f32) -> f32 {
     if value <= 0.04045 {
         value / 12.92
     } else {
-        ((value + 0.055) / 1.055).powf(3.0)
+        // sRGB EOTF exponent is 2.4; this read 3.0, which darkened and
+        // desaturated every LinearRaw file (DNG linear and similar).
+        ((value + 0.055) / 1.055).powf(2.4)
     }
 }
 
@@ -161,8 +163,24 @@ fn develop_internal(
 
                 let (final_r, final_g, final_b) = if max_c > 1.0 {
                     let min_c = r.min(g).min(b);
-                    let compression_factor =
-                        (1.0 - (max_c - 1.0) / (safe_highlight_compression - 1.0)).clamp(0.0, 1.0);
+                    // Chroma rolls off asymptotically. The old ramp was linear
+                    // and reached exactly ZERO at the limit, so any highlight
+                    // further over than `safe_highlight_compression` lost all
+                    // colour and became a flat grey disc. Measured by decoding
+                    // a sunset frame (DSC03520.ARW, sun peaking at 3.1 against
+                    // the 2.5 default), the brightest 0.1% of pixels came back
+                    // with saturation 0.0000 -- a grey sun, which is exactly
+                    // the "white cast" this looked like next to Resolve, whose
+                    // own render keeps a white core inside a golden surround.
+                    //
+                    // Desaturating clipped highlights is still right: once a
+                    // channel saturates its true colour is unknown, and holding
+                    // it produces magenta suns. But it should approach neutral,
+                    // not snap to it. 1/(1+x^2) matches the old curve closely
+                    // where it mattered (0.5 at the limit against the old 0.0)
+                    // and never quite reaches zero.
+                    let over = ((max_c - 1.0) / (safe_highlight_compression - 1.0)).max(0.0);
+                    let compression_factor = 1.0 / (1.0 + over * over);
                     let compressed_r = min_c + (r - min_c) * compression_factor;
                     let compressed_g = min_c + (g - min_c) * compression_factor;
                     let compressed_b = min_c + (b - min_c) * compression_factor;
@@ -251,4 +269,55 @@ pub fn get_fast_demosaic_scale_factor(
         }
     }
     1.0
+}
+
+#[cfg(test)]
+mod decode_probe {
+    /// Ad-hoc probe: decode a RAW at several Highlight Recovery settings and
+    /// report what happens to the brightest pixels. Needs a real file, so it
+    /// is ignored by default:
+    ///   RAPIDRAW_TEST_RAW=/path/to.ARW cargo test --lib decode_probe -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn highlight_recovery_sweep() {
+        let Ok(path) = std::env::var("RAPIDRAW_TEST_RAW") else {
+            eprintln!("set RAPIDRAW_TEST_RAW");
+            return;
+        };
+        let bytes = std::fs::read(&path).expect("read raw");
+        for hc in [1.5f32, 2.5, 5.0, 8.0] {
+            let img = super::develop_raw_image(&bytes, false, hc, "auto".to_string(), None)
+                .expect("develop");
+            let rgb = img.to_rgba32f();
+            let px: Vec<[f32; 3]> = rgb.pixels().map(|p| [p.0[0], p.0[1], p.0[2]]).collect();
+            let mut luma: Vec<f32> = px
+                .iter()
+                .map(|p| p[0] * 0.2126 + p[1] * 0.7152 + p[2] * 0.0722)
+                .collect();
+            luma.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let thr = luma[(luma.len() as f64 * 0.999) as usize];
+            let bright: Vec<&[f32; 3]> = px
+                .iter()
+                .filter(|p| p[0] * 0.2126 + p[1] * 0.7152 + p[2] * 0.0722 >= thr)
+                .collect();
+            let sat = |p: &[f32; 3]| {
+                let mx = p[0].max(p[1]).max(p[2]);
+                let mn = p[0].min(p[1]).min(p[2]);
+                if mx > 1e-6 { (mx - mn) / mx } else { 0.0 }
+            };
+            let mean_sat: f32 = bright.iter().map(|p| sat(p)).sum::<f32>() / bright.len() as f32;
+            let mean_max: f32 =
+                bright.iter().map(|p| p[0].max(p[1]).max(p[2])).sum::<f32>() / bright.len() as f32;
+            let above_one = px
+                .iter()
+                .filter(|p| p[0].max(p[1]).max(p[2]) > 1.0)
+                .count() as f64
+                / px.len() as f64;
+            println!(
+                "  hc {hc:>4.1}: top-0.1% mean sat {mean_sat:.4}  mean max-channel {mean_max:.3}  \
+                 pixels above 1.0: {:.3}%",
+                above_one * 100.0
+            );
+        }
+    }
 }
