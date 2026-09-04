@@ -277,6 +277,48 @@ mod decode_probe {
     /// report what happens to the brightest pixels. Needs a real file, so it
     /// is ignored by default:
     ///   RAPIDRAW_TEST_RAW=/path/to.ARW cargo test --lib decode_probe -- --ignored --nocapture
+    /// Dump our decoded linear RAW, downsampled, so the base render can be
+    /// fitted against another application's output of the same file.
+    ///   RAPIDRAW_TEST_RAW=... RAPIDRAW_DUMP_W=1440 RAPIDRAW_DUMP_OUT=/tmp/x.f32 \
+    ///     cargo test --lib dump_linear -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn dump_linear() {
+        let Ok(path) = std::env::var("RAPIDRAW_TEST_RAW") else { return };
+        let out = std::env::var("RAPIDRAW_DUMP_OUT").unwrap_or("/tmp/linear.f32".into());
+        let tw: u32 = std::env::var("RAPIDRAW_DUMP_W").ok()
+            .and_then(|v| v.parse().ok()).unwrap_or(1440);
+        let bytes = std::fs::read(&path).expect("read raw");
+        let settings = crate::AppSettings::default();
+        let img = crate::image_loader::load_base_image_from_bytes(
+            &bytes, &path, false, &settings, None,
+        ).expect("load");
+        let (w, h) = (img.width(), img.height());
+        let th = ((tw as u64 * h as u64) / w as u64) as u32;
+        // The image crate clamps f32 buffers to [0,1] when resampling, which
+        // would silently drop the RAW headroom this dump exists to capture.
+        // Scale into range first and record the factor.
+        let mut buf = img.to_rgb32f();
+        let scale = buf.as_raw().iter().cloned().fold(1.0f32, f32::max);
+        if scale > 1.0 {
+            for v in buf.as_mut().iter_mut() {
+                *v /= scale;
+            }
+        }
+        let small = image::imageops::resize(
+            &buf, tw, th, image::imageops::FilterType::Lanczos3,
+        );
+        let mut f = std::fs::File::create(&out).expect("create");
+        use std::io::Write;
+        f.write_all(&(tw as u32).to_le_bytes()).unwrap();
+        f.write_all(&(th as u32).to_le_bytes()).unwrap();
+        f.write_all(&scale.to_le_bytes()).unwrap();
+        for v in small.as_raw() {
+            f.write_all(&(v * scale).to_le_bytes()).unwrap();
+        }
+        println!("  wrote {out}  {tw}x{th}  (source {w}x{h})");
+    }
+
     /// Where does the brightness go? Report the max at each stage of loading.
     #[test]
     #[ignore]
