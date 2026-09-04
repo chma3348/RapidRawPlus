@@ -2272,3 +2272,65 @@ mod shadow_lift_tests {
         assert!((w[0] - 255.0).abs() < 0.51, "white must be untouched, got {}", w[0]);
     }
 }
+
+#[cfg(test)]
+mod raw_base_curve_tests {
+    /// The RAW base render is matched to DaVinci Resolve by measurement:
+    /// DSC03520.ARW decoded to linear and paired pixel-for-pixel against
+    /// Resolve's render of the same file (3.07M pixels), then fitted with a
+    /// monotone Hill curve. These tests parse the constants OUT OF THE SHADER
+    /// so they check what actually ships, and pin the shape of the curve --
+    /// the previous curve was hand-rolled and never matched to anything,
+    /// which is what made RAW files look flat and hazy.
+    const SRC: &str = include_str!("shaders/shader.wgsl");
+
+    fn constant(name: &str) -> f32 {
+        let key = format!("const {name}: f32 = ");
+        let i = SRC.find(&key).unwrap_or_else(|| panic!("{name} missing")) + key.len();
+        SRC[i..i + SRC[i..].find(';').unwrap()].trim().parse().unwrap()
+    }
+
+    fn curve(x: f32) -> f32 {
+        let xa = x.max(0.0).powf(constant("BASE_A"));
+        constant("BASE_S") * xa / (xa + constant("BASE_B_POW_A"))
+    }
+
+    #[test]
+    fn reproduces_the_measured_resolve_curve() {
+        // (our linear in, Resolve's linear out) from the fit.
+        for (x, want) in [
+            (0.002f32, 0.000457f32),
+            (0.020, 0.010307),
+            (0.100, 0.086694),
+            (0.350, 0.376541),
+            (0.700, 0.692280),
+            (1.000, 0.872070),
+        ] {
+            let got = curve(x);
+            assert!(
+                (got - want).abs() < want.max(0.001) * 0.02,
+                "curve({x}) = {got}, measured {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn crushes_shadows_and_rolls_off_highlights() {
+        // The whole point: deep shadows come down hard, the top rolls off.
+        // A curve that merely passed values through is what looked hazy.
+        assert!(curve(0.002) / 0.002 < 0.35, "deep shadows must be crushed");
+        assert!(curve(0.10) / 0.10 < 0.95, "shadows still below unity");
+        assert!(curve(1.0) < 0.90, "1.0 must roll off, not pass through");
+        assert!(curve(0.35) / 0.35 > 1.0, "midtones sit slightly above unity");
+    }
+
+    #[test]
+    fn is_monotone() {
+        let mut prev = -1.0f32;
+        for i in 0..=400 {
+            let v = curve(i as f32 * 0.01);
+            assert!(v >= prev, "curve must never invert tone order");
+            prev = v;
+        }
+    }
+}

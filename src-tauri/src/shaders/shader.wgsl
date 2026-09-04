@@ -2459,12 +2459,40 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     } else if (adjustments.global.tonemapper_mode == 1u) {
         base_srgb = agx_full_transform(composite_rgb_linear);
     } else if (is_raw == 1u) {
-        var srgb_emulated = linear_to_srgb(composite_rgb_linear);
-        const BRIGHTNESS_GAMMA: f32 = 1.1;
-        srgb_emulated = pow(srgb_emulated, vec3<f32>(1.0 / BRIGHTNESS_GAMMA));
-        const CONTRAST_MIX: f32 = 0.75;
-        let contrast_curve = srgb_emulated * srgb_emulated * (3.0 - 2.0 * srgb_emulated);
-        base_srgb = mix(srgb_emulated, contrast_curve, CONTRAST_MIX);
+        // RAW base render, MEASURED against DaVinci Resolve rather than
+        // invented. What stood here was a hand-rolled curve -- an sRGB
+        // encode, a 1/1.1 gamma lift, then 75% of a smoothstep -- that had
+        // never been matched to anything, and it was the reason RAW files
+        // came out flat and hazy next to Resolve however many individual
+        // bugs got fixed underneath it.
+        //
+        // Measured by decoding DSC03520.ARW to linear and pairing all 3.07M
+        // pixels against Resolve's render of the same file (see the
+        // dump_linear probe in raw_processing.rs). As a ratio out/in:
+        //
+        //   our linear   Resolve   the old curve
+        //      0.002      x0.30       x0.46
+        //      0.100      x0.83       x0.97
+        //      0.350      x1.02       x1.30
+        //      1.000      x0.85       x1.00
+        //
+        // Resolve crushes deep shadows about twice as hard and rolls the
+        // top off; the old curve brightened the midtones and passed 1.0
+        // straight through. Fitting a monotone Hill curve to the measurement
+        // (rather than baking the raw knots, which a single photograph
+        // samples too unevenly to trust) takes the mean error against
+        // Resolve from 4.28 code values to 1.55, and mean saturation from
+        // 0.600 to 0.653 against their 0.684.
+        //
+        // Per-channel gains were fitted too and deliberately NOT applied:
+        // with this curve in place they overshot saturation to 0.741, worse
+        // than leaving white balance alone. Colour science is untouched.
+        const BASE_A: f32 = 1.35593;
+        const BASE_S: f32 = 1.49730;
+        const BASE_B_POW_A: f32 = 0.71695;
+        let x = max(composite_rgb_linear, vec3<f32>(0.0));
+        let xa = pow(x, vec3<f32>(BASE_A));
+        base_srgb = linear_to_srgb(BASE_S * xa / (xa + BASE_B_POW_A));
     } else {
         base_srgb = linear_to_srgb(composite_rgb_linear);
     }
