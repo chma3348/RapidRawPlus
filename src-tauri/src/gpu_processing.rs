@@ -535,6 +535,7 @@ pub struct GpuProcessor {
     dummy_blur_view: wgpu::TextureView,
     dummy_lut_view: wgpu::TextureView,
     dummy_lut_sampler: wgpu::Sampler,
+    shadow_correction_view: wgpu::TextureView,
     ping_pong_view: wgpu::TextureView,
     sharpness_blur_view: wgpu::TextureView,
     tonal_blur_view: wgpu::TextureView,
@@ -896,6 +897,17 @@ impl GpuProcessor {
             count: None,
         });
 
+        bind_group_layout_entries.push(wgpu::BindGroupLayoutEntry {
+            binding: 11 + MAX_MASK_BINDINGS,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D3,
+                multisampled: false,
+            },
+            count: None,
+        });
+
         let main_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Main BGL"),
             entries: &bind_group_layout_entries,
@@ -946,6 +958,57 @@ impl GpuProcessor {
         });
         let dummy_lut_view = dummy_lut_texture.create_view(&Default::default());
         let dummy_lut_sampler = device.create_sampler(&wgpu::SamplerDescriptor::default());
+
+        // Measured correction for the Resolve shadow lift. The analytic curve
+        // in shader.wgsl is driven by luma alone, which is exact on greys and
+        // photographic colour but cannot follow Resolve on dark, near-pure
+        // colours -- there the required correction depends on HUE as well
+        // ([24,0,0] and [0,0,24] need opposite corrections), so no scalar
+        // driver can express it. This is that residual, measured off the same
+        // 33^3 Resolve render and stored as a scalar gain multiplier.
+        //
+        // It is ~1.0 over 94% of the cube, so it degrades gracefully: outside
+        // the measured range the lookup clamps to an edge that is already 1.0
+        // and the analytic curve stands on its own. Full-cube RMS against
+        // Resolve falls from 2.20 to 0.34 code values with this applied.
+        const SHADOW_CORRECTION_SIZE: u32 = 33;
+        let shadow_correction_bytes: &[u8] =
+            include_bytes!("shaders/shadow_correction_33.bin");
+        let expected = (SHADOW_CORRECTION_SIZE.pow(3) as usize) * 2;
+        if shadow_correction_bytes.len() != expected {
+            return Err(format!(
+                "shadow correction table is {} bytes, expected {expected}",
+                shadow_correction_bytes.len()
+            ));
+        }
+        // f16 scalars on disk; the GPU wants RGBA, so splat into the red channel.
+        let shadow_correction_rgba: Vec<f16> = shadow_correction_bytes
+            .chunks_exact(2)
+            .flat_map(|b| {
+                let v = f16::from_le_bytes([b[0], b[1]]);
+                [v, f16::ZERO, f16::ZERO, f16::ONE]
+            })
+            .collect();
+        let shadow_correction_texture = device.create_texture_with_data(
+            &context.queue,
+            &wgpu::TextureDescriptor {
+                label: Some("Resolve Shadow Correction"),
+                size: wgpu::Extent3d {
+                    width: SHADOW_CORRECTION_SIZE,
+                    height: SHADOW_CORRECTION_SIZE,
+                    depth_or_array_layers: SHADOW_CORRECTION_SIZE,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D3,
+                format: wgpu::TextureFormat::Rgba16Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            },
+            TextureDataOrder::MipMajor,
+            bytemuck::cast_slice(&shadow_correction_rgba),
+        );
+        let shadow_correction_view = shadow_correction_texture.create_view(&Default::default());
 
         let max_tile_size = wgpu::Extent3d {
             width: max_width,
@@ -1059,6 +1122,7 @@ impl GpuProcessor {
             dummy_blur_view,
             dummy_lut_view,
             dummy_lut_sampler,
+            shadow_correction_view,
             ping_pong_view,
             sharpness_blur_view,
             tonal_blur_view,
@@ -1442,6 +1506,11 @@ impl GpuProcessor {
                 bind_group_entries.push(wgpu::BindGroupEntry {
                     binding: 4 + MAX_MASK_BINDINGS,
                     resource: wgpu::BindingResource::Sampler(&lut_sampler),
+                });
+
+                bind_group_entries.push(wgpu::BindGroupEntry {
+                    binding: 11 + MAX_MASK_BINDINGS,
+                    resource: wgpu::BindingResource::TextureView(&self.shadow_correction_view),
                 });
 
                 bind_group_entries.push(wgpu::BindGroupEntry {
@@ -2083,6 +2152,26 @@ mod shadow_lift_tests {
         if c <= 0.0031308 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 }
     }
 
+    /// The hue-dependent correction table, shipped alongside the curve.
+    const CORRECTION: &[u8] = include_bytes!("shaders/shadow_correction_33.bin");
+
+    fn correction(enc: [f32; 3]) -> f32 {
+        let at = |r: usize, g: usize, b: usize| -> f32 {
+            let i = ((b * 33 + g) * 33 + r) * 2;
+            half::f16::from_le_bytes([CORRECTION[i], CORRECTION[i + 1]]).to_f32()
+        };
+        let p: Vec<f32> = enc.iter().map(|c| c.clamp(0.0, 1.0) * 32.0).collect();
+        let i0: Vec<usize> = p.iter().map(|v| v.floor() as usize).collect();
+        let i1: Vec<usize> = i0.iter().map(|v| (v + 1).min(32)).collect();
+        let f: Vec<f32> = p.iter().map(|v| v - v.floor()).collect();
+        let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+        let c00 = lerp(at(i0[0], i0[1], i0[2]), at(i1[0], i0[1], i0[2]), f[0]);
+        let c10 = lerp(at(i0[0], i1[1], i0[2]), at(i1[0], i1[1], i0[2]), f[0]);
+        let c01 = lerp(at(i0[0], i0[1], i1[2]), at(i1[0], i0[1], i1[2]), f[0]);
+        let c11 = lerp(at(i0[0], i1[1], i1[2]), at(i1[0], i1[1], i1[2]), f[0]);
+        lerp(lerp(c00, c10, f[1]), lerp(c01, c11, f[1]), f[2])
+    }
+
     /// Mirrors `apply_resolve_shadow_lift` for `t = 1.0` (slider at maximum).
     fn lift(rgb: [f32; 3]) -> [f32; 3] {
         let tab = parse_stops();
@@ -2092,14 +2181,31 @@ mod shadow_lift_tests {
         let x = y * 64.0;
         let i = (x.floor() as usize).min(63);
         let stops = tab[i] + (tab[i + 1] - tab[i]) * (x - x.floor());
+        let corr = correction([enc[0], enc[1], enc[2]]);
         let off = black * (1.0 - y).max(0.0).powf(60.0);
         let mut out = [0.0f32; 3];
         for c in 0..3 {
             out[c] = to_srgb(to_linear(
-                (enc[c] * stops.exp2() + off).clamp(0.0, 1.0),
+                (enc[c] * stops.exp2() * corr + off).clamp(0.0, 1.0),
             )) * 255.0;
         }
         out
+    }
+
+    #[test]
+    fn correction_table_is_well_formed() {
+        assert_eq!(CORRECTION.len(), 33 * 33 * 33 * 2, "expected a 33^3 f16 table");
+        let vals: Vec<f32> = CORRECTION
+            .chunks_exact(2)
+            .map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32())
+            .collect();
+        assert!(vals.iter().all(|v| v.is_finite() && (0.7..=1.4).contains(v)),
+            "corrections must stay a mild multiplier");
+        // It is a residual, so it has to be near-identity nearly everywhere;
+        // a table that drifted broadly would mean the curve itself regressed.
+        let near = vals.iter().filter(|v| (**v - 1.0).abs() < 0.01).count();
+        assert!(near * 100 / vals.len() > 70, "only {}% near 1.0", near * 100 / vals.len());
+        assert!((correction([1.0, 1.0, 1.0]) - 1.0).abs() < 0.02, "white must be left alone");
     }
 
     #[test]
@@ -2155,8 +2261,8 @@ mod shadow_lift_tests {
         }
         let rms = (sum_sq / (cases.len() * 3) as f64).sqrt();
         // Below one 8-bit code value: as exact as the format can express.
-        assert!(rms < 1.0, "RMS {rms:.2} code values against Resolve (want < 1.0)");
-        assert!(worst.0 < 4.0, "worst {:.2} on input {:?}", worst.0, worst.1);
+        assert!(rms < 0.6, "RMS {rms:.2} code values against Resolve (want < 0.6)");
+        assert!(worst.0 < 2.0, "worst {:.2} on input {:?}", worst.0, worst.1);
     }
 
     #[test]

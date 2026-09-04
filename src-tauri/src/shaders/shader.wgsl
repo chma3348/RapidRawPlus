@@ -268,6 +268,10 @@ const HSL_RANGES: array<HslRange, 8> = array<HslRange, 8>(
 @group(0) @binding(10) var flare_texture: texture_2d<f32>;
 @group(0) @binding(11) var flare_sampler: sampler;
 
+// Measured residual of the analytic shadow curve against Resolve, as a scalar
+// gain multiplier on a 33^3 grid indexed by the DISPLAY-ENCODED input colour.
+@group(0) @binding(12) var shadow_correction_texture: texture_3d<f32>;
+
 const LUMA_COEFF = vec3<f32>(0.2126, 0.7152, 0.0722);
 
 fn get_luma(c: vec3<f32>) -> f32 {
@@ -762,12 +766,46 @@ fn resolve_shadow_stops(y: f32) -> f32 {
     return mix(table[i], table[i + 1u], x - lo);
 }
 
+// The curve above is driven by luma alone, which is exact on greys and on
+// photographic colour but cannot follow Resolve on dark, near-pure colours.
+// There the needed correction depends on HUE as well — [24,0,0] and [0,0,24]
+// want opposite corrections — so no scalar driver can express it (every one
+// tested: optimised luma weights, power means, linear luma, max, min, mean).
+// This is the measured residual, off the same Resolve render, as a gain
+// multiplier. It is ~1.0 over 94% of the cube. Full-cube RMS against Resolve:
+// 2.20 without it, 0.34 with.
+fn resolve_shadow_correction(enc: vec3<f32>) -> f32 {
+    let p = clamp(enc, vec3<f32>(0.0), vec3<f32>(1.0)) * 32.0;
+    let b = floor(p);
+    let f = p - b;
+    let i0 = vec3<i32>(b);
+    let i1 = min(i0 + vec3<i32>(1), vec3<i32>(32));
+    // x indexes red, y green, z blue — the order the table is written in.
+    let c000 = textureLoad(shadow_correction_texture, vec3<i32>(i0.x, i0.y, i0.z), 0).r;
+    let c100 = textureLoad(shadow_correction_texture, vec3<i32>(i1.x, i0.y, i0.z), 0).r;
+    let c010 = textureLoad(shadow_correction_texture, vec3<i32>(i0.x, i1.y, i0.z), 0).r;
+    let c110 = textureLoad(shadow_correction_texture, vec3<i32>(i1.x, i1.y, i0.z), 0).r;
+    let c001 = textureLoad(shadow_correction_texture, vec3<i32>(i0.x, i0.y, i1.z), 0).r;
+    let c101 = textureLoad(shadow_correction_texture, vec3<i32>(i1.x, i0.y, i1.z), 0).r;
+    let c011 = textureLoad(shadow_correction_texture, vec3<i32>(i0.x, i1.y, i1.z), 0).r;
+    let c111 = textureLoad(shadow_correction_texture, vec3<i32>(i1.x, i1.y, i1.z), 0).r;
+    let c00 = mix(c000, c100, f.x);
+    let c10 = mix(c010, c110, f.x);
+    let c01 = mix(c001, c101, f.x);
+    let c11 = mix(c011, c111, f.x);
+    return mix(mix(c00, c10, f.y), mix(c01, c11, f.y), f.z);
+}
+
 // t = 1.0 is Resolve's shadow slider at maximum.
 fn apply_resolve_shadow_lift(color: vec3<f32>, t: f32) -> vec3<f32> {
     let enc = linear_to_srgb_extended(color);
     let y = clamp(get_luma(enc), 0.0, 1.0);
     let amt = clamp(t, 0.0, 1.0);
-    let lifted = enc * pow(2.0, amt * resolve_shadow_stops(y))
+    // Both the curve and its correction fade out together with the slider, so
+    // amt = 0 is exactly the identity. RAW values above 1.0 clamp to the top
+    // of the table, which is already 1.0, leaving the analytic curve alone.
+    let corr = mix(1.0, resolve_shadow_correction(enc), amt);
+    let lifted = enc * (pow(2.0, amt * resolve_shadow_stops(y)) * corr)
         + amt * SHADOW_BLACK_LIFT * pow(max(1.0 - y, 0.0), 60.0);
     // srgb_to_linear does not clamp, so RAW headroom above 1.0 survives.
     return srgb_to_linear(max(lifted, vec3<f32>(0.0)));
