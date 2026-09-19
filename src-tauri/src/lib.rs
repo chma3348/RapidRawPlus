@@ -13,6 +13,7 @@ pub mod subject_selection;
 mod android_integration;
 mod app_settings;
 mod app_state;
+pub mod auto_level;
 mod cache_utils;
 pub mod comfy_engine;
 mod culling;
@@ -2297,6 +2298,7 @@ pub fn run() {
             export_processing::cancel_export,
             export_processing::estimate_export_sizes,
             image_processing::calculate_auto_adjustments,
+            auto_level::auto_level,
             mask_generation::generate_mask_overlay,
             file_management::update_exif_fields,
             file_management::get_supported_file_types,

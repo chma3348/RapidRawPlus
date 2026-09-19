@@ -544,6 +544,13 @@
       },
       "resetTooltip": "Reset Crop & Transform",
       "rotationHeading": "Rotation",
+      "autoLevel": {
+        "noReference": "No clear horizon or vertical lines found",
+        "failed": "Auto level failed",
+        "levelledTo": "Levelled {{angle}}° using {{reference}} lines",
+        "horizontal": "horizontal",
+        "vertical": "vertical"
+      },
       "title": "Crop & Transform",
       "tooltips": {
         "compositionOverlay": "Composition Overlay",
@@ -556,6 +563,7 @@
         "rotateLeft": "Rotate 90° counter-clockwise",
         "rotateRight": "Rotate 90° clockwise",
         "straighten": "Straighten Tool (S)",
+        "autoLevel": "Auto Level: straighten to the horizon or dominant vertical lines",
         "switchOrientation": "Switch orientation",
         "switchToLandscape": "Switch to landscape",
         "switchToPortrait": "Switch to portrait",

@@ -11,12 +11,14 @@ import {
   RotateCw,
   Ruler,
   Scan,
+  WandSparkles,
   X,
 } from 'lucide-react';
+import { invoke } from '@tauri-apps/api/core';
 import { useTranslation } from 'react-i18next';
 import { Adjustments, INITIAL_ADJUSTMENTS } from '../../../utils/adjustments';
 import clsx from 'clsx';
-import { Orientation, Panel } from '../../ui/AppProperties';
+import { Invokes, Orientation, Panel } from '../../ui/AppProperties';
 import TransformModal from '../../modals/TransformModal';
 import LensCorrectionModal from '../../modals/LensCorrectionModal';
 import { motion } from 'framer-motion';
@@ -63,6 +65,21 @@ export default function CropPanel() {
 
   const [localRotation, setLocalRotation] = useState<number | null>(null);
   const localRotationRef = useRef<number | null>(null);
+  const [isAutoLeveling, setIsAutoLeveling] = useState(false);
+  const [autoLevelStatus, setAutoLevelStatus] = useState<string | null>(null);
+  const autoLevelStatusTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const showAutoLevelStatus = useCallback((message: string) => {
+    setAutoLevelStatus(message);
+    if (autoLevelStatusTimer.current) clearTimeout(autoLevelStatusTimer.current);
+    autoLevelStatusTimer.current = setTimeout(() => setAutoLevelStatus(null), 3500);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (autoLevelStatusTimer.current) clearTimeout(autoLevelStatusTimer.current);
+    };
+  }, []);
 
   const PRESETS = useMemo<Array<CropPreset>>(
     () => [
@@ -424,6 +441,58 @@ export default function CropPanel() {
     setAdjustments((prev: Partial<Adjustments>) => ({ ...prev, rotation: 0 }));
   };
 
+  const handleAutoLevel = async () => {
+    if (!selectedImage || isAutoLeveling) return;
+    setIsAutoLeveling(true);
+    try {
+      const result = await invoke<{ angle: number; confidence: number; reference: 'horizontal' | 'vertical' } | null>(
+        Invokes.AutoLevel,
+        {
+          jsAdjustments: {
+            transformDistortion: adjustments.transformDistortion,
+            transformVertical: adjustments.transformVertical,
+            transformHorizontal: adjustments.transformHorizontal,
+            transformRotate: adjustments.transformRotate,
+            transformAspect: adjustments.transformAspect,
+            transformScale: adjustments.transformScale,
+            transformXOffset: adjustments.transformXOffset,
+            transformYOffset: adjustments.transformYOffset,
+            lensDistortionAmount: adjustments.lensDistortionAmount,
+            lensVignetteAmount: adjustments.lensVignetteAmount,
+            lensTcaAmount: adjustments.lensTcaAmount,
+            lensDistortionParams: adjustments.lensDistortionParams,
+            lensMaker: adjustments.lensMaker,
+            lensModel: adjustments.lensModel,
+            lensDistortionEnabled: adjustments.lensDistortionEnabled,
+            lensTcaEnabled: adjustments.lensTcaEnabled,
+            lensVignetteEnabled: adjustments.lensVignetteEnabled,
+          },
+          orientationSteps: orientationSteps || 0,
+          flipHorizontal,
+          flipVertical,
+        },
+      );
+      if (!result) {
+        showAutoLevelStatus(t('editor.crop.autoLevel.noReference'));
+        return;
+      }
+      const angle = Math.round(result.angle * 10) / 10;
+      updateLocalRotation(null);
+      setAdjustments((prev: Adjustments) => ({ ...prev, rotation: angle }));
+      showAutoLevelStatus(
+        t('editor.crop.autoLevel.levelledTo', {
+          angle: angle.toFixed(1),
+          reference: t(`editor.crop.autoLevel.${result.reference}`),
+        }),
+      );
+    } catch (error) {
+      console.error('Auto level failed:', error);
+      showAutoLevelStatus(typeof error === 'string' ? error : t('editor.crop.autoLevel.failed'));
+    } finally {
+      setIsAutoLeveling(false);
+    }
+  };
+
   const handleOverlayCycle = () => {
     const currentIndex = OVERLAYS.findIndex((o) => o.id === activeOverlay);
     const nextIndex = (currentIndex + 1) % OVERLAYS.length;
@@ -617,6 +686,19 @@ export default function CropPanel() {
                         <Ruler size={14} />
                       </button>
                       <button
+                        onClick={handleAutoLevel}
+                        className={clsx(
+                          'p-1.5 rounded-md transition-colors',
+                          isAutoLeveling
+                            ? 'text-accent animate-pulse cursor-wait'
+                            : 'text-text-secondary hover:bg-card-active hover:text-text-primary',
+                        )}
+                        data-tooltip={t('editor.crop.tooltips.autoLevel')}
+                        disabled={isAutoLeveling || !selectedImage}
+                      >
+                        <WandSparkles size={14} />
+                      </button>
+                      <button
                         className="p-1.5 rounded-md text-text-secondary transition-colors cursor-pointer hover:bg-card-active hover:text-text-primary"
                         onClick={resetFineRotation}
                         data-tooltip={t('editor.crop.tooltips.resetFineRotation')}
@@ -635,6 +717,11 @@ export default function CropPanel() {
                   onChange={handleFineRotationChange}
                   onDragStateChange={handleDragStateChange}
                 />
+                {autoLevelStatus && (
+                  <p className="mt-2 text-xs text-text-secondary" aria-live="polite">
+                    {autoLevelStatus}
+                  </p>
+                )}
               </div>
             </div>
 
