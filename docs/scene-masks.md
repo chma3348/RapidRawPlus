@@ -17,7 +17,7 @@ frontend in `src/hooks/useAiMasking.ts`, `MasksPanel.tsx`,
 
 | mask | semantic source | edge source |
 |---|---|---|
-| Sky | the "sky" class of a scene-labelling model (UperNet Swin-L on ADE20K's 150 classes): one pass over the whole photo at 768 px, plus overlapping tiles at 1152 px where that pass is undecided | colour matte in the uncertain band, guided filter where sky and land colours match |
+| Sky | the "sky" class of a scene-labelling model (UperNet Swin-L on ADE20K's 150 classes): one pass over the whole photo at 768 px, plus overlapping tiles at 1152 px where that pass is undecided | colour matte in the uncertain band and reaching into fine structure, guided filter where sky and land colours match |
 | Foreground | everything nearer the camera than the subject: Depth Anything v2 relative depth (518 px, photo + mirror averaged), cut just in front of the subject's own depth | guided filter; the subject is always excluded |
 | Subject | BiRefNet lite, a dichotomous-segmentation model that cuts out the main object(s) directly | BiRefNet's own matte, placed at full resolution by the guided filter |
 
@@ -86,6 +86,33 @@ lite model is the more conservative of the two and a quarter of the size.
 4. **Confidence gates instead of always answering.** Each mask can say
    "nothing found"; the panel shows a toast and leaves the mask empty.
 
+### Sky through fine structure
+
+The model paints a tree crown or a bridge lattice as one solid object, so
+the sky showing between the branches is labelled not-sky. Refinement is
+therefore allowed to reach past the mask's edge into what the model
+rejected, but only where all three hold:
+
+- confident sky is within reach (colours are sampled at three scales, the
+  widest about a sixth of the frame, so a gap deep inside a crown still
+  sees the sky's colour, while a sunset gradient is still followed locally);
+- the neighbourhood is finely structured — high local luma contrast, so a
+  pixel sits among both branch-dark and sky-bright neighbours. A smooth
+  pale wall beside the sky has low contrast and is left alone;
+- the pixel's colour is within ~1.5 of the confident sky's own colour
+  spread, fading out by 3.5.
+
+Inside foliage the ordinary two-colour matte cannot work: the local
+"non-sky" colour is contaminated by the sky showing through the gaps, so
+the reach test asks instead whether the pixel *is* the sky's colour.
+
+Measured: sky between branches and inside bridge lattice cells is
+recovered (tree photo 34.8% → 35.3% of frame, bridge 39.6% → 41.5%), with
+no change on plain skies, no bleed into pale buildings beside sky on the
+hazy skyline, tower and street canyon photos, and no change to the 24
+underwater negatives. One synthetic graphic (a logo of thin curved lines)
+went from 1.2% to 6.8% false sky; the gates are tuned for photographs.
+
 ### Gates
 
 | mask | declines when |
@@ -139,9 +166,8 @@ the CPU.
 
 ## Known limits
 
-- Sky through very fine structure (a bridge lattice, bare branches) is
-  better with the tiles than without, but the thinnest gaps are still
-  partly soft rather than fully selected.
+- Sky through very fine structure is much better with the tiles and the
+  reach, but the thinnest gaps (a single-pixel wire) stay partly soft.
 - Refinement may move an uncertain pixel by at most ±0.35, so it corrects
   an edge that is slightly off but cannot rescue one the model placed far
   from the real boundary.

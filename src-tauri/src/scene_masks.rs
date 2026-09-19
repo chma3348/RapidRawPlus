@@ -37,6 +37,27 @@ use crate::subject_selection::{self, SubjectPoint, box_mean};
 pub const MIN_COVERAGE: f32 = 0.005;
 /// A sky probability map whose maximum stays under this is not sky.
 const SKY_MIN_PEAK: f32 = 0.6;
+/// Reaching into not-sky needs less nearby sky than the ordinary band,
+/// because deep inside a crown the nearest confident sky is far away.
+/// How much confident sky must sit in a pixel's neighbourhood before the
+/// colour matte is allowed to reach into what the model called not-sky.
+/// This is what recovers sky between branches: the model paints a tree
+/// crown as one solid object, but the gaps in it are sky-coloured.
+const SKY_REACH_MIN_NEIGHBOURHOOD: f32 = 0.01;
+/// Inside that reach, colour has to be decisive before it may overrule the
+/// model. Below this the pixel keeps the model's answer.
+const SKY_REACH_MIN_ALPHA: f32 = 0.6;
+const SKY_REACH_FULL_ALPHA: f32 = 0.85;
+/// Reaching is only allowed where the neighbourhood is finely structured
+/// (branches, cables, railings): a pixel there sits among both very dark
+/// and sky-bright neighbours. A smooth pale wall beside the sky has low
+/// local contrast and is left alone.
+const SKY_REACH_MIN_CONTRAST: f32 = 0.05;
+const SKY_REACH_FULL_CONTRAST: f32 = 0.12;
+/// How far a pixel's colour may sit from the local sky colour, in units of
+/// the sky's own colour spread, before it stops counting as sky.
+const SKY_REACH_NEAR: f32 = 1.5;
+const SKY_REACH_FAR: f32 = 3.5;
 /// A saliency map whose maximum stays under this has no clear subject.
 const SUBJECT_MIN_PEAK: f32 = 0.5;
 /// Foreground is what lies nearer the camera than the subject. The cut sits
@@ -437,19 +458,61 @@ pub fn sky_refine(probs: &ProbabilityMap, guide: &RgbImage) -> GrayImage {
         });
         (ws, wf, sc, fc)
     };
-    let (ws_f, wf_f, sc_f, fc_f) = sample(6);
-    let (ws_w, wf_w, sc_w, fc_w) = sample(18);
-    // Per pixel, the tight scale when it saw enough of both, else the wide one.
+    // Three scales, tight to very wide. The widest reaches ~10% of the
+    // frame, which is what lets a gap deep inside a tree crown still see
+    // the sky's colour, while staying local enough to follow a sunset
+    // gradient rather than averaging the whole sky into one colour.
+    let scales = [sample(6), sample(18), sample((w.max(h) / 6).max(48))];
     let enough = |a: f32, b: f32| a.min(b) >= 0.02;
-    let pick = |i: usize| enough(ws_f[i], wf_f[i]);
-    let ws: Vec<f32> = (0..w * h).map(|i| if pick(i) { ws_f[i] } else { ws_w[i] }).collect();
-    let wf: Vec<f32> = (0..w * h).map(|i| if pick(i) { wf_f[i] } else { wf_w[i] }).collect();
-    let sc: [Vec<f32>; 3] = std::array::from_fn(|c| {
-        (0..w * h).map(|i| if pick(i) { sc_f[c][i] } else { sc_w[c][i] }).collect()
-    });
-    let fc: [Vec<f32>; 3] = std::array::from_fn(|c| {
-        (0..w * h).map(|i| if pick(i) { fc_f[c][i] } else { fc_w[c][i] }).collect()
-    });
+    let level = |i: usize| {
+        if enough(scales[0].0[i], scales[0].1[i]) {
+            0
+        } else if enough(scales[1].0[i], scales[1].1[i]) {
+            1
+        } else {
+            2
+        }
+    };
+    let levels: Vec<usize> = (0..w * h).map(level).collect();
+    let ws: Vec<f32> = (0..w * h).map(|i| scales[levels[i]].0[i]).collect();
+    let wf: Vec<f32> = (0..w * h).map(|i| scales[levels[i]].1[i]).collect();
+    let sc: [Vec<f32>; 3] =
+        std::array::from_fn(|c| (0..w * h).map(|i| scales[levels[i]].2[c][i]).collect());
+    let fc: [Vec<f32>; 3] =
+        std::array::from_fn(|c| (0..w * h).map(|i| scales[levels[i]].3[c][i]).collect());
+    // Local luma contrast at stats resolution, and the spread of the
+    // confident sky's own colour: the two things the reach test needs.
+    let luma: Vec<f32> = small
+        .pixels()
+        .map(|p| (0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32) / 255.0)
+        .collect();
+    let cr = 4;
+    let luma_mean = box_mean(&luma, w, h, cr);
+    let luma_sq = box_mean(&luma.iter().map(|v| v * v).collect::<Vec<_>>(), w, h, cr);
+    let contrast: Vec<f32> = luma_sq
+        .iter()
+        .zip(&luma_mean)
+        .map(|(sq, m)| (sq - m * m).max(0.0).sqrt())
+        .collect();
+    let sky_spread = {
+        let n: f32 = sky.iter().sum();
+        if n < 8.0 {
+            0.05
+        } else {
+            let var: f32 = channels
+                .iter()
+                .map(|chan| {
+                    let mean: f32 = chan.iter().zip(&sky).map(|(v, m)| v * m).sum::<f32>() / n;
+                    chan.iter()
+                        .zip(&sky)
+                        .map(|(v, m)| m * (v - mean) * (v - mean))
+                        .sum::<f32>()
+                        / n
+                })
+                .sum();
+            (var / 3.0).sqrt().max(0.02)
+        }
+    };
     let p_full = resample(probs.as_raw(), probs.width() as usize, probs.height() as usize, width as usize, height as usize);
     let mut out = guided.clone();
     out.as_mut()
@@ -462,7 +525,7 @@ pub fn sky_refine(probs: &ProbabilityMap, guide: &RgbImage) -> GrayImage {
             let fy = sy - y0 as f32;
             for (x, o) in row.iter_mut().enumerate() {
                 let pv = p_full[y * width as usize + x];
-                if pv <= 0.02 || pv >= 0.98 {
+                if pv >= 0.98 {
                     continue;
                 }
                 let sx = ((x as f32 + 0.5) * w as f32 / width as f32 - 0.5).clamp(0.0, (w - 1) as f32);
@@ -483,11 +546,42 @@ pub fn sky_refine(probs: &ProbabilityMap, guide: &RgbImage) -> GrayImage {
                     num += (px[c] as f32 / 255.0 - f_c) * d;
                     den += d * d;
                 }
+                let sky_near = bil(&ws);
+                let g = *o as f32 / 255.0;
+                if pv <= 0.02 {
+                    // Reaching into what the model called not-sky. Inside a
+                    // crown the local "non-sky" colour is contaminated by
+                    // the sky showing through, so the two-colour line above
+                    // is useless here. Ask instead whether this pixel *is*
+                    // the sky's colour, somewhere finely structured with
+                    // confident sky in range.
+                    if sky_near < SKY_REACH_MIN_NEIGHBOURHOOD {
+                        continue;
+                    }
+                    let mut dist = 0.0f32;
+                    for c in 0..3 {
+                        let d = px[c] as f32 / 255.0 - bil(&sc[c]);
+                        dist += d * d;
+                    }
+                    // NB: smoothstep clamps its denominator, so it must be
+                    // called with an ascending range; invert instead.
+                    let like_sky =
+                        1.0 - smoothstep(SKY_REACH_NEAR, SKY_REACH_FAR, dist.sqrt() / sky_spread);
+                    let structured = smoothstep(
+                        SKY_REACH_MIN_CONTRAST,
+                        SKY_REACH_FULL_CONTRAST,
+                        bil(&contrast),
+                    );
+                    let rel = structured
+                        * smoothstep(0.004, 0.03, sky_near)
+                        * smoothstep(SKY_REACH_MIN_ALPHA, SKY_REACH_FULL_ALPHA, like_sky);
+                    *o = ((rel * like_sky + (1.0 - rel) * g).clamp(0.0, 1.0) * 255.0).round() as u8;
+                    continue;
+                }
                 let alpha = (num / den.max(1e-6)).clamp(0.0, 1.0);
                 let rel = smoothstep(0.04, 0.12, den.sqrt())
-                    * smoothstep(0.02, 0.1, bil(&ws))
+                    * smoothstep(0.02, 0.1, sky_near)
                     * smoothstep(0.02, 0.1, bil(&wf));
-                let g = *o as f32 / 255.0;
                 *o = ((rel * alpha + (1.0 - rel) * g).clamp(0.0, 1.0) * 255.0).round() as u8;
             }
         });
@@ -1324,6 +1418,28 @@ mod tests {
         assert!(col(90) < coarse_at(90) - 0.3, "edge not pulled up: {} vs {}", col(90), coarse_at(90));
         assert!(col(95) < coarse_at(95) - 0.3, "edge not pulled up: {} vs {}", col(95), coarse_at(95));
         assert!(col(70) > 0.9, "sky above the boundary lost: {}", col(70));
+    }
+
+    /// Branches against a bright sky: the model paints the whole crown as
+    /// one object, so the sky showing between the branches is labelled
+    /// not-sky. Colour has to recover those gaps without selecting the
+    /// branches themselves.
+    #[test]
+    fn sky_refine_recovers_gaps_between_branches() {
+        let (w, h) = (256u32, 256u32);
+        let branch = |x: u32, y: u32| y >= 96 && (x / 4) % 3 == 0;
+        let guide = RgbImage::from_fn(w, h, |x, y| {
+            if branch(x, y) { Rgb([25, 30, 25]) } else { Rgb([240, 240, 245]) }
+        });
+        // The model: sky above the crown, nothing inside it.
+        let coarse = map(32, 32, |_, y| if y < 12 { 0.99 } else { 0.0 });
+        let out = sky_refine(&coarse, &guide);
+        let at = |x: u32, y: u32| out.get_pixel(x, y)[0];
+        // A gap between branches, well inside the crown.
+        assert!(at(6, 160) > 180, "gap between branches not recovered: {}", at(6, 160));
+        // A branch itself stays out.
+        assert!(at(1, 160) < 60, "branch selected as sky: {}", at(1, 160));
+        assert!(at(128, 20) > 240, "open sky lost: {}", at(128, 20));
     }
 
     /// Haze: sky and land are nearly the same colour, so colour cannot
