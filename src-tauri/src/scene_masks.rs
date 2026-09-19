@@ -219,6 +219,11 @@ pub fn depth_oriented(
     Ok(unorient_map(&map, o))
 }
 
+/// Box mean, re-exported for the sky-replace compositor.
+pub fn box_mean_public(values: &[f32], w: usize, h: usize, radius: usize) -> Vec<f32> {
+    box_mean(values, w, h, radius)
+}
+
 /// Bilinear resample of an f32 grid.
 fn resample(src: &[f32], sw: usize, sh: usize, dw: usize, dh: usize) -> Vec<f32> {
     let mut out = vec![0.0f32; dw * dh];
