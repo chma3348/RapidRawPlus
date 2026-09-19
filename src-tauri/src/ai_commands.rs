@@ -135,31 +135,56 @@ pub async fn generate_ai_sky_mask(
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<AiSkyMaskParameters, String> {
-    let (registry, model) = resolve_and_prepare(
-        &app_handle,
-        &state.model_registry,
-        TaskType::Mask,
-        "mask_sky",
-        mask_subtype_filter("sky"),
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-    let session = registry
-        .get_session(&model.manifest.id, None)
-        .map_err(|e| e.to_string())?;
-
     let warped_image = get_cached_full_warped_image(&state, &js_adjustments)?;
     let orientation = crate::scene_masks::Orientation {
         steps: orientation_steps,
         flip_horizontal,
         flip_vertical,
     };
-    let result = tokio::task::spawn_blocking(move || {
-        crate::scene_masks::sky_mask(warped_image.as_ref(), &session, orientation)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string())?;
+    // Scene labelling is the primary path; the older U-2-Net sky model is
+    // the fallback when it is not installed.
+    let scene = resolve_and_prepare(
+        &app_handle,
+        &state.model_registry,
+        TaskType::Mask,
+        "mask_scene",
+        mask_subtype_filter("scene"),
+    )
+    .await;
+    let result = match scene {
+        Ok((registry, model)) => {
+            let session = registry
+                .get_session(&model.manifest.id, None)
+                .map_err(|e| e.to_string())?;
+            tokio::task::spawn_blocking(move || {
+                crate::scene_masks::sky_mask_scene(warped_image.as_ref(), &session, orientation)
+            })
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?
+        }
+        Err(e) => {
+            log::warn!("sky: scene-label model unavailable ({e}); using U-2-Net");
+            let (registry, model) = resolve_and_prepare(
+                &app_handle,
+                &state.model_registry,
+                TaskType::Mask,
+                "mask_sky",
+                mask_subtype_filter("sky"),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            let session = registry
+                .get_session(&model.manifest.id, None)
+                .map_err(|e| e.to_string())?;
+            tokio::task::spawn_blocking(move || {
+                crate::scene_masks::sky_mask(warped_image.as_ref(), &session, orientation)
+            })
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?
+        }
+    };
 
     let (mask_data_base64, coverage) = match result {
         Some(scene) => (Some(encode_to_base64_png(&scene.mask)?), scene.coverage),
@@ -196,6 +221,33 @@ async fn compute_auto_subject(
     state: &tauri::State<'_, AppState>,
     app_handle: &tauri::AppHandle,
 ) -> Result<(Option<crate::scene_masks::AutoSubject>, (u32, u32)), String> {
+    // BiRefNet is the primary path; the saliency + SAM path below remains
+    // as the fallback when it cannot be installed (offline first run).
+    match resolve_and_prepare(
+        app_handle,
+        &state.model_registry,
+        TaskType::Mask,
+        "mask_subject_auto",
+        mask_subtype_filter("subject_auto"),
+    )
+    .await
+    {
+        Ok((registry, model)) => {
+            let session = registry
+                .get_session(&model.manifest.id, None)
+                .map_err(|e| e.to_string())?;
+            let warped_image = get_cached_full_warped_image(state, js_adjustments)?;
+            let image_size = (warped_image.width(), warped_image.height());
+            let result = tokio::task::spawn_blocking(move || {
+                crate::scene_masks::auto_subject_birefnet(warped_image.as_ref(), &session, orientation)
+            })
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+            return Ok((result, image_size));
+        }
+        Err(e) => log::warn!("auto subject: BiRefNet unavailable ({e}); using saliency + SAM"),
+    }
     let (registry, sam) = resolve_and_prepare(
         app_handle,
         &state.model_registry,

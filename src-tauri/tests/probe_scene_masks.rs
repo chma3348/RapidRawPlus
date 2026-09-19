@@ -262,3 +262,60 @@ fn scene_eval() {
         let _ = (sky_ec, sky_eg);
     }
 }
+
+/// Parity: run the app's BiRefNet and scene-label runners on one photo and
+/// save the raw maps as .f32 files for comparison with the Python harness.
+/// `SCENE_PHOTO=... SCENE_EXTRA_MODELS=<dir with birefnet_lite.onnx, upernet_*.onnx> SCENE_OUT=...`
+#[test]
+#[ignore = "diagnostic"]
+fn runner_parity() {
+    let dir = PathBuf::from(env("SCENE_EXTRA_MODELS"));
+    let out = PathBuf::from(env("SCENE_OUT")); std::fs::create_dir_all(&out).unwrap();
+    let _ = ort::init().with_name("probe").commit();
+    let open = |f: &str| std::sync::Mutex::new(ort::session::Session::builder().unwrap().commit_from_file(dir.join(f)).unwrap());
+    let img = image::open(env("SCENE_PHOTO")).unwrap();
+    let img = img.resize(1600, 1600, image::imageops::FilterType::Triangle);
+    let t = std::time::Instant::now();
+    let (b, bw, bh) = ai_processing::run_birefnet(&img, &open("birefnet_lite.onnx")).unwrap();
+    println!("birefnet {bw}x{bh} in {:.1?}, mean {:.4}", t.elapsed(), b.iter().sum::<f32>() / b.len() as f32);
+    std::fs::write(out.join("rust_birefnet.f32"), b.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>()).unwrap();
+    let t = std::time::Instant::now();
+    let (p, classes, rw, rh) = ai_processing::run_scene_labels(&img, &open("upernet_convnext_small.onnx"), 768).unwrap();
+    let n = (rw * rh) as usize;
+    println!("scene labels {classes} x {rw}x{rh} in {:.1?}, sky mean {:.4}", t.elapsed(), p[2 * n..3 * n].iter().sum::<f32>() / n as f32);
+    std::fs::write(out.join("rust_sky.f32"), p[2 * n..3 * n].iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>()).unwrap();
+    std::fs::write(out.join("rust_dims.txt"), format!("{} {} {} {}", img.width(), img.height(), rw, rh)).unwrap();
+}
+
+/// End-to-end check of the shipping Sky and Subject pipelines through the
+/// app's own registry and runtime.
+/// `SCENE_DIR=... SCENE_OUT=... [SCENE_ONLY=a,b,c] SUBJECT_MODELS=<models dir>`
+#[test]
+#[ignore = "diagnostic"]
+fn new_pipeline() {
+    let registry = ModelRegistry::new(PathBuf::from(env("SUBJECT_MODELS")));
+    let scene = registry.get_session("upernet-swin-large-ade", None).expect("scene model");
+    let birefnet = registry.get_session("birefnet-lite", None).expect("birefnet");
+    let out = PathBuf::from(env("SCENE_OUT")); std::fs::create_dir_all(&out).unwrap();
+    let only: Option<Vec<String>> = std::env::var("SCENE_ONLY").ok().map(|s| s.split(',').map(str::to_string).collect());
+    let o = Orientation::default();
+    for path in photos(&env("SCENE_DIR")) {
+        let name = path.file_stem().unwrap().to_string_lossy().to_string();
+        if let Some(list) = &only && !list.contains(&name) { continue; }
+        // Load the way the app does, so EXIF rotation is applied.
+        let bytes = std::fs::read(&path).unwrap();
+        let img = rapidraw_lib::image_loader::load_image_with_orientation(&bytes, None).unwrap();
+        let img = img.resize(2400, 2400, image::imageops::FilterType::Triangle);
+        let t = std::time::Instant::now();
+        let sky = scene_masks::sky_mask_scene(&img, &scene, o).unwrap();
+        let t_sky = t.elapsed();
+        let t = std::time::Instant::now();
+        let subj = scene_masks::auto_subject_birefnet(&img, &birefnet, o).unwrap();
+        let t_subj = t.elapsed();
+        let show = |m: &Option<scene_masks::SceneMask>| m.as_ref().map(|s| format!("{:.1}%", s.coverage * 100.0)).unwrap_or_else(|| "none".into());
+        println!("{name:<16} sky {:>6} [{t_sky:.1?}]   subject {:>6} [{t_subj:.1?}]",
+            show(&sky), subj.as_ref().map(|a| format!("{:.1}%", a.scene.coverage * 100.0)).unwrap_or_else(|| "none".into()));
+        if let Some(s) = sky { s.mask.save(out.join(format!("{name}-sky-mask.png"))).unwrap(); }
+        if let Some(a) = subj { a.scene.mask.save(out.join(format!("{name}-subject-mask.png"))).unwrap(); }
+    }
+}

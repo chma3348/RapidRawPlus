@@ -17,9 +17,9 @@ frontend in `src/hooks/useAiMasking.ts`, `MasksPanel.tsx`,
 
 | mask | semantic source | edge source |
 |---|---|---|
-| Sky | sky-segmentation U²-Net probabilities (320 px, photo + mirror averaged) | guided filter against the full-resolution photo |
+| Sky | the "sky" class of a scene-labelling model (UperNet Swin-L on ADE20K's 150 classes): one pass over the whole photo at 768 px, plus overlapping tiles at 1152 px where that pass is undecided | colour matte in the uncertain band, guided filter where sky and land colours match |
 | Foreground | everything nearer the camera than the subject: Depth Anything v2 relative depth (518 px, photo + mirror averaged), cut just in front of the subject's own depth | guided filter; the subject is always excluded |
-| Subject | U²-Net saliency proposes components; SAM ViT-B is prompted with a padded box per component | SAM matte (falls back to guided saliency if SAM disagrees with the proposal by IoU < 0.4) |
+| Subject | BiRefNet lite, a dichotomous-segmentation model that cuts out the main object(s) directly | BiRefNet's own matte, placed at full resolution by the guided filter |
 
 Foreground follows the photographer's layering, foreground → subject →
 background: it is whatever lies between the camera and the subject. It is
@@ -30,8 +30,43 @@ sits at the larger of the subject's 75th-percentile disparity and its median
 plus 0.03, so the ground the subject stands on and things beside it stay out.
 The subject itself is never part of the foreground.
 
+### Why these models
+
+Measured on 170 of the user's photos (city, hazy landscape, underwater,
+plus charts and logos as negatives). Both new models are MIT-licensed.
+
+**Sky.** The old U-2-Net sky model is the weak link on exactly the photos
+that matter: it found 13–18% of the frame on three hazy mountain shots
+where the sky is 34–39%, and *nothing at all* on four overcast city
+photos where the sky is 35–62%. It also hallucinated sky underwater
+(16–98% of the frame on shots looking up at the surface). The scene model
+gets all of those right and returns zero sky on all 24 dive photos.
+
+A five-way degradation test (heavy haze, flat contrast, underexposed plus
+noise, dusk tint, grey overcast) on 20 sky photos, scored as overlap with
+each photo's clean-image sky:
+
+| model | mean over the five degradations | worst single case |
+|---|---|---|
+| U-2-Net (old) | 0.29–0.56 | 0.00 — sky lost entirely, on 13 of 20 photos |
+| UperNet ConvNeXt-small | 0.89–0.97 | 0.03 — collapses when underexposed |
+| **UperNet Swin-L (shipped)** | **0.98–0.99** | 0.74 |
+
+(The reference came from Swin's own clean-photo output, which flatters it;
+ConvNeXt's collapses are real failures, not an artifact of that choice.)
+
+**Subject.** Saliency picked the wrong object often enough to matter: the
+camera housing instead of the diver, one diver out of two, nothing at all
+in 7 of 16 dive photos. BiRefNet gets both divers, the whole diver
+including fins, and the coral head, and correctly finds no subject in the
+hazy valleys where the full-size BiRefNet wrongly selects hillsides. The
+lite model is the more conservative of the two and a quarter of the size.
+
 ## What changed versus the previous behaviour
 
+0. **Better models.** Sky is a scene-labelling model rather than a
+   single-purpose saliency network, and Subject is BiRefNet rather than
+   U-2-Net saliency + SAM. SAM is still what your clicks use.
 1. **No more min–max stretching.** Both U²-Net models are sigmoid
    classifiers. The old code rescaled whatever came out to 0–255, so a photo
    with no sky (max probability 0.001) got a full-strength "sky" mask made
@@ -57,7 +92,7 @@ The subject itself is never part of the foreground.
 |---|---|
 | Sky | peak probability < 0.6; mirror-pass agreement (IoU of >50% regions) < 0.55; region centroid not in the upper half as displayed; coverage < 0.5% |
 | Foreground | no subject (message asks for a Subject mask first); nothing nearer than the subject (< 0.5% of frame); photo and mirror disagree on what is in front (IoU < 0.5, checked once the region exceeds 2%) |
-| Subject | saliency peak < 0.5; coverage < 0.5% or > 50% of the frame; mask runs along ≥3 frame borders (≥25% each); spans ≥90% of the bottom edge at ≥25% coverage (ground, not subject) |
+| Subject | peak probability < 0.5; coverage < 0.5% or > 85% of the frame; mask runs along all four frame borders. (The old saliency-era rules declined at 50% coverage and three borders; measured against real portraits that was wrong — a close portrait legitimately fills 58–67% of the frame and touches three edges.) |
 
 ## Measured behaviour
 
@@ -83,13 +118,36 @@ logos and test charts).
 | Foreground, city | water and near people in front of the skyline or bridge |
 | Subject, underwater | 9/16 selected: divers and coral, full body each time; the diver in IMG_0716 matches the four-click consensus from the click-based tool exactly (21.6%, IoU 0.98 with the proposal). 5 declined as no clear subject, 1 open-water region declined as ground |
 | Subject, assorted | projector screen, an inverted person and a river selected; whole-valley and chart "subjects" declined |
-| timing (6000 px JPEG, M-series CPU) | sky 0.7–1.0 s, foreground ~1 s, subject 1.6–1.9 s including SAM embeddings |
+| timing (2400 px working copy, M5 Pro, CPU) | sky 3.4 s with no sky (one pass), ~10 s with sky (one pass + 2 tiles); subject ~2 s; foreground ~1 s plus the subject it measures against |
+
+## Models and where they come from
+
+| file | source | size | licence |
+|---|---|---|---|
+| `birefnet_lite.onnx` | onnx-community/BiRefNet_lite-ONNX (official ONNX build) | 224 MB | MIT |
+| `upernet_swin_large.onnx` | exported from openmmlab/upernet-swin-large by `tools/export_upernet.py` | 978 MB | MIT |
+
+BiRefNet downloads on first use like the app's other models. The scene
+model has no published ONNX build, so it is exported locally by the script
+(checked against PyTorch to 2e-5 before use) and placed in the models
+folder. When either file is missing the masks fall back to the previous
+models, with a warning in the log.
+
+Apple's CoreML accelerator cannot compile either model (the pyramid
+pooling and the deformable convolutions are unsupported), so both run on
+the CPU.
 
 ## Known limits
 
-- The sky model reads the underwater surface seen from below, and large
-  featureless blue areas, as sky. Position and consistency gates remove the
-  unstable cases but not the confident ones.
+- Sky through very fine structure (a bridge lattice, bare branches) is
+  better with the tiles than without, but the thinnest gaps are still
+  partly soft rather than fully selected.
+- Refinement may move an uncertain pixel by at most ±0.35, so it corrects
+  an edge that is slightly off but cannot rescue one the model placed far
+  from the real boundary.
+- Clicking on an automatic Subject mask hands the selection back to SAM,
+  which is a different (and sometimes coarser) model than the BiRefNet
+  cutout the click started from.
 - Foreground is only as right as the subject it is measured against. When
   the automatic subject is wrong (a camera housing over a small diver),
   make the Subject mask by clicking first, then add Foreground.
@@ -97,9 +155,6 @@ logos and test charts).
   might not call foreground (a stranger's head at the frame edge, the walls
   around a projected screen). The cut across a featureless water plane is a
   depth line, not an object edge.
-- Subject follows saliency: with no clear object it declines, and when two
-  objects compete it takes the largest salient component (the camera
-  housing over a small diver in one shot). Click the intended subject to
-  override; the click tool's containment and growth rules apply from there.
-- A graphic with a coloured field can still be read as sky; the gates are
-  tuned for photographs.
+- Subject follows the model's idea of the main object. On a skyline it may
+  pick a boat rather than the buildings. Click the subject you want to
+  override it.

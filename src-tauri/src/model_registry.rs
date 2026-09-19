@@ -155,6 +155,35 @@ fn builtin_manifests() -> Vec<ModelManifest> {
             params: json!({ "mask_subtype": "sky", "input_size": 320 }),
         },
         ModelManifest {
+            // UperNet + Swin-L on ADE20K (MIT): 150 scene classes, of which
+            // "sky" drives the Sky mask. Exported locally by
+            // tools/export_upernet.py; when the file is absent the Sky mask
+            // falls back to the older U-2-Net sky model.
+            id: "upernet-swin-large-ade".to_string(),
+            display_name: "UperNet Swin-L (Scene labels)".to_string(),
+            task_type: TaskType::Mask,
+            file_path: "upernet_swin_large.onnx".to_string(),
+            aux_files: HashMap::new(),
+            download: None,
+            aux_downloads: HashMap::new(),
+            params: json!({ "mask_subtype": "scene", "input_size": 768 }),
+        },
+        ModelManifest {
+            // BiRefNet (MIT): dichotomous segmentation of the main object(s).
+            // Drives the one-click Subject mask; SAM stays for clicks.
+            id: "birefnet-lite".to_string(),
+            display_name: "BiRefNet Lite (Subject)".to_string(),
+            task_type: TaskType::Mask,
+            file_path: "birefnet_lite.onnx".to_string(),
+            aux_files: HashMap::new(),
+            download: Some(DownloadSpec {
+                url: "https://huggingface.co/onnx-community/BiRefNet_lite-ONNX/resolve/main/onnx/model.onnx?download=true".to_string(),
+                sha256: "5600024376f572a557870a5eb0afb1e5961636bef4e1e22132025467d0f03333".to_string(),
+            }),
+            aux_downloads: HashMap::new(),
+            params: json!({ "mask_subtype": "subject_auto", "input_size": 1024 }),
+        },
+        ModelManifest {
             id: "depth-anything-v2-vits".to_string(),
             display_name: "Depth Anything V2 (Small)".to_string(),
             task_type: TaskType::Mask,

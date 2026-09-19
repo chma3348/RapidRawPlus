@@ -961,6 +961,78 @@ fn u2net_stretched_mask(
     Ok(imageops::resize(&cropped_mask, orig_width, orig_height, FilterType::Triangle))
 }
 
+/// BiRefNet (dichotomous image segmentation): foreground probability at the
+/// model's fixed 1024×1024 input, which the photo is resized to directly
+/// (no letterbox), as the reference implementation does. Returns
+/// probabilities (sigmoid applied) and the map size.
+pub fn run_birefnet(image: &DynamicImage, session: &Mutex<Session>) -> Result<(Vec<f32>, u32, u32)> {
+    const SIZE: u32 = 1024;
+    let resized = image.resize_exact(SIZE, SIZE, FilterType::Triangle).into_rgb8();
+    let mean = [0.485f32, 0.456, 0.406];
+    let std = [0.229f32, 0.224, 0.225];
+    let n = (SIZE * SIZE) as usize;
+    let mut data = vec![0.0f32; 3 * n];
+    for (i, p) in resized.pixels().enumerate() {
+        for c in 0..3 {
+            data[c * n + i] = (p[c] as f32 / 255.0 - mean[c]) / std[c];
+        }
+    }
+    let input = Array::from_shape_vec((1, 3, SIZE as usize, SIZE as usize), data)?;
+    let t_input = Tensor::from_array(input)?;
+    let mut session = session.lock().unwrap();
+    let outputs = session.run(ort::inputs![t_input])?;
+    let out = outputs[0].try_extract_array::<f32>()?;
+    let probs: Vec<f32> = out.iter().map(|&v| 1.0 / (1.0 + (-v).exp())).collect();
+    anyhow::ensure!(probs.len() == n, "unexpected BiRefNet output size {}", probs.len());
+    Ok((probs, SIZE, SIZE))
+}
+
+/// Scene labelling (UperNet, ADE20K's 150 classes) at a fixed square input
+/// the photo is letterboxed into. Returns the per-class probabilities for
+/// the photo's area only, laid out class-major, plus that area's size.
+pub fn run_scene_labels(
+    image: &DynamicImage,
+    session: &Mutex<Session>,
+    size: u32,
+) -> Result<(Vec<f32>, usize, u32, u32)> {
+    let resized = image.resize(size, size, FilterType::Triangle).into_rgb8();
+    let (rw, rh) = resized.dimensions();
+    let (px, py) = ((size - rw) / 2, (size - rh) / 2);
+    let mean = [0.485f32, 0.456, 0.406];
+    let std = [0.229f32, 0.224, 0.225];
+    let n = (size * size) as usize;
+    let mut data = vec![0.0f32; 3 * n];
+    for (x, y, p) in resized.enumerate_pixels() {
+        let i = ((y + py) * size + x + px) as usize;
+        for c in 0..3 {
+            data[c * n + i] = (p[c] as f32 / 255.0 - mean[c]) / std[c];
+        }
+    }
+    let input = Array::from_shape_vec((1, 3, size as usize, size as usize), data)?;
+    let t_input = Tensor::from_array(input)?;
+    let mut session = session.lock().unwrap();
+    let outputs = session.run(ort::inputs![t_input])?;
+    let out = outputs[0].try_extract_array::<f32>()?;
+    let shape = out.shape().to_vec();
+    anyhow::ensure!(
+        shape.len() == 4 && shape[2] == size as usize && shape[3] == size as usize,
+        "unexpected scene-label output shape {shape:?}"
+    );
+    let classes = shape[1];
+    let flat = out.as_standard_layout();
+    let flat = flat.as_slice().ok_or_else(|| anyhow::anyhow!("non-contiguous output"))?;
+    let (rwu, rhu) = (rw as usize, rh as usize);
+    let mut cropped = Vec::with_capacity(classes * rwu * rhu);
+    for c in 0..classes {
+        let base = c * n;
+        for y in 0..rhu {
+            let row = base + (y + py as usize) * size as usize + px as usize;
+            cropped.extend_from_slice(&flat[row..row + rwu]);
+        }
+    }
+    Ok((cropped, classes, rw, rh))
+}
+
 pub fn run_sky_seg_model(
     image: &DynamicImage,
     sky_seg_session: &Mutex<Session>,
