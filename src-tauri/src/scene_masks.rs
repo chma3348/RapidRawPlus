@@ -39,15 +39,19 @@ pub const MIN_COVERAGE: f32 = 0.005;
 const SKY_MIN_PEAK: f32 = 0.6;
 /// A saliency map whose maximum stays under this has no clear subject.
 const SUBJECT_MIN_PEAK: f32 = 0.5;
-/// Otsu separability (between-class over total variance) below which the
-/// depth histogram has no meaningful near/far split.
-pub const FOREGROUND_MIN_SEPARABILITY: f32 = 0.55;
-/// The near/far split of the photo and of its mirror must agree at least
-/// this much (IoU); below it the depth ordering is not trustworthy.
+/// Foreground is what lies nearer the camera than the subject. The cut sits
+/// this far (in normalised disparity) in front of the subject's median
+/// depth, or at its 75th percentile if the subject is itself deep, so the
+/// ground the subject stands on and things beside it stay out.
+const FOREGROUND_SUBJECT_MARGIN: f32 = 0.03;
+/// Half-width of the soft transition around that cut.
+const FOREGROUND_SOFT_BAND: f32 = 0.03;
+/// Fewer subject samples than this at depth resolution is no subject.
+const FOREGROUND_MIN_SUBJECT_SAMPLES: usize = 16;
+/// The photo and its mirror must agree on what is in front (IoU) once the
+/// region is large enough for the comparison to mean something.
 pub const FOREGROUND_MIN_MIRROR_AGREEMENT: f32 = 0.5;
-/// Half-width of the soft transition around the depth threshold, as a
-/// fraction of the depth range.
-const FOREGROUND_SOFT_BAND: f32 = 0.05;
+const FOREGROUND_AGREEMENT_MIN_SHARE: f32 = 0.02;
 /// Salient components smaller than this share of the largest one are noise.
 const SUBJECT_COMPONENT_MIN_RATIO: f32 = 0.25;
 /// Salient components smaller than this share of the frame are ignored.
@@ -445,63 +449,140 @@ pub fn sky_mask(
     Ok(sky_from_probabilities(&probs, &image.to_rgb8()))
 }
 
-/// Foreground from relative depth (near = 1): Otsu split with a soft band,
-/// refined against the photo. `None` when the depth has no clear split.
-pub fn foreground_from_depth(depth: &ProbabilityMap, guide: &RgbImage) -> Option<SceneMask> {
-    let (threshold, separability) = otsu(depth.as_raw());
-    if separability < FOREGROUND_MIN_SEPARABILITY {
-        return None;
-    }
-    let soft = ProbabilityMap::from_fn(depth.width(), depth.height(), |x, y| {
-        let d = depth.get_pixel(x, y).0[0];
-        Luma([smoothstep(
-            threshold - FOREGROUND_SOFT_BAND,
-            threshold + FOREGROUND_SOFT_BAND,
-            d,
-        )])
-    });
-    let mask = guided_upsample(&soft, guide, 0.35);
-    let coverage = coverage(&mask);
-    (MIN_COVERAGE..=1.0 - MIN_COVERAGE)
-        .contains(&coverage)
-        .then_some(SceneMask { mask, coverage })
+/// Why no foreground was produced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForegroundDecline {
+    /// There is no subject to measure the foreground against.
+    NoSubject,
+    /// Nothing in the photo is nearer the camera than the subject.
+    NothingInFront,
+    /// The depth ordering in front of the subject is not stable.
+    Unstable,
 }
 
-/// Hard near-side mask of a depth map at its own Otsu threshold.
-fn near_side(depth: &ProbabilityMap) -> ProbabilityMap {
-    let (t, _) = otsu(depth.as_raw());
+impl ForegroundDecline {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::NoSubject => {
+                "No subject to measure the foreground against. Add a Subject mask first, then Foreground."
+            }
+            Self::NothingInFront => "Nothing in this photo is in front of the subject.",
+            Self::Unstable => "The depth in front of the subject is too ambiguous to select reliably.",
+        }
+    }
+}
+
+/// Depth-map-sized copy of a full-resolution mask, as 0..1.
+fn mask_to_map(mask: &GrayImage, w: u32, h: u32) -> ProbabilityMap {
+    let small = imageops::resize(mask, w, h, FilterType::Triangle);
+    map_from(small.pixels().map(|p| p[0] as f32 / 255.0).collect(), w, h)
+}
+
+/// Disparity (near = 1) beyond which a pixel is in front of the subject.
+pub fn subject_depth_cut(depth: &ProbabilityMap, subject: &ProbabilityMap) -> Option<f32> {
+    // Interior samples only: at depth resolution the subject's outline
+    // mixes in whatever is behind it.
+    let mut samples: Vec<f32> = depth
+        .pixels()
+        .zip(subject.pixels())
+        .filter(|(_, s)| s.0[0] > 0.8)
+        .map(|(d, _)| d.0[0])
+        .collect();
+    if samples.len() < FOREGROUND_MIN_SUBJECT_SAMPLES {
+        return None;
+    }
+    samples.sort_by(f32::total_cmp);
+    let q = |f: f32| samples[((samples.len() - 1) as f32 * f).round() as usize];
+    Some(q(0.75).max(q(0.5) + FOREGROUND_SUBJECT_MARGIN))
+}
+
+fn in_front(depth: &ProbabilityMap, subject: &ProbabilityMap, cut: f32) -> ProbabilityMap {
     ProbabilityMap::from_fn(depth.width(), depth.height(), |x, y| {
-        Luma([if depth.get_pixel(x, y).0[0] > t { 1.0 } else { 0.0 }])
+        let d = depth.get_pixel(x, y).0[0];
+        let s = subject.get_pixel(x, y).0[0];
+        Luma([
+            smoothstep(cut - FOREGROUND_SOFT_BAND, cut + FOREGROUND_SOFT_BAND, d) * (1.0 - s),
+        ])
     })
 }
 
-/// Foreground mask for `image` (stored space) as seen with orientation `o`.
+/// Foreground relative to a subject: everything nearer the camera than the
+/// subject, refined against the photo, never overlapping the subject.
+/// `depth` is relative disparity (near = 1) in stored layout; `subject` is a
+/// full-resolution mask the size of `guide`.
+pub fn foreground_from_subject(
+    depth: &ProbabilityMap,
+    subject: &GrayImage,
+    guide: &RgbImage,
+) -> std::result::Result<SceneMask, ForegroundDecline> {
+    if subject.dimensions() != guide.dimensions() {
+        return Err(ForegroundDecline::NoSubject);
+    }
+    let subject_small = mask_to_map(subject, depth.width(), depth.height());
+    let cut = subject_depth_cut(depth, &subject_small).ok_or(ForegroundDecline::NoSubject)?;
+    let soft = in_front(depth, &subject_small, cut);
+    let mut mask = guided_upsample(&soft, guide, 0.35);
+    // The guided filter can bleed a little across the subject's outline;
+    // the subject itself is never foreground.
+    for (m, s) in mask.pixels_mut().zip(subject.pixels()) {
+        m[0] = m[0].min(255 - s[0]);
+    }
+    let coverage = coverage(&mask);
+    if coverage < MIN_COVERAGE {
+        return Err(ForegroundDecline::NothingInFront);
+    }
+    Ok(SceneMask { mask, coverage })
+}
+
+/// Foreground mask for `image` (stored space) relative to `subject`
+/// (full-resolution, stored space), seen with orientation `o`.
 ///
-/// Depth is estimated on the photo and on its mirror; the two near/far
-/// splits must agree, and their averaged depth is what gets split.
+/// Depth is estimated on the photo and on its mirror. When the region in
+/// front of the subject is large enough to compare, both passes must agree
+/// on it; their averaged depth is what gets cut.
 pub fn foreground_mask(
     image: &DynamicImage,
     depth_session: &Mutex<Session>,
+    subject: &GrayImage,
     o: Orientation,
-) -> Result<Option<SceneMask>> {
+) -> Result<std::result::Result<SceneMask, ForegroundDecline>> {
     let oriented = orient(image, o);
     let a = ai_processing::run_depth_anything_model(&oriented, depth_session)?;
     let b = ai_processing::run_depth_anything_model(&oriented.fliph(), depth_session)?;
     ensure!(a.dimensions() == b.dimensions(), "mirrored depth pass changed size");
     let (w, h) = a.dimensions();
     let a = map_from(a.pixels().map(|p| p[0] as f32 / 255.0).collect(), w, h);
-    let b = imageops::flip_horizontal(&map_from(b.pixels().map(|p| p[0] as f32 / 255.0).collect(), w, h));
-    let agreement = map_agreement(&near_side(&a), &near_side(&b));
-    if agreement < FOREGROUND_MIN_MIRROR_AGREEMENT {
-        log::info!("foreground: near/far splits agree only {agreement:.2}; declining");
-        return Ok(None);
+    let b = imageops::flip_horizontal(&map_from(
+        b.pixels().map(|p| p[0] as f32 / 255.0).collect(),
+        w,
+        h,
+    ));
+    let (a, b) = (unorient_map(&a, o), unorient_map(&b, o));
+
+    let subject_small = mask_to_map(subject, a.width(), a.height());
+    if let (Some(cut_a), Some(cut_b)) = (
+        subject_depth_cut(&a, &subject_small),
+        subject_depth_cut(&b, &subject_small),
+    ) {
+        let (fa, fb) = (
+            in_front(&a, &subject_small, cut_a),
+            in_front(&b, &subject_small, cut_b),
+        );
+        let n = (fa.width() * fa.height()) as f32;
+        let share = |m: &ProbabilityMap| m.pixels().filter(|p| p.0[0] > 0.5).count() as f32 / n;
+        if share(&fa).max(share(&fb)) >= FOREGROUND_AGREEMENT_MIN_SHARE {
+            let agreement = map_agreement(&fa, &fb);
+            if agreement < FOREGROUND_MIN_MIRROR_AGREEMENT {
+                log::info!("foreground: passes agree only {agreement:.2}; declining");
+                return Ok(Err(ForegroundDecline::Unstable));
+            }
+        }
     }
     let mut avg = a;
     for (x, y) in avg.pixels_mut().zip(b.pixels()) {
         x.0[0] = 0.5 * (x.0[0] + y.0[0]);
     }
-    let depth = unorient_map(&avg, o);
-    Ok(foreground_from_depth(&depth, &image.to_rgb8()))
+    Ok(foreground_from_subject(&avg, subject, &image.to_rgb8()))
 }
 
 /// A salient component's footprint, in map coordinates.
@@ -918,15 +999,59 @@ mod tests {
         assert!((sky.coverage - 0.5).abs() < 0.05, "{}", sky.coverage);
     }
 
+    /// Three depth layers: background (far), subject layer, near ground.
+    fn layered_scene() -> (ProbabilityMap, GrayImage, RgbImage) {
+        let depth = map(32, 32, |_, y| match y {
+            0..=9 => 0.1,
+            10..=19 => 0.5,
+            _ => 0.9,
+        });
+        // Subject: a block in the middle layer, full resolution 128x128.
+        let subject = GrayImage::from_fn(128, 128, |x, y| {
+            Luma([if (48..80).contains(&x) && (40..80).contains(&y) { 255 } else { 0 }])
+        });
+        (depth, subject, RgbImage::from_pixel(128, 128, Rgb([100, 100, 100])))
+    }
+
     #[test]
-    fn foreground_requires_a_depth_split() {
-        let guide = RgbImage::from_pixel(64, 64, Rgb([100, 100, 100]));
-        let split = map(32, 32, |_, y| if y < 20 { 0.15 } else { 0.85 });
-        let fg = foreground_from_depth(&split, &guide).expect("foreground");
+    fn foreground_is_what_lies_in_front_of_the_subject() {
+        let (depth, subject, guide) = layered_scene();
+        let fg = foreground_from_subject(&depth, &subject, &guide).expect("foreground");
+        // Only the near layer (rows 20..32 of 32) counts; background and the
+        // subject's own layer do not.
         assert!((fg.coverage - 12.0 / 32.0).abs() < 0.05, "{}", fg.coverage);
-        // A flat depth (a wall) has no near side at all.
-        let flat = map(32, 32, |_, _| 0.4);
-        assert!(foreground_from_depth(&flat, &guide).is_none());
+        assert!(fg.mask.get_pixel(10, 10)[0] < 10, "background selected");
+        assert!(fg.mask.get_pixel(10, 60)[0] < 10, "subject's depth layer selected");
+        assert!(fg.mask.get_pixel(10, 120)[0] > 245, "near ground missed");
+    }
+
+    #[test]
+    fn foreground_never_overlaps_the_subject() {
+        let (depth, _, guide) = layered_scene();
+        // A subject whose legs reach down into the near layer.
+        let subject = GrayImage::from_fn(128, 128, |x, y| {
+            Luma([if (48..80).contains(&x) && (40..110).contains(&y) { 255 } else { 0 }])
+        });
+        let fg = foreground_from_subject(&depth, &subject, &guide).expect("foreground");
+        for (m, s) in fg.mask.pixels().zip(subject.pixels()) {
+            assert!(m[0] as u16 + s[0] as u16 <= 255);
+        }
+        assert_eq!(fg.mask.get_pixel(64, 100)[0], 0);
+    }
+
+    #[test]
+    fn foreground_declines_without_a_subject_or_anything_in_front() {
+        let (depth, _, guide) = layered_scene();
+        let none = GrayImage::new(128, 128);
+        assert_eq!(foreground_from_subject(&depth, &none, &guide).err(), Some(ForegroundDecline::NoSubject));
+        // Subject on the nearest layer: nothing can be in front of it.
+        let nearest = GrayImage::from_fn(128, 128, |x, y| {
+            Luma([if (48..80).contains(&x) && y >= 90 { 255 } else { 0 }])
+        });
+        assert_eq!(
+            foreground_from_subject(&depth, &nearest, &guide).err(),
+            Some(ForegroundDecline::NothingInFront)
+        );
     }
 
     #[test]

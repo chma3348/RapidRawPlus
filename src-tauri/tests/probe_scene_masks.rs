@@ -198,8 +198,6 @@ fn scene_eval() {
     let out = PathBuf::from(env("SCENE_OUT")); std::fs::create_dir_all(&out).unwrap();
     let limit: usize = std::env::var("SCENE_LIMIT").ok().and_then(|s| s.parse().ok()).unwrap_or(usize::MAX);
     let o = Orientation::default();
-    println!("{:<14} {:>7} {:>6} {:>6} {:>6} | {:>7} {:>5} {:>6} {:>6} {:>6} | {:>7} {:>4} {:>6}",
-        "photo", "sky%", "mirIoU", "edgeC", "edgeG", "fg%", "sep", "mirIoU", "edgeC", "edgeG", "subj%", "sam", "agree");
     for path in photos(&env("SCENE_DIR")).into_iter().take(limit) {
         let name = path.file_stem().unwrap().to_string_lossy().to_string();
         let img = image::open(&path).unwrap();
@@ -223,30 +221,10 @@ fn scene_eval() {
             None => (0.0, f32::NAN, f32::NAN, f32::NAN),
         };
 
-        // Foreground
-        let t = std::time::Instant::now();
-        let d = scene_masks::depth_oriented(&img, &depth, o).unwrap();
-        let (_, sep) = scene_masks::otsu(d.as_raw());
-        let fg_res = scene_masks::foreground_mask(&img, &depth, o).unwrap();
-        let t_fg = t.elapsed();
-        let (fg_cov, fg_mir, fg_ec, fg_eg) = match &fg_res {
-            Some(f) => {
-                let g = small_mask(&f.mask, target);
-                g.save(out.join(format!("{name}-fg-mask.png"))).unwrap();
-                let (thr, _) = scene_masks::otsu(d.as_raw());
-                let hard = ProbabilityMap::from_fn(d.width(), d.height(), |x, y| image::Luma([if d.get_pixel(x, y)[0] > thr { 1.0 } else { 0.0 }]));
-                let c = coarse_mask(&hard, target);
-                let dm = scene_masks::depth_oriented(&img.fliph(), &depth, o).map(|m| image::imageops::flip_horizontal(&m)).unwrap();
-                let (thr_m, _) = scene_masks::otsu(dm.as_raw());
-                let hard_m = ProbabilityMap::from_fn(dm.width(), dm.height(), |x, y| image::Luma([if dm.get_pixel(x, y)[0] > thr_m { 1.0 } else { 0.0 }]));
-                (f.coverage * 100.0, iou(&c, &coarse_mask(&hard_m, target)), edge_alignment(&c, &sm), edge_alignment(&g, &sm))
-            }
-            None => (0.0, f32::NAN, f32::NAN, f32::NAN),
-        };
-
-        // Subject
+        // Subject (needed by Foreground: foreground = in front of the subject)
         let mut subj = (0.0f32, String::from("-"), f32::NAN);
         let mut t_subj = std::time::Duration::ZERO;
+        let mut subject_mask: Option<GrayImage> = None;
         if let (Some(enc), Some(dec)) = (&encoder, &decoder) {
             let t = std::time::Instant::now();
             let emb = ai_processing::generate_image_embeddings(&img, enc).unwrap();
@@ -258,9 +236,29 @@ fn scene_eval() {
                 g.save(out.join(format!("{name}-subject-mask.png"))).unwrap();
                 let proposal = coarse_mask(&p_fg, target);
                 subj = (a.scene.coverage * 100.0, if a.from_sam { "yes".into() } else { "no".into() }, iou(&g, &proposal));
+                subject_mask = Some(a.scene.mask);
             }
         }
-        println!("{name:<14} {sky_cov:>6.1}% {sky_mir:>6.3} {sky_ec:>6.2} {sky_eg:>6.2} | {fg_cov:>6.1}% {sep:>5.2} {fg_mir:>6.3} {fg_ec:>6.2} {fg_eg:>6.2} | {:>6.1}% {:>4} {:>6.2}   sky {t_sky:.0?} fg {t_fg:.0?} subj {t_subj:.1?}",
+
+        // Foreground relative to the subject
+        let t = std::time::Instant::now();
+        let (fg_cov, fg_note, fg_eg) = match &subject_mask {
+            None => (0.0, "no subject".to_string(), f32::NAN),
+            Some(subject) => match scene_masks::foreground_mask(&img, &depth, subject, o).unwrap() {
+                Ok(f) => {
+                    let g = small_mask(&f.mask, target);
+                    g.save(out.join(format!("{name}-fg-mask.png"))).unwrap();
+                    let overlap = f.mask.pixels().zip(subject.pixels()).filter(|(a, b)| a[0] > 127 && b[0] > 127).count();
+                    (f.coverage * 100.0, format!("overlap {overlap}px"), edge_alignment(&g, &sm))
+                }
+                Err(reason) => (0.0, format!("{reason:?}"), f32::NAN),
+            },
+        };
+        let t_fg = t.elapsed();
+        let _ = &fg_eg;
+
+        println!("{name:<14} sky {sky_cov:>5.1}% mir {sky_mir:>5.3} | subject {:>5.1}% sam {:>3} agree {:>5.2} | fg {fg_cov:>5.1}% {fg_note}   [sky {t_sky:.0?} subj {t_subj:.1?} fg {t_fg:.1?}]",
             subj.0, subj.1, subj.2);
+        let _ = (sky_ec, sky_eg);
     }
 }

@@ -40,9 +40,22 @@ fn encode_to_base64_png(image: &GrayImage) -> Result<String, String> {
     Ok(format!("data:image/png;base64,{}", base64_str))
 }
 
+/// Decode a stored mask (`data:image/png;base64,...` or bare base64).
+fn decode_mask_data_url(data: &str) -> Option<GrayImage> {
+    let b64 = data.split_once(',').map_or(data, |(_, b)| b);
+    let bytes = general_purpose::STANDARD.decode(b64).ok()?;
+    Some(image::load_from_memory(&bytes).ok()?.to_luma8())
+}
+
+/// Foreground = everything nearer the camera than the subject (photography's
+/// foreground → subject → background). The subject is the caller's existing
+/// Subject mask when it matches the photo, otherwise the automatic subject.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn generate_ai_foreground_mask(
     js_adjustments: serde_json::Value,
+    path: String,
+    subject_mask_base64: Option<String>,
     rotation: f32,
     flip_horizontal: bool,
     flip_vertical: bool,
@@ -50,8 +63,6 @@ pub async fn generate_ai_foreground_mask(
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<AiForegroundMaskParameters, String> {
-    // Foreground is the near side of the scene's depth, not a saliency
-    // guess: see scene_masks.
     let (registry, model) = resolve_and_prepare(
         &app_handle,
         &state.model_registry,
@@ -71,20 +82,42 @@ pub async fn generate_ai_foreground_mask(
         flip_horizontal,
         flip_vertical,
     };
-    let result = tokio::task::spawn_blocking(move || {
-        crate::scene_masks::foreground_mask(warped_image.as_ref(), &session, orientation)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string())?;
+    let dims = (warped_image.width(), warped_image.height());
+    let supplied = subject_mask_base64
+        .as_deref()
+        .and_then(decode_mask_data_url)
+        .filter(|m| m.dimensions() == dims);
+    let subject = match supplied {
+        Some(mask) => {
+            log::info!("foreground: measuring against the user's subject mask");
+            Some(mask)
+        }
+        None => {
+            let (auto, _) =
+                compute_auto_subject(&js_adjustments, &path, orientation, &state, &app_handle)
+                    .await?;
+            auto.map(|a| a.scene.mask)
+        }
+    };
 
-    let (mask_data_base64, coverage) = match result {
-        Some(scene) => (Some(encode_to_base64_png(&scene.mask)?), scene.coverage),
-        None => (None, 0.0),
+    let outcome = match subject {
+        None => Err(crate::scene_masks::ForegroundDecline::NoSubject),
+        Some(subject) => tokio::task::spawn_blocking(move || {
+            crate::scene_masks::foreground_mask(warped_image.as_ref(), &session, &subject, orientation)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?,
+    };
+
+    let (mask_data_base64, coverage, declined) = match outcome {
+        Ok(scene) => (Some(encode_to_base64_png(&scene.mask)?), scene.coverage, None),
+        Err(reason) => (None, 0.0, Some(reason.message().to_string())),
     };
     Ok(AiForegroundMaskParameters {
         mask_data_base64,
         coverage: Some(coverage),
+        declined,
         rotation: Some(rotation),
         flip_horizontal: Some(flip_horizontal),
         flip_vertical: Some(flip_vertical),
@@ -154,21 +187,17 @@ pub struct AiAutoSubjectResult {
     pub found: bool,
 }
 
-/// One-click subject: saliency proposes, SAM delineates. See scene_masks.
-#[allow(clippy::too_many_arguments)]
-#[tauri::command]
-pub async fn generate_ai_auto_subject_mask(
-    js_adjustments: serde_json::Value,
-    path: String,
-    rotation: f32,
-    flip_horizontal: bool,
-    flip_vertical: bool,
-    orientation_steps: u8,
-    state: tauri::State<'_, AppState>,
-    app_handle: tauri::AppHandle,
-) -> Result<AiAutoSubjectResult, String> {
+/// Saliency proposes, SAM delineates: the automatic subject for the
+/// current photo and geometry. Shared by the Subject and Foreground masks.
+async fn compute_auto_subject(
+    js_adjustments: &serde_json::Value,
+    path: &str,
+    orientation: crate::scene_masks::Orientation,
+    state: &tauri::State<'_, AppState>,
+    app_handle: &tauri::AppHandle,
+) -> Result<(Option<crate::scene_masks::AutoSubject>, (u32, u32)), String> {
     let (registry, sam) = resolve_and_prepare(
-        &app_handle,
+        app_handle,
         &state.model_registry,
         TaskType::Mask,
         "mask_subject",
@@ -177,7 +206,7 @@ pub async fn generate_ai_auto_subject_mask(
     .await
     .map_err(|e| e.to_string())?;
     let (saliency_registry, saliency) = resolve_and_prepare(
-        &app_handle,
+        app_handle,
         &state.model_registry,
         TaskType::Mask,
         "mask_foreground",
@@ -210,7 +239,7 @@ pub async fn generate_ai_auto_subject_mask(
         hasher.finalize().to_hex().to_string()
     };
 
-    let warped_image = get_cached_full_warped_image(&state, &js_adjustments)?;
+    let warped_image = get_cached_full_warped_image(state, js_adjustments)?;
     ensure_ai_state(&state.ai_state);
     let embeddings = {
         let mut ai_state_lock = state.ai_state.lock().unwrap();
@@ -227,11 +256,6 @@ pub async fn generate_ai_auto_subject_mask(
         }
     };
 
-    let orientation = crate::scene_masks::Orientation {
-        steps: orientation_steps,
-        flip_horizontal,
-        flip_vertical,
-    };
     let image_size = (warped_image.width(), warped_image.height());
     let result = tokio::task::spawn_blocking(move || {
         crate::scene_masks::auto_subject(
@@ -245,6 +269,30 @@ pub async fn generate_ai_auto_subject_mask(
     .await
     .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())?;
+
+    Ok((result, image_size))
+}
+
+/// One-click subject: saliency proposes, SAM delineates. See scene_masks.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub async fn generate_ai_auto_subject_mask(
+    js_adjustments: serde_json::Value,
+    path: String,
+    rotation: f32,
+    flip_horizontal: bool,
+    flip_vertical: bool,
+    orientation_steps: u8,
+    state: tauri::State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+) -> Result<AiAutoSubjectResult, String> {
+    let orientation = crate::scene_masks::Orientation {
+        steps: orientation_steps,
+        flip_horizontal,
+        flip_vertical,
+    };
+    let (result, image_size) =
+        compute_auto_subject(&js_adjustments, &path, orientation, &state, &app_handle).await?;
 
     let (mask_data_base64, coverage, points, found) = match result {
         Some(auto) => {

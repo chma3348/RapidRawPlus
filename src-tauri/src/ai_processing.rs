@@ -1102,6 +1102,9 @@ pub struct AiForegroundMaskParameters {
     /// Share of the frame selected (0 when nothing was found).
     #[serde(default)]
     pub coverage: Option<f32>,
+    /// Why nothing was selected, for the UI; not persisted by the frontend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declined: Option<String>,
     #[serde(default)]
     pub rotation: Option<f32>,
     #[serde(default)]

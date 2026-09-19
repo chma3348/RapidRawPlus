@@ -816,19 +816,36 @@ export function useAiMasking() {
 
     try {
       const transformAdjustments = getTransformAdjustments(adjustments);
-      const newParameters = await invoke(Invokes.GenerateAiForegroundMask, {
+      const geometry = JSON.stringify([transformAdjustments, adjustments.rotation, adjustments.flipHorizontal,
+        adjustments.flipVertical, adjustments.orientationSteps]);
+      // Foreground is measured against a subject. Prefer the Subject mask the
+      // user already made (same container first, then any), if it was made
+      // on the current geometry; otherwise the backend finds one itself.
+      const containers = [...(adjustments.masks || [])];
+      const own = containers.find((c: MaskContainer) => c.subMasks.some((sm: SubMask) => sm.id === subMaskId));
+      const ordered = own ? [own, ...containers.filter((c) => c !== own)] : containers;
+      const subject = ordered
+        .flatMap((c: MaskContainer) => c.subMasks)
+        .find((sm: SubMask) => sm.type === 'ai-subject' && sm.parameters?.maskDataBase64
+          && sm.parameters?.subjectGeometry === geometry);
+
+      const newParameters: any = await invoke(Invokes.GenerateAiForegroundMask, {
         jsAdjustments: transformAdjustments,
+        path: selectedImage.path,
+        subjectMaskBase64: subject?.parameters.maskDataBase64 ?? null,
         flipHorizontal: adjustments.flipHorizontal,
         flipVertical: adjustments.flipVertical,
         orientationSteps: adjustments.orientationSteps,
         rotation: adjustments.rotation,
       });
 
-      if ((newParameters as any)?.coverage === 0) toast.info('No foreground found: the scene has no clear near/far split.');
-      const subMask = adjustments.aiPatches
-        ?.flatMap((p: AiPatch) => p.subMasks)
+      const { declined, ...persisted } = newParameters ?? {};
+      if (declined) toast.info(declined);
+      const current = useEditorStore.getState().adjustments;
+      const subMask = [...(current.masks || []), ...(current.aiPatches || [])]
+        .flatMap((p: any) => p.subMasks)
         .find((sm: SubMask) => sm.id === subMaskId);
-      const mergedParameters = { ...(subMask?.parameters || {}), ...newParameters };
+      const mergedParameters = { ...(subMask?.parameters || {}), ...persisted };
       patchesSentToBackend.delete(subMaskId);
       updateSubMask(subMaskId, { parameters: mergedParameters });
     } catch (error) {
