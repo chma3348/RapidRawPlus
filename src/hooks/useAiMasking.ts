@@ -15,6 +15,10 @@ import { v4 as uuidv4 } from 'uuid';
 import { SubMask } from '../components/panel/right/Masks';
 import { Invokes } from '../components/ui/AppProperties';
 import { useAuth } from '@clerk/react';
+import type { ReplacementBlendOptions } from '../components/panel/right/ReplacementBlendControls';
+import { subjectPrompts } from '../utils/subjectSelection';
+
+const pendingSelections = new Set<string>();
 
 const getTransformAdjustments = (adj: Adjustments) => ({
   transformDistortion: adj.transformDistortion,
@@ -71,6 +75,9 @@ export function useAiMasking() {
         loras?: Array<{ name: string; strength: number }>;
       },
     ) => {
+      // Text and Replace mode always require a generative model, even if a
+      // previous quick-repair selection left the fast preference enabled.
+      useFastInpaint = useFastInpaint && !generateMode && !prompt.trim();
       const { selectedImage, adjustments, isGeneratingAi, patchesSentToBackend } = useEditorStore.getState();
       // Every early exit must be LOUD: silent returns here read as "the
       // button does nothing" (console.error reaches app.log).
@@ -183,6 +190,41 @@ export function useAiMasking() {
     [setAdjustments, setEditor],
   );
 
+  const handleReblendReplacement = useCallback(async (patchId: string, options: ReplacementBlendOptions) => {
+    const snapshot = useEditorStore.getState();
+    const patch = snapshot.adjustments.aiPatches.find((p: AiPatch) => p.id === patchId);
+    if (!patch?.patchData || snapshot.isGeneratingAi) return false;
+    const originalData = patch.patchData;
+    setEditor({ isGeneratingAi: true });
+    try {
+      // Keep a portable baseline in the sidecar too: restoring the original
+      // must still work after the raw disk cache is removed or on another Mac.
+      const baseline = originalData.replacementOriginal ?? {
+        color: originalData.color, mask: originalData.mask, encoding: originalData.encoding,
+      };
+      const result = !options.improved && originalData.replacementOriginal
+        ? { ...baseline, replacementBlend: { options, canExpand: false } }
+        : JSON.parse(await invoke<string>('reblend_replacement', {
+            patchId, currentAdjustments: snapshot.adjustments, options,
+          }));
+      result.replacementOriginal = baseline;
+      const current = useEditorStore.getState();
+      // Navigation, undo, variant changes, or another result must never receive
+      // a late blend calculated for the previous photo/result.
+      if (current.selectedImage?.path !== snapshot.selectedImage?.path
+        || current.adjustments.aiPatches.find((p: AiPatch) => p.id === patchId)?.patchData !== originalData) return false;
+      current.patchesSentToBackend.delete(patchId);
+      setAdjustments((prev: Adjustments) => ({ ...prev,
+        aiPatches: prev.aiPatches.map((p: AiPatch) => p.id === patchId && p.patchData === originalData
+          ? { ...p, patchData: { ...p.patchData, ...result } } : p),
+      }));
+      return true;
+    } catch (error) {
+      toast.error(`Blend was not applied: ${error}`);
+      return false;
+    } finally { setEditor({ isGeneratingAi: false }); }
+  }, [setAdjustments, setEditor]);
+
   /// Turns a finished fill into an ordinary editable mask.
   ///
   /// Patches are composited into the image BEFORE any adjustment or mask
@@ -200,6 +242,9 @@ export function useAiMasking() {
         toast.error('Run the fill first — there is no filled area to adjust yet.');
         return;
       }
+
+      const existing = adjustments.masks.find((mask) => mask.sourceAiPatchId === patchId);
+      if (existing) return existing.id;
 
       const subMask: any = {
         id: uuidv4(),
@@ -226,6 +271,8 @@ export function useAiMasking() {
         ...INITIAL_MASK_CONTAINER,
         id: uuidv4(),
         name: `Fill: ${patch.name || 'AI area'}`,
+        sourceAiPatchId: patchId,
+        sourceAiSubMaskId: subMask.id,
         subMasks: [subMask],
       };
 
@@ -233,7 +280,7 @@ export function useAiMasking() {
         ...prev,
         masks: [...(prev.masks || []), container],
       }));
-      toast.success('Added a mask over the filled area — adjust it in the Masks panel.');
+      toast.success('Fill adjustments are ready in the Masks panel.');
       return container.id;
     },
     [setAdjustments],
@@ -553,6 +600,9 @@ export function useAiMasking() {
               reconstructPrompt: variant.prompt ?? p.patchData.reconstructPrompt,
               reconstructDebugRunId: variant.debugRunId ?? p.patchData.reconstructDebugRunId,
               reconstructDebugDir: variant.debugDir ?? p.patchData.reconstructDebugDir,
+              replacementRunId: variant.kind === 'context-replace' ? variant.debugRunId : undefined,
+              replacementBlend: undefined,
+              replacementOriginal: undefined,
               reconstructVariants: variants,
             },
           };
@@ -562,13 +612,31 @@ export function useAiMasking() {
     [setAdjustments],
   );
 
-  const handleGenerateAiMask = async (subMaskId: string, startPoint: Coord, endPoint: Coord) => {
+  const handleGenerateAiMask = async (subMaskId: string, startPoint: Coord, endPoint: Coord, exclude = false) => {
     const { selectedImage, adjustments, patchesSentToBackend } = useEditorStore.getState();
     if (!selectedImage?.path) return;
+    const subMask = [...(adjustments.masks || []), ...(adjustments.aiPatches || [])]
+      .flatMap((p) => p.subMasks).find((sm) => sm.id === subMaskId);
+    if (!subMask) return;
+    const requestId = uuidv4();
+    const transformAdjustments = getTransformAdjustments(adjustments);
+    const geometry = JSON.stringify([transformAdjustments, adjustments.rotation, adjustments.flipHorizontal,
+      adjustments.flipVertical, adjustments.orientationSteps]);
+    const prior = subMask.parameters;
+    let points;
+    try {
+      points = subjectPrompts(prior.subjectGeometry && prior.subjectGeometry !== geometry ? {} : prior,
+        startPoint, endPoint, exclude);
+    } catch (error) {
+      toast.error(String(error));
+      return;
+    }
+    updateSubMask(subMaskId, { parameters: { ...prior, subjectPoints: points, subjectGeometry: geometry,
+      subjectRequestId: requestId } });
+    pendingSelections.add(requestId);
     setEditor({ isGeneratingAiMask: true });
 
     try {
-      const transformAdjustments = getTransformAdjustments(adjustments);
       const newParameters = await invoke(Invokes.GenerateAiSubjectMask, {
         jsAdjustments: transformAdjustments,
         endPoint: [endPoint.x, endPoint.y],
@@ -578,28 +646,41 @@ export function useAiMasking() {
         path: selectedImage.path,
         rotation: adjustments.rotation,
         startPoint: [startPoint.x, startPoint.y],
+        points,
+        selectionId: subMaskId,
+        wholeSubject: true,
       });
 
-      const subMask = adjustments.aiPatches
-        ?.flatMap((p: AiPatch) => p.subMasks)
-        .find((sm: SubMask) => sm.id === subMaskId);
-      const mergedParameters = { ...(subMask?.parameters || {}), ...newParameters };
+      const current = useEditorStore.getState();
+      const latest = [...(current.adjustments.masks || []), ...(current.adjustments.aiPatches || [])]
+        .flatMap((p) => p.subMasks).find((sm) => sm.id === subMaskId);
+      if (current.selectedImage?.path !== selectedImage.path || latest?.parameters.subjectRequestId !== requestId) return;
+      const currentGeometry = JSON.stringify([getTransformAdjustments(current.adjustments), current.adjustments.rotation,
+        current.adjustments.flipHorizontal, current.adjustments.flipVertical, current.adjustments.orientationSteps]);
+      if (currentGeometry !== geometry) return;
+      const mergedParameters = { ...latest.parameters, ...(newParameters as object) };
       patchesSentToBackend.delete(subMaskId);
       updateSubMask(subMaskId, { parameters: mergedParameters });
     } catch (error) {
       toast.error(`AI Mask Failed: ${error}`);
     } finally {
-      setEditor({ isGeneratingAiMask: false });
+      pendingSelections.delete(requestId);
+      setEditor({ isGeneratingAiMask: pendingSelections.size > 0 });
     }
   };
 
   const paintDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (paintDebounceRef.current) clearTimeout(paintDebounceRef.current);
+  }, []);
 
   const handleGenerateAiPaintMask = (subMaskId: string, lines: any[]) => {
     // Debounced: painting several strokes in a row batches into ONE SAM
     // run 600ms after the last release, instead of pausing between each.
     if (paintDebounceRef.current) clearTimeout(paintDebounceRef.current);
+    const path = useEditorStore.getState().selectedImage?.path;
     paintDebounceRef.current = setTimeout(() => {
+      if (useEditorStore.getState().selectedImage?.path !== path) return;
       void runAiPaintGeneration(subMaskId, lines);
     }, 600);
   };
@@ -607,6 +688,17 @@ export function useAiMasking() {
   const runAiPaintGeneration = async (subMaskId: string, lines: any[]) => {
     const { selectedImage, adjustments, patchesSentToBackend } = useEditorStore.getState();
     if (!selectedImage?.path) return;
+    const findMask = (adj: Adjustments) => [...(adj.masks || []), ...(adj.aiPatches || [])]
+      .flatMap((p) => p.subMasks).find((sm) => sm.id === subMaskId);
+    const signature = JSON.stringify(lines);
+    const subMask = findMask(adjustments);
+    if (!subMask || JSON.stringify(subMask.parameters.lines) !== signature) return;
+    const geometryOf = (adj: Adjustments) => JSON.stringify([getTransformAdjustments(adj), adj.rotation,
+      adj.flipHorizontal, adj.flipVertical, adj.orientationSteps]);
+    const geometry = geometryOf(adjustments);
+    const requestId = uuidv4();
+    updateSubMask(subMaskId, { parameters: { ...subMask.parameters, subjectRequestId: requestId } });
+    pendingSelections.add(requestId);
     setEditor({ isGeneratingAiMask: true });
 
     try {
@@ -621,17 +713,19 @@ export function useAiMasking() {
         rotation: adjustments.rotation,
       });
 
-      const subMask = [...(adjustments.masks || []), ...(adjustments.aiPatches || [])]
-        .flatMap((p: any) => p.subMasks)
-        .find((sm: SubMask) => sm.id === subMaskId);
+      const current = useEditorStore.getState();
+      const latest = findMask(current.adjustments);
+      if (current.selectedImage?.path !== selectedImage.path || latest?.parameters.subjectRequestId !== requestId
+        || JSON.stringify(latest.parameters.lines) !== signature || geometryOf(current.adjustments) !== geometry) return;
       // Keep the strokes so painting more refines the same selection.
-      const mergedParameters = { ...(subMask?.parameters || {}), ...newParameters, lines };
+      const mergedParameters = { ...latest.parameters, ...newParameters, lines };
       patchesSentToBackend.delete(subMaskId);
       updateSubMask(subMaskId, { parameters: mergedParameters });
     } catch (error) {
       toast.error(`AI Paint Failed: ${error}`);
     } finally {
-      setEditor({ isGeneratingAiMask: false });
+      pendingSelections.delete(requestId);
+      setEditor({ isGeneratingAiMask: pendingSelections.size > 0 });
     }
   };
 
@@ -747,6 +841,7 @@ export function useAiMasking() {
   return {
     updateSubMask,
     handleGenerativeReplace,
+    handleReblendReplacement,
     handleAdjustFillArea,
     handleCloneStamp,
     handleSpotEnhance,

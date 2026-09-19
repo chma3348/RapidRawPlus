@@ -46,6 +46,7 @@ import {
 import CollapsibleSection from '../../ui/CollapsibleSection';
 import Switch from '../../ui/Switch';
 import Slider from '../../ui/Slider';
+import SubjectSelectionControls from './SubjectSelectionControls';
 import BasicAdjustments from '../../adjustments/Basic';
 import CurveGraph from '../../adjustments/Curves';
 import ColorPanel from '../../adjustments/Color';
@@ -581,7 +582,7 @@ function DepthRangePicker({
 export default function MasksPanel() {
   const { t } = useTranslation();
   const { setAdjustments } = useEditorActions();
-  const { handleGenerateAiDepthMask, handleGenerateAiForegroundMask, handleGenerateAiSkyMask } = useAiMasking();
+  const { handleGenerateAiDepthMask, handleGenerateAiForegroundMask, handleGenerateAiSkyMask, handleAdjustFillArea } = useAiMasking();
   const setCustomEscapeHandler = useUIStore((s) => s.setCustomEscapeHandler);
   const { appSettings } = useSettingsStore(
     useShallow((state) => ({
@@ -1362,6 +1363,33 @@ export default function MasksPanel() {
         </AnimatePresence>
 
         <div className="flex-1 overflow-y-auto overflow-x-hidden flex flex-col min-h-0 p-4">
+          {(adjustments.aiPatches || []).some((patch) => patch.patchData?.mask) && (
+            <details open className="mb-4 shrink-0 border-b border-surface pb-3">
+              <summary className="cursor-pointer text-sm font-medium text-text-primary py-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">
+                Generated fills
+              </summary>
+              <p className="text-xs text-text-primary leading-relaxed mb-2">
+                Select a fill to adjust its color and tone with the controls below. No regeneration.
+              </p>
+              <div className="space-y-1">
+                {(adjustments.aiPatches || []).filter((patch) => patch.patchData?.mask).map((patch) => {
+                  const linked = adjustments.masks.find((mask) => mask.sourceAiPatchId === patch.id);
+                  return (
+                    <button key={patch.id} type="button"
+                      aria-pressed={!!linked && activeMaskContainerId === linked.id}
+                      className={`w-full text-left rounded-md px-2 py-2 text-sm text-text-primary hover:bg-card-active focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent ${linked && activeMaskContainerId === linked.id ? 'bg-card-active' : 'bg-bg-primary'}`}
+                      onClick={() => {
+                        const id = handleAdjustFillArea(patch.id);
+                        if (id) { onSelectContainer(id); onSelectMask(null); }
+                      }}>
+                      <span className="block truncate">{patch.name || 'AI fill'}</span>
+                      <span className="block text-xs">{patch.visible === false ? 'Fill hidden · adjustments retained' : linked ? 'Edit color & tone' : 'Add color & tone adjustments'}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </details>
+          )}
           <AnimatePresence mode="wait">
             {!adjustments.masks || adjustments.masks.length === 0 ? (
               <motion.div
@@ -2509,6 +2537,10 @@ function SettingsPanel({
 
           {isComponentMode && (
             <>
+              {(activeSubMask.type === Mask.AiSubject || activeSubMask.type === Mask.AiPaint) && (
+                <SubjectSelectionControls parameters={activeSubMask.parameters} paint={activeSubMask.type === Mask.AiPaint}
+                  onChange={(parameters) => updateSubMask(activeSubMask.id, { parameters })} />
+              )}
               {isAiMask && aiModelDownloadStatus && (
                 <Text
                   as="div"

@@ -822,12 +822,77 @@ fn highlight_compressed_luma(y: f32, amt: f32) -> f32 {
     return max(0.0, y - amt * 0.275 * pow(clamp(y, 0.0, 1.0), 1.88));
 }
 
-fn apply_highlight_compression_scalar_encoded(enc: vec3<f32>, t: f32) -> vec3<f32> {
-    let source = clamp(enc, vec3<f32>(0.0), vec3<f32>(1.0));
-    let y = clamp(get_luma(source), 0.0, 1.0);
-    let amt = clamp(t, 0.0, 1.0);
-    let gain = highlight_compressed_luma(y, amt) / max(y, 1.0e-4);
-    return source * gain;
+// A cheap, one-sample approximation of the tone equalizer's edge-aware guide.
+// The Gaussian base is useful inside a textured area, but must not cross a
+// strong brightness edge: doing so makes a bright object darken its darker
+// surround. At a hard edge the guide falls back to the pixel; across fine
+// texture it keeps the blurred base, so the detail split below still works.
+fn highlight_edge_aware_base(y: f32, blurred_y: f32) -> f32 {
+    let delta = abs(y - blurred_y);
+    let edge_weight = exp(-(delta * delta) / (2.0 * 0.10 * 0.10));
+    return mix(y, blurred_y, edge_weight);
+}
+
+fn relative_chroma(c: vec3<f32>) -> f32 {
+    let hi = max(c.r, max(c.g, c.b));
+    let lo = min(c.r, min(c.g, c.b));
+    return (hi - lo) / max(hi, 1.0e-4);
+}
+
+// Blacks are an exposure band, not a colour operation. darktable's tone
+// equalizer applies one correction factor to all three RGB channels; that is
+// the important property to keep here because it preserves hue and does not
+// turn small chroma noise into coloured blotches.
+const BLACKS_INPUT_RANGE: f32 = 2.5;
+const BLACKS_MAX_STOPS: f32 = 2.0;
+// Linear-light equivalent of display-encoded 0.035. Keeping this linear is
+// what makes the floor colour-safe; decoding a tinted encoded offset bends
+// the three channels by different amounts.
+const BLACKS_FLOOR_LINEAR: f32 = 0.002709;
+
+fn apply_blacks_adjustment(
+    color: vec3<f32>,
+    bl: f32,
+) -> vec3<f32> {
+    let source = max(color, vec3<f32>(0.0));
+    let encoded = max(linear_to_srgb_extended(source), vec3<f32>(0.0));
+    let y = max(get_luma(encoded), 0.0);
+    let source_linear_y = max(get_luma(source), 0.0);
+
+    // The reference places "blacks" around -5 EV. The soft shoulders make
+    // the adjustment continuous while keeping ordinary midtones pinned. Use
+    // the pixel's own luminance: a broad Gaussian guide created visible bands
+    // around bright/dark boundaries because it was not a true guided filter.
+    let zone = 1.0 - smoothstep(0.015, 0.27, y);
+    let strength = clamp(abs(bl) / BLACKS_INPUT_RANGE, 0.0, 1.0);
+    let signed_stops = select(-BLACKS_MAX_STOPS, BLACKS_MAX_STOPS, bl > 0.0);
+    // Apply the correction in scene-linear RGB, exactly as the reference tone
+    // equalizer does. A shared gain here preserves actual chromaticity. Doing
+    // this in encoded RGB appeared ratio-stable numerically but decoded each
+    // channel nonlinearly, producing the orange/magenta cast in deep shadows.
+    var adjusted = source * exp2(signed_stops * strength * zone);
+
+    if (bl > 0.0) {
+        // Multiplication alone cannot recover an exact zero. Compute the same
+        // lifted floor brightness as before, but reach it by scaling along the
+        // pixel's original LINEAR colour direction. That keeps the pulling
+        // power without adding a grey veil over valid near-black colour.
+        let crushed = 1.0 - smoothstep(0.0, 0.045, y);
+        let floor_luma = BLACKS_FLOOR_LINEAR * strength * crushed * crushed * zone;
+        let target_linear_y = source_linear_y
+            * exp2(signed_stops * strength * zone)
+            + floor_luma;
+
+        // Only values indistinguishable from numerical zero fade to neutral;
+        // there is no chromaticity to preserve there. This transition is far
+        // below the former 0.8-4% encoded fallback that caused the white cast.
+        let color_confidence = smoothstep(1.0e-7, 2.0e-5, source_linear_y);
+        let source_direction = source / max(source_linear_y, 1.0e-8);
+        let direction = mix(vec3<f32>(1.0), source_direction, color_confidence);
+        adjusted = direction * target_linear_y;
+    }
+
+    return max(adjusted, vec3<f32>(0.0));
 }
 
 // Detail-preserving compression. The plain curve above has slope ~0.55 across
@@ -851,24 +916,51 @@ fn apply_highlight_compression_detail_encoded(
     let amt = clamp(t, 0.0, 1.0);
     let y = clamp(get_luma(source), 0.0, 1.0);
     let y_base = clamp(get_luma(clamp(base_enc, vec3<f32>(0.0), vec3<f32>(1.0))), 0.0, 1.0);
-    let detail = y - y_base;
+    let guided_base = highlight_edge_aware_base(y, y_base);
+    let detail = y - guided_base;
     // Compress the base tone, carry the detail through undimmed. Clamp keeps a
     // bright textured peak from running away past white.
-    let target_y = clamp(highlight_compressed_luma(y_base, amt) + detail, 0.0, 1.0);
+    let target_y = clamp(highlight_compressed_luma(guided_base, amt) + detail, 0.0, 1.0);
     let gain = target_y / max(y, 1.0e-4);
     return source * gain;
 }
 
-fn apply_highlight_compression_scalar(color: vec3<f32>, t: f32) -> vec3<f32> {
-    return srgb_to_linear(apply_highlight_compression_scalar_encoded(linear_to_srgb_extended(color), t));
-}
+// Scene-linear counterpart of the display-bounded function above. Crucially,
+// neither the source nor the result is clipped at display white. RAW values of
+// 1.2 and 2.0 must remain distinct so the later filmic/AgX transform can use
+// that headroom. For a truly clipped, near-neutral RAW core, cautiously borrow
+// chromaticity from the broad neighborhood; this is the only place where the
+// input no longer contains trustworthy colour information.
+fn apply_highlight_compression_scene(
+    color: vec3<f32>,
+    base_linear: vec3<f32>,
+    neighborhood_linear: vec3<f32>,
+    t: f32,
+) -> vec3<f32> {
+    let source = max(linear_to_srgb_extended(color), vec3<f32>(0.0));
+    let base = max(linear_to_srgb_extended(base_linear), vec3<f32>(0.0));
+    let neighborhood = max(linear_to_srgb_extended(neighborhood_linear), vec3<f32>(0.0));
+    let amt = clamp(t, 0.0, 1.0);
+    let y = max(get_luma(source), 0.0);
+    let y_base = max(get_luma(base), 0.0);
+    let guided_base = highlight_edge_aware_base(y, y_base);
+    let detail = y - guided_base;
+    let target_y = max(highlight_compressed_luma(guided_base, amt) + detail, 0.0);
+    let compressed = source * (target_y / max(y, 1.0e-4));
 
-fn apply_highlight_compression_detail(color: vec3<f32>, base_linear: vec3<f32>, t: f32) -> vec3<f32> {
-    return srgb_to_linear(apply_highlight_compression_detail_encoded(
-        linear_to_srgb_extended(color),
-        linear_to_srgb_extended(base_linear),
-        t,
-    ));
+    let neighborhood_y = get_luma(neighborhood);
+    let neighborhood_chroma = relative_chroma(neighborhood);
+    let source_neutral = 1.0 - smoothstep(0.025, 0.14, relative_chroma(source));
+    let clipped_core = smoothstep(1.0, 1.18, y);
+    let useful_surround = smoothstep(0.035, 0.20, neighborhood_chroma);
+    let recovery = amt * clipped_core * source_neutral * useful_surround * 0.72;
+    let neighborhood_tint = clamp(
+        neighborhood / max(neighborhood_y, 1.0e-4),
+        vec3<f32>(0.35),
+        vec3<f32>(2.5),
+    );
+    let recovered = neighborhood_tint * target_y;
+    return srgb_to_linear(mix(compressed, recovered, recovery));
 }
 
 fn apply_tonal_adjustments_v2(
@@ -892,6 +984,20 @@ fn apply_tonal_adjustments_v2(
         color_in = apply_resolve_shadow_lift(color_in, sh * 1.2);
     }
 
+    var neighborhood_linear: vec3<f32>;
+    if (is_raw == 1u) {
+        neighborhood_linear = neighborhood_input_space;
+    } else {
+        neighborhood_linear = srgb_to_linear(neighborhood_input_space);
+    }
+
+    // Keep Blacks out of the generic Oklab lightness/chroma compensation
+    // below. It now works as an RGB gain, like the reference tone equalizer,
+    // with a narrowly gated floor only for values too crushed for gain alone.
+    if (bl != 0.0) {
+        color_in = apply_blacks_adjustment(color_in, bl);
+    }
+
     var lab = linear_to_oklab(max(color_in, vec3<f32>(0.0)));
     var l_ok = lab.x;
     let l_clamped = clamp(l_ok, 0.0, 1.0);
@@ -900,12 +1006,6 @@ fn apply_tonal_adjustments_v2(
     // much a zone moves, so texture inside a lifted region rides along
     // and detail survives (the Lightroom/Resolve trick). A dash of the
     // pixel's own lightness guards halos at strong zone boundaries.
-    var neighborhood_linear: vec3<f32>;
-    if (is_raw == 1u) {
-        neighborhood_linear = neighborhood_input_space;
-    } else {
-        neighborhood_linear = srgb_to_linear(neighborhood_input_space);
-    }
     let l_base = clamp(linear_to_oklab(max(neighborhood_linear, vec3<f32>(0.0))).x, 0.0, 1.0);
     // Mostly the pixel's OWN lightness. At 0.75 the neighbourhood decided
     // almost everything, and identical tones got wildly different
@@ -949,18 +1049,6 @@ fn apply_tonal_adjustments_v2(
         let zone = 1.0 - smoothstep(0.04, sh_fade, driver);
         l_new = l_new * pow(2.0, sh * 1.1 * zone);
     }
-
-
-    // Blacks: floor control with real authority, tightly range-limited.
-    if (bl != 0.0) {
-        let bzone = 1.0 - smoothstep(0.0, 0.27, driver);
-        if (bl > 0.0) {
-            l_new = l_new + bl * 0.10 * bzone;
-        } else {
-            l_new = max(l_new + bl * 0.11 * bzone, 0.0);
-        }
-    }
-
     // Contrast: pivoted S-curve directly on perceptual lightness.
     if (con != 0.0) {
         let p = clamp(pivot, 0.05, 0.95);
@@ -988,9 +1076,9 @@ fn apply_tonal_adjustments_v2(
     // 97-99% retention across hues with no hue drift and no change in gamut
     // behaviour.
     //
-    // Clamped because the ratio explodes on near-black pixels — blacks +0.5
-    // takes L 0.01 to 0.11, a ratio of 11, which would amplify the chroma
-    // noise sitting in the shadows. Real lifts stay near 1.5.
+    // Clamped because the ratio can explode on near-black pixels under the
+    // remaining Oklab tools and amplify chroma noise. Blacks bypasses this
+    // path entirely and therefore needs no such compensation.
     let l_ratio = l_new / max(l_ok, 1e-4);
     // 1.15, measured — not the 0.9 I picked by reasoning.
     //
@@ -1013,11 +1101,11 @@ fn apply_tonal_adjustments_v2(
     // so roughly a third of what is asked for is eaten downstream, where
     // gamut and tonemapping pull saturated colour back. 1.29 lands the
     // measured value on Resolve's 1.15.
-    // NOTE: shadows no longer reach this. The lift now runs in display-
+    // NOTE: shadows and blacks no longer reach this. Their lifts now run in display-
     // encoded space at the top of the function, where — as the LUT
     // measurement showed — saturation comes out right on its own and needs
-    // no compensation. What is left here serves blacks, whites and
-    // contrast, which have NOT been measured against Resolve, so 1.29 stays
+    // no compensation. What is left here serves whites and contrast, which
+    // have NOT been measured against Resolve, so 1.29 stays
     // as it was rather than being retuned on a guess.
     let chroma_follow = clamp(pow(max(l_ratio, 1e-4), 1.29), 0.25, 2.5);
     lab.y *= chroma_follow;
@@ -1150,13 +1238,19 @@ fn apply_highlights_adjustment(
             // clouds) keeps ~95% of its contrast instead of the ~65% the plain
             // per-pixel curve leaves. blurred_color_input_space is the r=3.5
             // tonal blur.
-            var base_hc: vec3<f32>;
             if (is_raw == 1u) {
-                base_hc = blurred_color_input_space;
-            } else {
-                base_hc = srgb_to_linear(blurred_color_input_space);
+                return apply_highlight_compression_scene(
+                    color_in,
+                    blurred_color_input_space,
+                    neighborhood_input_space,
+                    -highlights_adj * 1.2,
+                );
             }
-            return apply_highlight_compression_detail(color_in, base_hc, -highlights_adj * 1.2);
+            return srgb_to_linear(apply_highlight_compression_detail_encoded(
+                linear_to_srgb_extended(color_in),
+                blurred_color_input_space,
+                -highlights_adj * 1.2,
+            ));
         }
 
         var lab = linear_to_oklab(max(color_in, vec3<f32>(0.0)));
@@ -1171,7 +1265,8 @@ fn apply_highlights_adjustment(
             nb_linear = srgb_to_linear(neighborhood_input_space);
         }
         let l_base_h = clamp(linear_to_oklab(max(nb_linear, vec3<f32>(0.0))).x, 0.0, 1.2);
-        let driver_h = mix(t, l_base_h, 0.75);
+        let edge_weight_h = exp(-pow(abs(t - l_base_h), 2.0) / (2.0 * 0.12 * 0.12));
+        let driver_h = mix(t, l_base_h, 0.75 * edge_weight_h);
         let mask = smoothstep(0.45, 1.0, driver_h);
 
         // Brighten with a clip-resistant approach: the push fades as

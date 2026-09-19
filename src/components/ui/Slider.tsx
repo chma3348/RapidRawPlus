@@ -538,6 +538,7 @@ const Slider = ({
         />
         <input
           ref={rangeInputRef}
+          aria-label={typeof label === 'string' ? label : undefined}
           className={`absolute top-1/2 left-0 w-full h-1.5 appearance-none bg-transparent cursor-pointer m-0 p-0 slider-input z-10 ${
             isDragging ? 'slider-thumb-active' : ''
           }`}

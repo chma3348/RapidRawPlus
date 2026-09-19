@@ -9,6 +9,7 @@ mod adjustment_utils;
 mod ai_commands;
 mod ai_connector;
 pub mod ai_processing;
+pub mod subject_selection;
 mod android_integration;
 mod app_settings;
 mod app_state;
@@ -25,6 +26,7 @@ pub mod flat_field;
 mod flog2c;
 mod formats;
 pub mod heal_blend;
+pub mod replacement_blend;
 pub mod gpu_processing;
 pub mod image_loader;
 pub mod image_processing;
@@ -2250,6 +2252,7 @@ pub fn run() {
             ai_commands::generate_ai_paint_mask,
             ai_commands::sample_image_color,
             ai_commands::respot_enhance,
+            ai_commands::reblend_replacement,
             ai_commands::apply_clone_patch,
             ai_commands::list_managed_luts,
             merge_discovery::discover_merge_candidates,

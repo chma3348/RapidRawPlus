@@ -2429,13 +2429,194 @@ mod render_harness {
 }
 
 #[cfg(test)]
+mod blacks_adjustment_tests {
+    //! Mirrors the Blacks shader arithmetic in display-encoded RGB. The
+    //! important contract inherited from a scene-referred tone equalizer is
+    //! that ordinary dark colours move by a single RGB gain, while only an
+    //! almost-crushed pixel receives a small colour-stable floor.
+    const SRC: &str = include_str!("shaders/shader.wgsl");
+    const LUMA: [f32; 3] = [0.2126, 0.7152, 0.0722];
+
+    fn shader_constant(name: &str) -> f32 {
+        let marker = format!("const {name}: f32 = ");
+        let start = SRC.find(&marker).expect("shader constant missing") + marker.len();
+        let end = SRC[start..].find(';').expect("constant terminator") + start;
+        SRC[start..end].trim().parse().expect("numeric constant")
+    }
+
+    fn luma(c: [f32; 3]) -> f32 {
+        c[0] * LUMA[0] + c[1] * LUMA[1] + c[2] * LUMA[2]
+    }
+
+    fn encode_channel(v: f32) -> f32 {
+        if v <= 0.003_130_8 {
+            12.92 * v
+        } else {
+            1.055 * v.powf(1.0 / 2.4) - 0.055
+        }
+    }
+
+    fn encode(c: [f32; 3]) -> [f32; 3] {
+        [
+            encode_channel(c[0]),
+            encode_channel(c[1]),
+            encode_channel(c[2]),
+        ]
+    }
+
+    fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
+        let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    }
+
+    fn mix3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
+        [
+            a[0] * (1.0 - t) + b[0] * t,
+            a[1] * (1.0 - t) + b[1] * t,
+            a[2] * (1.0 - t) + b[2] * t,
+        ]
+    }
+
+    fn adjust(source: [f32; 3], bl: f32) -> [f32; 3] {
+        let y = luma(encode(source)).max(0.0);
+        let source_linear_y = luma(source).max(0.0);
+        let zone = 1.0 - smoothstep(0.015, 0.27, y);
+        let input_range = shader_constant("BLACKS_INPUT_RANGE");
+        let max_stops = shader_constant("BLACKS_MAX_STOPS");
+        let floor = shader_constant("BLACKS_FLOOR_LINEAR");
+        let strength = (bl.abs() / input_range).clamp(0.0, 1.0);
+        let gain = 2.0f32.powf(if bl > 0.0 {
+            max_stops * strength * zone
+        } else {
+            -max_stops * strength * zone
+        });
+        let mut out = [source[0] * gain, source[1] * gain, source[2] * gain];
+
+        if bl > 0.0 {
+            let crushed = 1.0 - smoothstep(0.0, 0.045, y);
+            let floor_luma = floor * strength * crushed * crushed * zone;
+            let target_linear_y = source_linear_y * gain + floor_luma;
+            let confidence = smoothstep(1e-7, 2e-5, source_linear_y);
+            let source_direction = [
+                source[0] / source_linear_y.max(1e-8),
+                source[1] / source_linear_y.max(1e-8),
+                source[2] / source_linear_y.max(1e-8),
+            ];
+            let direction = mix3([1.0; 3], source_direction, confidence);
+            out = [
+                direction[0] * target_linear_y,
+                direction[1] * target_linear_y,
+                direction[2] * target_linear_y,
+            ];
+        }
+        out
+    }
+
+    fn assert_ratios_preserved(before: [f32; 3], after: [f32; 3]) {
+        let before_rg = before[0] / before[1];
+        let before_gb = before[1] / before[2];
+        let after_rg = after[0] / after[1];
+        let after_gb = after[1] / after[2];
+        assert!((before_rg - after_rg).abs() < 1e-5);
+        assert!((before_gb - after_gb).abs() < 1e-5);
+    }
+
+    fn display_chroma(c: [f32; 3]) -> f32 {
+        let encoded = encode(c);
+        let hi = encoded[0].max(encoded[1]).max(encoded[2]);
+        let lo = encoded[0].min(encoded[1]).min(encoded[2]);
+        (hi - lo) / hi.max(1e-6)
+    }
+
+    #[test]
+    fn lift_preserves_dark_colour_ratios_outside_the_crushed_floor() {
+        let source = [0.012, 0.006, 0.003];
+        let out = adjust(source, 2.5);
+        assert!(luma(out) > luma(source));
+        assert_ratios_preserved(source, out);
+    }
+
+    #[test]
+    fn darkening_preserves_hue_and_never_goes_negative() {
+        let source = [0.011, 0.0055, 0.0028];
+        let out = adjust(source, -2.5);
+        assert!(luma(out) < luma(source));
+        assert!(out.iter().all(|channel| *channel >= 0.0));
+        assert_ratios_preserved(source, out);
+    }
+
+    #[test]
+    fn exact_black_gets_a_small_neutral_recoverable_floor() {
+        let out = adjust([0.0; 3], 2.5);
+        let expected = shader_constant("BLACKS_FLOOR_LINEAR");
+        assert!((out[0] - expected).abs() < 1e-6);
+        assert_eq!(out[0], out[1]);
+        assert_eq!(out[1], out[2]);
+    }
+
+    #[test]
+    fn lifting_deep_colours_does_not_increase_display_chroma() {
+        // These warm, magenta and green-biased samples represent the casts
+        // and channel noise that become visible when underexposed pixels are
+        // raised. A Blacks lift may preserve or gently tame them, never make
+        // them more colourful than the source.
+        for source in [
+            [0.0030, 0.0009, 0.0004],
+            [0.0025, 0.0005, 0.0018],
+            [0.0006, 0.0024, 0.0005],
+        ] {
+            let out = adjust(source, 2.5);
+            assert!(
+                display_chroma(out) <= display_chroma(source) + 1e-5,
+                "Blacks increased display chroma: {source:?} -> {out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn near_black_signal_keeps_its_colour_inside_the_floor_region() {
+        // This sample is dark enough to receive almost the full floor, but it
+        // still contains valid channel information. The lift must reach the
+        // floor by scaling that colour rather than mixing in neutral grey.
+        let source = [0.0005, 0.0002, 0.0001];
+        let out = adjust(source, 2.5);
+        assert!(luma(out) > luma(source) * 8.0);
+        assert_ratios_preserved(source, out);
+    }
+
+    #[test]
+    fn midtones_are_pinned() {
+        let source = [0.18, 0.13, 0.10];
+        assert_eq!(adjust(source, 2.5), source);
+        assert_eq!(adjust(source, -2.5), source);
+    }
+
+    #[test]
+    fn shader_has_no_spatial_input_that_can_create_halos() {
+        let start = SRC.find("fn apply_blacks_adjustment").expect("fn missing");
+        let end = SRC[start..]
+            .find("fn apply_highlight_compression_detail_encoded")
+            .expect("next fn missing")
+            + start;
+        let body = &SRC[start..end];
+        assert!(!body.contains("neighborhood"));
+        assert!(!body.contains("blurred"));
+    }
+
+    #[test]
+    fn excessive_input_is_safely_bounded() {
+        let source = [0.008, 0.006, 0.004];
+        assert_eq!(adjust(source, 2.5), adjust(source, 25.0));
+        assert_eq!(adjust(source, -2.5), adjust(source, -25.0));
+    }
+}
+
+#[cfg(test)]
 mod highlight_detail_tests {
     //! The negative-highlights path compresses the blurred BASE tone and adds
-    //! the pixel's local detail back undimmed, so bright texture survives
-    //! instead of turning to mush. These mirror the shader arithmetic (parsing
-    //! its constants) and assert the two properties that must hold together:
-    //! flat regions match the plain fitted curve (Resolve's grey ramp), and
-    //! textured regions keep their local contrast.
+    //! the pixel's local detail back undimmed. Its guide rejects blur across a
+    //! hard edge, and the scene-linear variant never clips RAW headroom at 1.0.
+    //! These mirror the shader arithmetic (parsing its curve constants).
     const SRC: &str = include_str!("shaders/shader.wgsl");
 
     /// Parse `y - amt * A * y^E` constants out of `highlight_compressed_luma`.
@@ -2454,9 +2635,21 @@ mod highlight_detail_tests {
         (y - amt * a * y.clamp(0.0, 1.0).powf(e)).max(0.0)
     }
 
+    fn edge_aware_base(y: f32, y_base: f32) -> f32 {
+        let delta = (y - y_base).abs();
+        let edge_weight = (-(delta * delta) / (2.0 * 0.10 * 0.10)).exp();
+        y * (1.0 - edge_weight) + y_base * edge_weight
+    }
+
     // Mirror of apply_highlight_compression_detail_encoded on luma.
-    fn detail_target(y: f32, y_base: f32, amt: f32) -> f32 {
-        (compressed(y_base, amt) + (y - y_base)).clamp(0.0, 1.0)
+    fn detail_target(y: f32, y_base: f32, amt: f32, display_bounded: bool) -> f32 {
+        let guided = edge_aware_base(y, y_base);
+        let target = (compressed(guided, amt) + (y - guided)).max(0.0);
+        if display_bounded {
+            target.min(1.0)
+        } else {
+            target
+        }
     }
 
     #[test]
@@ -2465,7 +2658,7 @@ mod highlight_detail_tests {
         // to the fitted curve that matches Resolve's grey ramp.
         for y in [0.5f32, 0.7, 0.85, 0.95, 1.0] {
             assert!(
-                (detail_target(y, y, 1.0) - compressed(y, 1.0)).abs() < 1e-6,
+                (detail_target(y, y, 1.0, true) - compressed(y, 1.0)).abs() < 1e-6,
                 "flat region must equal the plain curve at y={y}"
             );
         }
@@ -2482,7 +2675,8 @@ mod highlight_detail_tests {
         let lo = base - 0.04;
 
         let plain_contrast = compressed(hi, amt) - compressed(lo, amt);
-        let detail_contrast = detail_target(hi, base, amt) - detail_target(lo, base, amt);
+        let detail_contrast =
+            detail_target(hi, base, amt, true) - detail_target(lo, base, amt, true);
         let source_contrast = hi - lo;
 
         assert!(
@@ -2500,6 +2694,58 @@ mod highlight_detail_tests {
     fn still_compresses_the_overall_tone() {
         // The whole point is compression: a bright plateau must still come
         // down, detail preservation notwithstanding.
-        assert!(detail_target(0.95, 0.95, 1.0) < 0.90, "plateau must compress");
+        assert!(
+            detail_target(0.95, 0.95, 1.0, true) < 0.90,
+            "plateau must compress"
+        );
+    }
+
+    #[test]
+    fn hard_edges_do_not_leak_into_the_highlight_guide() {
+        // A dark pixel beside a bright object can have a very bright Gaussian
+        // base. The edge-aware guide must treat it nearly like a flat dark
+        // region instead of pulling a halo across the boundary.
+        let y = 0.25f32;
+        let crossed_blur = 0.78f32;
+        let at_edge = detail_target(y, crossed_blur, 1.0, true);
+        let flat = detail_target(y, y, 1.0, true);
+        assert!(
+            (at_edge - flat).abs() < 0.001,
+            "edge leaked: {flat:.4} -> {at_edge:.4}"
+        );
+    }
+
+    #[test]
+    fn scene_linear_headroom_stays_ordered_above_white() {
+        // The display path may clamp at 1.0; the RAW path must not. Distinct
+        // recovered sensor values have to reach filmic/AgX still distinct.
+        let low = detail_target(1.10, 1.10, 1.0, false);
+        let high = detail_target(1.60, 1.60, 1.0, false);
+        assert!(low > 0.75, "over-white value was crushed: {low:.4}");
+        assert!(
+            high > low + 0.45,
+            "RAW headroom order collapsed: {low:.4}, {high:.4}"
+        );
+    }
+
+    #[test]
+    fn raw_colour_recovery_is_strictly_gated() {
+        // Keep the recovery heuristic confined to over-white neutral cores
+        // with a chromatic neighborhood; ordinary bright colours and neutral
+        // surroundings must pass without borrowed colour.
+        let smoothstep = |a: f32, b: f32, x: f32| {
+            let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
+            t * t * (3.0 - 2.0 * t)
+        };
+        let weight = |y: f32, source_chroma: f32, surround_chroma: f32| {
+            smoothstep(1.0, 1.18, y)
+                * (1.0 - smoothstep(0.025, 0.14, source_chroma))
+                * smoothstep(0.035, 0.20, surround_chroma)
+                * 0.72
+        };
+        assert!(weight(1.4, 0.0, 0.3) > 0.70);
+        assert_eq!(weight(0.95, 0.0, 0.3), 0.0);
+        assert_eq!(weight(1.4, 0.3, 0.3), 0.0);
+        assert_eq!(weight(1.4, 0.0, 0.0), 0.0);
     }
 }

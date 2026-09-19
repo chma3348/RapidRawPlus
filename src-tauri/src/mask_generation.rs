@@ -98,20 +98,14 @@ pub struct AiPatchDefinition {
     pub prompt: String,
     #[serde(default)]
     pub reconstruct_single_path: bool,
-    /// Build the fill from the prompt alone instead of continuing the
-    /// surrounding photograph. For blown-out regions the surroundings carry
-    /// no information to continue, so an inpainting model faithfully
-    /// reproduces the blowout; generating and compositing instead is what
-    /// actually puts content there.
+    /// Replace the selection in one image-conditioned generation, including
+    /// with an empty prompt. False plus empty text retains texture repair.
     #[serde(default)]
     pub generate_mode: bool,
-    /// Generate mode: how much more sky to make than the region needs, so
-    /// only the middle is used and cloud forms land larger. 1.0 = fit the
-    /// whole generated frame to the region.
+    /// Legacy free-generation setting retained for sidecar compatibility.
     #[serde(default = "default_content_scale")]
     pub content_scale: f32,
-    /// Generate mode: 0..1, how far the generated content is moved toward
-    /// the tone of the photograph around the selection.
+    /// Legacy tone-matching setting retained for sidecar compatibility.
     #[serde(default = "default_match_photo")]
     pub match_photo: f32,
     /// LoRAs to apply, in order. Flux only — these are Flux-architecture
@@ -980,8 +974,24 @@ fn generate_ai_bitmap_from_full_mask(
                 && y_src >= 0.0
                 && y_src < full_mask_h as f32
             {
-                let pixel = full_mask_image.get_pixel(x_src as u32, y_src as u32);
-                final_mask.put_pixel(x_out, y_out, *pixel);
+                // Bilinear, pixel-centre convention. The saved matte is a
+                // full-resolution soft edge; point-sampling it onto a preview
+                // a third the size picked one source pixel per output pixel
+                // and turned every smooth boundary into a jagged one, which
+                // read as a bad selection when the mask itself was fine.
+                let sx = (x_src - 0.5).max(0.0);
+                let sy = (y_src - 0.5).max(0.0);
+                let x0 = (sx.floor() as u32).min(full_mask_w - 1);
+                let y0 = (sy.floor() as u32).min(full_mask_h - 1);
+                let x1 = (x0 + 1).min(full_mask_w - 1);
+                let y1 = (y0 + 1).min(full_mask_h - 1);
+                let fx = sx - x0 as f32;
+                let fy = sy - y0 as f32;
+                let p = |x: u32, y: u32| full_mask_image.get_pixel(x, y)[0] as f32;
+                let top = p(x0, y0) * (1.0 - fx) + p(x1, y0) * fx;
+                let bottom = p(x0, y1) * (1.0 - fx) + p(x1, y1) * fx;
+                let value = (top * (1.0 - fy) + bottom * fy).round().clamp(0.0, 255.0) as u8;
+                final_mask.put_pixel(x_out, y_out, image::Luma([value]));
             }
         }
     }
@@ -1159,6 +1169,17 @@ fn generate_ai_subject_bitmap(
         crop_offset,
     };
     let mut mask = generate_ai_bitmap_from_base64(&data_url, &tf)?;
+
+    // Shift uncertain coverage without moving confident foreground/background.
+    // Work from the saved soft matte so this slider never re-runs inference.
+    let balance = params_value.get("edgeBalance").and_then(Value::as_f64).unwrap_or(0.0);
+    if balance.is_finite() && balance.abs() > 0.01 {
+        let odds = (balance.clamp(-100.0, 100.0) as f32 * 0.03).exp();
+        for p in mask.pixels_mut() {
+            let v = p[0] as f32 / 255.0;
+            p[0] = (255.0 * v * odds / (1.0 - v + v * odds)).round() as u8;
+        }
+    }
 
     apply_grow_and_feather(
         &mut mask,

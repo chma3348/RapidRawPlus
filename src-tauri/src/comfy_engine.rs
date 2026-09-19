@@ -637,6 +637,7 @@ pub async fn run_generative_fill(
     prompt: &str,
     seed: u64,
     loras: &[LoraSpec],
+    replace_content: bool,
     mut on_progress: impl FnMut(String),
 ) -> Result<Vec<u8>> {
     if !fill_files_present(app_handle, kind) {
@@ -655,7 +656,11 @@ pub async fn run_generative_fill(
     // Truly empty matches stock ComfyUI semantics — the model extends the
     // scene; prompts are how structure gets injected.
     let positive = prompt.trim().to_string();
-    let negative = "blurry, low quality, artifacts, watermark, text";
+    let negative = if replace_content {
+        "blurry, low quality, artifacts, watermark"
+    } else {
+        "blurry, low quality, artifacts, watermark, text"
+    };
 
     let workflow = match kind {
         // Refine-the-prefill recipe: encode the whole canvas (whose masked
@@ -745,6 +750,16 @@ pub async fn run_generative_fill(
     // Flux only: these are Flux LoRAs on a Flux UNet. The SDXL graphs are a
     // different architecture and must not be patched with them.
     let mut workflow = workflow;
+    if replace_content && kind == FillKind::SdxlBase {
+        // Replacement must not retain the damaged region's original latent
+        // imprint. Repair keeps its prefill and partial denoise recipe above.
+        workflow["6"] = json!({
+            "class_type": "VAEEncodeForInpaint",
+            "inputs": {"pixels": ["1", 0], "vae": ["3", 2],
+                       "mask": ["2", 0], "grow_mask_by": 0}
+        });
+        workflow["7"]["inputs"]["denoise"] = json!(1.0);
+    }
     if kind == FillKind::Flux {
         apply_loras(&mut workflow, loras, "3", "3d");
     }
@@ -1052,4 +1067,3 @@ mod lora_tests {
         assert_eq!(g["3d"]["inputs"]["model"], json!(["3", 0]));
     }
 }
-

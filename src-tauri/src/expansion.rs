@@ -387,6 +387,7 @@ async fn apply_expansion_engine(
             *seed,
             // Outpainting has no patch, so no LoRA selection to apply.
             &[],
+            false,
             move |msg| {
                 let _ = progress_handle.emit("expand-progress", format!("{label} — {msg}"));
             },

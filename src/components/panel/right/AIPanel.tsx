@@ -37,8 +37,10 @@ import {
 } from 'lucide-react';
 
 import CollapsibleSection from '../../ui/CollapsibleSection';
+import ReplacementBlendControls from './ReplacementBlendControls';
 import Switch from '../../ui/Switch';
 import Slider from '../../ui/Slider';
+import SubjectSelectionControls from './SubjectSelectionControls';
 import Input from '../../ui/Input';
 import Button from '../../ui/Button';
 
@@ -326,6 +328,7 @@ export default function AIPanel() {
   const { setAdjustments } = useEditorActions();
   const {
     handleGenerativeReplace,
+    handleReblendReplacement,
     handleAdjustFillArea,
     handleCloneStamp,
     handleSpotEnhance,
@@ -1207,6 +1210,7 @@ export default function AIPanel() {
                   isGeneratingAi={isGeneratingAi}
                   isGeneratingAiMask={isGeneratingAiMask}
                   onGenerativeReplace={handleGenerativeReplace}
+                  onReblendReplacement={handleReblendReplacement}
                   onSelectAiPatchVariant={handleSelectAiPatchVariant}
                   onAdjustFillArea={handleAdjustFillArea}
                   onCloneStamp={handleCloneStamp}
@@ -1830,6 +1834,7 @@ function SettingsPanel({
   isGeneratingAi,
   isGeneratingAiMask: _isGeneratingAiMask,
   onGenerativeReplace,
+  onReblendReplacement,
   onSelectAiPatchVariant,
   onAdjustFillArea,
   onCloneStamp,
@@ -1859,8 +1864,6 @@ function SettingsPanel({
   // with `false`, including on mount. Writing to the store there re-renders
   // and fires it again: an infinite loop, not a race. Persist only on a real
   // true -> false transition.
-  const scaleDrag = useRef(false);
-  const matchDrag = useRef(false);
   const loraDrag = useRef(false);
   const [reconstructSinglePath, setReconstructSinglePath] = useState(
     isReconstructPatch && displayContainer.reconstructSinglePath !== false,
@@ -2213,59 +2216,18 @@ function SettingsPanel({
               <Switch
                 checked={generateMode}
                 disabled={isGeneratingAi || displayContainer.isLoading}
-                label="Generate new content"
+                label="Replace selected content"
                 onChange={setGenerateMode}
-                tooltip="Build the fill from your prompt instead of continuing the surrounding photo. Use this where the area is blown out and has nothing left to continue — an inpainting model faithfully reproduces a blowout, so it has to generate instead."
+                tooltip="Generate a replacement using the selection and surrounding scene. Leave the prompt blank for automatic content, or describe what should replace the selection. Turn off and clear the prompt for fast texture repair."
               />
             </div>
 
             {generateMode && (
               <div className="mt-3 p-2 bg-bg-tertiary rounded-md">
-                <Slider
-                  label="Content scale"
-                  min={100}
-                  max={200}
-                  step={5}
-                  defaultValue={100}
-                  value={Math.round(contentScale * 100)}
-                  onChange={(e: any) => setContentScale(Number(e.target.value) / 100)}
-                  onDragStateChange={(dragging: boolean) => {
-                    // Persist on release, not on every tick: the adjustments
-                    // object carries the patch bitmaps and is autosaved.
-                    if (dragging) {
-                      scaleDrag.current = true;
-                      return;
-                    }
-                    if (!scaleDrag.current) return;
-                    scaleDrag.current = false;
-                    if (container) updateContainer(container.id, { contentScale });
-                  }}
-                  suffix="%"
-                />
-                <Slider
-                  label="Match photo"
-                  min={0}
-                  max={100}
-                  step={5}
-                  defaultValue={80}
-                  value={Math.round(matchPhoto * 100)}
-                  onChange={(e: any) => setMatchPhoto(Number(e.target.value) / 100)}
-                  onDragStateChange={(dragging: boolean) => {
-                    if (dragging) {
-                      matchDrag.current = true;
-                      return;
-                    }
-                    if (!matchDrag.current) return;
-                    matchDrag.current = false;
-                    if (container) updateContainer(container.id, { matchPhoto });
-                  }}
-                  suffix="%"
-                />
                 <Text variant={TextVariants.small} className="block text-text-secondary mt-1">
-                  Scale makes cloud forms larger by using only the middle of a bigger
-                  generation. Match photo lifts the result toward the tone of the sky
-                  around your selection — at 0 you get the raw generation, which will
-                  sit darker than the photo.
+                  The model sees your selection with surrounding scene context and replaces it in one pass.
+                  Describe the new content, or leave the prompt blank for an automatic fill.
+                  Lighting and perspective come from the photo; only the selected area is applied.
                 </Text>
               </div>
             )}
@@ -2344,7 +2306,7 @@ function SettingsPanel({
               </div>
             )}
 
-            {isReconstructPatch && !generateMode && (
+            {isReconstructPatch && !generateMode && !prompt.trim() && (
               <div className="mt-3">
                 <Switch
                   checked={reconstructSinglePath}
@@ -2357,7 +2319,7 @@ function SettingsPanel({
             )}
 
             <AnimatePresence>
-              {(isEngineFill || !useFastInpaint) && (
+              {(generateMode || isEngineFill || !useFastInpaint) && (
                 <motion.div
                   animate={{ opacity: 1, height: 'auto', marginTop: '0.75rem' }}
                   className="overflow-hidden"
@@ -2376,7 +2338,7 @@ function SettingsPanel({
                       onKeyDown={(e: any) => {
                         if (e.key === 'Enter') handleGenerateClick();
                       }}
-                      placeholder={t('editor.ai.settings.placeholder')}
+                      placeholder={generateMode ? 'Optional: blue sky with soft clouds, a red linen shirt…' : t('editor.ai.settings.placeholder')}
                       type="text"
                       value={prompt}
                     />
@@ -2399,7 +2361,9 @@ function SettingsPanel({
             <span className="ml-2">
               {isGeneratingAi || displayContainer.isLoading
                 ? t('editor.ai.settings.generating')
-                : isEngineFill
+                : generateMode || prompt.trim()
+                  ? 'Replace selection'
+                  : isEngineFill
                   ? prompt.trim()
                     ? t('editor.ai.settings.generateWithAiButton')
                     : t('editor.ai.settings.inpaintSelectionButton')
@@ -2409,12 +2373,21 @@ function SettingsPanel({
             </span>
           </Button>
 
-          {displayContainer.needsPromptReason !== undefined && !displayContainer.patchData && (
+          {!generateMode && !prompt.trim() && displayContainer.needsPromptReason !== undefined && !displayContainer.patchData && (
             <Text variant={TextVariants.small} className="block mt-2 text-text-secondary">
               Only {displayContainer.needsPromptReason}% of the area around this selection has
               usable detail, so there is nothing to rebuild from. Describe what should be here and
               run it again.
             </Text>
+          )}
+
+          {(displayContainer.patchData?.replacementRunId || displayContainer.patchData?.reconstructActiveKind === 'context-replace') && (
+            <ReplacementBlendControls
+              key={`${displayContainer.id}-${displayContainer.patchData?.replacementRunId ?? displayContainer.patchData?.reconstructDebugRunId}`}
+              patch={displayContainer}
+              disabled={isGeneratingAi || displayContainer.isLoading}
+              onApply={onReblendReplacement}
+            />
           )}
 
           {displayContainer.patchData && onAdjustFillArea && (
@@ -2550,6 +2523,10 @@ function SettingsPanel({
 
           {isComponentMode && (
             <>
+              {(activeSubMask.type === Mask.AiSubject || activeSubMask.type === Mask.AiPaint) && (
+                <SubjectSelectionControls parameters={activeSubMask.parameters} paint={activeSubMask.type === Mask.AiPaint}
+                  onChange={(parameters) => updateSubMask(activeSubMask.id, { parameters })} />
+              )}
               {isAiMask && aiModelDownloadStatus && (
                 <Text
                   as="div"

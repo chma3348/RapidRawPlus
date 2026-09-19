@@ -44,7 +44,7 @@ interface ImageCanvasProps {
   isStraightenActive: boolean;
   isRotationActive?: boolean;
   maskOverlayUrl: string | null;
-  onGenerateAiMask(id: string | null, start: Coord, end: Coord): void;
+  onGenerateAiMask(id: string | null, start: Coord, end: Coord, exclude?: boolean): void;
   onGenerateAiPaintMask?(id: string | null, lines: any[]): void;
   onLiveMaskPreview?: (previewMaskDef: any) => void;
   onQuickErase(subMaskId: string | null, startPoint: Coord, endpoint: Coord): void;
@@ -591,6 +591,25 @@ const MaskOverlay = memo(
     };
 
     if (subMask.type === Mask.AiSubject || subMask.type === Mask.QuickEraser) {
+      if (subMask.type === Mask.AiSubject && Array.isArray(p.subjectPoints) && p.subjectPoints.length) {
+        const points = p.subjectPoints;
+        const boxStart = points.find((p: any) => p.label === 2);
+        const boxEnd = points.find((p: any) => p.label === 3);
+        return (
+          <Group listening={!isToolActive} onClick={handleSelect} onTap={handleSelect}>
+            {boxStart && boxEnd && <Rect x={(boxStart.x - cropX) * scale} y={(boxStart.y - cropY) * scale}
+              width={(boxEnd.x - boxStart.x) * scale} height={(boxEnd.y - boxStart.y) * scale}
+              stroke={isSelected ? '#0ea5e9' : 'white'} strokeWidth={1} dash={[4, 4]} />}
+            {points.filter((p: any) => p.label <= 1).map((point: any, i: number) => (
+              <Group key={i} x={(point.x - cropX) * scale} y={(point.y - cropY) * scale}>
+                <Circle radius={6} fill={point.label === 1 ? '#0369a1' : '#be123c'} stroke="white" strokeWidth={1.5} />
+                <Line points={[-3, 0, 3, 0]} stroke="white" strokeWidth={1.5} />
+                {point.label === 1 && <Line points={[0, -3, 0, 3]} stroke="white" strokeWidth={1.5} />}
+              </Group>
+            ))}
+          </Group>
+        );
+      }
       const { startX, startY, endX, endY } = p;
       if (startX !== undefined && startY !== undefined && endX !== undefined && endY !== undefined) {
         const isPoint = Math.abs(startX - endX) < 1e-6 && Math.abs(startY - endY) < 1e-6;
@@ -1073,6 +1092,7 @@ const ImageCanvas = memo(
     const lastBrushPoint = useRef<Coord | null>(null);
     const currentLine = useRef<DrawnLine | null>(null);
     const previewBoxRef = useRef<{ start: Coord; end: Coord } | null>(null);
+    const subjectExcludeRef = useRef(false);
     const [previewBox, setPreviewBox] = useState<{ start: Coord; end: Coord } | null>(null);
 
     const [cursorPreview, setCursorPreview] = useState<CursorPreview>({ x: 0, y: 0, visible: false });
@@ -1794,6 +1814,7 @@ const ImageCanvas = memo(
           }
 
           if (isAiSubjectActive) {
+            subjectExcludeRef.current = !!(e.evt.shiftKey || e.evt.altKey || activeSubMask?.parameters.selectionMode === 'exclude');
             isDrawing.current = true;
             drawingStageRef.current = stage;
             const newBox = { start: pos, end: pos };
@@ -2181,7 +2202,7 @@ const ImageCanvas = memo(
         }
 
         if (activeId) {
-          updateSubMask(activeId, {
+          if (activeSubMask?.type !== Mask.AiSubject) updateSubMask(activeId, {
             parameters: {
               ...activeSubMask?.parameters,
               startX: startPoint.x,
@@ -2195,7 +2216,7 @@ const ImageCanvas = memo(
         if (activeSubMask?.type === Mask.QuickEraser && onQuickErase) {
           onQuickErase(activeId, startPoint, endPoint);
         } else if (activeSubMask?.type === Mask.AiSubject && onGenerateAiMask) {
-          onGenerateAiMask(activeId, startPoint, endPoint);
+          onGenerateAiMask(activeId, startPoint, endPoint, subjectExcludeRef.current);
         }
         return;
       }
@@ -2273,6 +2294,7 @@ const ImageCanvas = memo(
       activeLineFlow,
       isMasking,
       onGenerateAiMask,
+      onGenerateAiPaintMask,
       onQuickErase,
       updateSubMask,
       effectiveImageDimensions,

@@ -564,6 +564,16 @@
       "done": "Done"
     },
     "masks": {
+      "subject": {
+        "mode": "Selection mode",
+        "include": "Include",
+        "exclude": "Exclude",
+        "hint": "Click to include. Shift-click or Alt-click to exclude. Drag a box to start a new subject selection.",
+        "paintHint": "Paint inside the subject to include it. Use the eraser to exclude background.",
+        "edgeBalance": "Edge balance",
+        "edgeHint": "Negative values tighten uncertain edges; positive values include more edge detail.",
+        "startOver": "Start over"
+      },
       "actions": {
         "addNewComponent": "Add New Component",
         "applyPreset": "Apply Preset",

@@ -371,6 +371,9 @@ export interface MaskAdjustments {
 }
 
 export interface MaskContainer {
+  /** Generated fill whose footprint this adjustment mask follows. */
+  sourceAiPatchId?: string;
+  sourceAiSubMaskId?: string;
   adjustments: MaskAdjustments;
   id?: any;
   invert: boolean;
