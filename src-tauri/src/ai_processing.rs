@@ -875,22 +875,25 @@ pub fn run_sam_decoder(
     )
 }
 
-pub fn run_sky_seg_model(
+/// Raw output of a U²-Net-family segmentation model (sky, saliency): the
+/// model's probability map at its own resolution, letterbox padding removed,
+/// plus the size of the resized image it corresponds to. Callers decide how
+/// to threshold or refine; nothing here is normalised.
+pub fn run_u2net_probabilities(
     image: &DynamicImage,
-    sky_seg_session: &Mutex<Session>,
-) -> Result<GrayImage> {
-    let (orig_width, orig_height) = image.dimensions();
-
-    let resized_image = image.resize(SKYSEG_INPUT_SIZE, SKYSEG_INPUT_SIZE, FilterType::Triangle);
+    session: &Mutex<Session>,
+    input_size: u32,
+) -> Result<(Vec<f32>, u32, u32)> {
+    let resized_image = image.resize(input_size, input_size, FilterType::Triangle);
     let (resized_w, resized_h) = resized_image.dimensions();
     let resized_rgb = resized_image.into_rgb8();
     let raw_pixels = resized_rgb.as_raw();
 
-    let paste_x = ((SKYSEG_INPUT_SIZE - resized_w) / 2) as usize;
-    let paste_y = ((SKYSEG_INPUT_SIZE - resized_h) / 2) as usize;
+    let paste_x = ((input_size - resized_w) / 2) as usize;
+    let paste_y = ((input_size - resized_h) / 2) as usize;
 
     let mut input_tensor: Array<f32, _> =
-        Array::zeros((1, 3, SKYSEG_INPUT_SIZE as usize, SKYSEG_INPUT_SIZE as usize));
+        Array::zeros((1, 3, input_size as usize, input_size as usize));
 
     let mean = [0.485, 0.456, 0.406];
     let std = [0.229, 0.224, 0.225];
@@ -903,7 +906,6 @@ pub fn run_sky_seg_model(
             let idx = (y * rw + x) * 3;
             let dest_y = y + paste_y;
             let dest_x = x + paste_x;
-
             input_tensor[[0, 0, dest_y, dest_x]] =
                 (raw_pixels[idx] as f32 / 255.0 - mean[0]) / std[0];
             input_tensor[[0, 1, dest_y, dest_x]] =
@@ -916,44 +918,56 @@ pub fn run_sky_seg_model(
     let input_tensor_dyn = input_tensor.into_dyn();
     let t_input = Tensor::from_array(input_tensor_dyn.as_standard_layout().into_owned())?;
 
-    let mut session = sky_seg_session.lock().unwrap();
+    let mut session = session.lock().unwrap();
     let outputs = session.run(ort::inputs![t_input])?;
     let output_tensor = outputs[0].try_extract_array::<f32>()?.to_owned();
     let out_slice = output_tensor.as_slice().unwrap();
 
-    let mut min_val = f32::MAX;
-    let mut max_val = f32::MIN;
-    for &v in out_slice {
-        min_val = min_val.min(v);
-        max_val = max_val.max(v);
-    }
-
-    let range = max_val - min_val;
-    let scale = if range > 1e-6 { 255.0 / range } else { 0.0 };
-
-    let usize_size = SKYSEG_INPUT_SIZE as usize;
-    let mut cropped_mask_data = Vec::with_capacity(rw * rh);
-
+    let usize_size = input_size as usize;
+    let mut cropped = Vec::with_capacity(rw * rh);
     for y in 0..rh {
         let src_y = y + paste_y;
         for x in 0..rw {
-            let src_x = x + paste_x;
-            let val = out_slice[src_y * usize_size + src_x];
-            let pixel = if range > 1e-6 {
-                ((val - min_val) * scale) as u8
-            } else {
-                0
-            };
-            cropped_mask_data.push(pixel);
+            cropped.push(out_slice[src_y * usize_size + x + paste_x]);
         }
     }
+    Ok((cropped, resized_w, resized_h))
+}
 
-    let cropped_mask = GrayImage::from_raw(resized_w, resized_h, cropped_mask_data)
-        .ok_or_else(|| anyhow::anyhow!("Failed to create mask from Sky Segmentation output"))?;
+/// Legacy presentation of a U²-Net output: min–max stretch to 0..255 and
+/// resize to the source image.
+fn u2net_stretched_mask(
+    probabilities: &[f32],
+    w: u32,
+    h: u32,
+    orig_width: u32,
+    orig_height: u32,
+    what: &str,
+) -> Result<GrayImage> {
+    let mut min_val = f32::MAX;
+    let mut max_val = f32::MIN;
+    for &v in probabilities {
+        min_val = min_val.min(v);
+        max_val = max_val.max(v);
+    }
+    let range = max_val - min_val;
+    let scale = if range > 1e-6 { 255.0 / range } else { 0.0 };
+    let data: Vec<u8> = probabilities
+        .iter()
+        .map(|&v| if range > 1e-6 { ((v - min_val) * scale) as u8 } else { 0 })
+        .collect();
+    let cropped_mask = GrayImage::from_raw(w, h, data)
+        .ok_or_else(|| anyhow::anyhow!("Failed to create mask from {what} output"))?;
+    Ok(imageops::resize(&cropped_mask, orig_width, orig_height, FilterType::Triangle))
+}
 
-    let final_mask = imageops::resize(&cropped_mask, orig_width, orig_height, FilterType::Triangle);
-
-    Ok(final_mask)
+pub fn run_sky_seg_model(
+    image: &DynamicImage,
+    sky_seg_session: &Mutex<Session>,
+) -> Result<GrayImage> {
+    let (orig_width, orig_height) = image.dimensions();
+    let (probs, w, h) = run_u2net_probabilities(image, sky_seg_session, SKYSEG_INPUT_SIZE)?;
+    u2net_stretched_mask(&probs, w, h, orig_width, orig_height, "Sky Segmentation")
 }
 
 pub fn run_u2netp_model(
@@ -961,86 +975,16 @@ pub fn run_u2netp_model(
     u2netp_session: &Mutex<Session>,
 ) -> Result<GrayImage> {
     let (orig_width, orig_height) = image.dimensions();
-
-    let resized_image = image.resize(U2NETP_INPUT_SIZE, U2NETP_INPUT_SIZE, FilterType::Triangle);
-    let (resized_w, resized_h) = resized_image.dimensions();
-    let resized_rgb = resized_image.into_rgb8();
-    let raw_pixels = resized_rgb.as_raw();
-
-    let paste_x = ((U2NETP_INPUT_SIZE - resized_w) / 2) as usize;
-    let paste_y = ((U2NETP_INPUT_SIZE - resized_h) / 2) as usize;
-
-    let mut input_tensor: Array<f32, _> =
-        Array::zeros((1, 3, U2NETP_INPUT_SIZE as usize, U2NETP_INPUT_SIZE as usize));
-
-    let mean = [0.485, 0.456, 0.406];
-    let std = [0.229, 0.224, 0.225];
-
-    let rw = resized_w as usize;
-    let rh = resized_h as usize;
-
-    for y in 0..rh {
-        for x in 0..rw {
-            let idx = (y * rw + x) * 3;
-            let dest_y = y + paste_y;
-            let dest_x = x + paste_x;
-
-            input_tensor[[0, 0, dest_y, dest_x]] =
-                (raw_pixels[idx] as f32 / 255.0 - mean[0]) / std[0];
-            input_tensor[[0, 1, dest_y, dest_x]] =
-                (raw_pixels[idx + 1] as f32 / 255.0 - mean[1]) / std[1];
-            input_tensor[[0, 2, dest_y, dest_x]] =
-                (raw_pixels[idx + 2] as f32 / 255.0 - mean[2]) / std[2];
-        }
-    }
-
-    let input_tensor_dyn = input_tensor.into_dyn();
-    let t_input = Tensor::from_array(input_tensor_dyn.as_standard_layout().into_owned())?;
-
-    let mut session = u2netp_session.lock().unwrap();
-    let outputs = session.run(ort::inputs![t_input])?;
-    let output_tensor = outputs[0].try_extract_array::<f32>()?.to_owned();
-    let out_slice = output_tensor.as_slice().unwrap();
-
-    let mut min_val = f32::MAX;
-    let mut max_val = f32::MIN;
-    for &v in out_slice {
-        min_val = min_val.min(v);
-        max_val = max_val.max(v);
-    }
-
-    let range = max_val - min_val;
-    let scale = if range > 1e-6 { 255.0 / range } else { 0.0 };
-
-    let usize_size = U2NETP_INPUT_SIZE as usize;
-    let mut cropped_mask_data = Vec::with_capacity(rw * rh);
-
-    for y in 0..rh {
-        let src_y = y + paste_y;
-        for x in 0..rw {
-            let src_x = x + paste_x;
-            let val = out_slice[src_y * usize_size + src_x];
-            let pixel = if range > 1e-6 {
-                ((val - min_val) * scale) as u8
-            } else {
-                0
-            };
-            cropped_mask_data.push(pixel);
-        }
-    }
-
-    let cropped_mask = GrayImage::from_raw(resized_w, resized_h, cropped_mask_data)
-        .ok_or_else(|| anyhow::anyhow!("Failed to create mask from U-2-Netp output"))?;
-
-    let final_mask = imageops::resize(&cropped_mask, orig_width, orig_height, FilterType::Triangle);
-
-    Ok(final_mask)
+    let (probs, w, h) = run_u2net_probabilities(image, u2netp_session, U2NETP_INPUT_SIZE)?;
+    u2net_stretched_mask(&probs, w, h, orig_width, orig_height, "U-2-Netp")
 }
 
-pub fn run_depth_anything_model(
+/// Raw relative-disparity output of Depth Anything (larger = nearer), letterbox
+/// removed, plus the size it corresponds to. Not normalised.
+pub fn run_depth_anything_raw(
     image: &DynamicImage,
     depth_session: &Mutex<Session>,
-) -> Result<GrayImage> {
+) -> Result<(Vec<f32>, u32, u32)> {
     let resized_image = image.resize(DEPTH_INPUT_SIZE, DEPTH_INPUT_SIZE, FilterType::Triangle);
     let (resized_w, resized_h) = resized_image.dimensions();
     let resized_rgb = resized_image.into_rgb8();
@@ -1082,44 +1026,37 @@ pub fn run_depth_anything_model(
     let out_slice = output_tensor.as_slice().unwrap();
 
     let usize_size = DEPTH_INPUT_SIZE as usize;
-
-    let mut min_val = f32::MAX;
-    let mut max_val = f32::MIN;
+    let mut cropped = Vec::with_capacity(rw * rh);
     for y in 0..rh {
         let src_y = y + paste_y;
         for x in 0..rw {
-            let src_x = x + paste_x;
-            let val = out_slice[src_y * usize_size + src_x];
-            min_val = min_val.min(val);
-            max_val = max_val.max(val);
+            cropped.push(out_slice[src_y * usize_size + x + paste_x]);
         }
     }
-
-    let range = max_val - min_val;
-    let scale = if range > 1e-6 { 255.0 / range } else { 0.0 };
-
-    let mut cropped_depth_data = Vec::with_capacity(rw * rh);
-
-    for y in 0..rh {
-        let src_y = y + paste_y;
-        for x in 0..rw {
-            let src_x = x + paste_x;
-            let val = out_slice[src_y * usize_size + src_x];
-            let pixel = if range > 1e-6 {
-                ((val - min_val) * scale) as u8
-            } else {
-                0
-            };
-            cropped_depth_data.push(pixel);
-        }
-    }
-
-    let depth_map = GrayImage::from_raw(resized_w, resized_h, cropped_depth_data)
-        .ok_or_else(|| anyhow::anyhow!("Failed to create mask from Depth output"))?;
-
-    Ok(depth_map)
+    Ok((cropped, resized_w, resized_h))
 }
 
+pub fn run_depth_anything_model(
+    image: &DynamicImage,
+    depth_session: &Mutex<Session>,
+) -> Result<GrayImage> {
+    let (raw, w, h) = run_depth_anything_raw(image, depth_session)?;
+    let mut min_val = f32::MAX;
+    let mut max_val = f32::MIN;
+    for &v in &raw {
+        min_val = min_val.min(v);
+        max_val = max_val.max(v);
+    }
+    let range = max_val - min_val;
+    let scale = if range > 1e-6 { 255.0 / range } else { 0.0 };
+    let data: Vec<u8> = raw
+        .iter()
+        .map(|&v| if range > 1e-6 { ((v - min_val) * scale) as u8 } else { 0 })
+        .collect();
+    let cropped = GrayImage::from_raw(w, h, data)
+        .ok_or_else(|| anyhow::anyhow!("Failed to create depth map from model output"))?;
+    Ok(cropped)
+}
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct AiSubjectMaskParameters {
@@ -1144,6 +1081,9 @@ pub struct AiSubjectMaskParameters {
 pub struct AiSkyMaskParameters {
     #[serde(default)]
     pub mask_data_base64: Option<String>,
+    /// Share of the frame selected (0 when nothing was found).
+    #[serde(default)]
+    pub coverage: Option<f32>,
     #[serde(default)]
     pub rotation: Option<f32>,
     #[serde(default)]
@@ -1159,6 +1099,9 @@ pub struct AiSkyMaskParameters {
 pub struct AiForegroundMaskParameters {
     #[serde(default)]
     pub mask_data_base64: Option<String>,
+    /// Share of the frame selected (0 when nothing was found).
+    #[serde(default)]
+    pub coverage: Option<f32>,
     #[serde(default)]
     pub rotation: Option<f32>,
     #[serde(default)]

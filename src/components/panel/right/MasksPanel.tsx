@@ -582,7 +582,7 @@ function DepthRangePicker({
 export default function MasksPanel() {
   const { t } = useTranslation();
   const { setAdjustments } = useEditorActions();
-  const { handleGenerateAiDepthMask, handleGenerateAiForegroundMask, handleGenerateAiSkyMask, handleAdjustFillArea } = useAiMasking();
+  const { handleGenerateAiDepthMask, handleGenerateAiForegroundMask, handleGenerateAiSkyMask, handleGenerateAiAutoSubjectMask, handleAdjustFillArea } = useAiMasking();
   const setCustomEscapeHandler = useUIStore((s) => s.setCustomEscapeHandler);
   const { appSettings } = useSettingsStore(
     useShallow((state) => ({
@@ -846,6 +846,7 @@ export default function MasksPanel() {
     if (type === Mask.Brush || type === Mask.Flow || type === Mask.AiPaint) selectBrushToolForNewMask();
     if (type === Mask.AiForeground) handleGenerateAiForegroundMask(subMask.id);
     else if (type === Mask.AiSky) handleGenerateAiSkyMask(subMask.id);
+    else if (type === Mask.AiSubject) handleGenerateAiAutoSubjectMask(subMask.id);
     else if (type === Mask.AiDepth) handleGenerateAiDepthMask(subMask.id, subMask.parameters);
   };
 
@@ -877,6 +878,7 @@ export default function MasksPanel() {
     if (type === Mask.Brush || type === Mask.Flow || type === Mask.AiPaint) selectBrushToolForNewMask();
     if (type === Mask.AiForeground) handleGenerateAiForegroundMask(subMask.id);
     else if (type === Mask.AiSky) handleGenerateAiSkyMask(subMask.id);
+    else if (type === Mask.AiSubject) handleGenerateAiAutoSubjectMask(subMask.id);
     else if (type === Mask.AiDepth) handleGenerateAiDepthMask(subMask.id, subMask.parameters);
   };
 
@@ -1544,6 +1546,7 @@ export default function MasksPanel() {
                   setSettingsSectionOpen={setSettingsSectionOpen}
                   presets={presets}
                   handleGenerateAiDepthMask={handleGenerateAiDepthMask}
+                  handleGenerateAiAutoSubjectMask={handleGenerateAiAutoSubjectMask}
                 />
               </motion.div>
             )}
@@ -2249,6 +2252,7 @@ function SettingsPanel({
   setSettingsSectionOpen,
   presets,
   handleGenerateAiDepthMask,
+  handleGenerateAiAutoSubjectMask,
 }: any) {
   const { t } = useTranslation();
   const { showContextMenu } = useContextMenu();
@@ -2539,7 +2543,8 @@ function SettingsPanel({
             <>
               {(activeSubMask.type === Mask.AiSubject || activeSubMask.type === Mask.AiPaint) && (
                 <SubjectSelectionControls parameters={activeSubMask.parameters} paint={activeSubMask.type === Mask.AiPaint}
-                  onChange={(parameters) => updateSubMask(activeSubMask.id, { parameters })} />
+                  onChange={(parameters) => updateSubMask(activeSubMask.id, { parameters })}
+                  onAutoSelect={activeSubMask.type === Mask.AiSubject ? () => handleGenerateAiAutoSubjectMask(activeSubMask.id) : undefined} />
               )}
               {isAiMask && aiModelDownloadStatus && (
                 <Text

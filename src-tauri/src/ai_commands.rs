@@ -16,7 +16,7 @@ use crate::ai_connector;
 use crate::ai_processing::{
     self, AiDepthMaskParameters, AiForegroundMaskParameters, AiSkyMaskParameters,
     AiSubjectMaskParameters, CachedDepthMap, ensure_ai_state, generate_image_embeddings,
-    run_depth_anything_model, run_sky_seg_model, run_u2netp_model,
+    run_depth_anything_model, run_sky_seg_model,
 };
 use crate::app_settings::load_settings;
 use crate::app_state::AppState;
@@ -50,12 +50,14 @@ pub async fn generate_ai_foreground_mask(
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<AiForegroundMaskParameters, String> {
+    // Foreground is the near side of the scene's depth, not a saliency
+    // guess: see scene_masks.
     let (registry, model) = resolve_and_prepare(
         &app_handle,
         &state.model_registry,
         TaskType::Mask,
-        "mask_foreground",
-        mask_subtype_filter("foreground"),
+        "mask_depth",
+        mask_subtype_filter("depth"),
     )
     .await
     .map_err(|e| e.to_string())?;
@@ -64,13 +66,25 @@ pub async fn generate_ai_foreground_mask(
         .map_err(|e| e.to_string())?;
 
     let warped_image = get_cached_full_warped_image(&state, &js_adjustments)?;
+    let orientation = crate::scene_masks::Orientation {
+        steps: orientation_steps,
+        flip_horizontal,
+        flip_vertical,
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        crate::scene_masks::foreground_mask(warped_image.as_ref(), &session, orientation)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
 
-    let full_mask_image =
-        run_u2netp_model(warped_image.as_ref(), &session).map_err(|e| e.to_string())?;
-    let base64_data = encode_to_base64_png(&full_mask_image)?;
-
+    let (mask_data_base64, coverage) = match result {
+        Some(scene) => (Some(encode_to_base64_png(&scene.mask)?), scene.coverage),
+        None => (None, 0.0),
+    };
     Ok(AiForegroundMaskParameters {
-        mask_data_base64: Some(base64_data),
+        mask_data_base64,
+        coverage: Some(coverage),
         rotation: Some(rotation),
         flip_horizontal: Some(flip_horizontal),
         flip_vertical: Some(flip_vertical),
@@ -102,17 +116,180 @@ pub async fn generate_ai_sky_mask(
         .map_err(|e| e.to_string())?;
 
     let warped_image = get_cached_full_warped_image(&state, &js_adjustments)?;
+    let orientation = crate::scene_masks::Orientation {
+        steps: orientation_steps,
+        flip_horizontal,
+        flip_vertical,
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        crate::scene_masks::sky_mask(warped_image.as_ref(), &session, orientation)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
 
-    let full_mask_image =
-        run_sky_seg_model(warped_image.as_ref(), &session).map_err(|e| e.to_string())?;
-    let base64_data = encode_to_base64_png(&full_mask_image)?;
-
+    let (mask_data_base64, coverage) = match result {
+        Some(scene) => (Some(encode_to_base64_png(&scene.mask)?), scene.coverage),
+        None => (None, 0.0),
+    };
     Ok(AiSkyMaskParameters {
-        mask_data_base64: Some(base64_data),
+        mask_data_base64,
+        coverage: Some(coverage),
         rotation: Some(rotation),
         flip_horizontal: Some(flip_horizontal),
         flip_vertical: Some(flip_vertical),
         orientation_steps: Some(orientation_steps),
+    })
+}
+
+/// Result of the one-click subject selection.
+#[derive(serde::Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AiAutoSubjectResult {
+    pub parameters: AiSubjectMaskParameters,
+    /// Prompts in display space that reproduce the selection; later clicks
+    /// extend them.
+    pub subject_points: Vec<crate::subject_selection::SubjectPoint>,
+    pub coverage: f32,
+    pub found: bool,
+}
+
+/// One-click subject: saliency proposes, SAM delineates. See scene_masks.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub async fn generate_ai_auto_subject_mask(
+    js_adjustments: serde_json::Value,
+    path: String,
+    rotation: f32,
+    flip_horizontal: bool,
+    flip_vertical: bool,
+    orientation_steps: u8,
+    state: tauri::State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+) -> Result<AiAutoSubjectResult, String> {
+    let (registry, sam) = resolve_and_prepare(
+        &app_handle,
+        &state.model_registry,
+        TaskType::Mask,
+        "mask_subject",
+        mask_subtype_filter("subject"),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    let (saliency_registry, saliency) = resolve_and_prepare(
+        &app_handle,
+        &state.model_registry,
+        TaskType::Mask,
+        "mask_foreground",
+        mask_subtype_filter("foreground"),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    let encoder_session = registry
+        .get_session(&sam.manifest.id, None)
+        .map_err(|e| e.to_string())?;
+    let decoder_session = registry
+        .get_session(&sam.manifest.id, Some("decoder"))
+        .map_err(|e| e.to_string())?;
+    let saliency_session = saliency_registry
+        .get_session(&saliency.manifest.id, None)
+        .map_err(|e| e.to_string())?;
+
+    let path_hash = {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(path.as_bytes());
+        hasher.update(sam.manifest.id.as_bytes());
+        let mut geo_hasher = DefaultHasher::new();
+        for key in GEOMETRY_KEYS {
+            if let Some(val) = js_adjustments.get(key) {
+                key.hash(&mut geo_hasher);
+                val.to_string().hash(&mut geo_hasher);
+            }
+        }
+        hasher.update(&geo_hasher.finish().to_le_bytes());
+        hasher.finalize().to_hex().to_string()
+    };
+
+    let warped_image = get_cached_full_warped_image(&state, &js_adjustments)?;
+    ensure_ai_state(&state.ai_state);
+    let embeddings = {
+        let mut ai_state_lock = state.ai_state.lock().unwrap();
+        let ai_state = ai_state_lock.as_mut().unwrap();
+        match &ai_state.embeddings {
+            Some(cached) if cached.path_hash == path_hash => cached.clone(),
+            _ => {
+                let mut fresh = generate_image_embeddings(warped_image.as_ref(), &encoder_session)
+                    .map_err(|e| e.to_string())?;
+                fresh.path_hash = path_hash.clone();
+                ai_state.embeddings = Some(fresh.clone());
+                fresh
+            }
+        }
+    };
+
+    let orientation = crate::scene_masks::Orientation {
+        steps: orientation_steps,
+        flip_horizontal,
+        flip_vertical,
+    };
+    let image_size = (warped_image.width(), warped_image.height());
+    let result = tokio::task::spawn_blocking(move || {
+        crate::scene_masks::auto_subject(
+            warped_image.as_ref(),
+            &saliency_session,
+            &decoder_session,
+            &embeddings,
+            orientation,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+
+    let (mask_data_base64, coverage, points, found) = match result {
+        Some(auto) => {
+            log::info!(
+                "auto subject: {:.1}% of frame, {} prompt(s), from_sam={}",
+                auto.scene.coverage * 100.0,
+                auto.points.len(),
+                auto.from_sam
+            );
+            let points = auto
+                .points
+                .iter()
+                .map(|p| {
+                    let (x, y) = crate::scene_masks::to_display_space(
+                        (p.x, p.y),
+                        image_size,
+                        orientation,
+                        rotation,
+                    );
+                    crate::subject_selection::SubjectPoint { x, y, label: p.label }
+                })
+                .collect();
+            (Some(encode_to_base64_png(&auto.scene.mask)?), auto.scene.coverage, points, true)
+        }
+        None => (None, 0.0, Vec::new(), false),
+    };
+    let (start, end) = match (points.first(), points.last()) {
+        (Some(a), Some(b)) => ((a.x, a.y), (b.x, b.y)),
+        _ => ((0.0, 0.0), (0.0, 0.0)),
+    };
+    Ok(AiAutoSubjectResult {
+        parameters: AiSubjectMaskParameters {
+            start_x: start.0,
+            start_y: start.1,
+            end_x: end.0,
+            end_y: end.1,
+            mask_data_base64,
+            rotation: Some(rotation),
+            flip_horizontal: Some(flip_horizontal),
+            flip_vertical: Some(flip_vertical),
+            orientation_steps: Some(orientation_steps),
+        },
+        subject_points: points,
+        coverage,
+        found,
     })
 }
 

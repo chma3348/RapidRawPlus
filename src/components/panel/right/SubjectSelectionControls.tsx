@@ -1,4 +1,4 @@
-import { Minus, Plus, RotateCcw } from 'lucide-react';
+import { Minus, Plus, RotateCcw, Sparkles } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import Slider from '../../ui/Slider';
 
@@ -6,16 +6,28 @@ export default function SubjectSelectionControls({
   parameters,
   onChange,
   paint = false,
+  onAutoSelect,
 }: {
   parameters: any;
   onChange: (parameters: any) => void;
   paint?: boolean;
+  onAutoSelect?: () => void;
 }) {
   const { t } = useTranslation();
   const mode = parameters.selectionMode ?? 'include';
   const hasSelection = !!parameters.maskDataBase64 || !!parameters.subjectPoints?.length || !!parameters.lines?.length;
   return (
     <div className="space-y-3">
+      {!paint && onAutoSelect && (
+        <button
+          type="button"
+          onClick={onAutoSelect}
+          className="flex w-full items-center justify-center gap-2 rounded-md border border-surface px-2 py-1.5 text-sm text-text-primary hover:bg-card-active focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+        >
+          <Sparkles size={14} />
+          {t('editor.masks.subject.autoSelect', 'Select subject automatically')}
+        </button>
+      )}
       {!paint && (
         <div className="flex gap-1" role="group" aria-label={t('editor.masks.subject.mode', 'Selection mode')}>
           {(['include', 'exclude'] as const).map((value) => (
@@ -49,7 +61,7 @@ export default function SubjectSelectionControls({
             )
           : t(
               'editor.masks.subject.hint',
-              'Click to include. Shift-click or Alt-click to exclude. Drag a box to start a new subject selection.',
+              'The subject is selected automatically. Click to include more, Shift-click or Alt-click to exclude. Drag a box to start over.',
             )}
       </p>
       {hasSelection && (

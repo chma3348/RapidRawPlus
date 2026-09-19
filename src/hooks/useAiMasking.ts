@@ -763,6 +763,52 @@ export function useAiMasking() {
     }
   };
 
+  const handleGenerateAiAutoSubjectMask = async (subMaskId: string) => {
+    const { selectedImage, adjustments, patchesSentToBackend } = useEditorStore.getState();
+    if (!selectedImage?.path) return;
+    const subMask = [...(adjustments.masks || []), ...(adjustments.aiPatches || [])]
+      .flatMap((p) => p.subMasks).find((sm) => sm.id === subMaskId);
+    if (!subMask) return;
+    const requestId = uuidv4();
+    const transformAdjustments = getTransformAdjustments(adjustments);
+    const geometry = JSON.stringify([transformAdjustments, adjustments.rotation, adjustments.flipHorizontal,
+      adjustments.flipVertical, adjustments.orientationSteps]);
+    updateSubMask(subMaskId, { parameters: { ...subMask.parameters, subjectRequestId: requestId } });
+    pendingSelections.add(requestId);
+    setEditor({ isGeneratingAiMask: true });
+    try {
+      const result: any = await invoke(Invokes.GenerateAiAutoSubjectMask, {
+        jsAdjustments: transformAdjustments,
+        path: selectedImage.path,
+        rotation: adjustments.rotation,
+        flipHorizontal: adjustments.flipHorizontal,
+        flipVertical: adjustments.flipVertical,
+        orientationSteps: adjustments.orientationSteps,
+      });
+      const current = useEditorStore.getState();
+      const latest = [...(current.adjustments.masks || []), ...(current.adjustments.aiPatches || [])]
+        .flatMap((p) => p.subMasks).find((sm) => sm.id === subMaskId);
+      if (current.selectedImage?.path !== selectedImage.path || latest?.parameters.subjectRequestId !== requestId) return;
+      if (!result?.found) {
+        toast.info('No clear subject found. Click on the subject to select it.');
+        return;
+      }
+      const mergedParameters = {
+        ...latest.parameters,
+        ...result.parameters,
+        subjectPoints: result.subjectPoints,
+        subjectGeometry: geometry,
+      };
+      patchesSentToBackend.delete(subMaskId);
+      updateSubMask(subMaskId, { parameters: mergedParameters });
+    } catch (error) {
+      toast.error(`AI Mask Failed: ${error}`);
+    } finally {
+      pendingSelections.delete(requestId);
+      setEditor({ isGeneratingAiMask: pendingSelections.size > 0 });
+    }
+  };
+
   const handleGenerateAiForegroundMask = async (subMaskId: string) => {
     const { selectedImage, adjustments, patchesSentToBackend } = useEditorStore.getState();
     if (!selectedImage?.path) return;
@@ -778,6 +824,7 @@ export function useAiMasking() {
         rotation: adjustments.rotation,
       });
 
+      if ((newParameters as any)?.coverage === 0) toast.info('No foreground found: the scene has no clear near/far split.');
       const subMask = adjustments.aiPatches
         ?.flatMap((p: AiPatch) => p.subMasks)
         .find((sm: SubMask) => sm.id === subMaskId);
@@ -806,6 +853,7 @@ export function useAiMasking() {
         rotation: adjustments.rotation,
       });
 
+      if ((newParameters as any)?.coverage === 0) toast.info('No sky found in this photo.');
       const subMask = adjustments.aiPatches
         ?.flatMap((p: AiPatch) => p.subMasks)
         .find((sm: SubMask) => sm.id === subMaskId);
@@ -856,5 +904,6 @@ export function useAiMasking() {
     handleGenerateAiDepthMask,
     handleGenerateAiForegroundMask,
     handleGenerateAiSkyMask,
+    handleGenerateAiAutoSubjectMask,
   };
 }

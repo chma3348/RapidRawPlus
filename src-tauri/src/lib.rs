@@ -14,6 +14,7 @@ mod android_integration;
 mod app_settings;
 mod app_state;
 pub mod auto_level;
+pub mod scene_masks;
 mod cache_utils;
 pub mod comfy_engine;
 mod culling;
@@ -2250,6 +2251,7 @@ pub fn run() {
             app_settings::load_settings,
             app_settings::save_settings,
             ai_commands::generate_ai_subject_mask,
+            ai_commands::generate_ai_auto_subject_mask,
             ai_commands::generate_ai_paint_mask,
             ai_commands::sample_image_color,
             ai_commands::respot_enhance,

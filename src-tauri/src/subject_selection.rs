@@ -279,7 +279,7 @@ fn render_coarse_matte(logits: &[f32], side: usize, guide: &RgbImage) -> GrayIma
 }
 
 /// Separable box mean with clipped windows (no dark padding at photo edges).
-fn box_mean(values: &[f32], w: usize, h: usize, radius: usize) -> Vec<f32> {
+pub(crate) fn box_mean(values: &[f32], w: usize, h: usize, radius: usize) -> Vec<f32> {
     let mut horizontal = vec![0.0; values.len()];
     for y in 0..h {
         let mut sum = 0.0f64;
