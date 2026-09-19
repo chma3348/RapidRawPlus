@@ -21,7 +21,7 @@
 //! a short plate smears it into vertical streaks.
 
 use image::imageops::{self, FilterType};
-use image::{DynamicImage, GenericImageView, GrayImage, RgbImage};
+use image::{DynamicImage, GrayImage, RgbImage};
 use rayon::prelude::*;
 
 use crate::scene_masks::box_mean_public as box_mean;
