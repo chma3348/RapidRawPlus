@@ -44,6 +44,22 @@ pub struct SkyReplaceOptions {
     pub flip_horizontal: bool,
     /// Match the photo's grain so the new sky is not suspiciously clean.
     pub match_grain: bool,
+    /// Move the sky/foreground boundary, as a fraction of the photo's long
+    /// side. Negative pulls the new sky back behind the foreground, which
+    /// hides a rim of leftover old sky; positive lets it eat into the
+    /// foreground, which hides a dark fringe.
+    pub edge_shift: f32,
+    /// Width of the hand-over from foreground to sky, as a fraction of the
+    /// long side. 0 keeps the matte's own edge.
+    pub edge_feather: f32,
+    /// Fade the new sky back into the original one just above the horizon,
+    /// over this fraction of the photo's height, so the scene keeps its own
+    /// haze and the seam disappears.
+    pub horizon_fade: f32,
+    /// Shift the new sky's colour cast toward the photo's own light.
+    /// 0 leaves the plate as shot, 1 fully adopts the photo's white
+    /// balance. Brightness and the plate's own colour variation are kept.
+    pub white_balance_match: f32,
 }
 
 impl Default for SkyReplaceOptions {
@@ -56,6 +72,10 @@ impl Default for SkyReplaceOptions {
             pan: 0.0,
             flip_horizontal: false,
             match_grain: true,
+            edge_shift: 0.0,
+            edge_feather: 0.0,
+            horizon_fade: 0.0,
+            white_balance_match: 0.4,
         }
     }
 }
@@ -129,6 +149,58 @@ pub fn place_plate(
     })
 }
 
+/// Move the matte's boundary and soften it. `shift` and `feather` are in
+/// pixels; a positive shift grows the sky into the foreground.
+pub fn adjust_edges(alpha: &GrayImage, shift: f32, feather: f32) -> GrayImage {
+    if shift.abs() < 0.5 && feather < 0.5 {
+        return alpha.clone();
+    }
+    let (w, h) = alpha.dimensions();
+    let (wu, hu) = (w as usize, h as usize);
+    // A blur turns the hard matte into a ramp whose 0.5 level is the
+    // boundary; offsetting the level moves the boundary, and rescaling the
+    // ramp sets how wide the hand-over is.
+    let radius = (feather.max(shift.abs()).max(1.0)).round() as usize;
+    let values: Vec<f32> = alpha.pixels().map(|p| p[0] as f32 / 255.0).collect();
+    let blurred = box_mean(&box_mean(&values, wu, hu, radius), wu, hu, radius);
+    // Each unit of blurred value is roughly `radius` pixels of distance.
+    let slope = if feather >= 0.5 { radius as f32 / feather } else { 6.0 };
+    let offset = shift / radius.max(1) as f32 * 0.5;
+    GrayImage::from_raw(
+        w,
+        h,
+        blurred
+            .iter()
+            .map(|v| {
+                let t = ((v - 0.5 + offset) * slope + 0.5).clamp(0.0, 1.0);
+                (t * 255.0).round() as u8
+            })
+            .collect(),
+    )
+    .expect("edge-adjusted matte")
+}
+
+/// Per-channel gains that move `plate_mean` toward `scene_mean` in colour
+/// only: the gains are normalised so overall brightness is unchanged.
+pub fn white_balance_gains(plate_mean: [f32; 3], scene_mean: [f32; 3], strength: f32) -> [f32; 3] {
+    let lum = |c: [f32; 3]| (0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]).max(1e-4);
+    let (pl, sl) = (lum(plate_mean), lum(scene_mean));
+    let mut gains = [1.0f32; 3];
+    for c in 0..3 {
+        // Compare chromaticities, not raw levels, so a dark scene does not
+        // darken the sky and a bright one does not blow it out.
+        let ratio = ((scene_mean[c] / sl) + 1e-4) / ((plate_mean[c] / pl) + 1e-4);
+        // Bounded: matching should tint the sky toward the photo's light,
+        // never recolour it into a different sky.
+        gains[c] = ratio.clamp(0.25, 4.0).powf(strength.clamp(0.0, 1.0)).clamp(0.72, 1.38);
+    }
+    let g_lum = 0.2126 * gains[0] + 0.7152 * gains[1] + 0.0722 * gains[2];
+    for g in gains.iter_mut() {
+        *g /= g_lum.max(1e-4);
+    }
+    gains
+}
+
 /// The old sky's colour as a smooth field, averaged from confident sky only.
 fn old_sky_colour(photo: &RgbImage, alpha: &GrayImage, radius: usize) -> [Vec<f32>; 3] {
     let (w, h) = photo.dimensions();
@@ -164,10 +236,73 @@ pub fn replace_sky(
         alpha.dimensions(),
         (w, h)
     );
+    let long = w.max(h) as f32;
+    let alpha = &adjust_edges(alpha, o.edge_shift * long, o.edge_feather * long);
     let horizon = (horizon_row(alpha) as i64
         + (o.horizon_offset * h as f32).round() as i64)
         .clamp(1, h as i64 - 1) as u32;
-    let new_sky = place_plate(plate, (w, h), horizon, o);
+    let mut new_sky = place_plate(plate, (w, h), horizon, o);
+
+    // White balance: move the plate's cast toward the light in this photo,
+    // measured from the foreground (the sky itself is what we are
+    // replacing, and a blown-out one carries no usable colour).
+    if o.white_balance_match > 0.01 {
+        // The scene's light is estimated from its brightest lit surfaces
+        // (grey-world over the top quarter of foreground luminance), not
+        // from the whole foreground: dark vegetation or shadow would drag
+        // the estimate toward its own colour rather than the light's.
+        let mut lums: Vec<f32> = Vec::new();
+        for (i, px) in rgb.pixels().enumerate() {
+            if alpha.as_raw()[i] < 128 {
+                let l = 0.2126 * px[0] as f32 + 0.7152 * px[1] as f32 + 0.0722 * px[2] as f32;
+                lums.push(l / 255.0);
+            }
+        }
+        let cutoff = if lums.len() > 64 {
+            lums.sort_by(f32::total_cmp);
+            lums[lums.len() * 3 / 4]
+        } else {
+            0.0
+        };
+        let mut scene = [0.0f32; 3];
+        let mut weight = 0.0f32;
+        for (i, px) in rgb.pixels().enumerate() {
+            if alpha.as_raw()[i] >= 128 {
+                continue;
+            }
+            let l = (0.2126 * px[0] as f32 + 0.7152 * px[1] as f32 + 0.0722 * px[2] as f32) / 255.0;
+            if l < cutoff || l > 0.98 {
+                continue;
+            }
+            weight += 1.0;
+            for c in 0..3 {
+                scene[c] += px[c] as f32 / 255.0;
+            }
+        }
+        // The plate's own mean, over the whole frame, is the fair reference.
+        let mut plate_all = [0.0f32; 3];
+        for px in new_sky.pixels() {
+            for c in 0..3 {
+                plate_all[c] += px[c] as f32 / 255.0;
+            }
+        }
+        let n = (w * h) as f32;
+        for v in plate_all.iter_mut() {
+            *v /= n;
+        }
+        if weight > 200.0 {
+            for v in scene.iter_mut() {
+                *v /= weight;
+            }
+            let gains = white_balance_gains(plate_all, scene, o.white_balance_match);
+            for px in new_sky.pixels_mut() {
+                for c in 0..3 {
+                    px[c] = ((px[c] as f32 * gains[c]).clamp(0.0, 255.0)).round() as u8;
+                }
+            }
+        }
+    }
+    let new_sky = new_sky;
     let radius = ((w.max(h) as usize) / 24).max(8);
     let old = old_sky_colour(&rgb, alpha, radius);
 
@@ -208,6 +343,15 @@ pub fn replace_sky(
             let ramp = (1.0 - (y as f32 - horizon as f32) / (0.45 * h as f32)).clamp(0.0, 1.0);
             let relight = o.relight * (0.5 + 0.5 * ramp);
             let haze = o.haze * ramp;
+            // Just above the horizon the new sky fades back into the old
+            // one, so the scene keeps its own haze and the seam vanishes.
+            let fade = if o.horizon_fade > 0.001 {
+                let band = (o.horizon_fade * h as f32).max(1.0);
+                let above = (horizon as f32 - y as f32).max(0.0);
+                (above / band).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
             for x in 0..w as usize {
                 let i = y * w as usize + x;
                 let a = alpha.as_raw()[i] as f32 / 255.0;
@@ -226,6 +370,8 @@ pub fn replace_sky(
                     };
                     let lit = (fg * (1.0 + relight * (ratio[c] - 1.0))).clamp(0.0, 1.0);
                     let hazed = lit * (1.0 - haze) + sky * haze;
+                    // fade < 1 keeps some of the photo's own sky here
+                    let sky = sky * fade + pixel * (1.0 - fade);
                     let value = a * sky + (1.0 - a) * hazed;
                     row[x * 3 + c] = (value.clamp(0.0, 1.0) * 255.0).round() as u8;
                 }
@@ -310,7 +456,7 @@ mod tests {
     #[test]
     fn sky_is_replaced_and_ground_is_kept() {
         let size = (120, 90);
-        let opts = SkyReplaceOptions { relight: 0.0, haze: 0.0, match_grain: false, ..Default::default() };
+        let opts = SkyReplaceOptions { relight: 0.0, haze: 0.0, match_grain: false, white_balance_match: 0.0, ..Default::default() };
         let out = replace_sky(
             &photo([200, 210, 240], [60, 90, 50], 45, size),
             &matte(45, size),
@@ -350,7 +496,7 @@ mod tests {
                 _ => 0,
             }])
         });
-        let opts = SkyReplaceOptions { relight: 0.0, haze: 0.0, match_grain: false, ..Default::default() };
+        let opts = SkyReplaceOptions { relight: 0.0, haze: 0.0, match_grain: false, white_balance_match: 0.0, ..Default::default() };
         let out = replace_sky(&DynamicImage::ImageRgb8(rgb), &alpha, &plain_plate([250, 120, 40]), &opts)
             .unwrap()
             .to_rgb8();
@@ -374,13 +520,79 @@ mod tests {
         let size = (120, 90);
         let base = photo([200, 210, 240], [80, 80, 80], 45, size);
         let warm = plain_plate([250, 140, 40]);
-        let neutral = SkyReplaceOptions { relight: 0.0, haze: 0.0, match_grain: false, ..Default::default() };
+        let neutral = SkyReplaceOptions { relight: 0.0, haze: 0.0, match_grain: false, white_balance_match: 0.0, ..Default::default() };
         let lit = SkyReplaceOptions { relight: 1.0, ..neutral };
         let a = replace_sky(&base, &matte(45, size), &warm, &neutral).unwrap().to_rgb8();
         let b = replace_sky(&base, &matte(45, size), &warm, &lit).unwrap().to_rgb8();
         let (pa, pb) = (a.get_pixel(60, 70).0, b.get_pixel(60, 70).0);
         assert!(pb[0] > pa[0] + 5, "red not lifted: {pa:?} -> {pb:?}");
         assert!(pb[2] < pa[2], "blue not reduced: {pa:?} -> {pb:?}");
+    }
+
+    #[test]
+    fn edge_feather_turns_a_hard_matte_into_a_ramp() {
+        let size = (120u32, 90u32);
+        let hard = matte(45, size);
+        let soft = adjust_edges(&hard, 0.0, 6.0);
+        let column: Vec<u8> = (38..52).map(|y| soft.get_pixel(60, y)[0]).collect();
+        let midtones = column.iter().filter(|&&v| v > 20 && v < 235).count();
+        assert!(midtones >= 4, "no hand-over band: {column:?}");
+        assert!(soft.get_pixel(60, 10)[0] > 250 && soft.get_pixel(60, 85)[0] < 5, "interiors moved");
+    }
+
+    #[test]
+    fn edge_shift_moves_the_boundary_both_ways() {
+        let size = (120u32, 90u32);
+        let hard = matte(45, size);
+        let sky = |m: &GrayImage| m.pixels().filter(|p| p[0] > 127).count();
+        let base = sky(&hard);
+        let grown = sky(&adjust_edges(&hard, 4.0, 2.0));
+        let shrunk = sky(&adjust_edges(&hard, -4.0, 2.0));
+        assert!(grown > base + 200, "sky did not grow: {base} -> {grown}");
+        assert!(shrunk + 200 < base, "sky did not shrink: {base} -> {shrunk}");
+    }
+
+    #[test]
+    fn white_balance_gains_tint_without_changing_brightness() {
+        // A warm scene and a cold plate: matching must warm the plate.
+        let gains = white_balance_gains([0.35, 0.45, 0.75], [0.60, 0.50, 0.40], 1.0);
+        assert!(gains[0] > 1.0 && gains[2] < 1.0, "not warmed: {gains:?}");
+        let lum = 0.2126 * gains[0] + 0.7152 * gains[1] + 0.0722 * gains[2];
+        assert!((lum - 1.0).abs() < 1e-3, "brightness changed: {lum}");
+        // Strength 0 is a no-op.
+        let none = white_balance_gains([0.35, 0.45, 0.75], [0.60, 0.50, 0.40], 0.0);
+        assert!(none.iter().all(|g| (g - 1.0).abs() < 1e-3), "{none:?}");
+    }
+
+    #[test]
+    fn white_balance_match_moves_the_sky_toward_the_photos_light() {
+        let size = (160, 120);
+        // Warm sunlit ground under a neutral sky; the plate is cold blue.
+        let base = photo([220, 220, 220], [210, 170, 120], 60, size);
+        let plate = plain_plate([90, 130, 220]);
+        let off = SkyReplaceOptions { relight: 0.0, haze: 0.0, match_grain: false, white_balance_match: 0.0, ..Default::default() };
+        let on = SkyReplaceOptions { white_balance_match: 1.0, ..off };
+        let a = replace_sky(&base, &matte(60, size), &plate, &off).unwrap().to_rgb8();
+        let b = replace_sky(&base, &matte(60, size), &plate, &on).unwrap().to_rgb8();
+        let (pa, pb) = (a.get_pixel(80, 20).0, b.get_pixel(80, 20).0);
+        assert!(pb[0] > pa[0] && pb[2] < pa[2], "sky not warmed toward the scene: {pa:?} -> {pb:?}");
+        let lum = |p: [u8; 3]| 0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32;
+        assert!((lum(pb) - lum(pa)).abs() < 18.0, "brightness swung: {pa:?} -> {pb:?}");
+    }
+
+    #[test]
+    fn horizon_fade_keeps_the_photos_own_sky_at_the_seam() {
+        let size = (120, 200);
+        let base = photo([200, 205, 215], [60, 90, 50], 150, size);
+        let plate = plain_plate([250, 120, 40]);
+        let opts = SkyReplaceOptions { relight: 0.0, haze: 0.0, match_grain: false, white_balance_match: 0.0,
+                                       horizon_fade: 0.2, ..Default::default() };
+        let out = replace_sky(&base, &matte(150, size), &plate, &opts).unwrap().to_rgb8();
+        let at_seam = out.get_pixel(60, 148).0;
+        let high = out.get_pixel(60, 40).0;
+        assert_eq!(high, [250, 120, 40], "sky above the fade should be the plate");
+        assert!(at_seam[2] > 100, "seam kept none of the original sky: {at_seam:?}");
+        assert!(at_seam[0] > 190 && at_seam[0] < 250, "seam is not a blend: {at_seam:?}");
     }
 
     #[test]

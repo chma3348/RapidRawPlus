@@ -15,7 +15,18 @@ fn replace() {
     let registry = ModelRegistry::new(PathBuf::from(env("SUBJECT_MODELS")));
     let scene = registry.get_session("upernet-swin-large-ade", None).expect("scene model");
     let out = PathBuf::from(env("SKY_OUT")); std::fs::create_dir_all(&out).unwrap();
-    let opts = sky_replace::SkyReplaceOptions::default();
+    // SKY_VARIANTS: name=json,name=json — each is composited and saved.
+    let variants: Vec<(String, sky_replace::SkyReplaceOptions)> = match std::env::var("SKY_VARIANTS") {
+        Ok(v) => v
+            .split(';')
+            .filter(|s| !s.is_empty())
+            .map(|spec| {
+                let (name, json) = spec.split_once('=').expect("name=json");
+                (name.to_string(), serde_json::from_str(json).expect("options json"))
+            })
+            .collect(),
+        Err(_) => vec![("default".to_string(), sky_replace::SkyReplaceOptions::default())],
+    };
     let plates: Vec<PathBuf> = env("SKY_PLATES").split(',').map(PathBuf::from).collect();
     for photo_path in env("SKY_PHOTOS").split(',') {
         let bytes = std::fs::read(photo_path).unwrap();
@@ -30,13 +41,15 @@ fn replace() {
         let name = PathBuf::from(photo_path).file_stem().unwrap().to_string_lossy().to_string();
         for plate_path in &plates {
             let plate = image::open(plate_path).unwrap();
-            let t = std::time::Instant::now();
-            let done = sky_replace::replace_sky(&photo, &sky.mask, &plate, &opts).unwrap();
             let plate_name = plate_path.file_stem().unwrap().to_string_lossy();
-            let stem: String = plate_name.chars().take(28).collect();
-            done.save(out.join(format!("{name}__{stem}.jpg"))).unwrap();
-            println!("{name} + {stem}: sky {:.0}% [mask {t_mask:.1?}, composite {:.1?}]",
-                sky.coverage * 100.0, t.elapsed());
+            let stem: String = plate_name.chars().take(24).collect();
+            for (variant, opts) in &variants {
+                let t = std::time::Instant::now();
+                let done = sky_replace::replace_sky(&photo, &sky.mask, &plate, opts).unwrap();
+                done.save(out.join(format!("{name}__{stem}__{variant}.jpg"))).unwrap();
+                println!("{name} + {stem} [{variant}]: sky {:.0}% [mask {t_mask:.1?}, composite {:.1?}]",
+                    sky.coverage * 100.0, t.elapsed());
+            }
         }
     }
 }

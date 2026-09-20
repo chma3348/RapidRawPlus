@@ -13,6 +13,24 @@ reads as fake, and both are implemented in `src-tauri/src/sky_replace.rs`:
    sky's colour, strongest near the horizon, and a little of the new sky is
    mixed in there as atmospheric haze.
 
+## Controls
+
+| control | what it does |
+|---|---|
+| `relight` | shifts the foreground toward the new sky's colour, strongest near the horizon |
+| `haze` | mixes a little of the new sky into the foreground near the horizon |
+| `whiteBalanceMatch` | shifts the **new sky** toward the light in your photo. The scene's light is estimated by grey-world over the brightest quarter of the foreground, not the whole of it: dark vegetation or shadow would otherwise drag the estimate toward its own colour. Gains are normalised so brightness does not change and bounded to 0.72–1.38, so matching tints a sky without recolouring it into a different one. Default 0.4 |
+| `edgeShift` | moves the sky/foreground boundary, as a fraction of the long side. Negative pulls the sky back behind the foreground (hides a rim of leftover old sky); positive lets it grow (hides a dark fringe) |
+| `edgeFeather` | width of the hand-over from foreground to sky |
+| `horizonFade` | fades the new sky back into the original just above the horizon, so the scene keeps its own haze and the seam disappears |
+| `scale`, `pan`, `flipHorizontal`, `horizonOffset` | frame the plate |
+| `matchGrain` | gives the new sky the photo's own grain |
+
+`relight` and `whiteBalanceMatch` pull in opposite directions by design:
+one moves the scene toward the sky, the other the sky toward the scene.
+They are applied in that order (sky matched first, then the foreground relit
+toward the already-matched sky), so raising both does not double-count.
+
 Plus: the plate's bottom edge is placed on the photo's horizon (the median
 of the lowest sky row per column, so one tall tree does not drag it down),
 scaled to cover, mirror-tiled if too short rather than stretched, and given
@@ -67,6 +85,9 @@ back to back.
 - A plate whose sun sits in a different place from the original lighting
   will not be caught automatically; pick a plate that matches, or turn the
   relight up so the foreground follows the new sky.
+- White-balance matching assumes the foreground's bright surfaces are
+  roughly neutral. A scene dominated by one strong colour (a red barn
+  filling the frame) will tint the sky toward it; lower the slider there.
 - The classifier is colour statistics, not semantics: a dark sunset lands
   in "twilight" and a mackerel sky in "overcast" as often as not.
 - One fetched plate carries a photographer's watermark; watermark detection
