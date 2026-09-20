@@ -48,6 +48,7 @@ import Switch from '../../ui/Switch';
 import Slider from '../../ui/Slider';
 import SubjectSelectionControls from './SubjectSelectionControls';
 import BasicAdjustments from '../../adjustments/Basic';
+import ColorV3Controls from '../../adjustments/ColorV3';
 import CurveGraph from '../../adjustments/Curves';
 import ColorPanel from '../../adjustments/Color';
 import DetailsPanel from '../../adjustments/Details';
@@ -2254,6 +2255,13 @@ function SettingsPanel({
   handleGenerateAiDepthMask,
   handleGenerateAiAutoSubjectMask,
 }: any) {
+  // The photo's process version, not the mask's: masks carry no
+  // processVersion of their own, and the bare `adjustments` this used to
+  // read does not exist in this scope — referencing it threw a
+  // ReferenceError and took the whole panel down as soon as a mask was
+  // selected.
+  const photoProcessVersion = useEditorStore((s: any) => s.adjustments?.processVersion);
+
   const { t } = useTranslation();
   const { showContextMenu } = useContextMenu();
   const isActive = !!container;
@@ -2685,7 +2693,7 @@ function SettingsPanel({
         onMouseLeave={() => setIsMaskControlHovered(false)}
         className="flex flex-col gap-2"
       >
-        {Object.keys(ADJUSTMENT_SECTIONS).map((sectionName) => {
+        {photoProcessVersion === 3 ? <ColorV3Controls adjustments={displayContainer.adjustments} setAdjustments={setMaskContainerAdjustments} onDragStateChange={onDragStateChange}/> : Object.keys(ADJUSTMENT_SECTIONS).map((sectionName) => {
           const SectionComponent: any = {
             basic: BasicAdjustments,
             curves: CurveGraph,

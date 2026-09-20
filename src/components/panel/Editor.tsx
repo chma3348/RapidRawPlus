@@ -2024,12 +2024,12 @@ export default function Editor({ onBackToLibrary, onContextMenu, transformWrappe
             it replaces the canvas entirely rather than layering over it. */}
         {selectedImage?.isVideo && <VideoViewer path={selectedImage.path} />}
 
+        {!selectedImage?.isVideo && (
         <div
           ref={contentRef}
           className="w-full h-full flex items-center justify-center origin-top-left"
           style={{
             transform: `translate(${transformState.positionX}px, ${transformState.positionY}px) scale(${transformState.scale})`,
-            display: selectedImage?.isVideo ? 'none' : undefined,
           }}
         >
           <ImageCanvas
@@ -2082,6 +2082,7 @@ export default function Editor({ onBackToLibrary, onContextMenu, transformWrappe
             hasRenderedFirstFrame={hasRenderedFirstFrame}
           />
         </div>
+        )}
       </div>
     </div>
   );
