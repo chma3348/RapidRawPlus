@@ -804,6 +804,12 @@
         "undo": "Undo (Ctrl+Z) or History (Right-click)"
       },
       "vc": "VC"
+    },
+    "video": {
+      "saveFrame": "Save frame",
+      "saveFrameTooltip": "Write the current frame beside the video as a PNG you can edit",
+      "frameSaved": "Frame saved as {{name}}",
+      "frameFailed": "Could not save the frame"
     }
   },
   "export": {

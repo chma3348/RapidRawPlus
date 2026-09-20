@@ -9,6 +9,7 @@ import { useUIStore } from '../store/useUIStore';
 import { useProcessStore } from '../store/useProcessStore';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { Invokes, LibraryViewMode, ImageFile } from '../components/ui/AppProperties';
+import { isVideoPath } from '../utils/media';
 import { INITIAL_ADJUSTMENTS, normalizeLoadedAdjustments } from '../utils/adjustments';
 import { globalImageCache } from '../utils/ImageLRUCache';
 import { debouncedSave, debouncedSetHistory } from './useEditorActions';
@@ -114,6 +115,38 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
 
       debouncedSave.flush();
       debouncedSetHistory.cancel();
+
+      // Videos are viewed, not edited. Nothing in the image pipeline —
+      // load_image, previews, histograms, adjustments — applies to one,
+      // and asking it to decode a MOV just produces an error toast.
+      if (isVideoPath(path)) {
+        if (selectedImage?.path && cachedEditStateRef.current) {
+          globalImageCache.set(selectedImage.path, cachedEditStateRef.current);
+        }
+        setEditor({
+          selectedImage: {
+            exif: null,
+            height: 0,
+            isRaw: false,
+            isReady: true,
+            isVideo: true,
+            metadata: null,
+            originalUrl: null,
+            path,
+            thumbnailUrl: useProcessStore.getState().thumbnails[path],
+            width: 0,
+          },
+          finalPreviewUrl: null,
+          uncroppedAdjustedPreviewUrl: null,
+          originalSize: { width: 0, height: 0 },
+          previewSize: { width: 0, height: 0 },
+          histogram: null,
+          waveform: null,
+        });
+        setLibrary({ isViewLoading: false });
+        setUI({});
+        return;
+      }
 
       if (selectedImage?.path && cachedEditStateRef.current) {
         globalImageCache.set(selectedImage.path, cachedEditStateRef.current);

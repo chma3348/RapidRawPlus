@@ -9,6 +9,7 @@ import debounce from 'lodash.debounce';
 import { ImageDimensions, useImageRenderSize } from '../../hooks/useImageRenderSize';
 import { Adjustments, AiPatch, MaskContainer } from '../../utils/adjustments';
 import { calculateCenteredCrop } from '../../utils/cropUtils';
+import VideoViewer from './editor/VideoViewer';
 import EditorToolbar from './editor/EditorToolbar';
 import ImageCanvas from './editor/ImageCanvas';
 import { Mask, SubMask } from './right/Masks';
@@ -76,7 +77,9 @@ interface EditorProps {
 }
 
 export default function Editor({ onBackToLibrary, onContextMenu, transformWrapperRef }: EditorProps) {
-  const appSettings = useSettingsStore((s) => s.appSettings);
+  const storedAppSettings = useSettingsStore((s) => s.appSettings);
+  const useV3 = useEditorStore((s) => s.adjustments.processVersion === 3);
+  const appSettings = useMemo(() => useV3 && storedAppSettings ? {...storedAppSettings, useWgpuRenderer: false} : storedAppSettings, [storedAppSettings,useV3]);
   const osPlatform = useSettingsStore((s) => s.osPlatform);
   const isFullScreen = useUIStore((s) => s.isFullScreen);
   const activeRightPanel = useUIStore((s) => s.activeRightPanel);
@@ -2006,7 +2009,7 @@ export default function Editor({ onBackToLibrary, onContextMenu, transformWrappe
         onPointerCancel={handlePointerUp}
         onClick={handleClick}
       >
-        {showSpinner && (
+        {showSpinner && !selectedImage?.isVideo && (
           <div
             className={clsx(
               'absolute inset-0 bg-bg-secondary/80 flex items-center justify-center z-50 transition-opacity duration-300',
@@ -2017,11 +2020,16 @@ export default function Editor({ onBackToLibrary, onContextMenu, transformWrappe
           </div>
         )}
 
+        {/* A video is played by the webview, not drawn by the renderer, so
+            it replaces the canvas entirely rather than layering over it. */}
+        {selectedImage?.isVideo && <VideoViewer path={selectedImage.path} />}
+
         <div
           ref={contentRef}
           className="w-full h-full flex items-center justify-center origin-top-left"
           style={{
             transform: `translate(${transformState.positionX}px, ${transformState.positionY}px) scale(${transformState.scale})`,
+            display: selectedImage?.isVideo ? 'none' : undefined,
           }}
         >
           <ImageCanvas

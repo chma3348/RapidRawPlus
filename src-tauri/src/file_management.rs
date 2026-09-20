@@ -30,7 +30,7 @@ use crate::android_integration::*;
 use crate::app_settings::*;
 use crate::cache_utils::calculate_geometry_hash;
 use crate::exif_processing;
-use crate::formats::{is_raw_file, is_supported_image_file};
+use crate::formats::{is_raw_file, is_supported_image_file, is_supported_media_file, is_video_file};
 use crate::gpu_processing;
 use crate::image_loader;
 use crate::image_processing::{
@@ -311,7 +311,7 @@ pub fn list_images_in_dir(path: String, app_handle: AppHandle) -> Result<Vec<Ima
                 .entry(source_filename.to_string())
                 .or_default()
                 .push(copy_id);
-        } else if is_supported_image_file(&file_name) {
+        } else if is_supported_media_file(&file_name) {
             images.push((file_name, entry_path));
         }
     }
@@ -429,7 +429,7 @@ pub fn list_images_recursive(
                     .or_default()
                     .push(copy_id);
             }
-        } else if is_supported_image_file(entry_path.to_string_lossy().as_ref()) {
+        } else if is_supported_media_file(entry_path.to_string_lossy().as_ref()) {
             images.push(entry_path.to_path_buf());
         }
     }
@@ -1074,6 +1074,11 @@ pub fn generate_thumbnail_data(
     app_handle: &AppHandle,
 ) -> anyhow::Result<DynamicImage> {
     let (source_path, sidecar_path) = parse_virtual_path(path_str);
+    // A video stands in the grid as a frame from itself. None of the
+    // editing pipeline below applies to it.
+    if is_video_file(&source_path) {
+        return crate::video::poster_frame(&source_path);
+    }
     let source_path_str = source_path.to_string_lossy().to_string();
     let is_raw = is_raw_file(&source_path_str);
 
@@ -1084,6 +1089,14 @@ pub fn generate_thumbnail_data(
     let adjustments = metadata
         .as_ref()
         .map_or(serde_json::Value::Null, |m| m.adjustments.clone());
+
+    if crate::color_engine::application::enabled(&adjustments) {
+        let state = app_handle.state::<AppState>();
+        let context = gpu_context.ok_or_else(||anyhow::anyhow!("V3 thumbnail needs GPU rendering"))?;
+        let dimension=load_settings(app_handle.clone()).unwrap_or_default().thumbnail_resolution.unwrap_or(720);
+        return crate::color_engine::application::render_file(context,&state,path_str,&adjustments,Some(dimension))
+            .map(|f|DynamicImage::ImageRgba8(f.preview_rgba8()));
+    }
 
     if let Some(context) = gpu_context
         && metadata.is_some()
@@ -1742,6 +1755,42 @@ pub fn resolve_lens_params_in_adjustments(
             }
         }
     }
+}
+
+/// Writes a frame grabbed from a video next to it, as a PNG the editor
+/// can then treat as an ordinary photograph.
+#[tauri::command]
+pub fn save_video_frame(
+    video_path: String,
+    png_base64: String,
+    time_seconds: f64,
+) -> Result<String, String> {
+    let source = std::path::Path::new(&video_path);
+    let stem = source
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .ok_or("That video has no file name")?;
+    let parent = source.parent().ok_or("That video has no folder")?;
+    let bytes = general_purpose::STANDARD
+        .decode(png_base64.as_bytes())
+        .map_err(|e| format!("Could not read the frame: {e}"))?;
+    // Name by timestamp so grabbing several frames does not overwrite.
+    let stamp = format!("{:.2}", time_seconds.max(0.0)).replace('.', "s");
+    let mut target = parent.join(format!("{stem}_frame_{stamp}.png"));
+    let mut n = 2;
+    while target.exists() {
+        target = parent.join(format!("{stem}_frame_{stamp}_{n}.png"));
+        n += 1;
+    }
+    fs::write(&target, bytes).map_err(|e| format!("Could not write {target:?}: {e}"))?;
+    Ok(target.to_string_lossy().to_string())
+}
+
+/// Duration, size and codecs for a video, so the library can label it.
+/// Returns empty fields rather than failing when the system has nothing.
+#[tauri::command]
+pub fn load_video_info(path: String) -> Result<crate::video::VideoInfo, String> {
+    crate::video::video_info(std::path::Path::new(&path)).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

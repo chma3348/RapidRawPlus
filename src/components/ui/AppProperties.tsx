@@ -85,6 +85,8 @@ export enum Invokes {
   ListRegisteredModels = 'list_registered_models',
   MatchWhiteBalance = 'match_white_balance',
   LoadImage = 'load_image',
+  LoadVideoInfo = 'load_video_info',
+  SaveVideoFrame = 'save_video_frame',
   LoadMetadata = 'load_metadata',
   LoadPresets = 'load_presets',
   LoadSettings = 'load_settings',
@@ -322,6 +324,8 @@ export interface SelectedImage {
   exif: any;
   height: number;
   isRaw: boolean;
+  /** Videos are viewed rather than edited; the editor shows a player. */
+  isVideo?: boolean;
   isReady: boolean;
   metadata?: any;
   original_base64?: string;

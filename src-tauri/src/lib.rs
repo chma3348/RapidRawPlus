@@ -17,6 +17,7 @@ pub mod auto_level;
 pub mod scene_masks;
 pub mod sky_replace;
 pub mod white_balance;
+pub mod video;
 mod cache_utils;
 pub mod color_engine;
 pub mod comfy_engine;
@@ -29,7 +30,7 @@ mod export_processing;
 mod file_management;
 pub mod flat_field;
 mod flog2c;
-mod formats;
+pub mod formats;
 pub mod heal_blend;
 pub mod replacement_blend;
 pub mod gpu_processing;
@@ -345,6 +346,21 @@ fn process_preview_job(
         .ok_or("No original image loaded")?
         .clone();
     drop(loaded_image_guard);
+
+    if color_engine::application::enabled(&adjustments_clone) {
+        let settings = load_settings(app_handle.clone()).unwrap_or_default();
+        let dimension = target_resolution.unwrap_or(settings.editor_preview_resolution.unwrap_or(1920));
+        let dimension = if is_interactive {dimension.min(1280)} else {dimension};
+        let frame = color_engine::application::render_file(&context,&state,&loaded_image.path,&adjustments_clone,Some(dimension)).map_err(|e|e.to_string())?;
+        let (width,height) = frame.encoded_srgb.dimensions();
+        if let Some(sender) = state.analytics_worker_tx.lock().unwrap().clone() {
+            let _ = sender.send(AnalyticsJob {path:loaded_image.path.clone(),image:Arc::new(DynamicImage::ImageRgba8(frame.preview_rgba8())),compute_waveform,active_waveform_channel:active_waveform_channel.map(str::to_owned)});
+        }
+        let mut response = Vec::new();
+        if is_interactive { for v in [0u32,0,width,height,width,height] {response.extend_from_slice(&v.to_le_bytes());} }
+        frame.write_srgb_png(&mut response,false).map_err(|e|e.to_string())?;
+        return Ok(response);
+    }
 
     let new_transform_hash = calculate_transform_hash(&adjustments_clone);
     let settings = load_settings(app_handle.clone()).unwrap_or_default();
@@ -738,6 +754,15 @@ fn generate_uncropped_preview(
     thread::spawn(move || {
         let state = app_handle.state::<AppState>();
         let path = loaded_image.path.clone();
+        if color_engine::application::enabled(&adjustments_clone) {
+            let mut edits=adjustments_clone.clone();
+            edits["crop"]=Value::Null;
+            match color_engine::application::preview_bytes(&context,&state,&path,&edits,1920) {
+                Ok(bytes)=>{let _=app_handle.emit("preview-update-uncropped",format!("data:image/png;base64,{}",general_purpose::STANDARD.encode(bytes)));},
+                Err(e)=>log::error!("V3 uncropped preview: {e}"),
+            }
+            return;
+        }
         let is_raw = loaded_image.is_raw;
         let unique_hash = calculate_full_job_hash(&path, &adjustments_clone);
         let has_patches = adjustments_clone
@@ -866,6 +891,14 @@ fn generate_original_transformed_preview(
 
     let mut adjustments_clone = js_adjustments.clone();
     hydrate_adjustments(&state, &mut adjustments_clone);
+
+    if color_engine::application::enabled(&adjustments_clone) {
+        let context=get_or_init_gpu_context(&state,&app_handle)?;
+        adjustments_clone["v3"]=serde_json::to_value(color_engine::controls::Controls::default()).unwrap();
+        adjustments_clone["masks"]=serde_json::json!([]);
+        let bytes=color_engine::application::preview_bytes(&context,&state,&loaded_image.path,&adjustments_clone,target_resolution.unwrap_or(1920))?;
+        return Ok(format!("data:image/png;base64,{}",general_purpose::STANDARD.encode(bytes)));
+    }
 
     let (transformed_full_res, _unscaled_crop_offset) =
         apply_all_transformations(Cow::Borrowed(loaded_image.image.as_ref()), &adjustments_clone);
@@ -1145,6 +1178,9 @@ fn generate_preset_preview(
         .unwrap()
         .clone()
         .ok_or("No original image loaded for preset preview")?;
+    if color_engine::application::enabled(render_adjustments) {
+        return color_engine::application::preview_bytes(&context,&state,&loaded_image.path,render_adjustments,400).map(Response::new);
+    }
     let is_raw = loaded_image.is_raw;
     let unique_hash = calculate_full_job_hash(&loaded_image.path, render_adjustments);
 
@@ -1634,6 +1670,9 @@ fn generate_preview_for_path(
     let context = get_or_init_gpu_context(&state, &app_handle)?;
     let render_adjustments_cow = render_adjustments_for_empty(&js_adjustments);
     let render_adjustments = render_adjustments_cow.as_ref();
+    if color_engine::application::enabled(render_adjustments) {
+        return color_engine::application::preview_bytes(&context,&state,&path,render_adjustments,1920).map(Response::new);
+    }
     let (source_path, _) = parse_virtual_path(&path);
     let source_path_str = source_path.to_string_lossy().to_string();
     let is_raw = is_raw_file(&source_path_str);
@@ -2225,6 +2264,7 @@ pub fn run() {
         })
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
+            color_engine::application::prepare_color_v3,
             apply_adjustments,
             generate_preview_for_path,
             generate_original_transformed_preview,
@@ -2308,6 +2348,8 @@ pub fn run() {
             mask_generation::generate_mask_overlay,
             file_management::update_exif_fields,
             file_management::get_supported_file_types,
+            file_management::load_video_info,
+            file_management::save_video_frame,
             file_management::read_exif_for_paths,
             file_management::list_images_in_dir,
             file_management::list_images_recursive,

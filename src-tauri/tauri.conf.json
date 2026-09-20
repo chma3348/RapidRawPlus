@@ -26,7 +26,15 @@
       "csp": null,
       "capabilities": [
         "default"
-      ]
+      ],
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$HOME/**",
+          "/Volumes/**",
+          "$TEMP/**"
+        ]
+      }
     },
     "macOSPrivateApi": true
   },

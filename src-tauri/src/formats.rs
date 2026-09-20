@@ -79,6 +79,25 @@ pub const NON_RAW_EXTENSIONS: &[&str] = &[
     "pnm", "pbm", "pgm", "ppm", "pam", // Netpbm family
 ];
 
+/// Video the webview can play natively (WebKit decodes H.264/HEVC in
+/// these containers), so viewing needs no decoder of our own.
+pub const VIDEO_EXTENSIONS: &[&str] = &["mov", "mp4", "m4v"];
+
+pub fn is_video_file<P: AsRef<Path>>(path: P) -> bool {
+    let Some(ext) = path.as_ref().extension().and_then(|s| s.to_str()) else {
+        return false;
+    };
+    VIDEO_EXTENSIONS
+        .iter()
+        .any(|video_ext| video_ext.eq_ignore_ascii_case(ext))
+}
+
+/// Anything the library can show: a photograph or a playable video.
+pub fn is_supported_media_file<P: AsRef<Path>>(path: P) -> bool {
+    let path = path.as_ref();
+    is_supported_image_file(path) || is_video_file(path)
+}
+
 pub fn is_raw_file<P: AsRef<Path>>(path: P) -> bool {
     let ext = match path.as_ref().extension().and_then(|s| s.to_str()) {
         Some(e) => e,
@@ -108,4 +127,27 @@ pub fn is_supported_image_file<P: AsRef<Path>>(path: P) -> bool {
     NON_RAW_EXTENSIONS
         .iter()
         .any(|non_raw_ext| non_raw_ext.eq_ignore_ascii_case(ext))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn videos_are_recognised_and_photographs_are_not() {
+        for name in ["clip.mov", "CLIP.MOV", "a.mp4", "b.m4v"] {
+            assert!(is_video_file(name), "{name} should be video");
+            assert!(!is_supported_image_file(name), "{name} is not a photo");
+            assert!(is_supported_media_file(name));
+        }
+        for name in ["a.jpg", "b.ARW", "c.png", "d.heic"] {
+            assert!(!is_video_file(name), "{name} is not video");
+            assert!(is_supported_media_file(name), "{name} should be media");
+        }
+        // Containers WebKit will not play are left out on purpose.
+        for name in ["clip.mkv", "clip.avi", "clip.webm", "notes.txt"] {
+            assert!(!is_video_file(name), "{name} should not be offered");
+            assert!(!is_supported_media_file(name), "{name} should not list");
+        }
+    }
 }
