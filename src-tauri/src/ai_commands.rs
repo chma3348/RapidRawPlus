@@ -1030,6 +1030,49 @@ pub async fn list_managed_luts() -> Result<Vec<serde_json::Value>, String> {
 /// backend-side — the frontend preview is stale or empty under the WGPU
 /// renderer, which made preview-based eyedroppers silently sample garbage.
 /// Returns (hue_deg, saturation, value).
+/// Two-sample white balance for composited content: sample a patch inside
+/// the inserted pixels and a patch of the real photo that should match it,
+/// and return the temperature/tint change that lines them up.
+///
+/// Both samples are medians over a small square rather than single pixels,
+/// so noise and JPEG blocking do not decide the result.
+#[tauri::command]
+pub async fn match_white_balance(
+    sample: (f64, f64),
+    reference: (f64, f64),
+    radius: Option<u32>,
+    js_adjustments: serde_json::Value,
+    state: tauri::State<'_, AppState>,
+) -> Result<crate::white_balance::WhiteBalanceMatch, String> {
+    let img = get_cached_full_warped_image(&state, &js_adjustments)?;
+    let (w, h) = img.dimensions();
+    if w == 0 || h == 0 {
+        return Err("No image loaded".into());
+    }
+    let radius = radius.unwrap_or(5).min(64) as i64;
+    let median_at = |p: (f64, f64)| -> [f32; 3] {
+        let cx = (p.0.round() as i64).clamp(0, w as i64 - 1);
+        let cy = (p.1.round() as i64).clamp(0, h as i64 - 1);
+        let mut channels: [Vec<f32>; 3] = Default::default();
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                let sx = (cx + dx).clamp(0, w as i64 - 1) as u32;
+                let sy = (cy + dy).clamp(0, h as i64 - 1) as u32;
+                let px = img.get_pixel(sx, sy);
+                for c in 0..3 {
+                    channels[c].push(px[c] as f32 / 255.0);
+                }
+            }
+        }
+        std::array::from_fn(|c| {
+            channels[c].sort_by(f32::total_cmp);
+            channels[c][channels[c].len() / 2]
+        })
+    };
+    crate::white_balance::match_samples(median_at(sample), median_at(reference))
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn sample_image_color(
     x: f64,

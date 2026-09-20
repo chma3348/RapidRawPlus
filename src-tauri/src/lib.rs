@@ -16,6 +16,7 @@ mod app_state;
 pub mod auto_level;
 pub mod scene_masks;
 pub mod sky_replace;
+pub mod white_balance;
 mod cache_utils;
 pub mod color_engine;
 pub mod comfy_engine;
@@ -2256,6 +2257,7 @@ pub fn run() {
             ai_commands::generate_ai_auto_subject_mask,
             ai_commands::generate_ai_paint_mask,
             ai_commands::sample_image_color,
+            ai_commands::match_white_balance,
             ai_commands::respot_enhance,
             ai_commands::reblend_replacement,
             ai_commands::apply_clone_patch,

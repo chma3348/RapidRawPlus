@@ -109,3 +109,30 @@ back to back.
   in "twilight" and a mackerel sky in "overcast" as often as not.
 - One fetched plate carries a photographer's watermark; watermark detection
   is not implemented.
+
+## Matching colour by eye (two-sample white balance)
+
+`match_white_balance` (command) takes two points: one inside the inserted
+content, one on the real photo that should be the same colour — a cloud in
+the new sky against a cloud in the original, generated skin against the real
+skin beside it. It returns the temperature and tint change that lines the
+first up with the second, which the caller adds to the sky's own grading
+sliders (or the global ones, for a whole-image correction).
+
+- Both points are sampled as a **median** over a square (default 11 px
+  across), so noise and JPEG blocking do not decide the answer.
+- The comparison happens in **linear light**, and both samples are
+  normalised to the same brightness first, so clicking a bright cloud
+  against a dark one shifts colour without dragging exposure along.
+- Signs follow the renderer: positive temperature is warmer, positive tint
+  is magenta. A sample that reads too blue asks for positive temperature; a
+  sample that reads too green asks for positive tint.
+- It refuses clipped or near-black samples, says so when the two are
+  already the same colour, and flags a correction large enough to suggest
+  the two samples are not the same material.
+
+While any eyedropper is active the canvas shows a **magnifier** (`PickerLoupe`):
+a circle of real pixels at 10x under the cursor, with the crosshair on the
+clicked pixel, a square showing the area that will be averaged, and a swatch
+plus hex of that average. Picking a white balance off a thin cloud edge at
+fit-to-screen zoom is guesswork without it.

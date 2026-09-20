@@ -3,6 +3,7 @@ import ReactCrop from 'react-image-crop';
 import 'react-image-crop/dist/ReactCrop.css';
 import { Stage, Layer, Ellipse, Line, Transformer, Group, Circle, Rect } from 'react-konva';
 import { PercentCrop, Crop } from 'react-image-crop';
+import PickerLoupe from './PickerLoupe';
 import { Adjustments, AiPatch, Coord, MaskContainer } from '../../../utils/adjustments';
 import { Mask, SubMask, SubMaskMode, ToolType } from '../right/Masks';
 import { AppSettings, BrushSettings, SelectedImage } from '../../ui/AppProperties';
@@ -1134,6 +1135,14 @@ const ImageCanvas = memo(
     const maxDimension = Math.max(stageWidth, stageHeight, 1);
     const maxSafeScale = Math.max(1, Math.min(settledScale, 4092 / maxDimension));
 
+    // Where the eyedropper is hovering, for the magnifier: screen position
+    // to place the loupe, image position to sample from.
+    const [pickerHover, setPickerHover] = useState<{
+      screen: { x: number; y: number };
+      image: { x: number; y: number };
+    } | null>(null);
+    const canvasHostRef = useRef<HTMLDivElement | null>(null);
+
     const getCanvasPointer = useCallback(
       (stage: any) => {
         const pos = stage.getPointerPosition();
@@ -1938,6 +1947,20 @@ const ImageCanvas = memo(
     const handleMove = useCallback(
       (e: any) => {
         if (isWbPickerActive || isMixerPickerActive) {
+          const stage = e.target?.getStage?.();
+          const pointer = stage ? getCanvasPointer(stage) : null;
+          const rect = canvasHostRef.current?.getBoundingClientRect();
+          const native = e.evt as MouseEvent | TouchEvent | undefined;
+          const client =
+            native && 'clientX' in native
+              ? { x: (native as MouseEvent).clientX, y: (native as MouseEvent).clientY }
+              : null;
+          if (pointer && rect && client && imageRenderSize.scale > 0) {
+            setPickerHover({
+              screen: { x: client.x - rect.left, y: client.y - rect.top },
+              image: { x: pointer.x / imageRenderSize.scale, y: pointer.y / imageRenderSize.scale },
+            });
+          }
           return;
         }
 
@@ -2312,6 +2335,7 @@ const ImageCanvas = memo(
 
     const handleMouseLeave = useCallback(() => {
       setCursorPreview((p: CursorPreview) => ({ ...p, visible: false }));
+      setPickerHover(null);
     }, []);
 
     useEffect(() => {
@@ -2544,7 +2568,19 @@ const ImageCanvas = memo(
     }, [setIsMaskTouchInteracting]);
 
     return (
-      <div className="relative" style={{ width: '100%', height: '100%', cursor: effectiveCursor }}>
+      <div ref={canvasHostRef} className="relative" style={{ width: '100%', height: '100%', cursor: effectiveCursor }}>
+        {(isWbPickerActive || isMixerPickerActive) && (
+          <PickerLoupe
+            previewUrl={finalPreviewUrl}
+            screen={pickerHover?.screen ?? null}
+            image={pickerHover?.image ?? null}
+            logicalSize={{
+              width: imageRenderSize.width / (imageRenderSize.scale || 1),
+              height: imageRenderSize.height / (imageRenderSize.scale || 1),
+            }}
+            label={isWbPickerActive ? 'white balance' : 'colour band'}
+          />
+        )}
         <div
           className="absolute inset-0 w-full h-full transition-opacity duration-200 flex items-center justify-center"
           style={{

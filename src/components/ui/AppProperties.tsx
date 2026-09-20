@@ -83,6 +83,7 @@ export enum Invokes {
   ListImagesRecursive = 'list_images_recursive',
   ListEngineLoras = 'list_engine_loras',
   ListRegisteredModels = 'list_registered_models',
+  MatchWhiteBalance = 'match_white_balance',
   LoadImage = 'load_image',
   LoadMetadata = 'load_metadata',
   LoadPresets = 'load_presets',
