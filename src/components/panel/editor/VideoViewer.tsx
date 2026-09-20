@@ -107,7 +107,10 @@ export default function VideoViewer({ path }: { path: string }) {
 
   const saveFrame = async () => {
     const video = videoRef.current;
-    if (!video || !video.videoWidth) return;
+    if (!video || !video.videoWidth) {
+      report('warn', 'save frame with no frame to save');
+      return;
+    }
     setSaving(true);
     try {
       const canvas = document.createElement('canvas');
@@ -126,6 +129,7 @@ export default function VideoViewer({ path }: { path: string }) {
         name: saved.split('/').pop() ?? saved,
       }));
     } catch (err) {
+      report('error', `save frame failed: ${err}`);
       toast.error(`${t('editor.video.frameFailed', 'Could not save the frame')}: ${err}`);
     } finally {
       setSaving(false);
