@@ -13,6 +13,14 @@ reads as fake, and both are implemented in `src-tauri/src/sky_replace.rs`:
    sky's colour, strongest near the horizon, and a little of the new sky is
    mixed in there as atmospheric haze.
 
+## Three ways to use it
+
+| mode | what it does |
+|---|---|
+| **As shot** (`SkyReplaceOptions::as_shot()`) | the plate exactly as photographed: nothing matched, nothing graded, foreground untouched |
+| **Auto match** (`SkyReplaceOptions::auto_match()`) | one click: sky matched to the photo's light, seam faded, edge feathered, foreground relit to suit |
+| **Hand grading** | the five sky controls below, applied on top of whichever mode you started from |
+
 ## Controls
 
 | control | what it does |
@@ -23,8 +31,17 @@ reads as fake, and both are implemented in `src-tauri/src/sky_replace.rs`:
 | `edgeShift` | moves the sky/foreground boundary, as a fraction of the long side. Negative pulls the sky back behind the foreground (hides a rim of leftover old sky); positive lets it grow (hides a dark fringe) |
 | `edgeFeather` | width of the hand-over from foreground to sky |
 | `horizonFade` | fades the new sky back into the original just above the horizon, so the scene keeps its own haze and the seam disappears |
+| `skyTemperature`, `skyTint` | grade the inserted sky's colour by hand, −100…100. Luminance-preserving channel gains, so the sky's colour moves without changing how bright it sits against the foreground |
+| `skyExposure` | brightness of the sky in stops, −4…4, applied in linear light so a stop is a stop |
+| `skyContrast`, `skySaturation` | −100…100, also in linear light, with the contrast pivot at mid-grey |
 | `scale`, `pan`, `flipHorizontal`, `horizonOffset` | frame the plate |
 | `matchGrain` | gives the new sky the photo's own grain |
+
+Order of operations: the plate is placed, matched to the photo's light,
+then hand-graded, and only then is the foreground relit toward the finished
+sky. So a manual grade moves away from whatever the automatic match decided
+rather than fighting it, and relighting always follows the sky you can
+actually see.
 
 `relight` and `whiteBalanceMatch` pull in opposite directions by design:
 one moves the scene toward the sky, the other the sky toward the scene.

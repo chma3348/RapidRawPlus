@@ -60,6 +60,42 @@ pub struct SkyReplaceOptions {
     /// 0 leaves the plate as shot, 1 fully adopts the photo's white
     /// balance. Brightness and the plate's own colour variation are kept.
     pub white_balance_match: f32,
+    /// Hand grading of the inserted sky, applied after the automatic match
+    /// so the two compose: the slider moves away from whatever the match
+    /// decided rather than fighting it. All are −100…100, 0 = no change.
+    pub sky_temperature: f32,
+    pub sky_tint: f32,
+    /// Brightness of the sky in stops (−2…2), applied in linear light.
+    pub sky_exposure: f32,
+    pub sky_contrast: f32,
+    pub sky_saturation: f32,
+}
+
+impl SkyReplaceOptions {
+    /// The plate exactly as it was shot: nothing is matched or graded, and
+    /// the foreground is left alone too.
+    pub fn as_shot() -> Self {
+        Self {
+            relight: 0.0,
+            haze: 0.0,
+            white_balance_match: 0.0,
+            ..Default::default()
+        }
+    }
+
+    /// One click: match the sky to the photo's light, soften the seam, and
+    /// relight the foreground to suit.
+    pub fn auto_match() -> Self {
+        Self {
+            relight: 0.55,
+            haze: 0.10,
+            white_balance_match: 0.5,
+            horizon_fade: 0.10,
+            edge_feather: 0.0015,
+            edge_shift: -0.0008,
+            ..Default::default()
+        }
+    }
 }
 
 impl Default for SkyReplaceOptions {
@@ -76,6 +112,11 @@ impl Default for SkyReplaceOptions {
             edge_feather: 0.0,
             horizon_fade: 0.0,
             white_balance_match: 0.4,
+            sky_temperature: 0.0,
+            sky_tint: 0.0,
+            sky_exposure: 0.0,
+            sky_contrast: 0.0,
+            sky_saturation: 0.0,
         }
     }
 }
@@ -201,6 +242,59 @@ pub fn white_balance_gains(plate_mean: [f32; 3], scene_mean: [f32; 3], strength:
     gains
 }
 
+/// Hand grading of the inserted sky: temperature, tint, exposure,
+/// contrast and saturation, in that order.
+///
+/// Temperature and tint are luminance-preserving channel gains, so they
+/// change the sky's colour without changing how bright it sits against the
+/// foreground. Exposure and contrast work in linear light, so a stop is a
+/// stop and the contrast pivot is mid-grey rather than a gamma-encoded
+/// value.
+pub fn grade_sky(sky: &mut RgbImage, o: &SkyReplaceOptions) {
+    let temp = o.sky_temperature.clamp(-100.0, 100.0) / 100.0;
+    let tint = o.sky_tint.clamp(-100.0, 100.0) / 100.0;
+    let exposure = o.sky_exposure.clamp(-4.0, 4.0);
+    let contrast = o.sky_contrast.clamp(-100.0, 100.0) / 100.0;
+    let saturation = o.sky_saturation.clamp(-100.0, 100.0) / 100.0;
+    if temp == 0.0 && tint == 0.0 && exposure == 0.0 && contrast == 0.0 && saturation == 0.0 {
+        return;
+    }
+    // Warm raises red and drops blue; tint trades green against magenta.
+    let raw = [
+        1.0 + 0.30 * temp,
+        1.0 - 0.12 * tint,
+        1.0 - 0.30 * temp,
+    ];
+    let lum = 0.2126 * raw[0] + 0.7152 * raw[1] + 0.0722 * raw[2];
+    let gains: [f32; 3] = std::array::from_fn(|c| raw[c] / lum.max(1e-4));
+    let gain = 2f32.powf(exposure);
+    let slope = 1.0 + contrast;
+    let to_linear = |v: f32| if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
+    let to_srgb = |v: f32| if v <= 0.0031308 { v * 12.92 } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 };
+    const PIVOT: f32 = 0.18;
+
+    sky.par_pixels_mut().for_each(|px| {
+        let mut lin = [0.0f32; 3];
+        for c in 0..3 {
+            let v = to_linear((px[c] as f32 / 255.0).clamp(0.0, 1.0)) * gains[c] * gain;
+            lin[c] = if contrast != 0.0 {
+                (PIVOT * (v.max(1e-5) / PIVOT).powf(slope)).clamp(0.0, 4.0)
+            } else {
+                v
+            };
+        }
+        if saturation != 0.0 {
+            let l = 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2];
+            for v in lin.iter_mut() {
+                *v = (l + (*v - l) * (1.0 + saturation)).max(0.0);
+            }
+        }
+        for c in 0..3 {
+            px[c] = (to_srgb(lin[c].clamp(0.0, 1.0)) * 255.0).round() as u8;
+        }
+    });
+}
+
 /// The old sky's colour as a smooth field, averaged from confident sky only.
 fn old_sky_colour(photo: &RgbImage, alpha: &GrayImage, radius: usize) -> [Vec<f32>; 3] {
     let (w, h) = photo.dimensions();
@@ -302,6 +396,7 @@ pub fn replace_sky(
             }
         }
     }
+    grade_sky(&mut new_sky, o);
     let new_sky = new_sky;
     let radius = ((w.max(h) as usize) / 24).max(8);
     let old = old_sky_colour(&rgb, alpha, radius);
@@ -578,6 +673,96 @@ mod tests {
         assert!(pb[0] > pa[0] && pb[2] < pa[2], "sky not warmed toward the scene: {pa:?} -> {pb:?}");
         let lum = |p: [u8; 3]| 0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32;
         assert!((lum(pb) - lum(pa)).abs() < 18.0, "brightness swung: {pa:?} -> {pb:?}");
+    }
+
+    fn graded(plate: [u8; 3], edit: impl Fn(&mut SkyReplaceOptions)) -> [u8; 3] {
+        let size = (120, 90);
+        let mut o = SkyReplaceOptions::as_shot();
+        edit(&mut o);
+        o.match_grain = false;
+        replace_sky(
+            &photo([200, 205, 215], [90, 95, 90], 45, size),
+            &matte(45, size),
+            &plain_plate(plate),
+            &o,
+        )
+        .unwrap()
+        .to_rgb8()
+        .get_pixel(60, 12)
+        .0
+    }
+
+    fn luma(p: [u8; 3]) -> f32 {
+        0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32
+    }
+
+    #[test]
+    fn as_shot_leaves_the_plate_exactly_as_it_is() {
+        assert_eq!(graded([120, 150, 205], |_| {}), [120, 150, 205]);
+    }
+
+    #[test]
+    fn sky_temperature_and_tint_shift_colour_not_brightness() {
+        let base = graded([120, 150, 205], |_| {});
+        let warm = graded([120, 150, 205], |o| o.sky_temperature = 60.0);
+        let cool = graded([120, 150, 205], |o| o.sky_temperature = -60.0);
+        assert!(warm[0] > base[0] && warm[2] < base[2], "not warmed: {base:?} -> {warm:?}");
+        assert!(cool[0] < base[0] && cool[2] > base[2], "not cooled: {base:?} -> {cool:?}");
+        assert!((luma(warm) - luma(base)).abs() < 12.0, "brightness moved: {base:?} -> {warm:?}");
+        let green = graded([120, 150, 205], |o| o.sky_tint = -80.0);
+        assert!(green[1] > base[1], "tint did not move green: {base:?} -> {green:?}");
+    }
+
+    #[test]
+    fn sky_exposure_is_in_stops_and_only_touches_the_sky() {
+        let size = (120, 90);
+        let mut o = SkyReplaceOptions::as_shot();
+        o.sky_exposure = 1.0;
+        o.match_grain = false;
+        let out = replace_sky(
+            &photo([200, 205, 215], [90, 95, 90], 45, size),
+            &matte(45, size),
+            &plain_plate([100, 100, 100]),
+            &o,
+        )
+        .unwrap()
+        .to_rgb8();
+        // +1 stop doubles linear light: 100/255 sRGB = 0.1275 linear → 0.2550 → 138.
+        let sky = out.get_pixel(60, 12).0;
+        assert!((sky[0] as i32 - 138).abs() <= 3, "one stop is not one stop: {sky:?}");
+        assert_eq!(out.get_pixel(60, 80).0, [90, 95, 90], "foreground changed");
+    }
+
+    #[test]
+    fn sky_saturation_and_contrast_behave() {
+        let grey = graded([120, 150, 205], |o| o.sky_saturation = -100.0);
+        let spread = (grey[2] as i32 - grey[0] as i32).abs();
+        assert!(spread < 12, "not desaturated: {grey:?}");
+        // Contrast pivots on mid-grey: a dark sky gets darker, a bright one brighter.
+        let dark_base = graded([60, 60, 60], |_| {});
+        let dark_more = graded([60, 60, 60], |o| o.sky_contrast = 60.0);
+        let bright_base = graded([220, 220, 220], |_| {});
+        let bright_more = graded([220, 220, 220], |o| o.sky_contrast = 60.0);
+        assert!(dark_more[0] < dark_base[0], "dark not deepened: {dark_base:?} -> {dark_more:?}");
+        assert!(bright_more[0] > bright_base[0], "bright not lifted: {bright_base:?} -> {bright_more:?}");
+    }
+
+    #[test]
+    fn auto_match_differs_from_as_shot_on_a_mismatched_scene() {
+        let size = (160, 120);
+        // Warm sunlit ground, cold blue plate: one click should visibly change it.
+        let base = photo([215, 215, 215], [205, 165, 115], 60, size);
+        let plate = plain_plate([90, 130, 220]);
+        let a = replace_sky(&base, &matte(60, size), &plate, &SkyReplaceOptions::as_shot()).unwrap().to_rgb8();
+        let b = replace_sky(&base, &matte(60, size), &plate, &SkyReplaceOptions::auto_match()).unwrap().to_rgb8();
+        // as-shot still matches grain, which moves a level or two.
+        let kept = a.get_pixel(80, 20).0;
+        for (c, want) in [90, 130, 220].iter().enumerate() {
+            assert!((kept[c] as i32 - want).abs() <= 3, "as-shot altered the plate: {kept:?}");
+        }
+        let m = b.get_pixel(80, 20).0;
+        assert!(m[0] > 100 && m[2] < 220, "auto match did not warm the sky: {m:?}");
+        assert_ne!(a.get_pixel(80, 100).0, b.get_pixel(80, 100).0, "auto match did not relight the ground");
     }
 
     #[test]
