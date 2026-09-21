@@ -1,0 +1,1017 @@
+{
+  "max_dimension": 1024,
+  "fixtures": [
+    {
+      "name": "DSC08203",
+      "path": "/Users/chrismanning/Desktop/Test Photos/DSC08203.JPG",
+      "why": "deep shadow: the bottom of the tone chain and black lift"
+    },
+    {
+      "name": "DSC08202",
+      "path": "/Users/chrismanning/Desktop/Test Photos/DSC08202.JPG",
+      "why": "deep shadow: the bottom of the tone chain and black lift"
+    },
+    {
+      "name": "DSC08267",
+      "path": "/Users/chrismanning/Desktop/Test Photos/DSC08267.JPG",
+      "why": "high key: the shoulder and highlight separation"
+    },
+    {
+      "name": "DSC08273",
+      "path": "/Users/chrismanning/Desktop/Test Photos/NYC/DSC08273.JPG",
+      "why": "high key: the shoulder and highlight separation"
+    },
+    {
+      "name": "IMG_0716",
+      "path": "/Users/chrismanning/Desktop/Test Photos/Tahiti/IMG_0716.jpeg",
+      "why": "saturated extremes: the gamut mapper's main case"
+    },
+    {
+      "name": "IMG_0718",
+      "path": "/Users/chrismanning/Desktop/Test Photos/Tahiti/IMG_0718.jpeg",
+      "why": "saturated extremes: the gamut mapper's main case"
+    },
+    {
+      "name": "DSC08269",
+      "path": "/Users/chrismanning/Desktop/Test Photos/NYC/DSC08269.JPG",
+      "why": "near-neutral scene: neutral-axis drift"
+    },
+    {
+      "name": "DSC08271",
+      "path": "/Users/chrismanning/Desktop/Test Photos/NYC/DSC08271.JPG",
+      "why": "near-neutral scene: neutral-axis drift"
+    },
+    {
+      "name": "IMG_0805",
+      "path": "/Users/chrismanning/Desktop/Test Photos/Tahiti/IMG_0805.jpeg",
+      "why": "already clipping: highlight handling"
+    },
+    {
+      "name": "IMG_0766",
+      "path": "/Users/chrismanning/Desktop/Test Photos/Tahiti/IMG_0766.jpeg",
+      "why": "already clipping: highlight handling"
+    },
+    {
+      "name": "DSC08226",
+      "path": "/Users/chrismanning/Desktop/Test Photos/DSC08226.JPG",
+      "why": "wide dynamic range: zones and curve interaction"
+    },
+    {
+      "name": "DSC08227",
+      "path": "/Users/chrismanning/Desktop/Test Photos/DSC08227.JPG",
+      "why": "wide dynamic range: zones and curve interaction"
+    },
+    {
+      "name": "DSC08320",
+      "path": "/Users/chrismanning/Desktop/Test Photos/NYC/DSC08320.JPG",
+      "why": "low contrast: small movements must stay smooth"
+    },
+    {
+      "name": "DSC08327",
+      "path": "/Users/chrismanning/Desktop/Test Photos/NYC/DSC08327.JPG",
+      "why": "low contrast: small movements must stay smooth"
+    },
+    {
+      "name": "DSC08309",
+      "path": "/Users/chrismanning/Desktop/Test Photos/NYC/DSC08309.JPG",
+      "why": "ordinary frame, spread across the library's tone range"
+    },
+    {
+      "name": "DSC08319",
+      "path": "/Users/chrismanning/Desktop/Test Photos/NYC/DSC08319.JPG",
+      "why": "ordinary frame, spread across the library's tone range"
+    },
+    {
+      "name": "IMG_0779",
+      "path": "/Users/chrismanning/Desktop/Test Photos/Tahiti/IMG_0779.jpeg",
+      "why": "ordinary frame, spread across the library's tone range"
+    },
+    {
+      "name": "IMG_0775",
+      "path": "/Users/chrismanning/Desktop/Test Photos/Tahiti/IMG_0775.jpeg",
+      "why": "ordinary frame, spread across the library's tone range"
+    },
+    {
+      "name": "IMG_0746",
+      "path": "/Users/chrismanning/Desktop/Test Photos/Tahiti/IMG_0746.jpeg",
+      "why": "ordinary frame, spread across the library's tone range"
+    },
+    {
+      "name": "IMG_0743",
+      "path": "/Users/chrismanning/Desktop/Test Photos/Tahiti/IMG_0743.jpeg",
+      "why": "ordinary frame, spread across the library's tone range"
+    },
+    {
+      "name": "DSC08294",
+      "path": "/Users/chrismanning/Desktop/Test Photos/NYC/DSC08294.JPG",
+      "why": "ordinary frame, spread across the library's tone range"
+    },
+    {
+      "name": "IMG_0801",
+      "path": "/Users/chrismanning/Desktop/Test Photos/Tahiti/IMG_0801.jpeg",
+      "why": "ordinary frame, spread across the library's tone range"
+    }
+  ],
+  "cases": [
+    {
+      "name": "neutral",
+      "controls": {
+        "revision": 1,
+        "exposure": 0.0,
+        "temperature": 0.0,
+        "tint": 0.0,
+        "contrast": 0.0,
+        "pivot": 0.18,
+        "shadows": 0.0,
+        "highlights": 0.0,
+        "blacks": 0.0,
+        "whites": 0.0,
+        "saturation": 0.0,
+        "vibrance": 0.0,
+        "hue": 0.0,
+        "bands": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "grading": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "curve": [
+          0,
+          0.25,
+          0.5,
+          0.75,
+          1.0
+        ],
+        "ranges": []
+      }
+    },
+    {
+      "name": "exposure-plus-1",
+      "controls": {
+        "revision": 1,
+        "exposure": 1.0,
+        "temperature": 0.0,
+        "tint": 0.0,
+        "contrast": 0.0,
+        "pivot": 0.18,
+        "shadows": 0.0,
+        "highlights": 0.0,
+        "blacks": 0.0,
+        "whites": 0.0,
+        "saturation": 0.0,
+        "vibrance": 0.0,
+        "hue": 0.0,
+        "bands": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "grading": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "curve": [
+          0,
+          0.25,
+          0.5,
+          0.75,
+          1.0
+        ],
+        "ranges": []
+      }
+    },
+    {
+      "name": "exposure-minus-1",
+      "controls": {
+        "revision": 1,
+        "exposure": -1.0,
+        "temperature": 0.0,
+        "tint": 0.0,
+        "contrast": 0.0,
+        "pivot": 0.18,
+        "shadows": 0.0,
+        "highlights": 0.0,
+        "blacks": 0.0,
+        "whites": 0.0,
+        "saturation": 0.0,
+        "vibrance": 0.0,
+        "hue": 0.0,
+        "bands": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "grading": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "curve": [
+          0,
+          0.25,
+          0.5,
+          0.75,
+          1.0
+        ],
+        "ranges": []
+      }
+    },
+    {
+      "name": "contrast-40",
+      "controls": {
+        "revision": 1,
+        "exposure": 0.0,
+        "temperature": 0.0,
+        "tint": 0.0,
+        "contrast": 40.0,
+        "pivot": 0.18,
+        "shadows": 0.0,
+        "highlights": 0.0,
+        "blacks": 0.0,
+        "whites": 0.0,
+        "saturation": 0.0,
+        "vibrance": 0.0,
+        "hue": 0.0,
+        "bands": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "grading": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "curve": [
+          0,
+          0.25,
+          0.5,
+          0.75,
+          1.0
+        ],
+        "ranges": []
+      }
+    },
+    {
+      "name": "shadows-up-highlights-down",
+      "controls": {
+        "revision": 1,
+        "exposure": 0.0,
+        "temperature": 0.0,
+        "tint": 0.0,
+        "contrast": 0.0,
+        "pivot": 0.18,
+        "shadows": 50.0,
+        "highlights": -50.0,
+        "blacks": 0.0,
+        "whites": 0.0,
+        "saturation": 0.0,
+        "vibrance": 0.0,
+        "hue": 0.0,
+        "bands": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "grading": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "curve": [
+          0,
+          0.25,
+          0.5,
+          0.75,
+          1.0
+        ],
+        "ranges": []
+      }
+    },
+    {
+      "name": "warm-balance",
+      "controls": {
+        "revision": 1,
+        "exposure": 0.0,
+        "temperature": 25.0,
+        "tint": 0.0,
+        "contrast": 0.0,
+        "pivot": 0.18,
+        "shadows": 0.0,
+        "highlights": 0.0,
+        "blacks": 0.0,
+        "whites": 0.0,
+        "saturation": 0.0,
+        "vibrance": 0.0,
+        "hue": 0.0,
+        "bands": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "grading": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "curve": [
+          0,
+          0.25,
+          0.5,
+          0.75,
+          1.0
+        ],
+        "ranges": []
+      }
+    },
+    {
+      "name": "saturation-30",
+      "controls": {
+        "revision": 1,
+        "exposure": 0.0,
+        "temperature": 0.0,
+        "tint": 0.0,
+        "contrast": 0.0,
+        "pivot": 0.18,
+        "shadows": 0.0,
+        "highlights": 0.0,
+        "blacks": 0.0,
+        "whites": 0.0,
+        "saturation": 30.0,
+        "vibrance": 0.0,
+        "hue": 0.0,
+        "bands": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "grading": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "curve": [
+          0,
+          0.25,
+          0.5,
+          0.75,
+          1.0
+        ],
+        "ranges": []
+      }
+    },
+    {
+      "name": "vibrance-50",
+      "controls": {
+        "revision": 1,
+        "exposure": 0.0,
+        "temperature": 0.0,
+        "tint": 0.0,
+        "contrast": 0.0,
+        "pivot": 0.18,
+        "shadows": 0.0,
+        "highlights": 0.0,
+        "blacks": 0.0,
+        "whites": 0.0,
+        "saturation": 0.0,
+        "vibrance": 50.0,
+        "hue": 0.0,
+        "bands": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "grading": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "curve": [
+          0,
+          0.25,
+          0.5,
+          0.75,
+          1.0
+        ],
+        "ranges": []
+      }
+    },
+    {
+      "name": "shadow-wheel-teal",
+      "controls": {
+        "revision": 1,
+        "exposure": 0.0,
+        "temperature": 0.0,
+        "tint": 0.0,
+        "contrast": 0.0,
+        "pivot": 0.18,
+        "shadows": 0.0,
+        "highlights": 0.0,
+        "blacks": 0.0,
+        "whites": 0.0,
+        "saturation": 0.0,
+        "vibrance": 0.0,
+        "hue": 0.0,
+        "bands": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "grading": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            200.0,
+            45.0,
+            10.0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "curve": [
+          0,
+          0.25,
+          0.5,
+          0.75,
+          1.0
+        ],
+        "ranges": []
+      }
+    },
+    {
+      "name": "combined-grade",
+      "controls": {
+        "revision": 1,
+        "exposure": 0.35,
+        "temperature": 8.0,
+        "tint": 0.0,
+        "contrast": 22.0,
+        "pivot": 0.18,
+        "shadows": 30.0,
+        "highlights": -25.0,
+        "blacks": 0.0,
+        "whites": 0.0,
+        "saturation": 0.0,
+        "vibrance": 25.0,
+        "hue": 0.0,
+        "bands": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "grading": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0
+          ]
+        ],
+        "curve": [
+          0.0,
+          0.22,
+          0.5,
+          0.79,
+          1.0
+        ],
+        "ranges": []
+      }
+    }
+  ]
+}
