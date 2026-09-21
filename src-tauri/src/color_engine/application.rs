@@ -5,6 +5,7 @@ use super::{
     controls::Controls,
     input::DecodedFrame,
     plan::{Look, LookSpace, RenderPlan},
+    spaces,
 };
 use crate::{AppState, image_processing::GpuContext};
 use anyhow::{Context, Result, ensure};
@@ -104,11 +105,9 @@ pub fn controls(edits: &Value) -> Result<Controls> {
     Ok(controls)
 }
 
-pub fn validate_features(edits: &Value) -> Result<()> {
-    ensure!(
-        edits["flatFieldProfile"].is_null(),
-        "V3 flat-field profiles need a color-space adapter; return to the previous engine."
-    );
+pub fn validate_features(_edits: &Value) -> Result<()> {
+    // Every feature the previous engine applies to the whole picture now has
+    // a v3 definition; kept as the one place a future refusal would go.
     Ok(())
 }
 
@@ -313,6 +312,11 @@ fn spatial(
     let mut pixels = image.to_rgba32f();
     super::optics::correct_chromatic_aberration(&mut pixels, effects);
     super::detail::apply(&mut pixels, &controls.detail, weights, scale);
+    if let Some(clarity) = super::optics::centre_clarity(effects) {
+        let mut clarified = pixels.clone();
+        super::detail::apply(&mut clarified, &clarity, weights, scale);
+        super::optics::blend_centre(&mut pixels, &clarified);
+    }
     super::optics::add_light(
         &mut pixels,
         effects,
@@ -458,8 +462,33 @@ pub(crate) fn render_file_with_capture(
             )?;
             pixels
         };
+        // Flat-field correction divides linear light in the unwarped frame,
+        // before geometry, as the previous engine's does — but on linear
+        // values, so the shared geometry step is handed edits without it.
+        let mut patched = patched;
+        let to_srgb = spaces::conversion(source.color.primaries, Primaries::Srgb);
+        let rows = |m: glam::DMat3| {
+            m.transpose()
+                .to_cols_array_2d()
+                .map(|r| r.map(|v| v as f32))
+        };
+        let flattened = crate::flat_field::apply_flat_field_linear(
+            &mut patched,
+            edits,
+            rows(to_srgb),
+            rows(to_srgb.inverse()),
+        )?;
+        let geometry_edits;
+        let geometry_edits = if flattened || !edits["flatFieldProfile"].is_null() {
+            let mut e = edits.clone();
+            e["flatFieldProfile"] = Value::Null;
+            geometry_edits = e;
+            &geometry_edits
+        } else {
+            edits
+        };
         let base = DynamicImage::ImageRgba32F(patched);
-        let (transformed, offset) = crate::apply_all_transformations(&base, edits);
+        let (transformed, offset) = crate::apply_all_transformations(&base, geometry_edits);
         let full_width = transformed.width();
         let image = if let Some(dim) = max_dimension {
             ensure!((16..=16384).contains(&dim), "Invalid v3 preview dimensions");
@@ -647,6 +676,124 @@ pub(crate) fn render_file_with_capture(
     let frame = engine.render(&working, &final_plan, false);
     watch.lap("final pass");
     frame
+}
+
+/// Automatic exposure, white balance, highlights and shadows for v3,
+/// measured on the picture's scene data rather than its display pixels:
+///
+/// - exposure brings the log-average luminance (Reinhard's key, over the
+///   1st–99th percentiles so a lamp or a black border does not decide it)
+///   toward mid grey — nothing within half a stop, 60% of the rest, within
+///   ±2 stops, because most high- and low-key pictures are meant that way;
+/// - white balance is a grey-world estimate over the midtones at a third of
+///   its strength, within ±25, because a sunset or a bar is not supposed to
+///   be grey;
+/// - highlights and shadows pull in what still clips or crushes once that
+///   exposure is applied.
+///
+/// These are corrections, not a look: nothing creative is touched.
+pub fn auto_controls(
+    context: &GpuContext,
+    state: &AppState,
+    path: &str,
+    edits: &Value,
+) -> Result<Value> {
+    let mut neutral = edits.clone();
+    neutral["v3"] = serde_json::json!({});
+    neutral["masks"] = serde_json::json!([]);
+    neutral["lutPath"] = Value::Null;
+    let frame = render_file_with_capture(context, state, path, &neutral, Some(512), true)?;
+    let graded = frame.stages.context("Missing analysis stage")?.graded;
+    let y = spaces::rgb_to_xyz(Primaries::DavinciWideGamut).row(1);
+    let weights = [y.x as f32, y.y as f32, y.z as f32];
+    let mut lum: Vec<f32> = graded
+        .pixels()
+        .map(|p| (p[0] * weights[0] + p[1] * weights[1] + p[2] * weights[2]).max(1e-6))
+        .collect();
+    ensure!(!lum.is_empty(), "Nothing to analyse");
+    lum.sort_by(f32::total_cmp);
+    let (lo, hi) = (lum[lum.len() / 100], lum[lum.len() * 99 / 100]);
+    let body: Vec<f32> = lum
+        .iter()
+        .copied()
+        .filter(|v| (lo..=hi).contains(v))
+        .collect();
+    let key = (body.iter().map(|v| v.ln()).sum::<f32>() / body.len().max(1) as f32).exp();
+    // High-key and low-key pictures are usually meant that way: within half
+    // a stop of mid grey nothing moves, and beyond it only part of the way.
+    let error = (0.18 / key).log2();
+    let exposure = (error.signum() * (error.abs() - 0.5).max(0.) * 0.6).clamp(-2., 2.);
+
+    // Grey world, in cone-ish RGB, over pixels within two stops of the key.
+    let (mut sum, mut n) = ([0f64; 3], 0usize);
+    for p in graded.pixels() {
+        let l = p[0] * weights[0] + p[1] * weights[1] + p[2] * weights[2];
+        if l > key / 4. && l < key * 4. && p.0[..3].iter().all(|v| *v > 0.) {
+            for c in 0..3 {
+                sum[c] += (p[c] as f64).ln();
+            }
+            n += 1;
+        }
+    }
+    let (temperature, tint) = if n > 100 {
+        let [r, g, b] = sum.map(|v| v / n as f64);
+        let ln2 = std::f64::consts::LN_2;
+        let t = -((r - b) / ln2) / 0.012 * 0.35;
+        let k = ((g - (r + b) / 2.) / ln2) / 0.006 * 0.35;
+        (t.clamp(-25., 25.) as f32, k.clamp(-25., 25.) as f32)
+    } else {
+        (0., 0.)
+    };
+
+    // What clips or crushes once exposed.
+    let mut exposed = neutral.clone();
+    exposed["v3"] = serde_json::to_value(Controls {
+        exposure,
+        temperature,
+        tint,
+        ..Default::default()
+    })?;
+    let shown = render_file(context, state, path, &exposed, Some(512))?.encoded_srgb;
+    let total = (shown.width() * shown.height()).max(1) as f32;
+    let clipped = shown
+        .pixels()
+        .filter(|p| p.0[..3].iter().any(|v| *v > 0.99))
+        .count() as f32
+        / total;
+    let crushed = shown
+        .pixels()
+        .filter(|p| p.0[..3].iter().all(|v| *v < 0.02))
+        .count() as f32
+        / total;
+    let highlights = -(clipped * 1500.).clamp(0., 60.);
+    let shadows = (crushed * 1000.).clamp(0., 50.);
+    let round = |v: f32, places: i32| {
+        let k = 10f64.powi(places);
+        (v as f64 * k).round() / k + 0.0
+    };
+    Ok(serde_json::json!({
+        "exposure": round(exposure, 2),
+        "temperature": round(temperature, 0),
+        "tint": round(tint, 0),
+        "highlights": round(highlights, 0),
+        "shadows": round(shadows, 0),
+    }))
+}
+
+#[tauri::command]
+pub async fn auto_color_v3(
+    path: String,
+    edits: Value,
+    app_handle: tauri::AppHandle,
+) -> Result<Value, String> {
+    use tauri::Manager;
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app_handle.state::<AppState>();
+        let context = crate::gpu_processing::get_or_init_gpu_context(&state, &app_handle)?;
+        auto_controls(&context, &state, &path, &edits).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

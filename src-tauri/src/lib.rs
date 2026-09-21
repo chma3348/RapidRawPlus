@@ -373,6 +373,12 @@ fn process_preview_job(
                 active_waveform_channel: active_waveform_channel.map(str::to_owned),
             });
         }
+        // The clipping warning is drawn over the preview only, after the
+        // histogram has seen the real picture.
+        let mut frame = frame;
+        if adjustments_clone["showClipping"].as_bool() == Some(true) {
+            frame.mark_clipping();
+        }
         let mut response = Vec::new();
         if is_interactive {
             for v in [0u32, 0, width, height, width, height] {
@@ -2372,6 +2378,7 @@ pub fn run() {
         })
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
+            color_engine::application::auto_color_v3,
             color_engine::application::prepare_color_v3,
             color_engine::selection::inspect_color_v3,
             apply_adjustments,

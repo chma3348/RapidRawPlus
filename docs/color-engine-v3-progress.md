@@ -15,8 +15,10 @@ Intermediate, as Resolve's curves are); saturation, vibrance, hue; eight
 selective-colour bands and eight custom ranges with a picker; four grading
 wheels; dehaze, sharpening with threshold, texture, clarity, structure,
 luminance and colour noise reduction; vignette and grain; glow, halation and
-light flares; chromatic aberration correction; creative LUTs in three input
-spaces (display, DaVinci Intermediate, F-Log2 C film simulations).
+light flares; film saturation; Centre; chromatic aberration correction;
+camera calibration; flat-field correction; creative LUTs in three input
+spaces (display, DaVinci Intermediate, F-Log2 C film simulations). Auto
+adjust, the white-balance picker and the clipping warning work in v3.
 
 **Local work.** Brush, gradient and bitmap masks; colour and luminance range
 masks; detail inside masks; heal, clone, generative and Sky Replace patches.
@@ -27,15 +29,62 @@ each with its colour profile honoured. 16-bit export with profile tags.
 **Speed, 24–33 megapixels on this machine.** First preview about 0.3 s; a
 slider move about 11 ms, 28 ms with masks; export about 1 s plus detail.
 
-**Not in v3.** The centre control; flat-field correction; vignette, grain,
-glow, halation, flare, chromatic aberration and LUTs inside masks (they
-describe the whole frame, and a mask carrying them is refused with a message).
+**Not in v3.** Whole-frame effects inside masks (vignette, grain, glow,
+halation, flare, Centre, film saturation, chromatic aberration, LUTs): they
+describe the frame, and a mask carrying them is refused with a message. The
+previous engine allowed glow and halation per mask; that is the one real loss.
 The grading controls are v3's own, not yet Resolve's: matching them is
 prepared (`docs/resolve-controls.md`) and waits on fourteen captures.
 
 **Tests.** 260 library tests, the v3 GPU contracts (including forced chunk
 boundaries, preview/export agreement and the strip contract), frontend
 preset and history tests; `cargo fmt --check` and `clippy -D warnings` clean.
+
+## The rest of the previous engine — September 21, 2026
+
+With this, everything the previous engine applies to a picture has a v3
+definition, and `validate_features` refuses nothing.
+
+**Flat-field correction.** Refused until now for a real reason: its divide
+decodes sRGB first, which on v3's linear data divides the wrong quantity. V3
+divides linear light directly, per channel in linear sRGB primaries (where the
+master flat's ratios were measured), in the unwarped frame before geometry,
+and hands the shared geometry step edits without the profile so it cannot run
+twice. A missing profile is an error, not a silently uncorrected render.
+
+**Lens corrections** (distortion, TCA, lens vignetting) already reached v3
+through the shared geometry step. On v3's linear pixels the vignetting gain is
+applied to light, which is what it models; the previous engine applied it to
+encoded values.
+
+**Centre.** Two halves, as before. Exposure and chroma by a radial weight in
+the GPU pass; local contrast as clarity at the Centre's strength blended by
+`2m − 1`, so it is positive in the middle and negative at the edges, in the
+cached spatial stage.
+
+**Film saturation.** Chroma eased near white and in deep shadow, in Oklab, as
+before; applied after the grade.
+
+**Camera calibration.** The previous engine's primary hue and saturation
+shifts and shadow tint, in linear sRGB primaries, as the first step of the
+grade — with one deliberate difference: its hue matrix did not preserve
+white (a red hue shift turned grey green). V3 normalises the rows, so neutrals
+stay neutral while the primary still moves; `effects_contracts` pins both.
+
+**Auto adjust** (`auto_controls`), measured on the scene data, not display
+pixels: exposure toward mid grey by the log-average luminance over the 1st–99th
+percentiles, leaving anything within half a stop alone and correcting 60% of
+the rest (within ±2 stops) because high- and low-key pictures are usually
+meant; grey-world white balance at a third of its strength within ±25; then
+highlights and shadows from what still clips or crushes. About 0.3–0.4 s.
+`examples/v3_auto.rs` prints the choices and writes before/after sheets.
+
+**White-balance picker.** Solves v3's own cone-space gains for the clicked
+neutral; the rendering between it and the screen compresses ratios, so it
+undershoots slightly and a second click refines it.
+
+**Clipping warning.** Drawn on the editor preview after the histogram has been
+computed from the real picture, never on exports.
 
 ## Lens and film effects, and LUTs — September 21, 2026
 

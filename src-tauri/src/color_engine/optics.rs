@@ -39,9 +39,52 @@ const FLARE_MAP: usize = 256;
 /// slide, washed the whole screen out at 60; this brings 60 to a flare.
 const FLARE_GAIN: f32 = 0.3;
 
-/// Does this leave the picture alone?
+/// The previous engine divided its Centre slider by this.
+pub const CENTRE_SCALE: f32 = 250.;
+
+/// Does this leave the picture alone? (Only the spatial parts; Centre's
+/// exposure and colour run in the GPU pass.)
 pub fn is_neutral(e: &Effects) -> bool {
-    e.ca_red_cyan == 0. && e.ca_blue_yellow == 0. && light_is_neutral(e)
+    e.ca_red_cyan == 0. && e.ca_blue_yellow == 0. && e.centre == 0. && light_is_neutral(e)
+}
+
+/// Centre's radial weight, as the shader computes it.
+fn centre_weight(x: f32, y: f32, w: f32, h: f32) -> f32 {
+    let aspect = h / w;
+    let (u, v) = ((x / w - 0.5) * 2., (y / h - 0.5) * 2. * aspect);
+    let d = (u * u + v * v).sqrt() * 0.5;
+    1. - smoothstep(0.4 - 0.375, 0.4 + 0.375, d)
+}
+
+/// Centre's local-contrast half: clarity that is positive in the middle of
+/// the frame and negative toward the edges, as the previous engine's was.
+/// `clarified` is the image with clarity at the Centre's full strength; this
+/// blends toward it by `2m - 1`, which for the edges runs the other way.
+pub fn centre_clarity(e: &Effects) -> Option<super::detail::Detail> {
+    // The previous engine's clarity strength at full weight was
+    // centre * 0.9; v3's clarity slider is strength / 0.8 * 100.
+    (e.centre != 0.).then(|| super::detail::Detail {
+        clarity: (e.centre / CENTRE_SCALE * 0.9 / 0.8 * 100.).clamp(-100., 100.),
+        ..Default::default()
+    })
+}
+
+pub fn blend_centre(image: &mut image::Rgba32FImage, clarified: &image::Rgba32FImage) {
+    let (w, h) = (image.width() as usize, image.height() as usize);
+    image
+        .as_mut()
+        .par_chunks_mut(w * 4)
+        .zip(clarified.as_raw().par_chunks(w * 4))
+        .enumerate()
+        .for_each(|(y, (row, target))| {
+            for x in 0..w {
+                let k = 2. * centre_weight(x as f32 + 0.5, y as f32 + 0.5, w as f32, h as f32) - 1.;
+                for c in 0..3 {
+                    let i = x * 4 + c;
+                    row[i] += (target[i] - row[i]) * k;
+                }
+            }
+        });
 }
 
 pub fn light_is_neutral(e: &Effects) -> bool {

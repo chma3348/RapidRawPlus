@@ -38,6 +38,11 @@ pub struct Effects {
     /// -100..100: red and blue scaled about the centre, ±1% at the ends.
     pub ca_red_cyan: f32,
     pub ca_blue_yellow: f32,
+    /// -100..100: the previous engine's Centre — the middle of the frame
+    /// brighter, richer and crisper, the edges quieter; negative reverses it.
+    pub centre: f32,
+    /// 0..100: film's easing of saturation in deep shadows and near white.
+    pub film_saturation: f32,
 }
 
 impl Default for Effects {
@@ -55,6 +60,8 @@ impl Default for Effects {
             flare_amount: 0.,
             ca_red_cyan: 0.,
             ca_blue_yellow: 0.,
+            centre: 0.,
+            film_saturation: 0.,
         }
     }
 }
@@ -67,6 +74,7 @@ impl Effects {
                 && within(self.vignette_roundness, -100., 100.)
                 && within(self.ca_red_cyan, -100., 100.)
                 && within(self.ca_blue_yellow, -100., 100.)
+                && within(self.centre, -100., 100.)
                 && [
                     self.vignette_midpoint,
                     self.vignette_feather,
@@ -75,7 +83,8 @@ impl Effects {
                     self.grain_roughness,
                     self.glow_amount,
                     self.halation_amount,
-                    self.flare_amount
+                    self.flare_amount,
+                    self.film_saturation
                 ]
                 .iter()
                 .all(|v| within(*v, 0., 100.)),
@@ -85,7 +94,54 @@ impl Effects {
     }
 
     pub fn is_neutral(&self) -> bool {
-        self.vignette_amount == 0. && self.grain_amount == 0. && super::optics::is_neutral(self)
+        self.vignette_amount == 0.
+            && self.grain_amount == 0.
+            && self.centre == 0.
+            && self.film_saturation == 0.
+            && super::optics::is_neutral(self)
+    }
+}
+
+/// The previous engine's camera calibration: each primary's hue and
+/// saturation, and a green–magenta tint in the shadows, with its slider
+/// meanings (-100..100). Defined, as it was, in linear sRGB primaries.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Calibration {
+    pub shadows_tint: f32,
+    pub red_hue: f32,
+    pub red_saturation: f32,
+    pub green_hue: f32,
+    pub green_saturation: f32,
+    pub blue_hue: f32,
+    pub blue_saturation: f32,
+}
+
+impl Calibration {
+    fn values(&self) -> [f32; 7] {
+        [
+            self.shadows_tint,
+            self.red_hue,
+            self.red_saturation,
+            self.green_hue,
+            self.green_saturation,
+            self.blue_hue,
+            self.blue_saturation,
+        ]
+    }
+
+    pub fn is_neutral(&self) -> bool {
+        self.values() == [0.; 7]
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.values()
+                .iter()
+                .all(|v| v.is_finite() && (-100. ..=100.).contains(v)),
+            "Calibration settings are out of range"
+        );
+        Ok(())
     }
 }
 
@@ -126,6 +182,8 @@ pub struct Controls {
     /// Position-dependent effects: a vignette in the working space, grain on
     /// the finished image. Older v3 settings without this load as neutral.
     pub effects: Effects,
+    /// Camera calibration, the first thing the grade does.
+    pub calibration: Calibration,
 }
 impl Default for Controls {
     fn default() -> Self {
@@ -150,6 +208,7 @@ impl Default for Controls {
             ranges: Vec::new(),
             detail: super::detail::Detail::default(),
             effects: Effects::default(),
+            calibration: Calibration::default(),
         }
     }
 }
@@ -202,6 +261,7 @@ impl Controls {
         }
         self.detail.validate()?;
         self.effects.validate()?;
+        self.calibration.validate()?;
         ensure!(
             self.ranges.len() <= 8,
             "At most eight custom color ranges are supported"
@@ -254,6 +314,7 @@ impl Controls {
             && self.bands == [[0.; 3]; 8]
             && self.grading == [[0.; 3]; 4]
             && self.ranges.iter().all(|r| r.adjustment == [0.; 3])
+            && self.calibration.is_neutral()
     }
 
     pub fn is_neutral(&self) -> bool {

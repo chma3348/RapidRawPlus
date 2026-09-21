@@ -16,12 +16,14 @@ struct Parameters {
     range_width: array<vec4<f32>,8>,
     range_adjustment: array<vec4<f32>,8>,
     frame: vec4<u32>,
-    effects: array<vec4<f32>,2>,
+    effects: array<vec4<f32>,3>,
     channel_curves: array<vec4<f32>,15>,
     curve_flags: vec4<u32>,
     look: vec4<f32>,
     look_flags: vec4<u32>,
     work_to_look: mat3x3<f32>,
+    calibration: array<vec4<f32>,2>,
+    srgb_to_work: mat3x3<f32>,
 }
 @group(0) @binding(0) var<storage, read> source: array<vec4<f32>>;
 @group(0) @binding(1) var<storage, read_write> results: array<vec4<f32>>;
@@ -43,7 +45,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let width = max(parameters.frame.x, 1u);
     let position = vec2<f32>(f32(index % width), f32(index / width)) + vec2<f32>(0.5);
     let dims = vec2<f32>(f32(width), f32(max(parameters.frame.y, 1u)));
-    let graded = vignette(grade(working), position, dims);
+    let graded = film_saturation(vignette(grade(centre(calibrate(working), position, dims)), position, dims));
     // A captured transform replaces the whole rendering step, encode included,
     // and reads working values directly: its domain is the working space.
     let scene = look_scene(graded);
@@ -84,6 +86,74 @@ fn vignette(rgb: vec3<f32>, position: vec2<f32>, dims: vec2<f32>) -> vec3<f32> {
     let falloff = pow(clamp((reach - start) / max(1.0 - start, 1e-4), 0.0, 1.0), 1.0 + v.w * 2.0);
     let stops = v.x * (1.6 + 2.4 * abs(v.x));
     return rgb * exp2(stops * falloff);
+}
+
+// The previous engine's camera calibration, in the linear
+// sRGB primaries it was defined in: a hue matrix that leans each primary
+// toward its neighbours, saturation weighted by how much of each primary a
+// colour holds, and a green-magenta tint that fades out above the shadows.
+fn calibrate(working: vec3<f32>) -> vec3<f32> {
+    let a = parameters.calibration[0];
+    let b = parameters.calibration[1];
+    if b.w == 0.0 { return working; }
+    let h_r = a.y;
+    let h_g = a.w;
+    let h_b = b.y;
+    let hue = mat3x3<f32>(
+        vec3<f32>(1.0 - abs(h_r), max(0.0, h_r), max(0.0, -h_r)),
+        vec3<f32>(max(0.0, -h_g), 1.0 - abs(h_g), max(0.0, h_g)),
+        vec3<f32>(max(0.0, h_b), max(0.0, -h_b), 1.0 - abs(h_b)));
+    // Normalised so each row sums to one: the previous engine's matrix
+    // moved the primary but also tinted neutrals (a red hue shift turned
+    // grey green); here white stays white and the primary still moves.
+    let rows = hue * vec3<f32>(1.0);
+    var c = (hue * (parameters.work_to_output * working)) / rows;
+    let weights = vec3<f32>(0.2126, 0.7152, 0.0722);
+    let luma = dot(max(c, vec3<f32>(0.0)), weights);
+    let sum = c.r + c.g + c.b;
+    var share = vec3<f32>(0.0);
+    if sum > 0.001 { share = c / sum; }
+    c += (c - vec3<f32>(luma)) * dot(share, vec3<f32>(a.z, b.x, b.z));
+    if abs(a.x) > 0.001 {
+        let shadow = 1.0 - smoothstep(0.0, 0.3, dot(max(c, vec3<f32>(0.0)), weights));
+        let tint = vec3<f32>(1.0 + a.x * 0.25, 1.0 - a.x * 0.25, 1.0 + a.x * 0.25);
+        c = mix(c, c * tint, shadow);
+    }
+    return parameters.srgb_to_work * c;
+}
+
+// The previous engine's Centre, pointwise half: a radial weight that is one
+// in the middle and falls to zero past the frame's edge, as there. The
+// middle gains up to a fifth of a stop and chroma; the edges lose chroma.
+// (Its other half, local contrast, runs with detail on the CPU.)
+fn centre_weight(position: vec2<f32>, dims: vec2<f32>) -> f32 {
+    let aspect = dims.y / dims.x;
+    let uv = (position / dims - vec2<f32>(0.5)) * 2.0;
+    let d = length(uv * vec2<f32>(1.0, aspect)) * 0.5;
+    return 1.0 - smoothstep(0.4 - 0.375, 0.4 + 0.375, d);
+}
+
+fn centre(rgb: vec3<f32>, position: vec2<f32>, dims: vec2<f32>) -> vec3<f32> {
+    let c = parameters.effects[2].x;
+    if c == 0.0 { return rgb; }
+    let m = centre_weight(position, dims);
+    let lifted = rgb * exp2(m * c * 0.5);
+    let chroma = max(1.0 + m * c * 0.7 - (1.0 - m) * c * 0.8, 0.0);
+    let lab = to_lab_work(lifted);
+    return from_lab_work(vec3<f32>(lab.x, lab.yz * chroma));
+}
+
+// Film saturation, as the previous engine had it: chroma eased toward
+// neutral in deep shadows and near white, in Oklab so hue never moves.
+fn film_saturation(rgb: vec3<f32>) -> vec3<f32> {
+    let amount = parameters.effects[2].y;
+    if amount <= 0.001 { return rgb; }
+    let lab = to_lab_work(rgb);
+    let l = clamp(lab.x, 0.0, 1.2);
+    let highlight = smoothstep(0.78, 1.05, l);
+    let shadow = 1.0 - smoothstep(0.05, 0.28, l);
+    let desat = clamp((highlight * 0.75 + shadow * 0.55) * amount, 0.0, 0.9);
+    return from_lab_work(vec3<f32>(lab.x, lab.yz * (1.0 - desat)));
 }
 
 fn grain_hash(p: vec2<f32>) -> f32 {

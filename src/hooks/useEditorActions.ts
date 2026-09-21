@@ -37,7 +37,9 @@ export function useEditorActions() {
     (value: Partial<Adjustments> | ((prev: Adjustments) => Adjustments)) => {
       setEditor((state) => {
         const prev = state.adjustments;
-        const newAdjustments = syncFillAdjustmentMasks(typeof value === 'function' ? value(prev) : { ...prev, ...value });
+        const newAdjustments = syncFillAdjustmentMasks(
+          typeof value === 'function' ? value(prev) : { ...prev, ...value },
+        );
         debouncedSetHistory(newAdjustments);
         return { adjustments: newAdjustments };
       });
@@ -72,6 +74,16 @@ export function useEditorActions() {
     const selectedImage = useEditorStore.getState().selectedImage;
     if (!selectedImage?.isReady) return;
     try {
+      const current = useEditorStore.getState().adjustments;
+      if (current.processVersion === 3) {
+        // V3 measures on its own scene data and sets its own controls.
+        const auto: Record<string, number> = await invoke('auto_color_v3', {
+          path: selectedImage.path,
+          edits: current,
+        });
+        setAdjustments((prev: Adjustments) => ({ ...prev, v3: { ...(prev.v3 || {}), ...auto } as any }));
+        return;
+      }
       const autoAdjustments: Adjustments = await invoke(Invokes.CalculateAutoAdjustments);
       setAdjustments((prev: Adjustments) => ({
         ...prev,

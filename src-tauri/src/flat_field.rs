@@ -325,6 +325,89 @@ pub fn apply_flat_field<'a>(
     Cow::Owned(out)
 }
 
+/// The same correction for v3, whose pixels are already linear and may be in
+/// wider primaries than the reference was measured in. The previous path
+/// above decodes sRGB before dividing, which on linear data would divide the
+/// wrong quantity; this divides linear light directly, per channel in linear
+/// sRGB primaries — where the master flat's ratios were measured — and
+/// converts back. Returns whether a profile was applied.
+pub fn apply_flat_field_linear(
+    image: &mut image::Rgba32FImage,
+    adjustments: &serde_json::Value,
+    to_srgb: [[f32; 3]; 3],
+    from_srgb: [[f32; 3]; 3],
+) -> anyhow::Result<bool> {
+    let profile = match adjustments.get("flatFieldProfile").and_then(|v| v.as_str()) {
+        Some(p) if !p.is_empty() => p,
+        _ => return Ok(false),
+    };
+    let strength = (adjustments
+        .get("flatFieldStrength")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(100.0) as f32
+        / 100.0)
+        .clamp(0.0, 1.0);
+    if strength <= 0.0 {
+        return Ok(false);
+    }
+    let (w, h) = image.dimensions();
+    // Unlike the previous engine, a missing profile is an error rather than
+    // a silently uncorrected render.
+    let flat = resized_flat(profile, w, h).ok_or_else(|| {
+        anyhow::anyhow!("The flat-field profile '{profile}' is missing or unreadable")
+    })?;
+    divide_linear(image, &flat, strength, to_srgb, from_srgb);
+    Ok(true)
+}
+
+fn divide_linear(
+    image: &mut image::Rgba32FImage,
+    flat: &[f32],
+    strength: f32,
+    to_srgb: [[f32; 3]; 3],
+    from_srgb: [[f32; 3]; 3],
+) {
+    let apply = |m: &[[f32; 3]; 3], v: [f32; 3]| {
+        std::array::from_fn::<f32, 3, _>(|r| m[r][0] * v[0] + m[r][1] * v[1] + m[r][2] * v[2])
+    };
+    image
+        .as_mut()
+        .par_chunks_mut(4)
+        .enumerate()
+        .for_each(|(i, px)| {
+            let srgb = apply(&to_srgb, [px[0], px[1], px[2]]);
+            let divided: [f32; 3] = std::array::from_fn(|c| {
+                let f = flat[i * 3 + c];
+                srgb[c] / ((1.0 - strength) + f * strength).max(FLAT_FLOOR)
+            });
+            let back = apply(&from_srgb, divided);
+            px[..3].copy_from_slice(&back);
+        });
+}
+
+#[cfg(test)]
+mod linear_tests {
+    use super::*;
+
+    #[test]
+    fn linear_divide_undoes_a_falloff_exactly() {
+        // A flat grey photographed through a lens that loses half its light
+        // at the right-hand edge comes back flat.
+        let (w, h) = (64u32, 8u32);
+        let fall = |x: u32| 1.0 - 0.5 * x as f32 / (w - 1) as f32;
+        let mut image = image::Rgba32FImage::from_fn(w, h, |x, _| {
+            let v = 0.18 * fall(x);
+            image::Rgba([v, v, v, 1.0])
+        });
+        let flat: Vec<f32> = (0..w * h).flat_map(|i| [fall(i % w); 3]).collect();
+        let identity = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        divide_linear(&mut image, &flat, 1.0, identity, identity);
+        for p in image.pixels() {
+            assert!((p[0] - 0.18).abs() < 1e-6, "{}", p[0]);
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn create_flat_profile(
     app_handle: tauri::AppHandle,

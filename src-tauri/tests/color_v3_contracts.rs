@@ -840,6 +840,98 @@ fn effects_contracts(engine: &ColorEngine) {
     light.controls.effects.vignette_amount = 70.0;
     assert!(render(light).get_pixel(0, 0)[0] > base.get_pixel(0, 0)[0] + 0.05);
 
+    // Centre: the middle brighter than it was, the corner no brighter, and
+    // colour richer in the middle and quieter at the edge.
+    let tinted = ImageBuffer::from_pixel(200, 100, Rgba([0.45f32, 0.3, 0.2, 1.0]));
+    let render_tinted = |c: PipelineConfig| {
+        let mut plan = RenderPlan::build(c).unwrap();
+        plan.set_render_scale(1.0);
+        engine.render(&tinted, &plan, false).unwrap().encoded_srgb
+    };
+    let spread = |p: &Rgba<f32>| p[0] - p[2];
+    let plain = render_tinted(config());
+    let mut centred = config();
+    centred.controls.effects.centre = 80.0;
+    let lit = render(centred.clone());
+    assert!(lit.get_pixel(100, 50)[1] > base.get_pixel(100, 50)[1] + 0.01);
+    let gain = |x, y| lit.get_pixel(x, y)[1] - base.get_pixel(x, y)[1];
+    assert!(
+        gain(0, 0) < gain(100, 50) * 0.5,
+        "centre lifted the corner as much as the middle"
+    );
+    let c = render_tinted(centred);
+    assert!(spread(c.get_pixel(100, 50)) > spread(plain.get_pixel(100, 50)));
+    assert!(spread(c.get_pixel(0, 0)) < spread(plain.get_pixel(0, 0)));
+
+    // Calibration: neutral grey stays neutral under a primary's hue shift,
+    // a red leans toward orange, and the result is the previous engine's
+    // formula evaluated here in linear sRGB.
+    let patch = ImageBuffer::from_fn(2, 1, |x, _| {
+        if x == 0 {
+            Rgba([0.5f32, 0.5, 0.5, 1.0])
+        } else {
+            Rgba([0.8f32, 0.2, 0.15, 1.0])
+        }
+    });
+    let mut calibrated = config();
+    calibrated.controls.calibration.red_hue = 60.0;
+    let cal = engine
+        .render(&patch, &RenderPlan::build(calibrated).unwrap(), false)
+        .unwrap()
+        .encoded_srgb;
+    let grey = cal.get_pixel(0, 0);
+    assert!(
+        (grey[0] - grey[1]).abs() < 2e-3 && (grey[1] - grey[2]).abs() < 2e-3,
+        "{grey:?}"
+    );
+    let decode = |v: f32| {
+        if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let encode = |v: f32| {
+        if v <= 0.0031308 {
+            12.92 * v
+        } else {
+            1.055 * v.powf(1.0 / 2.4) - 0.055
+        }
+    };
+    let (r, g, b) = (decode(0.8), decode(0.2), decode(0.15));
+    let h = 60.0 / 400.0;
+    // Red's column of the hue matrix sends red into green by h; each row is
+    // then normalised so neutrals stay neutral.
+    let want = [r * (1.0 - h) / (1.0 - h), (g + r * h) / (1.0 + h), b];
+    let got = cal.get_pixel(1, 0);
+    for c in 0..3 {
+        assert!(
+            (got[c] - encode(want[c])).abs() < 3e-3,
+            "calibration {c}: {got:?} vs {want:?}"
+        );
+    }
+
+    // Film saturation: leaves midtone colour alone, eases it near white.
+    let ramp = ImageBuffer::from_fn(2, 1, |x, _| {
+        if x == 0 {
+            Rgba([0.3f32, 0.18, 0.12, 1.0])
+        } else {
+            Rgba([1.0f32, 0.92, 0.85, 1.0])
+        }
+    });
+    let render_ramp = |c: PipelineConfig| {
+        engine
+            .render(&ramp, &RenderPlan::build(c).unwrap(), false)
+            .unwrap()
+            .encoded_srgb
+    };
+    let before = render_ramp(config());
+    let mut film = config();
+    film.controls.effects.film_saturation = 100.0;
+    let after = render_ramp(film);
+    assert!((spread(after.get_pixel(0, 0)) - spread(before.get_pixel(0, 0))).abs() < 0.02);
+    assert!(spread(after.get_pixel(1, 0)) < spread(before.get_pixel(1, 0)) * 0.8);
+
     // Grain: present, deterministic, roughly zero-mean, absent at zero.
     let mut grainy = config();
     grainy.controls.effects.grain_amount = 80.0;

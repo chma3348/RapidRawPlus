@@ -18,6 +18,18 @@ pub struct RenderedFrame {
 }
 
 impl RenderedFrame {
+    /// The previous engine's clipping warning: red where any channel is at
+    /// white, blue where any is at black. For display only; never exported.
+    pub fn mark_clipping(&mut self) {
+        for p in self.encoded_srgb.pixels_mut() {
+            if p.0[..3].iter().any(|&v| v > 0.998) {
+                p.0[..3].copy_from_slice(&[1., 0., 0.]);
+            } else if p.0[..3].iter().any(|&v| v < 0.002) {
+                p.0[..3].copy_from_slice(&[0., 0., 1.]);
+            }
+        }
+    }
+
     /// Embed the output profile, so supporting viewers interpret these values
     /// as sRGB rather than the monitor's native gamut.
     pub fn write_srgb_png(&self, writer: impl std::io::Write, sixteen_bit: bool) -> Result<()> {

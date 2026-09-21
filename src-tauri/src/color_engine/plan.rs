@@ -30,8 +30,9 @@ pub(crate) struct GpuParameters {
     pub frame: [u32; 4],
     /// [vignette amount, midpoint, roundness, feather],
     /// [grain amplitude, cell size in full-resolution pixels, roughness,
-    ///  render scale].
-    pub effects: [[f32; 4]; 2],
+    ///  render scale],
+    /// [centre amount, film saturation, 0, 0].
+    pub effects: [[f32; 4]; 3],
     /// Red, green, blue curve knots, five each: [value, slope, 0, 0].
     pub channel_curves: [[f32; 4]; 15],
     /// x: channel curves active.
@@ -44,6 +45,11 @@ pub(crate) struct GpuParameters {
     pub look_flags: [u32; 4],
     /// Working space to the film simulation's F-Gamut C.
     pub work_to_look: [[f32; 4]; 3],
+    /// Calibration: [shadows tint, red hue, red sat, green hue],
+    /// [green sat, blue hue, blue sat, active].
+    pub calibration: [[f32; 4]; 2],
+    /// Linear sRGB to the working space, where calibration is defined.
+    pub srgb_to_work: [[f32; 4]; 3],
 }
 
 /// What a creative LUT expects to be fed, and therefore where in the
@@ -247,6 +253,24 @@ impl RenderPlan {
                 knots
             },
             curve_flags: [u32::from(!c.channel_curves_are_neutral()), 0, 0, 0],
+            calibration: {
+                let k = &c.calibration;
+                [
+                    [
+                        k.shadows_tint / 400.,
+                        k.red_hue / 400.,
+                        k.red_saturation / 120.,
+                        k.green_hue / 400.,
+                    ],
+                    [
+                        k.green_saturation / 120.,
+                        k.blue_hue / 400.,
+                        k.blue_saturation / 120.,
+                        if k.is_neutral() { 0. } else { 1. },
+                    ],
+                ]
+            },
+            srgb_to_work: packed(spaces::conversion(Primaries::Srgb, config.working_space)),
             look: [0.; 4],
             look_flags: [0; 4],
             work_to_look: packed(
@@ -268,6 +292,12 @@ impl RenderPlan {
                     c.effects.grain_size / 50.,
                     c.effects.grain_roughness / 100.,
                     1.0,
+                ],
+                [
+                    c.effects.centre / super::optics::CENTRE_SCALE,
+                    c.effects.film_saturation / 100.,
+                    0.,
+                    0.,
                 ],
             ],
             range_adjustment: std::array::from_fn(|i| {

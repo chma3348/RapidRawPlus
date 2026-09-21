@@ -1655,11 +1655,27 @@ const ImageCanvas = memo(
           const sumGM = linG + linM;
           const deltaTint = sumGM > 0.0001 ? ((linG - linM) / sumGM) * 400.0 : 0;
 
-          setAdjustments((prev: Adjustments) => ({
-            ...prev,
-            temperature: Math.max(-100, Math.min(100, (prev.temperature || 0) + deltaTemp)),
-            tint: Math.max(-100, Math.min(100, (prev.tint || 0) + deltaTint)),
-          }));
+          const clamp = (v: number) => Math.max(-100, Math.min(100, v));
+          setAdjustments((prev: Adjustments) => {
+            if (prev.processVersion === 3) {
+              // V3's warmth and tint are gains in cone space: warmth moves
+              // log2(R/B) by 0.012 per step, tint moves log2(G/sqrt(RB)) by
+              // -0.006. Solve for the neutral directly. The rendering between
+              // here and the screen compresses ratios, so this undershoots
+              // slightly and a second click refines it.
+              const floor = 1e-4;
+              const [r, g, b] = [linR, linG, linB].map((v) => Math.max(v, floor));
+              const v3 = { ...(prev.v3 || {}) } as any;
+              v3.temperature = clamp((v3.temperature || 0) - Math.log2(r / b) / 0.012);
+              v3.tint = clamp((v3.tint || 0) + Math.log2(g / Math.sqrt(r * b)) / 0.006);
+              return { ...prev, v3 };
+            }
+            return {
+              ...prev,
+              temperature: clamp((prev.temperature || 0) + deltaTemp),
+              tint: clamp((prev.tint || 0) + deltaTint),
+            };
+          });
 
           onWbPicked();
         };

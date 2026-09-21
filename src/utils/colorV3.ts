@@ -58,6 +58,8 @@ export interface V3Effects {
   flare_amount: number;
   ca_red_cyan: number;
   ca_blue_yellow: number;
+  centre: number;
+  film_saturation: number;
 }
 export const defaultV3Effects = (): V3Effects => ({
   vignette_amount: 0,
@@ -72,6 +74,28 @@ export const defaultV3Effects = (): V3Effects => ({
   flare_amount: 0,
   ca_red_cyan: 0,
   ca_blue_yellow: 0,
+  centre: 0,
+  film_saturation: 0,
+});
+
+/** The previous engine's camera calibration, -100..100 each. */
+export interface V3Calibration {
+  shadows_tint: number;
+  red_hue: number;
+  red_saturation: number;
+  green_hue: number;
+  green_saturation: number;
+  blue_hue: number;
+  blue_saturation: number;
+}
+export const defaultV3Calibration = (): V3Calibration => ({
+  shadows_tint: 0,
+  red_hue: 0,
+  red_saturation: 0,
+  green_hue: 0,
+  green_saturation: 0,
+  blue_hue: 0,
+  blue_saturation: 0,
 });
 
 export interface V3Controls {
@@ -96,6 +120,7 @@ export interface V3Controls {
   ranges: V3ColorRange[];
   detail: V3Detail;
   effects: V3Effects;
+  calibration: V3Calibration;
 }
 export function defaultV3Controls(): V3Controls {
   return {
@@ -119,6 +144,7 @@ export function defaultV3Controls(): V3Controls {
     ranges: [],
     detail: defaultV3Detail(),
     effects: defaultV3Effects(),
+    calibration: defaultV3Calibration(),
   };
 }
 
@@ -144,7 +170,15 @@ export function mixV3Controls(preset: Partial<V3Controls>, intensity: number): V
         glow_amount: fade('glow_amount'),
         halation_amount: fade('halation_amount'),
         flare_amount: fade('flare_amount'),
+        centre: fade('centre'),
+        film_saturation: fade('film_saturation'),
       };
+    } else if (key === 'calibration') {
+      const from = neutral.calibration;
+      const to = { ...from, ...(target.calibration ?? {}) };
+      result.calibration = Object.fromEntries(
+        (Object.keys(from) as (keyof V3Calibration)[]).map((k) => [k, from[k] + (to[k] - from[k]) * fraction]),
+      ) as unknown as V3Calibration;
     } else if (key === 'detail') {
       // Every detail value fades toward neutral, the threshold included, so
       // a half-strength preset is a half-strength preset.

@@ -1,13 +1,24 @@
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useTranslation } from 'react-i18next';
+import { Pipette } from 'lucide-react';
 import Slider from '../ui/Slider';
 import Dropdown from '../ui/Dropdown';
 import LUTControl from '../ui/LUTControl';
+import FlatFieldControl from './FlatFieldControl';
 import ColorV3Advanced from './ColorV3Advanced';
 import { useEditorStore } from '../../store/useEditorStore';
 import { useEditorActions } from '../../hooks/useEditorActions';
-import { defaultV3Controls, defaultV3Detail, defaultV3Effects, V3Controls, V3Detail, V3Effects } from '../../utils/colorV3';
+import {
+  defaultV3Controls,
+  defaultV3Detail,
+  defaultV3Effects,
+  V3Controls,
+  V3Detail,
+  V3Effects,
+  V3Calibration,
+  defaultV3Calibration,
+} from '../../utils/colorV3';
 
 export function ColorV3Switch({
   adjustments,
@@ -28,14 +39,6 @@ export function ColorV3Switch({
       return;
     }
     if (!selectedImage) return;
-    if (adjustments.flatFieldProfile) {
-      setError(
-        t('colorV3.incompatibleFlatField', {
-          defaultValue: 'Remove the flat-field profile before trying v3.',
-        }),
-      );
-      return;
-    }
     const path = selectedImage.path;
     setPending(true);
     try {
@@ -77,13 +80,6 @@ export function ColorV3Switch({
             'V3 uses separate color settings. Your previous color edits are preserved when you switch back. Crop and mask shapes are shared.',
         })}
       </p>
-      {active && (
-        <p className="mt-2 leading-relaxed">
-          {t('colorV3.limitsFlatField', {
-            defaultValue: 'Flat-field profiles are not available in this mode.',
-          })}
-        </p>
-      )}
       {error && (
         <p role="alert" className="mt-2">
           {error}
@@ -205,7 +201,9 @@ function V3LookSection({
               step={0.05}
               defaultValue={0}
               value={adjustments.lutSimExposure ?? 0}
-              onChange={(e: any) => setAdjustments((prev: any) => ({ ...prev, lutSimExposure: parseFloat(e.target.value) }))}
+              onChange={(e: any) =>
+                setAdjustments((prev: any) => ({ ...prev, lutSimExposure: parseFloat(e.target.value) }))
+              }
               onDragStateChange={onDragStateChange}
             />
           )}
@@ -221,6 +219,8 @@ export default function ColorV3Controls({
   onDragStateChange,
   showDetail = true,
   showEffects = true,
+  isWbPickerActive = false,
+  toggleWbPicker,
 }: {
   adjustments: any;
   setAdjustments: (fn: any) => void;
@@ -229,6 +229,9 @@ export default function ColorV3Controls({
   showDetail?: boolean;
   /** Effects, lens corrections and LUTs describe the whole frame, so masks do not offer them. */
   showEffects?: boolean;
+  /** The canvas white-balance picker; hosts without a canvas omit it. */
+  isWbPickerActive?: boolean;
+  toggleWbPicker?: () => void;
 }) {
   const { t } = useTranslation();
   const values: V3Controls = { ...defaultV3Controls(), ...adjustments.v3 };
@@ -279,6 +282,20 @@ export default function ColorV3Controls({
       onChange={(e: any) => update('effects', { ...effects, [key]: Number(e.target.value) })}
     />
   );
+  const calibration: V3Calibration = { ...defaultV3Calibration(), ...values.calibration };
+  const calibrationSlider = (key: keyof V3Calibration, label: string) => (
+    <Slider
+      key={`calibration-${key}`}
+      label={label}
+      value={calibration[key]}
+      min={-100}
+      max={100}
+      step={1}
+      defaultValue={0}
+      onDragStateChange={onDragStateChange}
+      onChange={(e: any) => update('calibration', { ...calibration, [key]: Number(e.target.value) })}
+    />
+  );
   const bands = ['Red', 'Orange', 'Yellow', 'Green', 'Aqua', 'Blue', 'Purple', 'Magenta'];
   const wheels = ['Global', 'Shadows', 'Midtones', 'Highlights'];
   const arraySlider = (
@@ -316,6 +333,19 @@ export default function ColorV3Controls({
       )}
       <h3 className="text-sm font-medium text-text-primary">{t('colorV3.tone', { defaultValue: 'Light and tone' })}</h3>
       {slider('exposure', t('colorV3.exposure', { defaultValue: 'Exposure (stops)' }), -5, 5, 0.01)}
+      {toggleWbPicker && (
+        <button
+          type="button"
+          onClick={toggleWbPicker}
+          aria-pressed={isWbPickerActive}
+          className={`self-start rounded-md px-2 py-1 text-xs flex items-center gap-1 transition-colors ${
+            isWbPickerActive ? 'bg-accent text-button-text' : 'bg-surface hover:bg-card-active text-text-primary'
+          }`}
+        >
+          <Pipette size={14} />
+          {t('colorV3.wbPicker', { defaultValue: 'Pick a neutral' })}
+        </button>
+      )}
       {slider('temperature', t('colorV3.temperature', { defaultValue: 'Warmth' }))}
       {slider('tint', t('colorV3.tint', { defaultValue: 'Tint' }))}
       {slider('contrast', t('colorV3.contrast', { defaultValue: 'Contrast' }))}
@@ -396,28 +426,66 @@ export default function ColorV3Controls({
             {t('colorV3.effects', { defaultValue: 'Vignette and grain' })}
           </h3>
           {effectSlider('vignette_amount', t('colorV3.vignette', { defaultValue: 'Vignette' }), -100, 100)}
-          {effectSlider('vignette_midpoint', t('colorV3.vignetteMidpoint', { defaultValue: 'Vignette midpoint' }), 0, 100)}
-          {effectSlider('vignette_roundness', t('colorV3.vignetteRoundness', { defaultValue: 'Vignette roundness' }), -100, 100)}
+          {effectSlider(
+            'vignette_midpoint',
+            t('colorV3.vignetteMidpoint', { defaultValue: 'Vignette midpoint' }),
+            0,
+            100,
+          )}
+          {effectSlider(
+            'vignette_roundness',
+            t('colorV3.vignetteRoundness', { defaultValue: 'Vignette roundness' }),
+            -100,
+            100,
+          )}
           {effectSlider('vignette_feather', t('colorV3.vignetteFeather', { defaultValue: 'Vignette feather' }), 0, 100)}
           {effectSlider('grain_amount', t('colorV3.grain', { defaultValue: 'Grain' }), 0, 100)}
           {effectSlider('grain_size', t('colorV3.grainSize', { defaultValue: 'Grain size' }), 0, 100)}
           {effectSlider('grain_roughness', t('colorV3.grainRoughness', { defaultValue: 'Grain roughness' }), 0, 100)}
           <h3 className="mt-3 text-sm font-medium text-text-primary">
-            {t('colorV3.light', { defaultValue: 'Glow, halation and flare' })}
+            {t('colorV3.light', { defaultValue: 'Film and lens looks' })}
           </h3>
           {effectSlider('glow_amount', t('colorV3.glow', { defaultValue: 'Glow' }), 0, 100)}
           {effectSlider('halation_amount', t('colorV3.halation', { defaultValue: 'Halation' }), 0, 100)}
           {effectSlider('flare_amount', t('colorV3.flare', { defaultValue: 'Light flares' }), 0, 100)}
+          {effectSlider('film_saturation', t('colorV3.filmSaturation', { defaultValue: 'Film saturation' }), 0, 100)}
+          {effectSlider('centre', t('colorV3.centre', { defaultValue: 'Centre' }), -100, 100)}
           <p className="text-xs text-text-secondary leading-relaxed">
             {t('colorV3.lightHelp', {
-              defaultValue: 'These respond to how bright highlights are after exposure, so raising exposure makes more of the picture glow.',
+              defaultValue:
+                'These respond to how bright highlights are after exposure, so raising exposure makes more of the picture glow.',
             })}
           </p>
           <h3 className="mt-3 text-sm font-medium text-text-primary">
             {t('colorV3.lens', { defaultValue: 'Chromatic aberration' })}
           </h3>
           {effectSlider('ca_red_cyan', t('colorV3.caRedCyan', { defaultValue: 'Red / cyan fringe' }), -100, 100)}
-          {effectSlider('ca_blue_yellow', t('colorV3.caBlueYellow', { defaultValue: 'Blue / yellow fringe' }), -100, 100)}
+          {effectSlider(
+            'ca_blue_yellow',
+            t('colorV3.caBlueYellow', { defaultValue: 'Blue / yellow fringe' }),
+            -100,
+            100,
+          )}
+          <h3 className="mt-3 text-sm font-medium text-text-primary">
+            {t('colorV3.calibration', { defaultValue: 'Camera calibration' })}
+          </h3>
+          {calibrationSlider('shadows_tint', t('colorV3.calShadowsTint', { defaultValue: 'Shadows tint' }))}
+          {calibrationSlider('red_hue', t('colorV3.calRedHue', { defaultValue: 'Red primary hue' }))}
+          {calibrationSlider('red_saturation', t('colorV3.calRedSat', { defaultValue: 'Red primary saturation' }))}
+          {calibrationSlider('green_hue', t('colorV3.calGreenHue', { defaultValue: 'Green primary hue' }))}
+          {calibrationSlider(
+            'green_saturation',
+            t('colorV3.calGreenSat', { defaultValue: 'Green primary saturation' }),
+          )}
+          {calibrationSlider('blue_hue', t('colorV3.calBlueHue', { defaultValue: 'Blue primary hue' }))}
+          {calibrationSlider('blue_saturation', t('colorV3.calBlueSat', { defaultValue: 'Blue primary saturation' }))}
+          <div className="mt-3">
+            <FlatFieldControl
+              adjustments={adjustments}
+              setAdjustments={setAdjustments}
+              onDragStateChange={onDragStateChange}
+            />
+          </div>
           <V3LookSection
             adjustments={adjustments}
             setAdjustments={setAdjustments}
