@@ -136,8 +136,11 @@ In Resolve, once:
        Color science:        DaVinci YRGB Color Managed
        Color processing:     DaVinci Wide Gamut (not ACES)
        Timeline colour space: DaVinci WG/Intermediate
-       Output colour space:   Rec.709 Gamma 2.4   (or sRGB, if that is the
-                              transform you actually grade to)
+       Output colour space:   sRGB
+                              (This app tags what it writes as sRGB. Capture
+                              Rec.709 Gamma 2.4 instead only if you also change
+                              the file tagging to match, which is a deliberate
+                              change and not a detail to skip.)
        Untick "Use white point adaptation" and any auto tone/gamut mapping.
   2. Project Settings > Master Settings
        Timeline resolution:  {width} x {height}  (Custom)
