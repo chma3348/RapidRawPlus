@@ -54,6 +54,7 @@ pub fn composite(
     base: &mut Rgba32FImage,
     edits: &Value,
     color: &SourceColor,
+    source_profile: Option<&[u8]>,
     input_transform: Option<&CubeLut>,
 ) -> Result<()> {
     let patches = visible(edits);
@@ -72,7 +73,13 @@ pub fn composite(
             height,
         )?;
         let stored_gamma = data["encoding"].as_str() == Some("gamma");
-        to_source_space(&mut colour, color, stored_gamma, input_transform);
+        to_source_space(
+            &mut colour,
+            color,
+            source_profile,
+            stored_gamma,
+            input_transform,
+        )?;
 
         let mut mask = mask_for(patch, data, width, height)?;
         if feather > 0.0 {
@@ -141,9 +148,10 @@ fn mask_for(patch: &Value, data: &Value, width: u32, height: u32) -> Result<imag
 fn to_source_space(
     colour: &mut image::Rgb32FImage,
     color: &SourceColor,
+    source_profile: Option<&[u8]>,
     stored_gamma: bool,
     input_transform: Option<&CubeLut>,
-) {
+) -> Result<()> {
     if stored_gamma {
         // Linear already, once the storage curve is undone, in the primaries
         // the source was decoded to.
@@ -152,50 +160,59 @@ fn to_source_space(
                 pixel[c] = pixel[c].clamp(0.0, 1.0).powf(STORED_GAMMA);
             }
         }
-        return;
+        return Ok(());
+    }
+    // Display pixels, in the file's own code values: the previous engine's
+    // tools never colour-manage a photograph, so a heal or a fill is made in
+    // whatever space the file is in. Decode them exactly as the photograph
+    // was decoded — through its profile when it has one — or a patch on a
+    // Display P3 file lands duller than the pixels around it.
+    let mut linear = image::ImageBuffer::from_fn(colour.width(), colour.height(), |x, y| {
+        let p = colour.get_pixel(x, y);
+        image::Rgba([p[0], p[1], p[2], 1.0])
+    });
+    match source_profile {
+        Some(icc) => {
+            let profile = moxcms::ColorProfile::new_from_slice(icc).map_err(|e| {
+                anyhow::anyhow!("The photograph's colour profile is unreadable: {e}")
+            })?;
+            linear = crate::color_engine::input::convert_rgb_profile(&linear, &profile)?;
+        }
+        None => {
+            for p in linear.pixels_mut() {
+                for c in 0..3 {
+                    p[c] = srgb_decode(p[c]);
+                }
+            }
+        }
     }
     match (color.reference, input_transform) {
         // The source has been through the input transform, so the patch must
         // be too, or it keeps a rendering the rest of the frame has had
-        // removed.
-        (ReferenceDomain::Scene, Some(cube)) => {
-            let mut rgba = image::ImageBuffer::from_fn(colour.width(), colour.height(), |x, y| {
-                let p = colour.get_pixel(x, y);
-                // `apply_input_transform` re-encodes what it is given, so hand
-                // it linear values.
-                image::Rgba([srgb_decode(p[0]), srgb_decode(p[1]), srgb_decode(p[2]), 1.0])
-            });
-            apply_input_transform(cube, &mut rgba);
-            for (out, src) in colour.pixels_mut().zip(rgba.pixels()) {
-                for c in 0..3 {
-                    out[c] = src[c];
-                }
-            }
-        }
+        // removed. `apply_input_transform` takes linear values, as here.
+        (ReferenceDomain::Scene, Some(cube)) => apply_input_transform(cube, &mut linear),
         _ => {
-            for pixel in colour.pixels_mut() {
-                for c in 0..3 {
-                    pixel[c] = srgb_decode(pixel[c]);
-                }
-            }
-            if color.primaries != Primaries::Srgb {
-                let matrix =
-                    crate::color_engine::spaces::conversion(Primaries::Srgb, color.primaries);
-                for pixel in colour.pixels_mut() {
-                    let v = glam::DVec3::new(pixel[0] as f64, pixel[1] as f64, pixel[2] as f64);
-                    let converted = matrix * v;
-                    pixel[0] = converted.x as f32;
-                    pixel[1] = converted.y as f32;
-                    pixel[2] = converted.z as f32;
-                }
-            }
             debug_assert_eq!(
                 color.transfer,
                 Transfer::Linear,
                 "the input adapter is expected to hand back linear pixels"
             );
+            if color.primaries != Primaries::Srgb {
+                let matrix =
+                    crate::color_engine::spaces::conversion(Primaries::Srgb, color.primaries);
+                for p in linear.pixels_mut() {
+                    let v = matrix * glam::DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64);
+                    p[0] = v.x as f32;
+                    p[1] = v.y as f32;
+                    p[2] = v.z as f32;
+                }
+            }
         }
     }
+    for (out, src) in colour.pixels_mut().zip(linear.pixels()) {
+        out.0 = [src[0], src[1], src[2]];
+    }
+    Ok(())
 }
 
 fn srgb_decode(v: f32) -> f32 {
@@ -248,6 +265,7 @@ mod tests {
             &patch_json(colour, mask, "srgb"),
             &display_source(),
             None,
+            None,
         )
         .unwrap();
         let got = base.get_pixel(0, 0);
@@ -270,6 +288,7 @@ mod tests {
             &patch_json(colour, mask, "gamma"),
             &display_source(),
             None,
+            None,
         )
         .unwrap();
         let want = (128.0f32 / 255.0).powf(STORED_GAMMA);
@@ -288,6 +307,7 @@ mod tests {
             &mut base,
             &patch_json(colour, mask, "srgb"),
             &display_source(),
+            None,
             None,
         )
         .unwrap();
@@ -312,7 +332,7 @@ mod tests {
         edits["aiPatches"][0]["visible"] = Value::Bool(false);
         let mut base = image::ImageBuffer::from_pixel(2, 2, image::Rgba([0.1f32, 0.1, 0.1, 1.0]));
         let before = base.clone();
-        composite(&mut base, &edits, &display_source(), None).unwrap();
+        composite(&mut base, &edits, &display_source(), None, None).unwrap();
         assert_eq!(base, before);
     }
 }

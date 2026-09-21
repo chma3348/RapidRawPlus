@@ -76,7 +76,14 @@ fn sky_patch_round_trip() {
             .to_rgb8();
         // v3: composites onto the linear decoded source.
         let mut frame = rapidraw_lib::color_engine::input::decode_profiled_photo(&bytes).unwrap();
-        patches::composite(&mut frame.pixels, &edits, &frame.color, None).unwrap();
+        patches::composite(
+            &mut frame.pixels,
+            &edits,
+            &frame.color,
+            frame.source_profile.as_deref(),
+            None,
+        )
+        .unwrap();
         assert_eq!(frame.color.reference, ReferenceDomain::Display);
 
         let gap = |pick: &dyn Fn(u32, u32) -> [f32; 3]| {

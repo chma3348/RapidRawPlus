@@ -1204,3 +1204,74 @@ fn advanced_control_contracts(engine: &ColorEngine) {
         "untouched range diluted existing adjustments"
     );
 }
+
+/// A patch made by the previous engine's tools is in the file's own code
+/// values — that engine never colour-manages a JPEG. Composited in v3, a
+/// patch identical to the photograph under it must change nothing, on a
+/// wide-gamut file as much as on an sRGB one.
+#[test]
+fn a_patch_of_the_photo_itself_is_invisible_on_a_p3_file() {
+    use base64::Engine;
+    use rapidraw_lib::color_engine::{input::decode_profiled_photo, patches};
+    let profile = "/System/Library/ColorSync/Profiles/Display P3.icc";
+    if !std::path::Path::new(profile).exists() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let plain = dir.path().join("plain.png");
+    let tagged = dir.path().join("p3.png");
+    // Saturated colours, where P3 and sRGB disagree most.
+    ImageBuffer::from_fn(16, 8, |x, _| {
+        if x < 8 {
+            Rgba([230u8, 40, 30, 255])
+        } else {
+            Rgba([20u8, 200, 60, 255])
+        }
+    })
+    .save(&plain)
+    .unwrap();
+    let ok = std::process::Command::new("sips")
+        .args(["--embedProfile", profile])
+        .arg(&plain)
+        .arg("--out")
+        .arg(&tagged)
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !ok {
+        return;
+    }
+    let bytes = std::fs::read(&tagged).unwrap();
+    // What the previous engine's tools see and write back: the code values.
+    let legacy_base = image::load_from_memory(&bytes).unwrap().to_rgb8();
+    let encode = |image: image::DynamicImage| {
+        let mut out = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut out, image::ImageFormat::Png).unwrap();
+        base64::engine::general_purpose::STANDARD.encode(out.into_inner())
+    };
+    let edits = serde_json::json!({"aiPatches": [{
+        "id": "p", "visible": true, "opacity": 100, "feather": 0,
+        "patchData": {
+            "color": encode(image::DynamicImage::ImageRgb8(legacy_base.clone())),
+            "mask": encode(image::DynamicImage::ImageLuma8(image::GrayImage::from_pixel(16, 8, image::Luma([255])))),
+            "encoding": "linear"
+        }
+    }]});
+    let frame = decode_profiled_photo(&bytes).unwrap();
+    let mut patched = frame.pixels.clone();
+    patches::composite(
+        &mut patched,
+        &edits,
+        &frame.color,
+        frame.source_profile.as_deref(),
+        None,
+    )
+    .unwrap();
+    for (a, b) in frame.pixels.pixels().zip(patched.pixels()) {
+        for c in 0..3 {
+            assert!(
+                (a[c] - b[c]).abs() < 2e-3,
+                "a patch of the photograph itself changed it: {a:?} -> {b:?}"
+            );
+        }
+    }
+}

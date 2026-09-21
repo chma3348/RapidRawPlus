@@ -207,7 +207,7 @@ fn develop(
         crate::image_processing::apply_orientation(DynamicImage::ImageRgba32F(image), orientation)
             .into_rgba32f();
     check_cancel()?;
-    Ok(DecodedFrame { pixels, color: SourceColor {primaries: Primaries::Srgb,transfer: Transfer::Linear,reference: ReferenceDomain::Scene}, provenance: InputProvenance {
+    Ok(DecodedFrame { pixels, color: SourceColor {primaries: Primaries::Srgb,transfer: Transfer::Linear,reference: ReferenceDomain::Scene}, source_profile: None, provenance: InputProvenance {
         decoder_revision: "v3-bayer-input-1-rawler-424cc109", interpretation: "calibrated_scene_linear_srgb".into(),
         profile_hash: None, calibration: Some(record),
         warnings: vec!["Experimental Bayer calibration; no clipped-sensor highlight reconstruction or dual-illuminant interpolation yet.".into()],

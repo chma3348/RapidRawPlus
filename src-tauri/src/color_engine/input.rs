@@ -23,6 +23,11 @@ pub struct DecodedFrame {
     pub pixels: Rgba32FImage,
     pub color: SourceColor,
     pub provenance: InputProvenance,
+    /// The ICC profile a display-referred source was interpreted with, when
+    /// it carried one. Patches made by the previous engine's tools are in
+    /// the file's own code values, and need this same profile to land in
+    /// the same place as the photograph under them.
+    pub source_profile: Option<Vec<u8>>,
 }
 
 /// Returns straight-alpha, linear sRGB coordinates of a display-referred
@@ -155,10 +160,11 @@ pub fn decode_profiled_photo(bytes: &[u8]) -> Result<DecodedFrame> {
         provenance: InputProvenance {
             decoder_revision: "v3-photo-input-1-image-0.25.10-moxcms-0.8.1",
             interpretation: interpretation.into(),
-            profile_hash: icc.map(|p| blake3::hash(&p).to_hex().to_string()),
+            profile_hash: icc.as_ref().map(|p| blake3::hash(p).to_hex().to_string()),
             warnings,
             calibration: None,
         },
+        source_profile: icc,
     })
 }
 
@@ -222,7 +228,10 @@ fn exif_orientation(bytes: &[u8]) -> Option<image::metadata::Orientation> {
     image::metadata::Orientation::from_exif(value as u8)
 }
 
-fn convert_rgb_profile(input: &Rgba32FImage, profile: &ColorProfile) -> Result<Rgba32FImage> {
+pub(crate) fn convert_rgb_profile(
+    input: &Rgba32FImage,
+    profile: &ColorProfile,
+) -> Result<Rgba32FImage> {
     // Match the ICC actually embedded in our exports. ICC colorants are fixed-
     // point; comparing a parsed profile against unquantized built-in colorants
     // introduces a small matrix mismatch, amplified by encoding near black.

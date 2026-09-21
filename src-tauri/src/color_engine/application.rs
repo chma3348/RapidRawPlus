@@ -387,7 +387,13 @@ pub(crate) fn render_file_with_capture(
                 .map(|p| super::cube::CubeLut::load(&p))
                 .transpose()?;
             let mut pixels = source.pixels.clone();
-            super::patches::composite(&mut pixels, edits, &source.color, cube.as_ref())?;
+            super::patches::composite(
+                &mut pixels,
+                edits,
+                &source.color,
+                source.source_profile.as_deref(),
+                cube.as_ref(),
+            )?;
             pixels
         };
         let base = DynamicImage::ImageRgba32F(patched);

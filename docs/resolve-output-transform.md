@@ -201,3 +201,17 @@ half on real photographs.
 
 The Photo page uses the project's colour management, so transforms captured
 on the timeline apply to stills.
+
+## Known limit: wide-gamut sources and the input transform
+
+The captured input transform is Resolve's **sRGB** input transform, and a cube
+only covers 0–1 of the encoding it was captured in. A Display P3 photograph —
+which is what an iPhone writes — is converted through its own profile first,
+so its colours are right, but colours P3 can hold and sRGB cannot fall outside
+the cube and are clipped to its edge before the output transform sees them.
+In Resolve the same file would be tagged P3-D65, not sRGB.
+
+The fix is a second capture with the clip tagged **P3-D65** instead of sRGB,
+installed alongside and chosen by the file's profile. Until then, the most
+saturated colours of a P3 file are held to sRGB's gamut in v3 when the
+Resolve transforms are installed.
