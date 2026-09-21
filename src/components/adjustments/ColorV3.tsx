@@ -420,6 +420,15 @@ export default function ColorV3Controls({
           </p>
         </>
       )}
+      {!showEffects && (
+        <>
+          <h3 className="mt-3 text-sm font-medium text-text-primary">
+            {t('colorV3.localLight', { defaultValue: 'Glow and halation' })}
+          </h3>
+          {effectSlider('glow_amount', t('colorV3.glow', { defaultValue: 'Glow' }), 0, 100)}
+          {effectSlider('halation_amount', t('colorV3.halation', { defaultValue: 'Halation' }), 0, 100)}
+        </>
+      )}
       {showEffects && (
         <>
           <h3 className="mt-3 text-sm font-medium text-text-primary">

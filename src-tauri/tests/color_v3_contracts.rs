@@ -597,6 +597,37 @@ fn detail_contracts(context: &GpuContext) {
         "full-coverage mask detail differs from global detail by {gap}"
     );
     // And a mask at zero opacity does nothing.
+    // Glow inside a full mask is the same light as global glow: both
+    // respond to the picture as exposed, and the constant field glows evenly.
+    let global_glow =
+        json!({"processVersion":3,"v3":{"exposure":2.0,"effects":{"glow_amount":80}},"masks":[]});
+    let mut local_glow = masked.clone();
+    local_glow["v3"] = json!({"exposure": 2.0});
+    local_glow["masks"][0]["adjustments"] = json!({"v3":{"effects":{"glow_amount":80}}});
+    let g = render_file(context, &state, path, &global_glow, None).unwrap();
+    let l = render_file(context, &state, path, &local_glow, None).unwrap();
+    let plain = render_file(
+        context,
+        &state,
+        path,
+        &json!({"processVersion":3,"v3":{"exposure":2.0},"masks":[]}),
+        None,
+    )
+    .unwrap();
+    assert!(
+        g.encoded_srgb.get_pixel(32, 16)[1] > plain.encoded_srgb.get_pixel(32, 16)[1] + 0.005,
+        "global glow did nothing"
+    );
+    for (a, b) in g.encoded_srgb.as_raw().iter().zip(l.encoded_srgb.as_raw()) {
+        assert!(
+            (a - b).abs() < 2e-3,
+            "full-mask glow differs from global glow {a} {b}"
+        );
+    }
+    // Frame effects stay refused in a mask.
+    let mut framed = masked.clone();
+    framed["masks"][0]["adjustments"] = json!({"v3":{"effects":{"vignette_amount":-50}}});
+    assert!(render_file(context, &state, path, &framed, None).is_err());
     masked["masks"][0]["opacity"] = json!(0);
     assert_eq!(
         render_file(context, &state, path, &masked, None)

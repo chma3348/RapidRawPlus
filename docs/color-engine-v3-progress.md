@@ -29,10 +29,11 @@ each with its colour profile honoured. 16-bit export with profile tags.
 **Speed, 24–33 megapixels on this machine.** First preview about 0.3 s; a
 slider move about 11 ms, 28 ms with masks; export about 1 s plus detail.
 
-**Not in v3.** Whole-frame effects inside masks (vignette, grain, glow,
-halation, flare, Centre, film saturation, chromatic aberration, LUTs): they
-describe the frame, and a mask carrying them is refused with a message. The
-previous engine allowed glow and halation per mask; that is the one real loss.
+**Not in v3.** Frame effects inside masks (vignette, grain, flare, Centre,
+film saturation, chromatic aberration, LUTs): they describe the frame, and a
+mask carrying them is refused with a message. Glow and halation work inside
+masks, as they did before, on the working image like local detail; a
+full-coverage mask matches global glow.
 The grading controls are v3's own, not yet Resolve's: matching them is
 prepared (`docs/resolve-controls.md`) and waits on fourteen captures.
 

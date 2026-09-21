@@ -606,12 +606,26 @@ pub(crate) fn render_file_with_capture(
         // Vignette, grain and the lens effects describe the whole frame; a
         // mask carrying them would be applying a frame effect to part of a
         // frame.
+        // Glow and halation are the exception, as they were in the previous
+        // engine: light spilling from one part of the picture is a local
+        // idea, and they run on the working image like local detail.
+        let local_light = super::controls::Effects {
+            glow_amount: local.effects.glow_amount,
+            halation_amount: local.effects.halation_amount,
+            ..Default::default()
+        };
         ensure!(
-            local.effects.is_neutral(),
-            "Vignette, grain and lens effects apply to the whole photo, not inside a mask."
+            super::controls::Effects {
+                glow_amount: 0.,
+                halation_amount: 0.,
+                ..local.effects.clone()
+            }
+            .is_neutral(),
+            "Vignette, grain, flare, Centre and lens corrections apply to the whole photo, not inside a mask."
         );
+        let light_is_neutral = super::optics::light_is_neutral(&local_light);
         // `is_neutral` is about the pointwise pass; detail is its own stage.
-        if local.is_neutral() && local.detail.is_neutral() {
+        if local.is_neutral() && local.detail.is_neutral() && light_is_neutral {
             continue;
         }
         let bitmap = mask_bitmap(
@@ -631,11 +645,13 @@ pub(crate) fn render_file_with_capture(
         // primaries it is measured in, so this does to the picture what the
         // global stage would: a full-coverage mask matches global detail.
         let detailed;
-        let input = if local.detail.is_neutral() {
+        let input = if local.detail.is_neutral() && light_is_neutral {
             &working
         } else {
             let mut copy = working.clone();
             super::detail::apply(&mut copy, &local.detail, working_luminance, scale);
+            // The working image is already exposed, so no further gain.
+            super::optics::add_light(&mut copy, &local_light, 0., Primaries::DavinciWideGamut);
             detailed = copy;
             &detailed
         };
