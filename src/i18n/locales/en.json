@@ -787,7 +787,8 @@
         "info": "Info",
         "inpaint": "Inpaint",
         "masks": "Masks",
-        "presets": "Presets"
+        "presets": "Presets",
+        "sky": "Sky Replace"
       }
     },
     "toolbar": {

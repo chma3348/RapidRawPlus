@@ -87,6 +87,10 @@ export enum Invokes {
   LoadImage = 'load_image',
   LoadVideoInfo = 'load_video_info',
   SaveVideoFrame = 'save_video_frame',
+  ListSkyPlates = 'list_sky_plates',
+  PrepareSkyReplacement = 'prepare_sky_replacement',
+  PreviewSkyReplacement = 'preview_sky_replacement',
+  ApplySkyReplacement = 'apply_sky_replacement',
   LoadMetadata = 'load_metadata',
   LoadPresets = 'load_presets',
   LoadSettings = 'load_settings',
@@ -154,6 +158,7 @@ export enum Panel {
   Masks = 'masks',
   Metadata = 'metadata',
   Presets = 'presets',
+  Sky = 'sky',
 }
 
 export enum RawStatus {

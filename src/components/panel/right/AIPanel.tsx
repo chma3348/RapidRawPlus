@@ -2153,7 +2153,21 @@ function SettingsPanel({
       </div>
       )}
 
-      {(container as any)?.patchType !== 'heal' && (
+      {(container as any)?.patchType === 'sky' && (
+      <div className="p-2 bg-bg-tertiary rounded-md">
+        <Text variant={TextVariants.heading} className="mb-2">
+          {t('editor.ai.settings.skyTitle', { defaultValue: 'Replaced sky' })}
+        </Text>
+        <Text variant={TextVariants.small} className="block text-text-secondary">
+          {t('editor.ai.settings.skyHint', {
+            defaultValue:
+              'Made by Sky Replace. Hide or fade it here; to change the sky itself, open the Sky panel.',
+          })}
+        </Text>
+      </div>
+      )}
+
+      {(container as any)?.patchType !== 'heal' && (container as any)?.patchType !== 'sky' && (
       <CollapsibleSection
         title={t('editor.ai.settings.generativeReplaceTitle')}
         isOpen={collapsibleState.generative}

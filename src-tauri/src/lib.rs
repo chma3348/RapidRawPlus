@@ -16,6 +16,7 @@ mod app_state;
 pub mod auto_level;
 pub mod scene_masks;
 pub mod sky_replace;
+pub mod sky_commands;
 pub mod white_balance;
 pub mod video;
 mod cache_utils;
@@ -2388,6 +2389,10 @@ pub fn run() {
             file_management::get_supported_file_types,
             file_management::load_video_info,
             file_management::save_video_frame,
+            sky_commands::list_sky_plates,
+            sky_commands::prepare_sky_replacement,
+            sky_commands::preview_sky_replacement,
+            sky_commands::apply_sky_replacement,
             file_management::read_exif_for_paths,
             file_management::list_images_in_dir,
             file_management::list_images_recursive,

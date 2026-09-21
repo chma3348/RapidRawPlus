@@ -146,6 +146,9 @@ pub struct AppState {
     /// A rendering transform captured from this machine's Resolve, when one
     /// has been installed. Resolved once at startup, not per render.
     pub output_transform: Mutex<Option<PathBuf>>,
+    /// The current photograph's sky, found once and reused while a plate is
+    /// chosen and adjusted.
+    pub sky_session: Mutex<Option<crate::sky_commands::SkySession>>,
     /// The matching input transform, which undoes the rendering a photograph
     /// already carries. Without it, rendered sources keep the built-in path.
     pub input_transform: Mutex<Option<PathBuf>>,
@@ -255,6 +258,7 @@ impl Default for AppState {
             decoded_image_cache: Mutex::new(DecodedImageCache::new(5)),
             thumbnail_manager: ThumbnailManager::new(),
             output_transform: Mutex::new(None),
+            sky_session: Mutex::new(None),
             input_transform: Mutex::new(None),
             model_registry: Mutex::new(None),
             comfy_process: Mutex::new(None),
