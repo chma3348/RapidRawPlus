@@ -48,6 +48,9 @@ pub enum OutputRendering {
     SceneLuminanceV2,
     /// As `DisplayGamutV1`, with the same soft chroma compression.
     DisplayGamutV2,
+    /// A rendering transform captured from DaVinci Resolve on this machine,
+    /// applied in DaVinci Intermediate. Requires `output_lut`.
+    ResolveCubeV1,
 }
 
 /// Input interpretation must be explicit. Creative controls default to neutral;
@@ -59,6 +62,10 @@ pub struct PipelineConfig {
     pub source: SourceColor,
     pub working_space: Primaries,
     pub output_rendering: OutputRendering,
+    /// The captured cube, for `ResolveCubeV1` only. Its contents, not its
+    /// path, are what the render is keyed on.
+    #[serde(default)]
+    pub output_lut: Option<std::path::PathBuf>,
     #[serde(default)]
     pub controls: super::controls::Controls,
 }

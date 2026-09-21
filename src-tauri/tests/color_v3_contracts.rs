@@ -13,6 +13,7 @@ fn config() -> PipelineConfig {
             reference: ReferenceDomain::Display,
         },
         working_space: Primaries::DavinciWideGamut,
+        output_lut: None,
         output_rendering: OutputRendering::DisplayPassthroughV1,
     }
 }
@@ -402,6 +403,7 @@ fn gpu_color_pipeline_contracts() {
             "display gamut transform changed in-gamut input: {a} -> {b}"
         );
     }
+    captured_transform_contracts(&engine);
     application_contracts(&context);
     advanced_control_contracts(&engine);
     output_and_grading_contracts(&engine);
@@ -538,6 +540,91 @@ fn application_contracts(context: &GpuContext) {
 /// The behaviours changed alongside the soft gamut mapper: wheels keyed to the
 /// tone-mapped image, a shadow wheel that can lift black, and out-of-gamut
 /// colours that stay distinguishable.
+/// A transform captured from Resolve is only worth having if what runs on the
+/// GPU is the transform that was captured.
+fn captured_transform_contracts(engine: &ColorEngine) {
+    use rapidraw_lib::color_engine::cube::CubeLut;
+    let size = 17usize;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("captured.cube");
+    // A deliberately awkward stand-in for a rendering transform: per-channel
+    // curves plus cross-channel mixing, so a lookup that quietly ignored an
+    // axis or transposed two of them could not pass.
+    let mut text = format!("LUT_3D_SIZE {size}\n");
+    let axis = |i: usize| i as f32 / (size - 1) as f32;
+    for b in 0..size {
+        for g in 0..size {
+            for r in 0..size {
+                let (r, g, b) = (axis(r), axis(g), axis(b));
+                text.push_str(&format!(
+                    "{} {} {}\n",
+                    (r * 0.8 + g * 0.2).powf(1.6),
+                    (g * 0.9 + b * 0.1).powf(0.8),
+                    (b * 0.7 + r * 0.3).powf(1.2)
+                ));
+            }
+        }
+    }
+    std::fs::write(&path, &text).unwrap();
+    let cube = CubeLut::parse(&text).unwrap();
+
+    let mut c = config();
+    c.source.transfer = Transfer::Linear;
+    c.output_rendering = OutputRendering::ResolveCubeV1;
+    c.output_lut = Some(path.clone());
+    // A cube is required for this rendering, and forbidden for the others.
+    let mut missing = c.clone();
+    missing.output_lut = None;
+    assert!(RenderPlan::build(missing).is_err());
+    let mut stray = config();
+    stray.output_lut = Some(path.clone());
+    assert!(RenderPlan::build(stray).is_err());
+
+    // Values spanning the working range, including above white and below
+    // black, since the cube's domain is a log encoding of exactly that.
+    let probe = ImageBuffer::from_fn(64, 1, |x, _| {
+        let t = x as f32 / 63.0;
+        Rgba([
+            (t * 8.0).powf(2.0) - 0.01,
+            0.02 + t * 1.2,
+            (1.0 - t) * 3.0,
+            1.0,
+        ])
+    });
+    let rendered = engine
+        .render(&probe, &RenderPlan::build(c.clone()).unwrap(), true)
+        .unwrap();
+    let graded = rendered.stages.as_ref().unwrap().graded.clone();
+    for (working, out) in graded.pixels().zip(rendered.encoded_srgb.pixels()) {
+        let logged: [f32; 3] = std::array::from_fn(|i| {
+            spaces::encode_intermediate(working[i] as f64) as f32
+        });
+        let want = cube.sample(logged);
+        for c in 0..3 {
+            // Tetrahedral on the GPU against trilinear here: they agree
+            // exactly on the lattice and differ only inside a cell.
+            assert!(
+                (out[c] - want[c]).abs() < 4e-3,
+                "captured transform not applied as captured: {out:?} vs {want:?}"
+            );
+        }
+    }
+
+    // And nothing may encode after it: the cube's output is already display
+    // values, so a second sRGB encode would lift the whole image.
+    let flat = ImageBuffer::from_pixel(1, 1, Rgba([0.18f32, 0.18, 0.18, 1.0]));
+    let out = engine
+        .render(&flat, &RenderPlan::build(c).unwrap(), false)
+        .unwrap();
+    let logged = spaces::encode_intermediate(0.18) as f32;
+    let want = cube.sample([logged; 3]);
+    assert!(
+        (out.encoded_srgb.get_pixel(0, 0)[0] - want[0]).abs() < 4e-3,
+        "a second encode ran after the captured transform: {:?} vs {want:?}",
+        out.encoded_srgb.get_pixel(0, 0)
+    );
+}
+
 fn output_and_grading_contracts(engine: &ColorEngine) {
     let render = |c: PipelineConfig, image: &image::Rgba32FImage| {
         engine

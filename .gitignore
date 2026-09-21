@@ -39,3 +39,6 @@ src-tauri/libs/
 **/keystore.properties
 **/keystore.jks
 **/key.properties
+
+# A captured rendering transform is derived from Blackmagic's and is local-only.
+*.cube

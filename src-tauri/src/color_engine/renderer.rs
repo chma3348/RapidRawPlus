@@ -186,6 +186,17 @@ impl ColorEngine {
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        // Always bound: the layout is fixed, so a plan without a captured
+        // transform still supplies one entry for the binding to point at.
+        let cube = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("V3 output transform"),
+            contents: bytemuck::cast_slice(
+                plan.cube
+                    .as_ref()
+                    .map_or(&[[0.0f32; 4]][..], |c| c.entries.as_slice()),
+            ),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
         let parameters = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("V3 parameters"),
             contents: bytemuck::bytes_of(&plan.parameters),
@@ -206,6 +217,10 @@ impl ColorEngine {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: parameters.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: cube.as_entire_binding(),
                 },
             ],
         });

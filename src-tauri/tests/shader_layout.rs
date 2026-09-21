@@ -164,6 +164,10 @@ fn shader_compiles_and_struct_layout_matches() {
             binding: 11,
             resource: wgpu::BindingResource::Sampler(&sampler),
         },
+        wgpu::BindGroupEntry {
+            binding: 12,
+            resource: wgpu::BindingResource::TextureView(&view(&lut, TVD::D3)),
+        },
     ];
     let _bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("layout probe"),

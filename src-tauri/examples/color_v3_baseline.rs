@@ -232,6 +232,7 @@ fn main() -> Result<()> {
                 process_version: 3,
                 source: color.clone(),
                 working_space: Primaries::DavinciWideGamut,
+                output_lut: None,
                 output_rendering: rendering,
                 controls: case.controls.clone(),
             })?;

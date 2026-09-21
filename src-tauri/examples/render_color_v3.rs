@@ -37,6 +37,7 @@ fn main() -> Result<()> {
             process_version: 3,
             source: decoded.color,
             working_space: Primaries::DavinciWideGamut,
+            output_lut: None,
             output_rendering,
         };
         (decoded.pixels, config, Some(decoded.provenance))

@@ -1,4 +1,4 @@
-use super::{config::*, spaces};
+use super::{config::*, cube::CubeLut, spaces};
 use anyhow::{Result, ensure};
 use bytemuck::{Pod, Zeroable};
 
@@ -29,6 +29,7 @@ pub(crate) struct GpuParameters {
 pub struct RenderPlan {
     config: PipelineConfig,
     pub(crate) parameters: GpuParameters,
+    pub(crate) cube: Option<CubeLut>,
 }
 
 impl RenderPlan {
@@ -50,6 +51,12 @@ impl RenderPlan {
                     | (ReferenceDomain::Scene, OutputRendering::SceneLuminanceV2)
                     | (ReferenceDomain::Display, OutputRendering::DisplayGamutV1)
                     | (ReferenceDomain::Display, OutputRendering::DisplayGamutV2)
+                    // A captured transform stands in for the whole rendering
+                    // step, so it is the right end for either kind of source:
+                    // it is what Resolve itself applies after its own input
+                    // transform has brought the source into the timeline.
+                    | (ReferenceDomain::Scene, OutputRendering::ResolveCubeV1)
+                    | (ReferenceDomain::Display, OutputRendering::ResolveCubeV1)
                     | (
                         ReferenceDomain::Display,
                         OutputRendering::DisplayPassthroughV1
@@ -57,6 +64,16 @@ impl RenderPlan {
             ),
             "Output rendering must match the source reference domain; refusing a double/missing display transform"
         );
+        let wants_cube = config.output_rendering == OutputRendering::ResolveCubeV1;
+        ensure!(
+            wants_cube == config.output_lut.is_some(),
+            "ResolveCubeV1 needs an output_lut, and the other renderings must not carry one"
+        );
+        let cube = config
+            .output_lut
+            .as_ref()
+            .map(|path| CubeLut::load(path))
+            .transpose()?;
         let packed = |matrix: glam::DMat3| {
             matrix
                 .to_cols_array_2d()
@@ -98,6 +115,7 @@ impl RenderPlan {
                     OutputRendering::DisplayGamutV1 => 3,
                     OutputRendering::SceneLuminanceV2 => 4,
                     OutputRendering::DisplayGamutV2 => 5,
+                    OutputRendering::ResolveCubeV1 => 6,
                 },
                 0,
                 0,
@@ -109,7 +127,7 @@ impl RenderPlan {
                 u32::from(!c.is_neutral()),
                 u32::from(!c.tone_is_neutral()),
                 u32::from(!c.color_is_neutral()),
-                0,
+                cube.as_ref().map_or(0, |c| c.size),
             ],
             tone: [
                 (c.contrast / 100.).exp2(),
@@ -168,7 +186,11 @@ impl RenderPlan {
                 })
             }),
         };
-        Ok(Self { config, parameters })
+        Ok(Self {
+            config,
+            parameters,
+            cube,
+        })
     }
 
     pub fn config(&self) -> &PipelineConfig {
@@ -182,6 +204,10 @@ impl RenderPlan {
         let mut hash = blake3::Hasher::new();
         hash.update(b"rapidraw-color-v3-controls-1\0");
         hash.update(&serde_json::to_vec(&self.config).expect("validated finite config"));
+        // The cube's contents, not the path it was read from.
+        if let Some(cube) = &self.cube {
+            hash.update(cube.digest.as_bytes());
+        }
         hash.update(source_revision.as_bytes());
         hash.finalize().to_hex().to_string()
     }

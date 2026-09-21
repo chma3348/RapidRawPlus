@@ -143,6 +143,9 @@ pub struct AppState {
     pub window_setup_complete: AtomicBool,
     pub gpu_crash_flag_path: Mutex<Option<PathBuf>>,
     pub original_image: Mutex<Option<LoadedImage>>,
+    /// A rendering transform captured from this machine's Resolve, when one
+    /// has been installed. Resolved once at startup, not per render.
+    pub output_transform: Mutex<Option<PathBuf>>,
     pub v3_source: Mutex<Option<crate::color_engine::application::SourceCache>>,
     pub v3_engine: Mutex<Option<crate::color_engine::application::EngineCache>>,
     pub v3_prepared: Mutex<Option<crate::color_engine::application::PreparedCache>>,
@@ -235,6 +238,7 @@ impl Default for AppState {
             full_transformed_cache: Mutex::new(None),
             decoded_image_cache: Mutex::new(DecodedImageCache::new(5)),
             thumbnail_manager: ThumbnailManager::new(),
+            output_transform: Mutex::new(None),
             model_registry: Mutex::new(None),
             comfy_process: Mutex::new(None),
         }

@@ -4,6 +4,7 @@ use super::{
     plan::RenderPlan,
 };
 use crate::{AppState, image_processing::GpuContext};
+use std::path::PathBuf;
 use anyhow::{Context, Result, ensure};
 use image::DynamicImage;
 use serde_json::Value;
@@ -90,18 +91,35 @@ pub fn validate_features(edits: &Value) -> Result<()> {
     Ok(())
 }
 
-fn plan(color: SourceColor, controls: Controls) -> Result<RenderPlan> {
-    let output_rendering = match color.reference {
-        ReferenceDomain::Scene => OutputRendering::SceneLuminanceV2,
-        ReferenceDomain::Display => OutputRendering::DisplayGamutV2,
+/// The rendering step, and where a captured transform displaces it.
+///
+/// `output_transform` is the cube captured from this machine's Resolve, when
+/// one has been installed. It replaces the built-in rendering entirely rather
+/// than running after it — two rendering transforms in series is the mistake
+/// the whole pipeline is arranged to avoid.
+fn plan(
+    color: SourceColor,
+    controls: Controls,
+    output_transform: Option<PathBuf>,
+) -> Result<RenderPlan> {
+    let output_rendering = match (&output_transform, color.reference) {
+        (Some(_), _) => OutputRendering::ResolveCubeV1,
+        (None, ReferenceDomain::Scene) => OutputRendering::SceneLuminanceV2,
+        (None, ReferenceDomain::Display) => OutputRendering::DisplayGamutV2,
     };
     RenderPlan::build(PipelineConfig {
         process_version: 3,
         source: color,
         working_space: Primaries::DavinciWideGamut,
         output_rendering,
+        output_lut: output_transform,
         controls,
     })
+}
+
+/// The captured transform this session renders through, if any.
+pub fn output_transform(state: &AppState) -> Option<PathBuf> {
+    state.output_transform.lock().unwrap().clone()
 }
 
 /// `max_dimension` only changes spatial sampling; source decode and all color
@@ -188,7 +206,7 @@ pub(crate) fn render_file_with_capture(
     let engine = &cache.as_ref().unwrap().engine;
     let initial = engine.render(
         &image.to_rgba32f(),
-        &plan(source.color.clone(), controls)?,
+        &plan(source.color.clone(), controls, output_transform(state))?,
         capture || !active.is_empty(),
     )?;
     if active.is_empty() {
@@ -218,7 +236,7 @@ pub(crate) fn render_file_with_capture(
         )
         .context("Could not generate v3 mask")?;
         let adjusted = engine
-            .render(&working, &plan(working_color.clone(), local)?, true)?
+            .render(&working, &plan(working_color.clone(), local, None)?, true)?
             .stages
             .context("Missing mask stage")?
             .graded;
@@ -233,7 +251,13 @@ pub(crate) fn render_file_with_capture(
             }
         }
     }
-    engine.render(&working, &plan(working_color, Controls::default())?, false)
+    // Only this last pass produces output, so only it renders through the
+    // captured transform.
+    engine.render(
+        &working,
+        &plan(working_color, Controls::default(), output_transform(state))?,
+        false,
+    )
 }
 
 #[tauri::command]

@@ -86,3 +86,66 @@ fn render_output(input:vec3<f32>,mode:u32) -> vec3<f32> {
     if mode>=4u {return gamut_compress(rgb);}
     return gamut_project(rgb);
 }
+
+// --- Captured rendering transform -------------------------------------------
+// The cube's domain is DaVinci Intermediate and its output is already
+// display-encoded, so nothing encodes after it.
+fn encode_intermediate(v: f32) -> f32 {
+    if v <= 0.00262409 { return v * 10.44426855; }
+    return (log2(max(v + 0.0075, 1e-10)) + 7.0) * 0.07329248;
+}
+
+fn cube_at(r: u32, g: u32, b: u32) -> vec3<f32> {
+    let size = parameters.flags.w;
+    return cube[r + (g + b * size) * size].rgb;
+}
+
+// Tetrahedral rather than trilinear: it is what LUT engines use, it keeps the
+// neutral axis exact, and on a transform this smooth it costs four lookups
+// instead of eight.
+fn cube_lookup(coordinate: vec3<f32>) -> vec3<f32> {
+    let last = f32(parameters.flags.w - 1u);
+    let scaled = clamp(coordinate, vec3<f32>(0.0), vec3<f32>(1.0)) * last;
+    let base = min(floor(scaled), vec3<f32>(last - 1.0));
+    let f = scaled - base;
+    let i = vec3<u32>(base);
+    let c000 = cube_at(i.x, i.y, i.z);
+    let c111 = cube_at(i.x + 1u, i.y + 1u, i.z + 1u);
+    if f.x >= f.y {
+        if f.y >= f.z {
+            let c100 = cube_at(i.x + 1u, i.y, i.z);
+            let c110 = cube_at(i.x + 1u, i.y + 1u, i.z);
+            return c000 + (c100 - c000) * f.x + (c110 - c100) * f.y + (c111 - c110) * f.z;
+        }
+        if f.x >= f.z {
+            let c100 = cube_at(i.x + 1u, i.y, i.z);
+            let c101 = cube_at(i.x + 1u, i.y, i.z + 1u);
+            return c000 + (c100 - c000) * f.x + (c111 - c101) * f.y + (c101 - c100) * f.z;
+        }
+        let c001 = cube_at(i.x, i.y, i.z + 1u);
+        let c101 = cube_at(i.x + 1u, i.y, i.z + 1u);
+        return c000 + (c101 - c001) * f.x + (c111 - c101) * f.y + (c001 - c000) * f.z;
+    }
+    if f.z > f.y {
+        let c001 = cube_at(i.x, i.y, i.z + 1u);
+        let c011 = cube_at(i.x, i.y + 1u, i.z + 1u);
+        return c000 + (c111 - c011) * f.x + (c011 - c001) * f.y + (c001 - c000) * f.z;
+    }
+    if f.z > f.x {
+        let c010 = cube_at(i.x, i.y + 1u, i.z);
+        let c011 = cube_at(i.x, i.y + 1u, i.z + 1u);
+        return c000 + (c111 - c011) * f.x + (c010 - c000) * f.y + (c011 - c010) * f.z;
+    }
+    let c010 = cube_at(i.x, i.y + 1u, i.z);
+    let c110 = cube_at(i.x + 1u, i.y + 1u, i.z);
+    return c000 + (c110 - c010) * f.x + (c010 - c000) * f.y + (c111 - c110) * f.z;
+}
+
+/// Working linear DWG straight to display-encoded output.
+fn render_captured(working: vec3<f32>) -> vec3<f32> {
+    let logged = vec3<f32>(
+        encode_intermediate(working.r),
+        encode_intermediate(working.g),
+        encode_intermediate(working.b));
+    return clamp(cube_lookup(logged), vec3<f32>(0.0), vec3<f32>(1.0));
+}

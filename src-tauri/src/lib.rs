@@ -2143,6 +2143,32 @@ pub fn run() {
                     );
                 }
 
+                // A rendering transform captured from this machine's Resolve,
+                // installed by dropping the .cube here. Resolved once, and
+                // said out loud: what renders the picture should never be a
+                // silent consequence of a file existing.
+                if let Ok(data_dir) = app.path().app_data_dir() {
+                    let cube = data_dir.join("output-transform.cube");
+                    if cube.is_file() {
+                        match crate::color_engine::cube::CubeLut::load(&cube) {
+                            Ok(lut) => {
+                                log::info!(
+                                    "Color v3 renders through the captured transform at {} (size {}, {})",
+                                    cube.display(),
+                                    lut.size,
+                                    &lut.digest[..12]
+                                );
+                                *app.state::<AppState>().output_transform.lock().unwrap() =
+                                    Some(cube);
+                            }
+                            Err(error) => log::error!(
+                                "Ignoring {}: {error}. Color v3 keeps its built-in rendering.",
+                                cube.display()
+                            ),
+                        }
+                    }
+                }
+
                 if let Ok(config_dir) = app.path().app_config_dir() {
                     let path = config_dir.join("window_state.json");
                     if let Ok(contents) = std::fs::read_to_string(&path) {
