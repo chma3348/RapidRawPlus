@@ -159,6 +159,9 @@ pub struct AppState {
     /// The prepared image with detail applied. Detail is spatial and the
     /// slowest v3 stage, so moving any other slider must not redo it.
     pub v3_detail: Mutex<Option<crate::color_engine::application::DetailCache>>,
+    /// Rendered v3 mask bitmaps, keyed by everything that shapes them. Moving
+    /// a global slider does not move a mask, so it must not rebuild one.
+    pub v3_masks: Mutex<std::collections::HashMap<u64, std::sync::Arc<image::GrayImage>>>,
     pub cached_preview: Mutex<Option<CachedPreview>>,
     pub gpu_context: Mutex<Option<GpuContext>>,
     pub gpu_image_cache: Mutex<Option<GpuImageCache>>,
@@ -217,6 +220,7 @@ impl Default for AppState {
             v3_prepared: Mutex::new(None),
             v3_sampling: Mutex::new(None),
             v3_detail: Mutex::new(None),
+            v3_masks: Mutex::new(std::collections::HashMap::new()),
             cached_preview: Mutex::new(None),
             gpu_context: Mutex::new(None),
             gpu_image_cache: Mutex::new(None),

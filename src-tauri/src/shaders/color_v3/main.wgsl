@@ -43,6 +43,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         results[id.x*3u] = vec4<f32>(working, pixel.a);
         results[id.x*3u+1u] = vec4<f32>(graded, pixel.a);
         results[id.x*3u+2u] = vec4<f32>(encoded, pixel.a);
+    } else if parameters.modes.w == 2u {
+        // Graded only: what a local adjustment consumes, at a third of the
+        // readback of a full capture.
+        results[id.x] = vec4<f32>(graded, pixel.a);
     } else {
         results[id.x] = vec4<f32>(encoded, pixel.a);
     }

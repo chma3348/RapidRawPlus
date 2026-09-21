@@ -118,6 +118,9 @@ fn uniform(x: u32, y: u32, channel: u32) -> f32 {
 pub struct ColorEngine {
     context: GpuContext,
     pipeline: wgpu::ComputePipeline,
+    /// Largest chunk, in pixels. Only tests change it, to force chunk
+    /// boundaries through images small enough to check pixel by pixel.
+    chunk_pixels: usize,
 }
 
 impl ColorEngine {
@@ -139,17 +142,49 @@ impl ColorEngine {
         if let Some(error) = pollster::block_on(scope.pop()) {
             return Err(anyhow!("V3 shader validation failed: {error}"));
         }
-        Ok(Self { context, pipeline })
+        Ok(Self {
+            context,
+            pipeline,
+            chunk_pixels: 1 << 22,
+        })
     }
 
     /// Bounded buffer dispatch avoids full-photo intermediate GPU allocations.
     /// No spatial operations yet: chunk boundaries cannot change pixel results.
+    /// The same engine with a smaller chunk, so a test can put boundaries
+    /// wherever it likes.
+    pub fn with_chunk_pixels(mut self, pixels: usize) -> Self {
+        self.chunk_pixels = pixels.max(1);
+        self
+    }
+
     pub fn render(
         &self,
         input: &Rgba32FImage,
         plan: &RenderPlan,
         capture: bool,
     ) -> Result<RenderedFrame> {
+        let (output, stages) = self.run(input, plan, if capture { 1 } else { 0 })?;
+        Ok(RenderedFrame {
+            encoded_srgb: output,
+            stages,
+        })
+    }
+
+    /// Only the graded working-space stage: what local adjustments consume.
+    /// Reads back a third of what a full capture does.
+    pub fn render_graded(&self, input: &Rgba32FImage, plan: &RenderPlan) -> Result<Rgba32FImage> {
+        Ok(self.run(input, plan, 2)?.0)
+    }
+
+    /// `mode`: 0 encoded output, 1 every stage, 2 graded only.
+    fn run(
+        &self,
+        input: &Rgba32FImage,
+        plan: &RenderPlan,
+        mode: u32,
+    ) -> Result<(Rgba32FImage, Option<StageCapture>)> {
+        let capture = mode == 1;
         let (width, height) = input.dimensions();
         ensure!(width > 0 && height > 0, "Cannot render an empty image");
         ensure!(
@@ -162,7 +197,12 @@ impl ColorEngine {
         let queue = &self.context.queue;
         let limits = device.limits();
         let stride = if capture { 48 } else { 16 };
-        let capacity = 65536usize
+        // Every chunk is a full CPU/GPU round trip, so chunk size decides the
+        // interactive cost: at 65,536 pixels a preview pass made 26 of them
+        // and took 44 ms. Four megapixels covers a whole preview in one, and
+        // still bounds GPU memory for a full-resolution export.
+        let capacity = self
+            .chunk_pixels
             .min(limits.max_storage_buffer_binding_size as usize / stride)
             .min(limits.max_buffer_size as usize / stride)
             .min(limits.max_compute_workgroups_per_dimension as usize * 64)
@@ -231,7 +271,7 @@ impl ColorEngine {
             let count = chunk.len() / 4;
             let mut params = plan.parameters;
             params.modes[2] = count as u32;
-            params.modes[3] = u32::from(capture);
+            params.modes[3] = mode;
             queue.write_buffer(&source, 0, bytemuck::cast_slice(chunk));
             queue.write_buffer(&parameters, 0, bytemuck::bytes_of(&params));
             let mut encoder = device.create_command_encoder(&Default::default());
@@ -255,38 +295,35 @@ impl ColorEngine {
             rx.recv_timeout(std::time::Duration::from_secs(30))??;
             {
                 let mapped = slice.get_mapped_range();
-                for pixel in mapped.chunks_exact(stride) {
-                    let mut channels = [0.0; 12];
-                    for (dst, src) in channels.iter_mut().zip(pixel.chunks_exact(4)) {
-                        *dst = f32::from_le_bytes(src.try_into().expect("four bytes"));
+                let floats: &[f32] = bytemuck::cast_slice(&mapped);
+                ensure!(
+                    floats.iter().all(|v| v.is_finite()),
+                    "V3 produced a non-finite pixel; check input range"
+                );
+                if capture {
+                    for pixel in floats.chunks_exact(12) {
+                        if let Some(v) = &mut working {
+                            v.extend_from_slice(&pixel[..4]);
+                        }
+                        if let Some(v) = &mut graded {
+                            v.extend_from_slice(&pixel[4..8]);
+                        }
+                        output.extend_from_slice(&pixel[8..]);
                     }
-                    ensure!(
-                        channels.iter().all(|v| v.is_finite()),
-                        "V3 produced a non-finite pixel; check input range"
-                    );
-                    if let Some(v) = &mut working {
-                        v.extend_from_slice(&channels[..4]);
-                    }
-                    if let Some(v) = &mut graded {
-                        v.extend_from_slice(&channels[4..8]);
-                    }
-                    output.extend_from_slice(if capture {
-                        &channels[8..]
-                    } else {
-                        &channels[..4]
-                    });
+                } else {
+                    output.extend_from_slice(floats);
                 }
             }
             readback.unmap();
         }
         let image =
             |data| ImageBuffer::from_raw(width, height, data).expect("validated dimensions");
-        Ok(RenderedFrame {
-            encoded_srgb: image(output),
-            stages: working.zip(graded).map(|(w, g)| StageCapture {
+        Ok((
+            image(output),
+            working.zip(graded).map(|(w, g)| StageCapture {
                 working: image(w),
                 graded: image(g),
             }),
-        })
+        ))
     }
 }

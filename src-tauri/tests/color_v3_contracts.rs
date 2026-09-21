@@ -188,6 +188,35 @@ fn gpu_color_pipeline_contracts() {
     let uncaptured = engine.render(&input, &plan, false).unwrap();
     assert!(uncaptured.stages.is_none());
     assert_eq!(uncaptured.encoded_srgb, result.encoded_srgb);
+    // Chunk boundaries must not change a pixel. The production chunk holds a
+    // whole preview, so force boundaries — including awkward, non-row-aligned
+    // ones — with engines that use small chunks, in every readback mode.
+    let mut graded_plan_config = config();
+    graded_plan_config.controls.exposure = 0.7;
+    graded_plan_config.controls.saturation = 30.0;
+    let graded_plan = RenderPlan::build(graded_plan_config).unwrap();
+    let reference = engine.render(&input, &graded_plan, true).unwrap();
+    let reference_graded = engine.render_graded(&input, &graded_plan).unwrap();
+    for pixels in [1000, 4096, 65536] {
+        let small = ColorEngine::new(context.clone()).unwrap().with_chunk_pixels(pixels);
+        let chunked = small.render(&input, &graded_plan, true).unwrap();
+        assert_eq!(chunked.encoded_srgb, reference.encoded_srgb, "{pixels}-pixel chunks changed output");
+        assert_eq!(
+            chunked.stages.as_ref().unwrap().graded,
+            reference.stages.as_ref().unwrap().graded,
+            "{pixels}-pixel chunks changed the graded stage"
+        );
+        assert_eq!(
+            small.render_graded(&input, &graded_plan).unwrap(),
+            reference_graded,
+            "{pixels}-pixel chunks changed graded-only readback"
+        );
+    }
+    assert_eq!(
+        reference_graded,
+        reference.stages.unwrap().graded,
+        "graded-only readback disagrees with the full capture"
+    );
     let preview = result.preview_rgba8();
     let export = result.export_rgba16().into_rgba16();
     for (a, b) in preview.as_raw().iter().zip(export.as_raw()) {

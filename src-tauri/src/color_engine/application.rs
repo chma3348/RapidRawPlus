@@ -160,6 +160,56 @@ pub fn input_transform(state: &AppState) -> Option<PathBuf> {
     state.input_transform.lock().unwrap().clone()
 }
 
+/// A mask's bitmap, cached. The key is the mask's own definition — minus its
+/// adjustments, which change what the mask *does* but not where it is — the
+/// output size and framing, and the picture a range mask samples.
+#[allow(clippy::too_many_arguments)]
+fn mask_bitmap(
+    state: &AppState,
+    mask: &crate::mask_generation::MaskDefinition,
+    width: u32,
+    height: u32,
+    scale: f32,
+    offset: (f32, f32),
+    sampled: Option<&Arc<DynamicImage>>,
+    picture: (&str, u64, u64),
+) -> Result<Arc<image::GrayImage>> {
+    use std::hash::{Hash, Hasher};
+    let mut shape = serde_json::to_value(mask)?;
+    shape["adjustments"] = Value::Null;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    shape.to_string().hash(&mut hasher);
+    (width, height, scale.to_bits(), offset.0.to_bits(), offset.1.to_bits()).hash(&mut hasher);
+    // Range masks depend on the picture too; shape masks do not.
+    if mask.requires_warped_image() {
+        picture.hash(&mut hasher);
+    }
+    let key = hasher.finish();
+    if let Some(hit) = state.v3_masks.lock().ok().and_then(|c| c.get(&key).cloned()) {
+        return Ok(hit);
+    }
+    let bitmap = Arc::new(
+        crate::mask_generation::generate_mask_bitmap(
+            mask,
+            width,
+            height,
+            scale,
+            offset,
+            sampled.map(|s| s.as_ref()),
+        )
+        .context("Could not generate v3 mask")?,
+    );
+    if let Ok(mut cache) = state.v3_masks.lock() {
+        // A handful of masks at one or two preview sizes is all an edit uses;
+        // anything beyond that is stale.
+        if cache.len() >= 24 {
+            cache.clear();
+        }
+        cache.insert(key, bitmap.clone());
+    }
+    Ok(bitmap)
+}
+
 /// The prepared image with detail applied, cached against everything that
 /// determines it, so dragging any other slider does not redo a spatial pass.
 #[allow(clippy::too_many_arguments)]
@@ -231,8 +281,15 @@ fn sampling_image(
     let mut neutral = edits.clone();
     neutral["v3"] = serde_json::json!({});
     neutral["masks"] = serde_json::json!([]);
-    let frame = render_file(context, state, path, &neutral, None)?;
-    let image = Arc::new(DynamicImage::ImageRgba8(frame.preview_rgba8()));
+    // The sampling render goes through the same prepared-image cache as the
+    // preview. Put the preview's entry back afterwards, or the next slider
+    // move pays to rebuild it from the full-resolution source.
+    let preview = state.v3_prepared.lock().ok().and_then(|mut c| c.take());
+    let frame = render_file(context, state, path, &neutral, None);
+    if let (Some(entry), Ok(mut cache)) = (preview, state.v3_prepared.lock()) {
+        *cache = Some(entry);
+    }
+    let image = Arc::new(DynamicImage::ImageRgba8(frame?.preview_rgba8()));
     if let Ok(mut cache) = state.v3_sampling.lock() {
         *cache = Some((key, image.clone()));
     }
@@ -251,6 +308,22 @@ pub fn render_file(
     render_file_with_capture(context, state, path, edits, max_dimension, false)
 }
 
+/// Stage timings on stderr when `RAPIDRAW_V3_PROFILE` is set. Costs nothing
+/// otherwise; kept because guessing where interactive time goes has been
+/// wrong more than once.
+struct Stopwatch(Option<std::time::Instant>);
+impl Stopwatch {
+    fn start() -> Self {
+        Self(std::env::var_os("RAPIDRAW_V3_PROFILE").map(|_| std::time::Instant::now()))
+    }
+    fn lap(&mut self, stage: &str) {
+        if let Some(t) = &mut self.0 {
+            eprintln!("  v3 {stage:24} {:>6.1} ms", t.elapsed().as_secs_f64() * 1000.0);
+            *t = std::time::Instant::now();
+        }
+    }
+}
+
 pub(crate) fn render_file_with_capture(
     context: &GpuContext,
     state: &AppState,
@@ -261,8 +334,10 @@ pub(crate) fn render_file_with_capture(
 ) -> Result<RenderedFrame> {
     ensure!(enabled(edits), "Expected v3 edits");
     validate_features(edits)?;
+    let mut watch = Stopwatch::start();
     let controls = controls(edits)?;
     let source = source(state, path)?;
+    watch.lap("source");
     let transform = crate::cache_utils::calculate_transform_hash(edits);
     // Patches are part of what the prepared image *is*, so they belong in its
     // key. Without this, hiding a patch would leave the old composite on
@@ -326,6 +401,7 @@ pub(crate) fn render_file_with_capture(
     } else {
         detailed(state, &source, image, &controls.detail, transform, patches, max_dimension, scale)?
     };
+    watch.lap("prepare + detail");
     let masks: Vec<crate::mask_generation::MaskDefinition> =
         serde_json::from_value(edits.get("masks").cloned().unwrap_or(serde_json::json!([])))
             .context("Invalid mask definitions")?;
@@ -356,6 +432,7 @@ pub(crate) fn render_file_with_capture(
     } else {
         None
     };
+    watch.lap("mask sampling");
     let mut cache = state
         .v3_engine
         .lock()
@@ -370,18 +447,22 @@ pub(crate) fn render_file_with_capture(
         });
     }
     let engine = &cache.as_ref().unwrap().engine;
-    let initial = engine.render(
-        &image.to_rgba32f(),
-        &plan(source.color.clone(), controls, output_transform(state))?,
-        capture || !active.is_empty(),
-    )?;
+    let initial_plan = plan(source.color.clone(), controls, output_transform(state))?;
     if active.is_empty() {
-        return Ok(initial);
+        return engine.render(&image.to_rgba32f(), &initial_plan, capture);
     }
-    let mut working = initial
-        .stages
-        .context("Missing local-adjustment stage")?
-        .graded;
+    // With masks, the first pass only feeds the local adjustments, which read
+    // the graded stage alone.
+    let mut working = if capture {
+        engine
+            .render(&image.to_rgba32f(), &initial_plan, true)?
+            .stages
+            .context("Missing local-adjustment stage")?
+            .graded
+    } else {
+        engine.render_graded(&image.to_rgba32f(), &initial_plan)?
+    };
+    watch.lap("first pass");
     let working_color = SourceColor {
         primaries: Primaries::DavinciWideGamut,
         transfer: Transfer::Linear,
@@ -397,15 +478,17 @@ pub(crate) fn render_file_with_capture(
         if local.is_neutral() && local.detail.is_neutral() {
             continue;
         }
-        let bitmap = crate::mask_generation::generate_mask_bitmap(
+        let bitmap = mask_bitmap(
+            state,
             mask,
             image.width(),
             image.height(),
             scale,
             (offset.0 * scale, offset.1 * scale),
-            sampled.as_deref(),
-        )
-        .context("Could not generate v3 mask")?;
+            sampled.as_ref(),
+            (path, transform, patches),
+        )?;
+        watch.lap("mask bitmap");
         // Local detail runs on the working image as it stands at this mask —
         // after the global grade and any earlier masks — like every other
         // local control. Luminance is the same physical quantity whichever
@@ -423,12 +506,9 @@ pub(crate) fn render_file_with_capture(
         let adjusted = if local.is_neutral() {
             input.clone()
         } else {
-            engine
-                .render(input, &plan(working_color.clone(), local, None)?, true)?
-                .stages
-                .context("Missing mask stage")?
-                .graded
+            engine.render_graded(input, &plan(working_color.clone(), local, None)?)?
         };
+        watch.lap("mask pass");
         for ((base, edited), alpha) in working
             .pixels_mut()
             .zip(adjusted.pixels())
@@ -440,13 +520,16 @@ pub(crate) fn render_file_with_capture(
             }
         }
     }
+    watch.lap("mask blends");
     // Only this last pass produces output, so only it renders through the
     // captured transform.
-    engine.render(
+    let frame = engine.render(
         &working,
         &plan(working_color, Controls::default(), output_transform(state))?,
         false,
-    )
+    );
+    watch.lap("final pass");
+    frame
 }
 
 #[tauri::command]
