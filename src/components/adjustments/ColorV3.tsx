@@ -76,9 +76,8 @@ export function ColorV3Switch({
       </p>
       {active && (
         <p className="mt-2 leading-relaxed">
-          {t('colorV3.limitsNow', {
-            defaultValue:
-              'Legacy LUTs and flat-field profiles are not available in this mode, and sharpening, clarity and noise reduction apply to the whole photo rather than inside masks.',
+          {t('colorV3.limitsLut', {
+            defaultValue: 'Legacy LUTs and flat-field profiles are not available in this mode.',
           })}
         </p>
       )}
@@ -100,7 +99,7 @@ export default function ColorV3Controls({
   adjustments: any;
   setAdjustments: (fn: any) => void;
   onDragStateChange?: (v: boolean) => void;
-  /** Masks cannot carry detail yet, so their panel does not offer it. */
+  /** Lets a host hide the detail section; every current host shows it. */
   showDetail?: boolean;
 }) {
   const { t } = useTranslation();

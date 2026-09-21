@@ -387,15 +387,14 @@ pub(crate) fn render_file_with_capture(
         transfer: Transfer::Linear,
         reference: source.color.reference,
     };
+    let working_luminance = {
+        let y = super::spaces::rgb_to_xyz(Primaries::DavinciWideGamut).row(1);
+        [y.x as f32, y.y as f32, y.z as f32]
+    };
     for mask in active {
         let local = self::controls(&mask.adjustments)?;
-        // Said rather than silently dropped: a mask's detail values would
-        // otherwise be ignored, and look like a control that does nothing.
-        ensure!(
-            local.detail.is_neutral(),
-            "V3 does not yet apply sharpening, clarity or noise reduction inside a mask. Use them globally, or the previous engine."
-        );
-        if local.is_neutral() {
+        // `is_neutral` is about the pointwise pass; detail is its own stage.
+        if local.is_neutral() && local.detail.is_neutral() {
             continue;
         }
         let bitmap = crate::mask_generation::generate_mask_bitmap(
@@ -407,11 +406,29 @@ pub(crate) fn render_file_with_capture(
             sampled.as_deref(),
         )
         .context("Could not generate v3 mask")?;
-        let adjusted = engine
-            .render(&working, &plan(working_color.clone(), local, None)?, true)?
-            .stages
-            .context("Missing mask stage")?
-            .graded;
+        // Local detail runs on the working image as it stands at this mask —
+        // after the global grade and any earlier masks — like every other
+        // local control. Luminance is the same physical quantity whichever
+        // primaries it is measured in, so this does to the picture what the
+        // global stage would: a full-coverage mask matches global detail.
+        let detailed;
+        let input = if local.detail.is_neutral() {
+            &working
+        } else {
+            let mut copy = working.clone();
+            super::detail::apply(&mut copy, &local.detail, working_luminance, scale);
+            detailed = copy;
+            &detailed
+        };
+        let adjusted = if local.is_neutral() {
+            input.clone()
+        } else {
+            engine
+                .render(input, &plan(working_color.clone(), local, None)?, true)?
+                .stages
+                .context("Missing mask stage")?
+                .graded
+        };
         for ((base, edited), alpha) in working
             .pixels_mut()
             .zip(adjusted.pixels())

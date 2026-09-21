@@ -501,14 +501,23 @@ fn detail_contracts(context: &GpuContext) {
         full.encoded_srgb
     );
 
-    // Detail inside a mask is refused out loud, not silently ignored.
-    let masked = json!({"processVersion":3,"v3":{},"masks":[{
+    // Detail inside a mask. Luminance is the same quantity in any primaries,
+    // so a mask covering everything must do what the global control does.
+    let mut masked = json!({"processVersion":3,"v3":{},"masks":[{
         "id":"m","name":"m","visible":true,"invert":false,"opacity":100,
-        "adjustments":{"v3":{"detail":{"clarity":50}}},
+        "adjustments":{"v3":{"detail":{"clarity":80,"structure":60}}},
         "subMasks":[{"id":"l","type":"linear","visible":true,"mode":"additive",
             "parameters":{"startX":0,"startY":1000,"endX":100,"endY":1000,"range":1}}]
     }]});
-    assert!(render_file(context, &state, path, &masked, None).is_err());
+    let local = render_file(context, &state, path, &masked, None).unwrap();
+    let gap = mean_gap(&local.encoded_srgb, &full.encoded_srgb);
+    assert!(gap < 1e-3, "full-coverage mask detail differs from global detail by {gap}");
+    // And a mask at zero opacity does nothing.
+    masked["masks"][0]["opacity"] = json!(0);
+    assert_eq!(
+        render_file(context, &state, path, &masked, None).unwrap().encoded_srgb,
+        base.encoded_srgb
+    );
 }
 
 fn application_contracts(context: &GpuContext) {

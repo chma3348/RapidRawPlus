@@ -2693,7 +2693,7 @@ function SettingsPanel({
         onMouseLeave={() => setIsMaskControlHovered(false)}
         className="flex flex-col gap-2"
       >
-        {photoProcessVersion === 3 ? <ColorV3Controls adjustments={displayContainer.adjustments} setAdjustments={setMaskContainerAdjustments} onDragStateChange={onDragStateChange} showDetail={false}/> : Object.keys(ADJUSTMENT_SECTIONS).map((sectionName) => {
+        {photoProcessVersion === 3 ? <ColorV3Controls adjustments={displayContainer.adjustments} setAdjustments={setMaskContainerAdjustments} onDragStateChange={onDragStateChange}/> : Object.keys(ADJUSTMENT_SECTIONS).map((sectionName) => {
           const SectionComponent: any = {
             basic: BasicAdjustments,
             curves: CurveGraph,
