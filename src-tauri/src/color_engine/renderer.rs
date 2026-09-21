@@ -21,13 +21,22 @@ impl RenderedFrame {
     /// Embed the output profile, so supporting viewers interpret these values
     /// as sRGB rather than the monitor's native gamut.
     pub fn write_srgb_png(&self, writer: impl std::io::Write, sixteen_bit: bool) -> Result<()> {
-        let mut encoder = image::codecs::png::PngEncoder::new(writer);
-        encoder.set_icc_profile(moxcms::ColorProfile::new_srgb().encode()?)?;
         let image = if sixteen_bit {
             self.export_rgba16()
         } else {
             DynamicImage::ImageRgba8(self.preview_rgba8())
         };
+        self.encode_png(writer, image)
+    }
+
+    /// As `write_srgb_png`, for the on-screen image: eight bits, dithered.
+    pub fn write_display_png(&self, writer: impl std::io::Write) -> Result<()> {
+        self.encode_png(writer, DynamicImage::ImageRgba8(self.display_rgba8()))
+    }
+
+    fn encode_png(&self, writer: impl std::io::Write, image: DynamicImage) -> Result<()> {
+        let mut encoder = image::codecs::png::PngEncoder::new(writer);
+        encoder.set_icc_profile(moxcms::ColorProfile::new_srgb().encode()?)?;
         image.write_with_encoder(encoder)?;
         Ok(())
     }
@@ -47,6 +56,36 @@ impl RenderedFrame {
         )
     }
 
+    /// The same 8-bit encoding, dithered, for the image a person looks at.
+    ///
+    /// Eight bits cannot hold the gradients this pipeline produces: rounding
+    /// alone turns a slow ramp into flat plateaus with visible steps between
+    /// them, which reads as a fault in the grade rather than in the encoding.
+    /// Triangular noise of one LSB, deterministic per pixel, trades that for
+    /// invisible noise and keeps the average exact.
+    ///
+    /// Deliberately not used for thumbnails, the scopes or the inspection
+    /// image: those measure the picture, and should not measure the dither.
+    pub fn display_rgba8(&self) -> image::RgbaImage {
+        ImageBuffer::from_fn(
+            self.encoded_srgb.width(),
+            self.encoded_srgb.height(),
+            |x, y| {
+                let pixel = self.encoded_srgb.get_pixel(x, y).0;
+                Rgba(std::array::from_fn(|c| {
+                    let level = pixel[c].clamp(0.0, 1.0) * 255.0;
+                    // Alpha is a coverage value, not a tone: leave it exact.
+                    let noise = if c == 3 {
+                        0.0
+                    } else {
+                        uniform(x, y, c as u32 * 2) + uniform(x, y, c as u32 * 2 + 1) - 1.0
+                    };
+                    (level + noise).round().clamp(0.0, 255.0) as u8
+                }))
+            },
+        )
+    }
+
     pub fn export_rgba16(&self) -> DynamicImage {
         DynamicImage::ImageRgba16(ImageBuffer::from_fn(
             self.encoded_srgb.width(),
@@ -61,6 +100,19 @@ impl RenderedFrame {
             },
         ))
     }
+}
+
+/// Deterministic value in [0,1) for one pixel and channel. Fixed per pixel so
+/// the same frame always encodes the same way.
+fn uniform(x: u32, y: u32, channel: u32) -> f32 {
+    let mut h = x
+        .wrapping_mul(0x9E37_79B9)
+        ^ y.wrapping_mul(0x85EB_CA6B)
+        ^ channel.wrapping_mul(0xC2B2_AE35);
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x2545_F491);
+    h ^= h >> 13;
+    h as f32 / u32::MAX as f32
 }
 
 pub struct ColorEngine {

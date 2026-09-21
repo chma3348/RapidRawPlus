@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use image::codecs::jpeg::JpegEncoder;
-use image::{DynamicImage, GenericImageView, GrayImage, ImageBuffer, ImageFormat, Luma, imageops};
+use image::{DynamicImage, GenericImageView, GrayImage, ImageBuffer, ImageFormat, ImageEncoder, Luma, imageops};
 use jxl_encoder::{LosslessConfig, LossyConfig, PixelLayout};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -20,13 +20,14 @@ use crate::file_management::{
     generate_filename_from_template, parse_virtual_path, read_file_mapped,
 };
 use crate::formats::is_raw_file;
+use crate::gpu_processing::process_and_get_dynamic_image_16 as process_and_get_dynamic_image;
 use crate::image_loader::{
     composite_patches_on_image, load_and_composite, load_base_image_from_bytes,
 };
 use crate::image_processing::{
     AllAdjustments, Crop, GpuContext, RenderRequest, downscale_f32_image,
-    get_all_adjustments_from_json, get_or_init_gpu_context, process_and_get_dynamic_image,
-    render_adjustments_for_empty, resolve_tonemapper_override_from_handle,
+    get_all_adjustments_from_json, get_or_init_gpu_context, render_adjustments_for_empty,
+    resolve_tonemapper_override_from_handle,
 };
 use crate::lut_processing::{
     convert_image_to_cube_lut, generate_identity_lut_image, get_or_load_lut,
@@ -39,6 +40,92 @@ use crate::{
     get_full_image_for_processing, hydrate_adjustments, load_settings,
     resolve_warped_image_for_masks,
 };
+
+#[cfg(test)]
+mod precision_tests {
+    use super::*;
+    use image::Rgba;
+
+    #[test]
+    fn supported_color_exports_embed_srgb_profiles() {
+        use image::ImageDecoder;
+        let image = DynamicImage::ImageRgba16(ImageBuffer::from_pixel(2,2,Rgba([30001,31002,32003,65535])));
+        for format in ["png", "jpg", "tiff"] {
+            let bytes = encode_image_to_bytes(&image,format,95).unwrap();
+            // The generic reader derives TIFF allocation limits from pixel
+            // size; on tiny fixtures this can be smaller than an ICC profile.
+            // Read metadata directly with the TIFF decoder's normal limits.
+            let profile = if format == "tiff" {
+                image::codecs::tiff::TiffDecoder::new(Cursor::new(bytes)).unwrap().icc_profile().unwrap()
+            } else {
+                image::ImageReader::new(Cursor::new(bytes)).with_guessed_format().unwrap().into_decoder().unwrap().icc_profile().unwrap()
+            }.unwrap_or_else(||panic!("missing {format} export profile"));
+            let mut profile = profile;
+            let mut expected = moxcms::ColorProfile::new_srgb().encode().unwrap();
+            // ICC creation timestamps may differ across a second boundary.
+            profile[24..36].fill(0);
+            expected[24..36].fill(0);
+            assert_eq!(profile,expected,"{format} profile changed");
+        }
+    }
+
+    #[test]
+    fn png_and_tiff_keep_real_16_bit_values() {
+        let image = DynamicImage::ImageRgba16(ImageBuffer::from_fn(1025, 2, |x, _| {
+            Rgba([30000 + x as u16, 31001, 32002, 65535])
+        }));
+        for format in ["png", "tiff", "tif"] {
+            let bytes = encode_image_to_bytes(&image, format, 95).unwrap();
+            let decoded = image::load_from_memory(&bytes).unwrap();
+            assert!(matches!(
+                decoded.color(),
+                image::ColorType::Rgb16 | image::ColorType::Rgba16
+            ));
+            assert_eq!(
+                decoded.to_rgb16(),
+                image.to_rgb16(),
+                "{format} lost precision"
+            );
+        }
+        for format in ["jpg", "webp", "avif", "jxl"] {
+            assert!(
+                !encode_image_to_bytes(&image, format, 95)
+                    .unwrap()
+                    .is_empty(),
+                "{format}"
+            );
+        }
+    }
+
+    #[test]
+    fn resize_and_transparent_watermark_do_not_reduce_base_to_eight_bits() {
+        let mut image = DynamicImage::ImageRgba16(ImageBuffer::from_pixel(
+            33,
+            17,
+            Rgba([30001, 31002, 32003, 65535]),
+        ));
+        image = image.resize(31, 15, imageops::FilterType::Lanczos3);
+        assert!(image.as_rgba16().is_some());
+        let before = image.clone();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transparent.png");
+        image::RgbaImage::from_pixel(2, 2, Rgba([255, 0, 0, 0]))
+            .save(&path)
+            .unwrap();
+        apply_watermark(
+            &mut image,
+            &WatermarkSettings {
+                path: path.to_string_lossy().into_owned(),
+                anchor: WatermarkAnchor::Center,
+                scale: 100.0,
+                spacing: 0.0,
+                opacity: 100.0,
+            },
+        )
+        .unwrap();
+        assert_eq!(image, before);
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -154,7 +241,13 @@ fn apply_watermark(
         | WatermarkAnchor::BottomRight => base_h as i64 - wm_h as i64 - spacing_pixels,
     };
 
-    image::imageops::overlay(base_image, &final_watermark, x, y);
+    if let Some(base) = base_image.as_mut_rgba16() {
+        // DynamicImage's generic pixel interface is RGBA8. Blend through the
+        // typed image so even pixels under a transparent watermark keep detail.
+        image::imageops::overlay(base, &final_watermark.to_rgba16(), x, y);
+    } else {
+        image::imageops::overlay(base_image, &final_watermark, x, y);
+    }
 
     Ok(())
 }
@@ -225,6 +318,10 @@ pub(crate) fn process_image_for_export_pipeline(
 ) -> Result<DynamicImage, String> {
     let render_adjustments_cow = render_adjustments_for_empty(js_adjustments);
     let render_adjustments = render_adjustments_cow.as_ref();
+    if crate::color_engine::application::enabled(render_adjustments) {
+        return crate::color_engine::application::render_file(context,state,path,render_adjustments,None)
+            .map(|f|f.export_rgba16()).map_err(|e|e.to_string());
+    }
     let (transformed_image, unscaled_crop_offset) =
         apply_all_transformations(Cow::Borrowed(base_image), render_adjustments);
     let (img_w, img_h) = transformed_image.dimensions();
@@ -435,14 +532,16 @@ fn encode_image_to_bytes(
             return Ok(jxl_data);
         }
         "webp" => {
-            let encoder = webp::Encoder::from_image(image)
+            let webp_image = DynamicImage::ImageRgba8(image.to_rgba8());
+            let encoder = webp::Encoder::from_image(&webp_image)
                 .map_err(|_| "Failed to create WebP encoder".to_string())?;
             let webp_mem = encoder.encode(jpeg_quality as f32);
             return Ok(webp_mem.to_vec());
         }
         "jpg" | "jpeg" => {
             let rgb_image = image.to_rgb8();
-            let encoder = JpegEncoder::new_with_quality(&mut cursor, jpeg_quality);
+            let mut encoder = JpegEncoder::new_with_quality(&mut cursor, jpeg_quality);
+            encoder.set_icc_profile(moxcms::ColorProfile::new_srgb().encode().map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
             rgb_image
                 .write_with_encoder(encoder)
                 .map_err(|e| e.to_string())?;
@@ -454,17 +553,21 @@ fn encode_image_to_bytes(
                 image.clone()
             };
 
+            let mut encoder = image::codecs::png::PngEncoder::new(&mut cursor);
+            encoder.set_icc_profile(moxcms::ColorProfile::new_srgb().encode().map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
             image_to_encode
-                .write_to(&mut cursor, image::ImageFormat::Png)
+                .write_with_encoder(encoder)
                 .map_err(|e| e.to_string())?;
         }
-        "tiff" => {
+        "tif" | "tiff" => {
+            let mut encoder = image::codecs::tiff::TiffEncoder::new(&mut cursor);
+            encoder.set_icc_profile(moxcms::ColorProfile::new_srgb().encode().map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
             DynamicImage::ImageRgb16(image.to_rgb16())
-                .write_to(&mut cursor, image::ImageFormat::Tiff)
+                .write_with_encoder(encoder)
                 .map_err(|e| e.to_string())?;
         }
         "avif" => {
-            image
+            DynamicImage::ImageRgba8(image.to_rgba8())
                 .write_to(&mut cursor, image::ImageFormat::Avif)
                 .map_err(|e| e.to_string())?;
         }
@@ -834,6 +937,14 @@ pub async fn export_images(
                 let extension = output_format.to_lowercase();
 
                 let result: Result<(), String> = (|| {
+                    if crate::color_engine::application::enabled(&js_adjustments) {
+                        if extension == "cube" || export_settings.export_masks {
+                            return Err("V3 currently exports the composited photo; separate mask-image and LUT exports are not supported.".into());
+                        }
+                        if !matches!(extension.as_str(),"png"|"jpg"|"jpeg"|"tif"|"tiff") {
+                            return Err("Use PNG, TIFF or JPEG for profile-tagged v3 export.".into());
+                        }
+                    }
                     if extension == "cube" {
                         let cube_bytes = export_adjustments_as_lut(
                             &js_adjustments,
@@ -1053,6 +1164,15 @@ pub async fn estimate_export_sizes(
     let is_current_edit = Some(&source_path_str) == current_edit_path.as_ref();
     let is_raw = is_raw_file(&source_path_str);
     let settings = load_settings(app_handle.clone()).unwrap_or_default();
+
+    let candidate = if is_current_edit {current_edit_adjustments.clone().unwrap_or_else(||crate::exif_processing::load_sidecar(&sidecar_path).adjustments)} else {crate::exif_processing::load_sidecar(&sidecar_path).adjustments};
+    if crate::color_engine::application::enabled(&candidate) {
+        let mut candidate=candidate;
+        hydrate_adjustments(&state,&mut candidate);
+        let rendered=crate::color_engine::application::render_file(&context,&state,&source_path_str,&candidate,None).map_err(|e|e.to_string())?.export_rgba16();
+        let rendered=apply_export_resize_and_watermark(rendered,&export_settings)?;
+        return Ok(encode_image_to_bytes(&rendered,&output_format,export_settings.jpeg_quality)?.len()*paths.len());
+    }
 
     let single_image_extrapolated_size: usize = if is_current_edit
         && current_edit_adjustments.is_some()

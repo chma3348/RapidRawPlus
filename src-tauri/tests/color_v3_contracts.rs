@@ -192,6 +192,59 @@ fn gpu_color_pipeline_contracts() {
     for (a, b) in preview.as_raw().iter().zip(export.as_raw()) {
         assert!((*a as f32 - *b as f32 / 257.0).abs() <= 0.501);
     }
+    // Eight-bit display encoding: dither must break the plateaus that plain
+    // rounding leaves in a slow ramp, without moving the average off the
+    // value it is encoding.
+    {
+        let mut ramp = config();
+        ramp.source.transfer = Transfer::Linear;
+        ramp.output_rendering = OutputRendering::DisplayGamutV2;
+        let shallow = ImageBuffer::from_fn(256, 8, |x, _| {
+            let v = 0.2 + x as f32 * (0.01 / 256.0);
+            Rgba([v, v, v, 1.0])
+        });
+        let frame = engine
+            .render(&shallow, &RenderPlan::build(ramp).unwrap(), false)
+            .unwrap();
+        let run = |image: &image::RgbaImage| {
+            let mut longest = 1;
+            let mut current = 1;
+            let row: Vec<u8> = (0..image.width()).map(|x| image.get_pixel(x, 0)[0]).collect();
+            for pair in row.windows(2) {
+                current = if pair[0] == pair[1] { current + 1 } else { 1 };
+                longest = longest.max(current);
+            }
+            longest
+        };
+        let plain = frame.preview_rgba8();
+        let dithered = frame.display_rgba8();
+        assert!(
+            run(&dithered) * 4 < run(&plain),
+            "dither left the banding in place: {} vs {}",
+            run(&dithered),
+            run(&plain)
+        );
+        let mean = |image: &image::RgbaImage| {
+            image.pixels().map(|p| p[0] as f64).sum::<f64>() / image.pixels().len() as f64
+        };
+        assert!(
+            (mean(&dithered) - mean(&plain)).abs() < 0.25,
+            "dither shifted the average: {} vs {}",
+            mean(&dithered),
+            mean(&plain)
+        );
+        for (a, d) in plain.as_raw().iter().zip(dithered.as_raw()) {
+            assert!(
+                a.abs_diff(*d) <= 1,
+                "dither moved a pixel more than one level: {a} -> {d}"
+            );
+        }
+        assert_eq!(
+            dithered,
+            frame.display_rgba8(),
+            "display dither must be deterministic"
+        );
+    }
     let mut png = std::io::Cursor::new(Vec::new());
     image::DynamicImage::ImageRgba16(export.clone())
         .write_to(&mut png, image::ImageFormat::Png)

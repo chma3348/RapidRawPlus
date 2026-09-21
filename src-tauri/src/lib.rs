@@ -358,7 +358,7 @@ fn process_preview_job(
         }
         let mut response = Vec::new();
         if is_interactive { for v in [0u32,0,width,height,width,height] {response.extend_from_slice(&v.to_le_bytes());} }
-        frame.write_srgb_png(&mut response,false).map_err(|e|e.to_string())?;
+        frame.write_display_png(&mut response).map_err(|e|e.to_string())?;
         return Ok(response);
     }
 
@@ -2265,6 +2265,7 @@ pub fn run() {
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             color_engine::application::prepare_color_v3,
+            color_engine::selection::inspect_color_v3,
             apply_adjustments,
             generate_preview_for_path,
             generate_original_transformed_preview,

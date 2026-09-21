@@ -28,6 +28,36 @@ pub struct RenderRequest<'a> {
     pub roi: Option<Roi>,
 }
 
+fn output_shader_source(high_precision: bool) -> String {
+    let source = include_str!("shaders/shader.wgsl");
+    if !high_precision {
+        return source.to_owned();
+    }
+    // Keep all color operations identical; specialize only storage/quantization.
+    let store = "textureStore(output_texture, id.xy, vec4<f32>(clamp(final_rgb, vec3<f32>(0.0), vec3<f32>(1.0)), original_alpha));";
+    assert_eq!(
+        source.matches(store).count(),
+        1,
+        "output shader contract changed"
+    );
+    source.replace("texture_storage_2d<rgba8unorm, write>", "texture_storage_2d<rgba16uint, write>")
+        .replace("let dither_amount = 1.0 / 255.0;", "let dither_amount = 0.0;")
+        .replace(store, "textureStore(output_texture, id.xy, vec4<u32>(round(clamp(vec4<f32>(final_rgb, original_alpha), vec4<f32>(0.0), vec4<f32>(1.0)) * 65535.0)));" )
+}
+
+fn rgba16_from_gpu(width: u32, height: u32, bytes: &[u8]) -> Result<DynamicImage, String> {
+    if bytes.len() != width as usize * height as usize * 8 {
+        return Err("Invalid 16-bit GPU output length".into());
+    }
+    let pixels: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|v| u16::from_le_bytes([v[0], v[1]]))
+        .collect();
+    let image = ImageBuffer::<Rgba<u16>, _>::from_raw(width, height, pixels)
+        .ok_or("Failed to create 16-bit image buffer from GPU data")?;
+    Ok(DynamicImage::ImageRgba16(image))
+}
+
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct DisplayTransform {
@@ -418,7 +448,12 @@ fn read_texture_data_roi(
     origin: wgpu::Origin3d,
     size: wgpu::Extent3d,
 ) -> Result<Vec<u8>, String> {
-    let unpadded_bytes_per_row = 4 * size.width;
+    let bytes_per_pixel = if texture.format() == wgpu::TextureFormat::Rgba16Uint {
+        8
+    } else {
+        4
+    };
+    let unpadded_bytes_per_row = bytes_per_pixel * size.width;
     let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
     let padded_bytes_per_row = (unpadded_bytes_per_row + align - 1) & !(align - 1);
     let output_buffer_size = (padded_bytes_per_row * size.height) as u64;
@@ -554,7 +589,23 @@ const FLARE_MAP_SIZE: u32 = 512;
 
 impl GpuProcessor {
     pub fn new(context: GpuContext, max_width: u32, max_height: u32) -> Result<Self, String> {
+        Self::new_with_precision(context, max_width, max_height, false)
+    }
+
+    /// Integer 16-bit output preserves all 65,536 encoded levels, unlike
+    /// half-float output (which has fewer mantissa bits). Preview stays 8-bit.
+    pub fn new_with_precision(
+        context: GpuContext,
+        max_width: u32,
+        max_height: u32,
+        high_precision: bool,
+    ) -> Result<Self, String> {
         let device = &context.device;
+        let output_format = if high_precision {
+            wgpu::TextureFormat::Rgba16Uint
+        } else {
+            wgpu::TextureFormat::Rgba8Unorm
+        };
         const MAX_MASK_BINDINGS: u32 = 1;
 
         let blur_shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -775,7 +826,7 @@ impl GpuProcessor {
 
         let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Image Processing Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/shader.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(output_shader_source(high_precision).into()),
         });
 
         let mut bind_group_layout_entries = vec![
@@ -794,7 +845,7 @@ impl GpuProcessor {
                 visibility: wgpu::ShaderStages::COMPUTE,
                 ty: wgpu::BindingType::StorageTexture {
                     access: wgpu::StorageTextureAccess::WriteOnly,
-                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    format: output_format,
                     view_dimension: wgpu::TextureViewDimension::D2,
                 },
                 count: None,
@@ -1011,8 +1062,18 @@ impl GpuProcessor {
         let shadow_correction_view = shadow_correction_texture.create_view(&Default::default());
 
         let max_tile_size = wgpu::Extent3d {
-            width: max_width,
-            height: max_height,
+            // Export reads each 2048px tile with up to 128px padding per edge;
+            // it does not need full-photo scratch/output textures.
+            width: if high_precision {
+                max_width.min(2304)
+            } else {
+                max_width
+            },
+            height: if high_precision {
+                max_height.min(2304)
+            } else {
+                max_height
+            },
             depth_or_array_layers: 1,
         };
 
@@ -1063,7 +1124,7 @@ impl GpuProcessor {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
+            format: output_format,
             usage: wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::STORAGE_BINDING
                 | wgpu::TextureUsages::COPY_SRC,
@@ -1073,11 +1134,19 @@ impl GpuProcessor {
 
         let working_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Working Output Texture"),
-            size: max_tile_size,
+            size: if high_precision {
+                wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                }
+            } else {
+                max_tile_size
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
+            format: output_format,
             usage: wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::STORAGE_BINDING
                 | wgpu::TextureUsages::COPY_DST
@@ -1088,11 +1157,19 @@ impl GpuProcessor {
 
         let output_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Full Output Texture"),
-            size: max_tile_size,
+            size: if high_precision {
+                wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                }
+            } else {
+                max_tile_size
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
+            format: output_format,
             usage: wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::STORAGE_BINDING
                 | wgpu::TextureUsages::COPY_DST
@@ -1146,8 +1223,23 @@ impl GpuProcessor {
         skip_cpu_readback: bool,
         output_to_display: bool,
     ) -> Result<(Vec<u8>, u32, u32, u32, u32), String> {
+        if crate::color_engine::config::engine_for_version(request.adjustments.global.process_version)
+            .map_err(|e| e.to_string())? == crate::color_engine::config::EngineVersion::ExperimentalV3 {
+            return Err("Color Engine v3 is experimental and must use its explicit render plan; existing edits cannot be silently rendered with unsupported controls.".into());
+        }
         let device = &self.context.device;
         let queue = &self.context.queue;
+        let bytes_per_pixel =
+            if self.tile_output_texture.format() == wgpu::TextureFormat::Rgba16Uint {
+                8
+            } else {
+                4
+            };
+        if bytes_per_pixel == 8 && (output_to_display || skip_cpu_readback) {
+            return Err(
+                "16-bit export requires CPU readback and cannot bind to the preview surface".into(),
+            );
+        }
         let scale = (width.min(height) as f32) / 1080.0;
         const MAX_MASK_BINDINGS: u32 = 1;
 
@@ -1348,7 +1440,7 @@ impl GpuProcessor {
             if skip_cpu_readback {
                 0
             } else {
-                (out_width * out_height * 4) as usize
+                out_width as usize * out_height as usize * bytes_per_pixel
             }
         ];
 
@@ -1624,11 +1716,12 @@ impl GpuProcessor {
                     for row in 0..tile_height {
                         let final_y = y_start + row - bounds.y;
                         let final_x = x_start - bounds.x;
-                        let final_row_offset = (final_y * out_width + final_x) as usize * 4;
+                        let final_row_offset =
+                            (final_y * out_width + final_x) as usize * bytes_per_pixel;
                         let source_y = crop_y_start + row;
                         let source_row_offset =
-                            (source_y * input_width + crop_x_start) as usize * 4;
-                        let copy_bytes = (tile_width * 4) as usize;
+                            (source_y * input_width + crop_x_start) as usize * bytes_per_pixel;
+                        let copy_bytes = tile_width as usize * bytes_per_pixel;
 
                         final_pixels[final_row_offset..final_row_offset + copy_bytes]
                             .copy_from_slice(
@@ -1661,6 +1754,29 @@ pub fn process_and_get_dynamic_image(
         caller_id,
         false,
         None,
+        false,
+    )
+}
+
+/// Full-precision encoded output for exports; no 8-bit image or dither stage.
+pub fn process_and_get_dynamic_image_16(
+    context: &GpuContext,
+    state: &AppState,
+    base_image: &DynamicImage,
+    transform_hash: u64,
+    request: RenderRequest,
+    caller_id: &str,
+) -> Result<DynamicImage, String> {
+    process_and_get_dynamic_image_inner(
+        context,
+        state,
+        base_image,
+        transform_hash,
+        request,
+        caller_id,
+        false,
+        None,
+        true,
     )
 }
 
@@ -1684,6 +1800,7 @@ pub fn process_and_get_dynamic_image_with_analytics(
         caller_id,
         output_to_display,
         analytics_config,
+        false,
     )
 }
 
@@ -1700,6 +1817,7 @@ fn process_and_get_dynamic_image_inner(
     caller_id: &str,
     output_to_display: bool,
     analytics_config: Option<crate::AnalyticsConfig>,
+    high_precision: bool,
 ) -> Result<DynamicImage, String> {
     let start_time = Instant::now();
     let (width, height) = base_image.dimensions();
@@ -1708,6 +1826,11 @@ fn process_and_get_dynamic_image_inner(
 
     let max_dim = context.limits.max_texture_dimension_2d;
     if width > max_dim || height > max_dim {
+        if high_precision {
+            return Err(format!(
+                "Image dimensions {width}×{height} exceed the GPU limit {max_dim}; cannot export the edited image."
+            ));
+        }
         log::warn!(
             "Image dimensions ({}x{}) exceed GPU limits ({}). Bypassing GPU processing and returning unprocessed image to prevent a crash. Try upgrading your GPU :)",
             width,
@@ -1724,6 +1847,14 @@ fn process_and_get_dynamic_image_inner(
     if processor_lock.is_none()
         || processor_lock.as_ref().unwrap().width < width
         || processor_lock.as_ref().unwrap().height < height
+        || (processor_lock
+            .as_ref()
+            .unwrap()
+            .processor
+            .output_texture
+            .format()
+            == wgpu::TextureFormat::Rgba16Uint)
+            != high_precision
     {
         let new_width = (width + 255) & !255;
         let new_height = (height + 255) & !255;
@@ -1732,7 +1863,12 @@ fn process_and_get_dynamic_image_inner(
             new_width,
             new_height
         );
-        let new_processor = GpuProcessor::new(context.clone(), new_width, new_height)?;
+        let new_processor = GpuProcessor::new_with_precision(
+            context.clone(),
+            new_width,
+            new_height,
+            high_precision,
+        )?;
 
         old_processor = processor_lock.take();
 
@@ -1746,7 +1882,11 @@ fn process_and_get_dynamic_image_inner(
     let processor_state = processor_lock.as_ref().unwrap();
     let processor = &processor_state.processor;
 
-    if reallocated && let Some(old_state) = &old_processor {
+    if reallocated
+        && !high_precision
+        && let Some(old_state) = &old_processor
+        && old_state.processor.output_texture.format() == processor.output_texture.format()
+    {
         let mut encoder = device.create_command_encoder(&Default::default());
         let copy_w = old_state.width.min(processor_state.width);
         let copy_h = old_state.height.min(processor_state.height);
@@ -1811,13 +1951,24 @@ fn process_and_get_dynamic_image_inner(
     if let Some(cache) = &*cache_lock
         && (cache.transform_hash != transform_hash
             || cache.width != width
-            || cache.height != height)
+            || cache.height != height
+            || (cache.texture.format() == wgpu::TextureFormat::Rgba32Float) != high_precision)
     {
         *cache_lock = None;
     }
 
     if cache_lock.is_none() {
-        let img_rgba_f16 = to_rgba_f16(base_image);
+        // Preserve 16-bit source distinctions for export: half-float has only
+        // ten fraction bits and would round nearby bright samples together.
+        let rgba_f32;
+        let rgba_f16;
+        let input_bytes: &[u8] = if high_precision {
+            rgba_f32 = base_image.to_rgba32f();
+            bytemuck::cast_slice(rgba_f32.as_raw())
+        } else {
+            rgba_f16 = to_rgba_f16(base_image);
+            bytemuck::cast_slice(&rgba_f16)
+        };
         let texture_size = wgpu::Extent3d {
             width,
             height,
@@ -1831,12 +1982,16 @@ fn process_and_get_dynamic_image_inner(
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba16Float,
+                format: if high_precision {
+                    wgpu::TextureFormat::Rgba32Float
+                } else {
+                    wgpu::TextureFormat::Rgba16Float
+                },
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             },
             TextureDataOrder::MipMajor,
-            bytemuck::cast_slice(&img_rgba_f16),
+            input_bytes,
         );
         let texture_view = texture.create_view(&Default::default());
 
@@ -2085,9 +2240,132 @@ fn process_and_get_dynamic_image_inner(
         fps
     );
 
+    if high_precision {
+        return rgba16_from_gpu(out_w, out_h, &processed_pixels);
+    }
     let img_buf = ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(out_w, out_h, processed_pixels)
         .ok_or("Failed to create image buffer from GPU data")?;
     Ok(DynamicImage::ImageRgba8(img_buf))
+}
+
+#[cfg(test)]
+mod precision_tests {
+    use super::*;
+
+    #[test]
+    fn export_shader_validates() {
+        let source = output_shader_source(true);
+        assert!(!source.contains("1.0 / 255.0;"));
+        let module = naga::front::wgsl::parse_str(&source).expect("16-bit WGSL parses");
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .expect("16-bit WGSL validates");
+    }
+
+    #[test]
+    fn export_preserves_gradient_precision_across_tiles_and_preview_switches() {
+        let instance = wgpu::Instance::default();
+        let adapter = pollster::block_on(instance.request_adapter(&Default::default()))
+            .expect("precision release check requires a GPU");
+        let limits = adapter.limits();
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_limits: limits.clone(),
+            ..Default::default()
+        }))
+        .expect("GPU device");
+        let context = GpuContext {
+            device: Arc::new(device),
+            queue: Arc::new(queue),
+            limits,
+            display: Arc::new(std::sync::Mutex::new(None)),
+        };
+        let state = AppState::default();
+        // Cross the 2048px tile boundary and require non-aligned readback rows.
+        let source = DynamicImage::ImageRgba16(ImageBuffer::from_fn(2053, 3, |x, y| {
+            let value = 30000 + x as u16 + y as u16;
+            Rgba([value, value, value, 42001])
+        }));
+        let make_request = || RenderRequest {
+            adjustments: crate::image_processing::get_all_adjustments_from_json(
+                &serde_json::json!({"processVersion": 2}),
+                false,
+                None,
+            ),
+            mask_bitmaps: &[],
+            lut: None,
+            roi: None,
+        };
+        let before = process_and_get_dynamic_image(
+            &context,
+            &state,
+            &source,
+            42,
+            make_request(),
+            "precision-preview",
+        )
+        .unwrap();
+        let full = process_and_get_dynamic_image_16(
+            &context,
+            &state,
+            &source,
+            42,
+            make_request(),
+            "precision-export",
+        )
+        .unwrap();
+        let pixels = full.as_rgba16().expect("true 16-bit output");
+        let unique: std::collections::HashSet<_> =
+            pixels.rows().next().unwrap().map(|p| p[0]).collect();
+        assert!(
+            unique.len() > 1500,
+            "only {} distinct levels survived",
+            unique.len()
+        );
+        for (actual, original) in pixels.pixels().zip(source.as_rgba16().unwrap().pixels()) {
+            for c in 0..4 {
+                assert!(
+                    actual[c].abs_diff(original[c]) <= 3,
+                    "identity drift: {actual:?} vs {original:?}"
+                );
+            }
+        }
+        let mut roi_request = make_request();
+        roi_request.roi = Some(Roi {
+            x: 2040,
+            y: 1,
+            width: 13,
+            height: 2,
+        });
+        let roi = process_and_get_dynamic_image_16(
+            &context,
+            &state,
+            &source,
+            42,
+            roi_request,
+            "precision-roi",
+        )
+        .unwrap();
+        assert_eq!(
+            roi.to_rgba16(),
+            image::imageops::crop_imm(pixels, 2040, 1, 13, 2).to_image()
+        );
+        let after = process_and_get_dynamic_image(
+            &context,
+            &state,
+            &source,
+            42,
+            make_request(),
+            "precision-preview-restored",
+        )
+        .unwrap();
+        assert_eq!(
+            before, after,
+            "export must not alter the cached preview format or result"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2115,7 +2393,6 @@ mod shader_validation_tests {
     }
 }
 
-
 #[cfg(test)]
 mod shadow_lift_tests {
     /// The shadow slider is matched to DaVinci Resolve by MEASUREMENT: a
@@ -2131,28 +2408,44 @@ mod shadow_lift_tests {
     const SRC: &str = include_str!("shaders/shader.wgsl");
 
     fn parse_stops() -> Vec<f32> {
-        let start = SRC.find("const SHADOW_STOPS").expect("SHADOW_STOPS missing");
+        let start = SRC
+            .find("const SHADOW_STOPS")
+            .expect("SHADOW_STOPS missing");
         let open = SRC[start..].find('(').unwrap() + start;
         let close = SRC[open..].find(");").unwrap() + open;
         SRC[open + 1..close]
             .split(',')
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .map(|s| s.parse::<f32>().unwrap_or_else(|_| panic!("bad entry {s:?}")))
+            .map(|s| {
+                s.parse::<f32>()
+                    .unwrap_or_else(|_| panic!("bad entry {s:?}"))
+            })
             .collect()
     }
     fn parse_black_lift() -> f32 {
         let k = "const SHADOW_BLACK_LIFT: f32 = ";
         let i = SRC.find(k).expect("SHADOW_BLACK_LIFT missing") + k.len();
-        SRC[i..i + SRC[i..].find(';').unwrap()].trim().parse().unwrap()
+        SRC[i..i + SRC[i..].find(';').unwrap()]
+            .trim()
+            .parse()
+            .unwrap()
     }
 
     fn to_linear(c: f32) -> f32 {
-        if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
     }
     fn to_srgb(c: f32) -> f32 {
         let c = c.max(0.0);
-        if c <= 0.0031308 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 }
+        if c <= 0.0031308 {
+            c * 12.92
+        } else {
+            1.055 * c.powf(1.0 / 2.4) - 0.055
+        }
     }
 
     /// The hue-dependent correction table, shipped alongside the curve.
@@ -2359,23 +2652,24 @@ mod render_harness {
         let is_raw = std::path::Path::new(&path)
             .extension()
             .and_then(|e| e.to_str())
-            .map(|e| !matches!(e.to_ascii_lowercase().as_str(), "jpg" | "jpeg" | "png" | "tif" | "tiff" | "webp"))
+            .map(|e| {
+                !matches!(
+                    e.to_ascii_lowercase().as_str(),
+                    "jpg" | "jpeg" | "png" | "tif" | "tiff" | "webp"
+                )
+            })
             .unwrap_or(true);
         let js_raw: serde_json::Value = if let Ok(adj_file) = std::env::var("RAPIDRAW_ADJ_FILE") {
             let sidecar_src = std::fs::read_to_string(adj_file).expect("read RAPIDRAW_ADJ_FILE");
             let sidecar: serde_json::Value =
                 serde_json::from_str(&sidecar_src).expect("RAPIDRAW_ADJ_FILE json");
-            sidecar
-                .get("adjustments")
-                .cloned()
-                .unwrap_or(sidecar)
+            sidecar.get("adjustments").cloned().unwrap_or(sidecar)
         } else {
             let adj_src = std::env::var("RAPIDRAW_ADJ").unwrap_or("{}".into());
             serde_json::from_str(&adj_src).expect("RAPIDRAW_ADJ json")
         };
         let js = render_adjustments_for_empty(&js_raw);
-        let adjustments =
-            crate::image_processing::get_all_adjustments_from_json(&js, is_raw, None);
+        let adjustments = crate::image_processing::get_all_adjustments_from_json(&js, is_raw, None);
         let lut = js["lutPath"]
             .as_str()
             .and_then(|p| crate::lut_processing::parse_lut_file(p).ok())

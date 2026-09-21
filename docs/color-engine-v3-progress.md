@@ -47,6 +47,14 @@ tone chain outright when it is neutral, which matters: the GPU is free to
 compute `x/x` reciprocally, so the chain was costing exposure its exactness. A
 stop is now an exact doubling again.
 
+**Dither on the way to eight bits.** Eight bits cannot hold the gradients this
+pipeline produces, and plain rounding turns a slow ramp into flat plateaus with
+visible steps — which reads as a fault in the grade rather than in the
+encoding. The on-screen image now carries one LSB of deterministic triangular
+noise. Thumbnails, the scopes and the inspection image keep exact rounding,
+because those measure the picture and should not measure the dither; 16-bit
+export is unaffected, being already below the noise floor.
+
 Also removed: `PipelineConfig::exposure_stops`, which every caller set to zero.
 `controls.exposure` is the only exposure, applied once.
 
