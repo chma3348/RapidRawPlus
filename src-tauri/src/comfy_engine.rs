@@ -479,7 +479,10 @@ fn looks_like_a_model(path: &std::path::Path) -> bool {
     if meta.len() < MIN_PLAUSIBLE_BYTES {
         return false;
     }
-    if path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase())
+    if path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
         != Some("safetensors".to_string())
     {
         // Only safetensors has a header we can cheaply verify.
@@ -518,7 +521,10 @@ pub fn list_engine_loras(app_handle: tauri::AppHandle) -> LoraLibrary {
     let folder = dir.join("ComfyUI/models/loras");
     let folder_str = folder.to_string_lossy().to_string();
     let Ok(entries) = std::fs::read_dir(&folder) else {
-        return LoraLibrary { folder: folder_str, files: Vec::new() };
+        return LoraLibrary {
+            folder: folder_str,
+            files: Vec::new(),
+        };
     };
     let mut out: Vec<String> = entries
         .filter_map(|e| e.ok())
@@ -529,14 +535,20 @@ pub fn list_engine_loras(app_handle: tauri::AppHandle) -> LoraLibrary {
                 return None;
             }
             if !looks_like_a_model(&path) {
-                log::info!("[engine] ignoring {:?} — not a usable model file", path.file_name());
+                log::info!(
+                    "[engine] ignoring {:?} — not a usable model file",
+                    path.file_name()
+                );
                 return None;
             }
             Some(path.file_name()?.to_str()?.to_string())
         })
         .collect();
     out.sort();
-    LoraLibrary { folder: folder_str, files: out }
+    LoraLibrary {
+        folder: folder_str,
+        files: out,
+    }
 }
 
 /// Chains LoRA loaders onto a model node, returning the id of the node that
@@ -1002,7 +1014,7 @@ mod lora_file_tests {
 
 #[cfg(test)]
 mod lora_tests {
-    use super::{apply_loras, LoraSpec};
+    use super::{LoraSpec, apply_loras};
     use serde_json::json;
 
     fn graph() -> serde_json::Value {
@@ -1026,7 +1038,10 @@ mod lora_tests {
         let mut g = graph();
         apply_loras(
             &mut g,
-            &[LoraSpec { name: "ultrareal.safetensors".into(), strength: 0.8 }],
+            &[LoraSpec {
+                name: "ultrareal.safetensors".into(),
+                strength: 0.8,
+            }],
             "3",
             "3d",
         );
@@ -1042,8 +1057,14 @@ mod lora_tests {
         apply_loras(
             &mut g,
             &[
-                LoraSpec { name: "a.safetensors".into(), strength: 0.6 },
-                LoraSpec { name: "b.safetensors".into(), strength: 0.4 },
+                LoraSpec {
+                    name: "a.safetensors".into(),
+                    strength: 0.6,
+                },
+                LoraSpec {
+                    name: "b.safetensors".into(),
+                    strength: 0.4,
+                },
             ],
             "3",
             "3d",
@@ -1059,11 +1080,17 @@ mod lora_tests {
         let mut g = graph();
         apply_loras(
             &mut g,
-            &[LoraSpec { name: "a.safetensors".into(), strength: 0.0 }],
+            &[LoraSpec {
+                name: "a.safetensors".into(),
+                strength: 0.0,
+            }],
             "3",
             "3d",
         );
-        assert!(g.get("lora0").is_none(), "a zero-strength LoRA should not be loaded");
+        assert!(
+            g.get("lora0").is_none(),
+            "a zero-strength LoRA should not be loaded"
+        );
         assert_eq!(g["3d"]["inputs"]["model"], json!(["3", 0]));
     }
 }

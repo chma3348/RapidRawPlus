@@ -367,7 +367,10 @@ pub fn system_codec_png(bytes: &[u8], extension: &str) -> Result<Vec<u8>> {
 
 #[cfg(not(target_os = "macos"))]
 pub fn system_codec_png(_bytes: &[u8], extension: &str) -> Result<Vec<u8>> {
-    Err(anyhow!("{} files are currently only supported on macOS", extension.to_uppercase()))
+    Err(anyhow!(
+        "{} files are currently only supported on macOS",
+        extension.to_uppercase()
+    ))
 }
 
 fn decode_via_system_codec(bytes: &[u8], extension: &str) -> Result<DynamicImage> {
@@ -376,7 +379,9 @@ fn decode_via_system_codec(bytes: &[u8], extension: &str) -> Result<DynamicImage
         .with_guessed_format()
         .context("Failed to read the decoded image as PNG")?;
     reader.no_limits();
-    reader.decode().context("Failed to decode the converted image")
+    reader
+        .decode()
+        .context("Failed to decode the converted image")
 }
 
 pub fn load_image_with_orientation(
@@ -795,9 +800,11 @@ mod system_codec_tests {
         let dir = std::env::temp_dir().join("rapidraw_loader_codec_fixture");
         let _ = std::fs::create_dir_all(&dir);
         let source = dir.join("source.png");
-        image::RgbImage::from_fn(32, 16, |x, _| image::Rgb([if x < 16 { 200 } else { 30 }, 90, 60]))
-            .save(&source)
-            .unwrap();
+        image::RgbImage::from_fn(32, 16, |x, _| {
+            image::Rgb([if x < 16 { 200 } else { 30 }, 90, 60])
+        })
+        .save(&source)
+        .unwrap();
         for format in ["heic", "avif", "psd"] {
             let out = dir.join(format!("fixture.{format}"));
             let made = std::process::Command::new("sips")
@@ -811,12 +818,24 @@ mod system_codec_tests {
                 continue;
             }
             let bytes = std::fs::read(&out).unwrap();
-            assert_eq!(system_codec_format(&bytes), Some(format), "{format} not recognised by its bytes");
-            let image = load_image_with_orientation(&bytes, None).unwrap_or_else(|e| panic!("{format}: {e}"));
-            assert_eq!((image.width(), image.height()), (32, 16), "{format} changed size");
+            assert_eq!(
+                system_codec_format(&bytes),
+                Some(format),
+                "{format} not recognised by its bytes"
+            );
+            let image = load_image_with_orientation(&bytes, None)
+                .unwrap_or_else(|e| panic!("{format}: {e}"));
+            assert_eq!(
+                (image.width(), image.height()),
+                (32, 16),
+                "{format} changed size"
+            );
             let left = image.to_rgb8().get_pixel(4, 8)[0] as i32;
             let right = image.to_rgb8().get_pixel(28, 8)[0] as i32;
-            assert!(left - right > 120, "{format} lost the image: {left} vs {right}");
+            assert!(
+                left - right > 120,
+                "{format} lost the image: {left} vs {right}"
+            );
         }
     }
 }

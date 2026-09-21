@@ -65,7 +65,13 @@ fn upsample(v: &[f32], w: usize, h: usize, tw: usize, th: usize) -> Vec<f32> {
 }
 
 /// Solves `∇²c = 0` inside the mask with `c = diff` outside it.
-fn solve_correction(diff: &[f32], inside_in: &[bool], w: usize, h: usize, level: usize) -> Vec<f32> {
+fn solve_correction(
+    diff: &[f32],
+    inside_in: &[bool],
+    w: usize,
+    h: usize,
+    level: usize,
+) -> Vec<f32> {
     if w == 0 || h == 0 {
         return Vec::new();
     }
@@ -434,7 +440,10 @@ mod tests {
         let mean = vals.iter().sum::<f32>() / vals.len() as f32;
         let std = (vals.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / vals.len() as f32).sqrt();
         // A flat paste-over would have std ~0; the grain is ~30 wide.
-        assert!(std > 4.0, "texture std {std:.2} — source grain was flattened away");
+        assert!(
+            std > 4.0,
+            "texture std {std:.2} — source grain was flattened away"
+        );
     }
 
     #[test]
@@ -499,7 +508,10 @@ mod tests {
             "interior mean {mean:.1} should stay near the generated tone (~140), not the \
              blown surroundings (245)"
         );
-        assert!(std > 8.0, "generated contrast was flattened to std {std:.2}");
+        assert!(
+            std > 8.0,
+            "generated contrast was flattened to std {std:.2}"
+        );
     }
 
     /// Control for the test above: widen the band past the region and the
@@ -524,7 +536,11 @@ mod tests {
         for y in 0..base.height() {
             for x in 0..base.width() {
                 if mask.get_pixel(x, y)[0] == 0 {
-                    assert_eq!(base.get_pixel(x, y), out.get_pixel(x, y), "({x},{y}) changed");
+                    assert_eq!(
+                        base.get_pixel(x, y),
+                        out.get_pixel(x, y),
+                        "({x},{y}) changed"
+                    );
                 }
             }
         }

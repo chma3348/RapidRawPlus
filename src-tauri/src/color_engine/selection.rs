@@ -173,11 +173,11 @@ mod tests {
             width: [30., 0.2, 0.5],
             adjustment: [10., 0., 0.],
         };
-        assert_eq!(weight([0.6, 0., 0.], &[range.clone()], 0), 0.);
-        assert!((weight([0.6, 0.1, 0.], &[range.clone()], 0) - 1.).abs() < 1e-6);
+        assert_eq!(weight([0.6, 0., 0.], std::slice::from_ref(&range), 0), 0.);
+        assert!((weight([0.6, 0.1, 0.], std::slice::from_ref(&range), 0) - 1.).abs() < 1e-6);
         assert!(
-            (weight([0.6, 0.1, 0.00001], &[range.clone()], 0)
-                - weight([0.6, 0.1, -0.00001], &[range.clone()], 0))
+            (weight([0.6, 0.1, 0.00001], std::slice::from_ref(&range), 0)
+                - weight([0.6, 0.1, -0.00001], std::slice::from_ref(&range), 0))
             .abs()
                 < 1e-6
         );

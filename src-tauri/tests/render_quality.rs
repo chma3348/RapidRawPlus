@@ -13,6 +13,9 @@ use std::sync::Arc;
 const W: u32 = 64;
 const H: u32 = 64;
 
+/// A named adjustment to sweep: the label and what it does to the settings.
+type Dial = (&'static str, Box<dyn Fn(&mut AllAdjustments)>);
+
 fn f32_to_f16_bits(v: f32) -> u16 {
     let bits = v.to_bits();
     let sign = ((bits >> 16) & 0x8000) as u16;
@@ -709,7 +712,7 @@ fn measure_tonal_dial_response() {
         out[(((H / 2) * W + W / 2) * 4) as usize]
     };
 
-    let dials: Vec<(&str, Box<dyn Fn(&mut AllAdjustments)>)> = vec![
+    let dials: Vec<Dial> = vec![
         ("base      ", Box::new(|_: &mut AllAdjustments| {})),
         (
             "high -100 ",
@@ -839,7 +842,7 @@ fn tonal_dials_zone_contract() {
 
     // 1. Monotonicity across a dense ramp for every dial extreme. The old
     //    highlights -100 pulled a 0.85 patch BELOW a 0.6 patch.
-    let dials: Vec<(&str, Box<dyn Fn(&mut AllAdjustments)>)> = vec![
+    let dials: Vec<Dial> = vec![
         (
             "highlights -100",
             Box::new(|a: &mut AllAdjustments| a.global.highlights = -1.0),

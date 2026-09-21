@@ -222,7 +222,7 @@ pub fn merge_frames(
     for y in 0..h {
         for x in 0..w {
             let mut merged = [0.0f32; 3];
-            for c in 0..3 {
+            for (c, merged_value) in merged.iter_mut().enumerate() {
                 // Best-exposed sample anchors both the fallback value and
                 // the deghost comparison.
                 let mut best_w = -1.0f32;
@@ -256,7 +256,11 @@ pub fn merge_frames(
                     acc += radiance * wgt;
                     acc_w += wgt;
                 }
-                merged[c] = if acc_w > 0.0 { acc / acc_w } else { best_radiance };
+                *merged_value = if acc_w > 0.0 {
+                    acc / acc_w
+                } else {
+                    best_radiance
+                };
             }
             out.put_pixel(x, y, Rgb(merged));
         }
@@ -311,7 +315,9 @@ mod tests {
     use super::*;
 
     fn hash01(x: i64, y: i64) -> f32 {
-        let mut h = (x.wrapping_mul(374_761_393).wrapping_add(y.wrapping_mul(668_265_263))) as u64;
+        let mut h = (x
+            .wrapping_mul(374_761_393)
+            .wrapping_add(y.wrapping_mul(668_265_263))) as u64;
         h ^= h >> 13;
         h = h.wrapping_mul(1_274_126_177);
         h ^= h >> 16;
@@ -339,9 +345,8 @@ mod tests {
         for y in 0..h {
             for x in 0..w {
                 let (fx, fy) = (x as f32, y as f32);
-                let mut v = 0.18
-                    + 0.45 * value_noise(fx, fy, 29.0)
-                    + 0.18 * value_noise(fx, fy, 11.0);
+                let mut v =
+                    0.18 + 0.45 * value_noise(fx, fy, 29.0) + 0.18 * value_noise(fx, fy, 11.0);
                 // Unique landmarks break any residual symmetry.
                 if (30..58).contains(&x) && (44..70).contains(&y) {
                     v = 0.92;
@@ -385,11 +390,15 @@ mod tests {
         for y in margin..(base.height() - margin) {
             for x in margin..(base.width() - margin) {
                 for c in 0..3 {
-                    worst = worst.max((base.get_pixel(x, y)[c] - restored.get_pixel(x, y)[c]).abs());
+                    worst =
+                        worst.max((base.get_pixel(x, y)[c] - restored.get_pixel(x, y)[c]).abs());
                 }
             }
         }
-        assert!(worst < 0.02, "re-registered interior still differs by {worst}");
+        assert!(
+            worst < 0.02,
+            "re-registered interior still differs by {worst}"
+        );
     }
 
     /// Alignment must survive a multi-stop exposure difference — the whole
@@ -464,7 +473,7 @@ mod tests {
     fn rejects_bad_input() {
         let a = Rgb32FImage::new(4, 4);
         assert!(merge_frames(&[], &[], &MergeOptions::default()).is_err());
-        assert!(merge_frames(&[a.clone()], &[0.0], &MergeOptions::default()).is_err());
+        assert!(merge_frames(std::slice::from_ref(&a), &[0.0], &MergeOptions::default()).is_err());
         assert!(merge_frames(&[a], &[1.0, 2.0], &MergeOptions::default()).is_err());
     }
 }

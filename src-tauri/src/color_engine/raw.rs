@@ -4,7 +4,7 @@ use super::{
     input::{DecodedFrame, InputProvenance},
     spaces,
 };
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 use glam::{DMat3, DVec3};
 use image::{DynamicImage, ImageBuffer, Rgba};
 use rawler::{
@@ -123,7 +123,10 @@ fn develop(
         "V3 RAW currently requires a 2x2 RGB Bayer mosaic"
     );
     ensure!(
-        raw.width >= 16 && raw.height >= 16 && raw.width % 2 == 0 && raw.height % 2 == 0,
+        raw.width >= 16
+            && raw.height >= 16
+            && raw.width.is_multiple_of(2)
+            && raw.height.is_multiple_of(2),
         "Unsupported RAW dimensions"
     );
     ensure!(
@@ -216,13 +219,15 @@ mod tests {
     use super::*;
     fn fixture() -> RawImage {
         use rawler::{
-            cfa::{PlaneColor, CFA},
+            cfa::{CFA, PlaneColor},
             decoders::Camera,
             rawimage::{BlackLevel, CFAConfig, WhiteLevel},
         };
-        let mut camera = Camera::default();
-        camera.cfa = CFA::new("RGGB");
-        camera.plane_color = PlaneColor::new("RGB");
+        let camera = Camera {
+            cfa: CFA::new("RGGB"),
+            plane_color: PlaneColor::new("RGB"),
+            ..Camera::default()
+        };
         let cfa = CFAConfig::new_from_camera(&camera);
         let mut raw = RawImage::new_with_data(
             camera,
@@ -291,7 +296,7 @@ mod tests {
     }
     #[test]
     fn encoded_dng_runs_through_real_decoder_and_development() {
-        use rawler::formats::tiff::{writer::TiffWriter, Rational, Value};
+        use rawler::formats::tiff::{Rational, Value, writer::TiffWriter};
         let mut bytes = std::io::Cursor::new(Vec::new());
         {
             let mut writer = TiffWriter::new(&mut bytes).unwrap();

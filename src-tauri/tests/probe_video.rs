@@ -9,8 +9,12 @@ fn poster_frames() {
     let dir = std::env::var("VIDEO_DIR").expect("VIDEO_DIR");
     let out = PathBuf::from(std::env::var("VIDEO_OUT").expect("VIDEO_OUT"));
     std::fs::create_dir_all(&out).unwrap();
-    let mut entries: Vec<_> = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).map(|e| e.path())
-        .filter(|p| formats::is_video_file(p)).collect();
+    let mut entries: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| formats::is_video_file(p))
+        .collect();
     entries.sort();
     assert!(!entries.is_empty(), "no videos found in {dir}");
     for path in entries {
@@ -21,10 +25,16 @@ fn poster_frames() {
             Ok(frame) => {
                 let f = out.join(format!("{name}.jpg"));
                 frame.to_rgb8().save(&f).unwrap();
-                println!("{name:<28} {}x{} {:.1}s {:?}  frame {}x{} in {:.1?}",
-                    info.width.unwrap_or(0), info.height.unwrap_or(0),
-                    info.duration_seconds.unwrap_or(0.0), info.codecs,
-                    frame.width(), frame.height(), t.elapsed());
+                println!(
+                    "{name:<28} {}x{} {:.1}s {:?}  frame {}x{} in {:.1?}",
+                    info.width.unwrap_or(0),
+                    info.height.unwrap_or(0),
+                    info.duration_seconds.unwrap_or(0.0),
+                    info.codecs,
+                    frame.width(),
+                    frame.height(),
+                    t.elapsed()
+                );
             }
             Err(e) => println!("{name:<28} NO FRAME: {e}"),
         }

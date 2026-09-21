@@ -4,10 +4,10 @@ use super::{
     plan::RenderPlan,
 };
 use crate::{AppState, image_processing::GpuContext};
-use std::path::PathBuf;
 use anyhow::{Context, Result, ensure};
 use image::DynamicImage;
 use serde_json::Value;
+use std::path::PathBuf;
 use std::{sync::Arc, time::SystemTime};
 
 pub struct SourceCache {
@@ -47,10 +47,12 @@ pub fn source(state: &AppState, path: &str) -> Result<Arc<DecodedFrame>> {
         .v3_source
         .lock()
         .map_err(|_| anyhow::anyhow!("V3 source cache unavailable"))?;
-    if let Some(c) = &*cache {
-        if c.path == path && c.length == meta.len() && c.modified == modified {
-            return Ok(c.frame.clone());
-        }
+    if let Some(c) = &*cache
+        && c.path == path
+        && c.length == meta.len()
+        && c.modified == modified
+    {
+        return Ok(c.frame.clone());
     }
     let bytes = std::fs::read(&path)?;
     let mut frame = if crate::formats::is_raw_file(&path) {
@@ -179,13 +181,25 @@ fn mask_bitmap(
     shape["adjustments"] = Value::Null;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     shape.to_string().hash(&mut hasher);
-    (width, height, scale.to_bits(), offset.0.to_bits(), offset.1.to_bits()).hash(&mut hasher);
+    (
+        width,
+        height,
+        scale.to_bits(),
+        offset.0.to_bits(),
+        offset.1.to_bits(),
+    )
+        .hash(&mut hasher);
     // Range masks depend on the picture too; shape masks do not.
     if mask.requires_warped_image() {
         picture.hash(&mut hasher);
     }
     let key = hasher.finish();
-    if let Some(hit) = state.v3_masks.lock().ok().and_then(|c| c.get(&key).cloned()) {
+    if let Some(hit) = state
+        .v3_masks
+        .lock()
+        .ok()
+        .and_then(|c| c.get(&key).cloned())
+    {
         return Ok(hit);
     }
     let bitmap = Arc::new(
@@ -318,7 +332,10 @@ impl Stopwatch {
     }
     fn lap(&mut self, stage: &str) {
         if let Some(t) = &mut self.0 {
-            eprintln!("  v3 {stage:24} {:>6.1} ms", t.elapsed().as_secs_f64() * 1000.0);
+            eprintln!(
+                "  v3 {stage:24} {:>6.1} ms",
+                t.elapsed().as_secs_f64() * 1000.0
+            );
             *t = std::time::Instant::now();
         }
     }
@@ -399,7 +416,16 @@ pub(crate) fn render_file_with_capture(
     let image = if controls.detail.is_neutral() {
         image
     } else {
-        detailed(state, &source, image, &controls.detail, transform, patches, max_dimension, scale)?
+        detailed(
+            state,
+            &source,
+            image,
+            &controls.detail,
+            transform,
+            patches,
+            max_dimension,
+            scale,
+        )?
     };
     watch.lap("prepare + detail");
     let masks: Vec<crate::mask_generation::MaskDefinition> =
@@ -422,12 +448,7 @@ pub(crate) fn render_file_with_capture(
     // per geometry or patch change rather than per render.
     let sampled = if active.iter().any(|m| m.requires_warped_image()) {
         Some(sampling_image(
-            context,
-            state,
-            path,
-            edits,
-            transform,
-            patches,
+            context, state, path, edits, transform, patches,
         )?)
     } else {
         None

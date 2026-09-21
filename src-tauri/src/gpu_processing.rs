@@ -1023,8 +1023,7 @@ impl GpuProcessor {
         // and the analytic curve stands on its own. Full-cube RMS against
         // Resolve falls from 2.20 to 0.34 code values with this applied.
         const SHADOW_CORRECTION_SIZE: u32 = 33;
-        let shadow_correction_bytes: &[u8] =
-            include_bytes!("shaders/shadow_correction_33.bin");
+        let shadow_correction_bytes: &[u8] = include_bytes!("shaders/shadow_correction_33.bin");
         let expected = (SHADOW_CORRECTION_SIZE.pow(3) as usize) * 2;
         if shadow_correction_bytes.len() != expected {
             return Err(format!(
@@ -1223,8 +1222,12 @@ impl GpuProcessor {
         skip_cpu_readback: bool,
         output_to_display: bool,
     ) -> Result<(Vec<u8>, u32, u32, u32, u32), String> {
-        if crate::color_engine::config::engine_for_version(request.adjustments.global.process_version)
-            .map_err(|e| e.to_string())? == crate::color_engine::config::EngineVersion::ExperimentalV3 {
+        if crate::color_engine::config::engine_for_version(
+            request.adjustments.global.process_version,
+        )
+        .map_err(|e| e.to_string())?
+            == crate::color_engine::config::EngineVersion::ExperimentalV3
+        {
             return Err("Color Engine v3 is experimental and must use its explicit render plan; existing edits cannot be silently rendered with unsupported controls.".into());
         }
         let device = &self.context.device;
@@ -2378,8 +2381,7 @@ mod shader_validation_tests {
     fn every_shader_parses_and_validates() {
         for name in ["shader.wgsl", "display.wgsl", "blur.wgsl", "flare.wgsl"] {
             let path = format!("src/shaders/{name}");
-            let src = std::fs::read_to_string(&path)
-                .unwrap_or_else(|e| panic!("{path}: {e}"));
+            let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
             let module = naga::front::wgsl::parse_str(&src)
                 .unwrap_or_else(|e| panic!("{name} failed to parse:\n{}", e.emit_to_string(&src)));
             let mut validator = naga::valid::Validator::new(
@@ -2490,18 +2492,32 @@ mod shadow_lift_tests {
 
     #[test]
     fn correction_table_is_well_formed() {
-        assert_eq!(CORRECTION.len(), 33 * 33 * 33 * 2, "expected a 33^3 f16 table");
+        assert_eq!(
+            CORRECTION.len(),
+            33 * 33 * 33 * 2,
+            "expected a 33^3 f16 table"
+        );
         let vals: Vec<f32> = CORRECTION
             .chunks_exact(2)
             .map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32())
             .collect();
-        assert!(vals.iter().all(|v| v.is_finite() && (0.7..=1.4).contains(v)),
-            "corrections must stay a mild multiplier");
+        assert!(
+            vals.iter()
+                .all(|v| v.is_finite() && (0.7..=1.4).contains(v)),
+            "corrections must stay a mild multiplier"
+        );
         // It is a residual, so it has to be near-identity nearly everywhere;
         // a table that drifted broadly would mean the curve itself regressed.
         let near = vals.iter().filter(|v| (**v - 1.0).abs() < 0.01).count();
-        assert!(near * 100 / vals.len() > 70, "only {}% near 1.0", near * 100 / vals.len());
-        assert!((correction([1.0, 1.0, 1.0]) - 1.0).abs() < 0.02, "white must be left alone");
+        assert!(
+            near * 100 / vals.len() > 70,
+            "only {}% near 1.0",
+            near * 100 / vals.len()
+        );
+        assert!(
+            (correction([1.0, 1.0, 1.0]) - 1.0).abs() < 0.02,
+            "white must be left alone"
+        );
     }
 
     #[test]
@@ -2512,7 +2528,11 @@ mod shadow_lift_tests {
         for w in tab.windows(2) {
             assert!(w[1] <= w[0] + 1e-6, "gain must fall monotonically: {w:?}");
         }
-        assert!(tab[0] > 1.6 && tab[0] < 1.7, "black lifts ~1.66 stops, got {}", tab[0]);
+        assert!(
+            tab[0] > 1.6 && tab[0] < 1.7,
+            "black lifts ~1.66 stops, got {}",
+            tab[0]
+        );
     }
 
     #[test]
@@ -2552,20 +2572,32 @@ mod shadow_lift_tests {
             for c in 0..3 {
                 let d = (got[c] - expect[c]).abs();
                 sum_sq += (d * d) as f64;
-                if d > worst.0 { worst = (d, *input); }
+                if d > worst.0 {
+                    worst = (d, *input);
+                }
             }
         }
         let rms = (sum_sq / (cases.len() * 3) as f64).sqrt();
         // Below one 8-bit code value: as exact as the format can express.
-        assert!(rms < 0.6, "RMS {rms:.2} code values against Resolve (want < 0.6)");
+        assert!(
+            rms < 0.6,
+            "RMS {rms:.2} code values against Resolve (want < 0.6)"
+        );
         assert!(worst.0 < 2.0, "worst {:.2} on input {:?}", worst.0, worst.1);
     }
 
     #[test]
     fn black_stays_black_and_white_stays_white() {
-        assert!(lift([0.0, 0.0, 0.0])[0] < 3.0, "true black must not turn milky");
+        assert!(
+            lift([0.0, 0.0, 0.0])[0] < 3.0,
+            "true black must not turn milky"
+        );
         let w = lift([255.0, 255.0, 255.0]);
-        assert!((w[0] - 255.0).abs() < 0.51, "white must be untouched, got {}", w[0]);
+        assert!(
+            (w[0] - 255.0).abs() < 0.51,
+            "white must be untouched, got {}",
+            w[0]
+        );
     }
 }
 
@@ -2915,12 +2947,20 @@ mod highlight_detail_tests {
 
     /// Parse `y - amt * A * y^E` constants out of `highlight_compressed_luma`.
     fn curve_constants() -> (f32, f32) {
-        let i = SRC.find("fn highlight_compressed_luma").expect("fn missing");
+        let i = SRC
+            .find("fn highlight_compressed_luma")
+            .expect("fn missing");
         let body = &SRC[i..i + 400];
         let mul = body.find("amt * ").expect("amt term") + 6;
-        let a: f32 = body[mul..body[mul..].find(" *").unwrap() + mul].trim().parse().unwrap();
+        let a: f32 = body[mul..body[mul..].find(" *").unwrap() + mul]
+            .trim()
+            .parse()
+            .unwrap();
         let powi = body.find("pow(clamp(y, 0.0, 1.0), ").expect("pow term") + 24;
-        let e: f32 = body[powi..body[powi..].find(')').unwrap() + powi].trim().parse().unwrap();
+        let e: f32 = body[powi..body[powi..].find(')').unwrap() + powi]
+            .trim()
+            .parse()
+            .unwrap();
         (a, e)
     }
 

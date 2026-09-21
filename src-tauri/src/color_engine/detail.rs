@@ -77,9 +77,15 @@ impl Detail {
     pub fn validate(&self) -> Result<()> {
         let within = |v: f32, a: f32, b: f32| v.is_finite() && (a..=b).contains(&v);
         for v in [self.sharpening, self.texture, self.clarity, self.structure] {
-            ensure!(within(v, -100., 100.), "Detail controls must be within -100..100");
+            ensure!(
+                within(v, -100., 100.),
+                "Detail controls must be within -100..100"
+            );
         }
-        ensure!(within(self.threshold, 0., 80.), "Sharpening threshold must be within 0..80");
+        ensure!(
+            within(self.threshold, 0., 80.),
+            "Sharpening threshold must be within 0..80"
+        );
         ensure!(
             within(self.luminance_noise, 0., 100.) && within(self.color_noise, 0., 100.),
             "Noise reduction must be within 0..100"
@@ -256,33 +262,46 @@ fn process(
     };
 
     let mut graded = denoised.clone();
-    let mut add_band = |gaussian: Option<Gaussian>, amount: f32, limit: f32, midtones: bool, gate: f32| {
-        let Some(gaussian) = gaussian else { return };
-        let blurred = blur(&denoised, width, height, gaussian);
-        graded
-            .par_iter_mut()
-            .zip(denoised.par_iter())
-            .zip(blurred.par_iter())
-            .for_each(|((out, l), b)| {
-                let mut d = l - b;
-                if gate > 0.0 {
-                    d *= d * d / (d * d + gate * gate);
-                }
-                // A soft limit on how far a band can push a pixel, which is
-                // what keeps a large-radius control from drawing halos.
-                let d = limit * (d / limit).tanh();
-                let weight = if midtones {
-                    (-((l - MID_GREY_LOG) / 3.0).powi(2)).exp()
-                } else {
-                    1.0
-                };
-                *out += amount * d * weight;
-            });
-    };
-    add_band(plan.sharpen, detail.sharpening / 100. * 1.5, 0.5, false, detail.threshold * 0.004);
+    let mut add_band =
+        |gaussian: Option<Gaussian>, amount: f32, limit: f32, midtones: bool, gate: f32| {
+            let Some(gaussian) = gaussian else { return };
+            let blurred = blur(&denoised, width, height, gaussian);
+            graded
+                .par_iter_mut()
+                .zip(denoised.par_iter())
+                .zip(blurred.par_iter())
+                .for_each(|((out, l), b)| {
+                    let mut d = l - b;
+                    if gate > 0.0 {
+                        d *= d * d / (d * d + gate * gate);
+                    }
+                    // A soft limit on how far a band can push a pixel, which is
+                    // what keeps a large-radius control from drawing halos.
+                    let d = limit * (d / limit).tanh();
+                    let weight = if midtones {
+                        (-((l - MID_GREY_LOG) / 3.0).powi(2)).exp()
+                    } else {
+                        1.0
+                    };
+                    *out += amount * d * weight;
+                });
+        };
+    add_band(
+        plan.sharpen,
+        detail.sharpening / 100. * 1.5,
+        0.5,
+        false,
+        detail.threshold * 0.004,
+    );
     add_band(plan.texture, detail.texture / 100., 0.5, false, 0.0);
     add_band(plan.clarity, detail.clarity / 100. * 0.8, 1.0, true, 0.0);
-    add_band(plan.structure, detail.structure / 100. * 0.6, 1.0, false, 0.0);
+    add_band(
+        plan.structure,
+        detail.structure / 100. * 0.6,
+        1.0,
+        false,
+        0.0,
+    );
 
     // Chromaticity: the colour with luminance divided out. Smoothing it
     // cannot change brightness, and a guided filter steered by luminance keeps
@@ -293,7 +312,13 @@ fn process(
         std::array::from_fn(|c| {
             let ratio: Vec<f32> = (0..pixels)
                 .into_par_iter()
-                .map(|i| if lit(i) { rgba[i * 4 + c] / luminance[i] } else { 1.0 })
+                .map(|i| {
+                    if lit(i) {
+                        rgba[i * 4 + c] / luminance[i]
+                    } else {
+                        1.0
+                    }
+                })
                 .collect();
             let smooth = guided(&denoised, &ratio, width, height, radius, 0.01);
             ratio
@@ -330,7 +355,11 @@ fn process(
 /// He, Sun and Tang's guided filter: smooths `input` while keeping the edges
 /// that `guide` has. Reaches twice `radius`.
 fn guided(guide: &[f32], input: &[f32], w: usize, h: usize, radius: usize, eps: f32) -> Vec<f32> {
-    let product: Vec<f32> = guide.par_iter().zip(input.par_iter()).map(|(a, b)| a * b).collect();
+    let product: Vec<f32> = guide
+        .par_iter()
+        .zip(input.par_iter())
+        .map(|(a, b)| a * b)
+        .collect();
     let square: Vec<f32> = guide.par_iter().map(|a| a * a).collect();
     let mean_g = box_mean(guide, w, h, radius);
     let mean_i = box_mean(input, w, h, radius);
@@ -343,10 +372,16 @@ fn guided(guide: &[f32], input: &[f32], w: usize, h: usize, radius: usize, eps: 
             (mean_gi[k] - mean_g[k] * mean_i[k]) / (variance + eps)
         })
         .collect();
-    let b: Vec<f32> = (0..w * h).into_par_iter().map(|k| mean_i[k] - a[k] * mean_g[k]).collect();
+    let b: Vec<f32> = (0..w * h)
+        .into_par_iter()
+        .map(|k| mean_i[k] - a[k] * mean_g[k])
+        .collect();
     let mean_a = box_mean(&a, w, h, radius);
     let mean_b = box_mean(&b, w, h, radius);
-    (0..w * h).into_par_iter().map(|k| mean_a[k] * guide[k] + mean_b[k]).collect()
+    (0..w * h)
+        .into_par_iter()
+        .map(|k| mean_a[k] * guide[k] + mean_b[k])
+        .collect()
 }
 
 fn blur(plane: &[f32], w: usize, h: usize, g: Gaussian) -> Vec<f32> {
@@ -467,7 +502,11 @@ mod tests {
         let base = edge_contrast_at(&image(64, 8, edge), 4, 1);
         for (amount, sharper) in [(80.0, true), (-80.0, false)] {
             let mut img = image(64, 8, edge);
-            let detail = Detail { sharpening: amount, threshold: 0., ..Detail::default() };
+            let detail = Detail {
+                sharpening: amount,
+                threshold: 0.,
+                ..Detail::default()
+            };
             apply(&mut img, &detail, SRGB_Y, 1.0);
             let after = edge_contrast_at(&img, 4, 1);
             assert_eq!(after > base, sharper, "{amount}: {base} -> {after}");
@@ -476,12 +515,26 @@ mod tests {
 
     #[test]
     fn detail_changes_brightness_not_colour() {
-        let mut img = image(64, 8, |x, _| if x < 32 { [0.2, 0.1, 0.05] } else { [0.4, 0.2, 0.1] });
-        let detail = Detail { sharpening: 100., clarity: 80., threshold: 0., ..Detail::default() };
+        let mut img = image(64, 8, |x, _| {
+            if x < 32 {
+                [0.2, 0.1, 0.05]
+            } else {
+                [0.4, 0.2, 0.1]
+            }
+        });
+        let detail = Detail {
+            sharpening: 100.,
+            clarity: 80.,
+            threshold: 0.,
+            ..Detail::default()
+        };
         apply(&mut img, &detail, SRGB_Y, 1.0);
         for p in img.pixels() {
             // Same 4:2:1 ratio as the source: brightness moved, hue did not.
-            assert!((p[0] / p[1] - 2.0).abs() < 1e-3 && (p[1] / p[2] - 2.0).abs() < 1e-3, "{p:?}");
+            assert!(
+                (p[0] / p[1] - 2.0).abs() < 1e-3 && (p[1] / p[2] - 2.0).abs() < 1e-3,
+                "{p:?}"
+            );
         }
     }
 
@@ -496,13 +549,28 @@ mod tests {
         let base = spread(&image(64, 64, grain));
         let run = |threshold: f32| {
             let mut img = image(64, 64, grain);
-            apply(&mut img, &Detail { sharpening: 100., threshold, ..Detail::default() }, SRGB_Y, 1.0);
+            apply(
+                &mut img,
+                &Detail {
+                    sharpening: 100.,
+                    threshold,
+                    ..Detail::default()
+                },
+                SRGB_Y,
+                1.0,
+            );
             spread(&img)
         };
         let ungated = run(0.);
         let gated = run(80.);
-        assert!(ungated > base * 1.3, "sharpening should amplify fine grain: {base} -> {ungated}");
-        assert!(gated < base * 1.1, "a high threshold should leave grain alone: {base} -> {gated}");
+        assert!(
+            ungated > base * 1.3,
+            "sharpening should amplify fine grain: {base} -> {ungated}"
+        );
+        assert!(
+            gated < base * 1.1,
+            "a high threshold should leave grain alone: {base} -> {gated}"
+        );
     }
 
     #[test]
@@ -518,9 +586,23 @@ mod tests {
         };
         let before = image(64, 16, noisy);
         let mut after = before.clone();
-        apply(&mut after, &Detail { luminance_noise: 100., ..Detail::default() }, SRGB_Y, 1.0);
-        assert!(variance(&after) < variance(&before) * 0.5, "noise not reduced");
-        assert!(edge_contrast(&after, 8) > edge_contrast(&before, 8) * 0.8, "edge was blurred away");
+        apply(
+            &mut after,
+            &Detail {
+                luminance_noise: 100.,
+                ..Detail::default()
+            },
+            SRGB_Y,
+            1.0,
+        );
+        assert!(
+            variance(&after) < variance(&before) * 0.5,
+            "noise not reduced"
+        );
+        assert!(
+            edge_contrast(&after, 8) > edge_contrast(&before, 8) * 0.8,
+            "edge was blurred away"
+        );
     }
 
     #[test]
@@ -529,11 +611,24 @@ mod tests {
             let n = noise(x, y) * 0.1;
             [0.2 + n, 0.2 - n * 0.5, 0.2 + n * 0.3]
         });
-        let luminance = |p: &image::Rgba<f32>| SRGB_Y[0] * p[0] + SRGB_Y[1] * p[1] + SRGB_Y[2] * p[2];
+        let luminance =
+            |p: &image::Rgba<f32>| SRGB_Y[0] * p[0] + SRGB_Y[1] * p[1] + SRGB_Y[2] * p[2];
         let before: Vec<f32> = img.pixels().map(luminance).collect();
-        apply(&mut img, &Detail { color_noise: 100., ..Detail::default() }, SRGB_Y, 1.0);
+        apply(
+            &mut img,
+            &Detail {
+                color_noise: 100.,
+                ..Detail::default()
+            },
+            SRGB_Y,
+            1.0,
+        );
         for (b, p) in before.iter().zip(img.pixels()) {
-            assert!((luminance(p) - b).abs() < 2e-5, "luminance moved: {b} -> {}", luminance(p));
+            assert!(
+                (luminance(p) - b).abs() < 2e-5,
+                "luminance moved: {b} -> {}",
+                luminance(p)
+            );
         }
     }
 
@@ -552,7 +647,11 @@ mod tests {
         let make = || {
             image(96, 200, |x, y| {
                 let n = noise(x, y) * 0.05;
-                let base = if (x / 13 + y / 17) % 2 == 0 { 0.15 } else { 0.45 };
+                let base = if (x / 13 + y / 17) % 2 == 0 {
+                    0.15
+                } else {
+                    0.45
+                };
                 [base + n, base * 0.8 - n * 0.3, base * 0.6 + n * 0.2]
             })
         };
@@ -562,15 +661,30 @@ mod tests {
             let mut tiled = make();
             apply_in_strips(&mut tiled, &detail, SRGB_Y, 1.0, strip);
             for (a, b) in whole.as_raw().iter().zip(tiled.as_raw()) {
-                assert!((a - b).abs() < 1e-5, "strips of {strip} rows changed a pixel: {a} vs {b}");
+                assert!(
+                    (a - b).abs() < 1e-5,
+                    "strips of {strip} rows changed a pixel: {a} vs {b}"
+                );
             }
         }
     }
 
     #[test]
     fn radii_follow_the_preview_scale() {
-        let plan = Plan::new(&Detail { structure: 50., ..Detail::default() }, 1.0);
-        let small = Plan::new(&Detail { structure: 50., ..Detail::default() }, 0.25);
+        let plan = Plan::new(
+            &Detail {
+                structure: 50.,
+                ..Detail::default()
+            },
+            1.0,
+        );
+        let small = Plan::new(
+            &Detail {
+                structure: 50.,
+                ..Detail::default()
+            },
+            0.25,
+        );
         let full = plan.structure.unwrap().support() as f32;
         let quarter = small.structure.unwrap().support() as f32;
         assert!((quarter / full - 0.25).abs() < 0.05, "{full} vs {quarter}");
@@ -584,9 +698,29 @@ mod tests {
     fn full_resolution_cost() {
         let make = || image(7008, 4672, |x, y| [0.2 + 0.05 * noise(x, y), 0.2, 0.18]);
         for (name, detail) in [
-            ("clarity + structure", Detail { clarity: 50., structure: 50., ..Detail::default() }),
-            ("sharpening", Detail { sharpening: 50., ..Detail::default() }),
-            ("both noise reductions", Detail { luminance_noise: 50., color_noise: 50., ..Detail::default() }),
+            (
+                "clarity + structure",
+                Detail {
+                    clarity: 50.,
+                    structure: 50.,
+                    ..Detail::default()
+                },
+            ),
+            (
+                "sharpening",
+                Detail {
+                    sharpening: 50.,
+                    ..Detail::default()
+                },
+            ),
+            (
+                "both noise reductions",
+                Detail {
+                    luminance_noise: 50.,
+                    color_noise: 50.,
+                    ..Detail::default()
+                },
+            ),
             (
                 "everything",
                 Detail {
@@ -603,7 +737,10 @@ mod tests {
             let mut img = make();
             let start = std::time::Instant::now();
             apply(&mut img, &detail, SRGB_Y, 1.0);
-            println!("{name:24} {:>7.0} ms", start.elapsed().as_secs_f64() * 1000.0);
+            println!(
+                "{name:24} {:>7.0} ms",
+                start.elapsed().as_secs_f64() * 1000.0
+            );
         }
     }
 }

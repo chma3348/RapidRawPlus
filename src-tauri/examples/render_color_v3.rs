@@ -1,7 +1,7 @@
 //! Developer-only renderer; requires explicit interpretation of decoded pixels.
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 use rapidraw_lib::color_engine::{
-    config::*, input::decode_profiled_photo, plan::RenderPlan, ColorEngine,
+    ColorEngine, config::*, input::decode_profiled_photo, plan::RenderPlan,
 };
 use rapidraw_lib::image_processing::GpuContext;
 use std::{

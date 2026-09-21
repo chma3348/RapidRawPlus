@@ -1,17 +1,17 @@
 //! Opt-in, versioned color pipeline shared by application previews and exports.
 //! Explicit source interpretation, float DWG controls and fixed SDR sRGB output.
 //! Application defaults and legacy edit rendering remain unchanged.
-pub mod config;
 pub mod application;
+pub mod config;
 pub mod controls;
 pub mod cube;
 pub mod detail;
-pub mod patches;
-pub mod selection;
 pub mod input;
-pub mod raw;
+pub mod patches;
 pub mod plan;
+pub mod raw;
 mod renderer;
+pub mod selection;
 pub mod spaces;
 
 pub use renderer::{ColorEngine, RenderedFrame, StageCapture};

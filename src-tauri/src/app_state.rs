@@ -244,7 +244,10 @@ impl Default for AppState {
             lut_cache: Mutex::new(HashMap::new()),
             initial_file_path: Mutex::new(None),
             thumbnail_cancellation_token: Arc::new(AtomicBool::new(false)),
-            thumbnail_progress: Mutex::new(ThumbnailProgressTracker { total: 0, completed: 0 }),
+            thumbnail_progress: Mutex::new(ThumbnailProgressTracker {
+                total: 0,
+                completed: 0,
+            }),
             preview_worker_tx: Mutex::new(None),
             analytics_worker_tx: Mutex::new(None),
             mask_cache: Mutex::new(HashMap::new()),

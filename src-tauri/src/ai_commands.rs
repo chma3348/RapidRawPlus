@@ -103,7 +103,12 @@ pub async fn generate_ai_foreground_mask(
     let outcome = match subject {
         None => Err(crate::scene_masks::ForegroundDecline::NoSubject),
         Some(subject) => tokio::task::spawn_blocking(move || {
-            crate::scene_masks::foreground_mask(warped_image.as_ref(), &session, &subject, orientation)
+            crate::scene_masks::foreground_mask(
+                warped_image.as_ref(),
+                &session,
+                &subject,
+                orientation,
+            )
         })
         .await
         .map_err(|e| e.to_string())?
@@ -111,7 +116,11 @@ pub async fn generate_ai_foreground_mask(
     };
 
     let (mask_data_base64, coverage, declined) = match outcome {
-        Ok(scene) => (Some(encode_to_base64_png(&scene.mask)?), scene.coverage, None),
+        Ok(scene) => (
+            Some(encode_to_base64_png(&scene.mask)?),
+            scene.coverage,
+            None,
+        ),
         Err(reason) => (None, 0.0, Some(reason.message().to_string())),
     };
     Ok(AiForegroundMaskParameters {
@@ -239,7 +248,11 @@ async fn compute_auto_subject(
             let warped_image = get_cached_full_warped_image(state, js_adjustments)?;
             let image_size = (warped_image.width(), warped_image.height());
             let result = tokio::task::spawn_blocking(move || {
-                crate::scene_masks::auto_subject_birefnet(warped_image.as_ref(), &session, orientation)
+                crate::scene_masks::auto_subject_birefnet(
+                    warped_image.as_ref(),
+                    &session,
+                    orientation,
+                )
             })
             .await
             .map_err(|e| e.to_string())?
@@ -364,10 +377,19 @@ pub async fn generate_ai_auto_subject_mask(
                         orientation,
                         rotation,
                     );
-                    crate::subject_selection::SubjectPoint { x, y, label: p.label }
+                    crate::subject_selection::SubjectPoint {
+                        x,
+                        y,
+                        label: p.label,
+                    }
                 })
                 .collect();
-            (Some(encode_to_base64_png(&auto.scene.mask)?), auto.scene.coverage, points, true)
+            (
+                Some(encode_to_base64_png(&auto.scene.mask)?),
+                auto.scene.coverage,
+                points,
+                true,
+            )
         }
         None => (None, 0.0, Vec::new(), false),
     };
@@ -651,14 +673,29 @@ pub async fn generate_ai_subject_mask(
             let p = &points[i];
             if p.label == 2 && points.get(i + 1).is_some_and(|p| p.label == 3) {
                 let q = &points[i + 1];
-                let corners = [transform(p.x, p.y), transform(p.x, q.y), transform(q.x, p.y), transform(q.x, q.y)];
-                let min = corners.iter().fold((f64::INFINITY, f64::INFINITY), |a,p| (a.0.min(p.0), a.1.min(p.1)));
-                let max = corners.iter().fold((f64::NEG_INFINITY, f64::NEG_INFINITY), |a,p| (a.0.max(p.0), a.1.max(p.1)));
+                let corners = [
+                    transform(p.x, p.y),
+                    transform(p.x, q.y),
+                    transform(q.x, p.y),
+                    transform(q.x, q.y),
+                ];
+                let min = corners.iter().fold((f64::INFINITY, f64::INFINITY), |a, p| {
+                    (a.0.min(p.0), a.1.min(p.1))
+                });
+                let max = corners
+                    .iter()
+                    .fold((f64::NEG_INFINITY, f64::NEG_INFINITY), |a, p| {
+                        (a.0.max(p.0), a.1.max(p.1))
+                    });
                 transformed.extend(crate::subject_selection::box_or_point(min, max));
                 i += 2;
             } else {
                 let (x, y) = transform(p.x, p.y);
-                transformed.push(crate::subject_selection::SubjectPoint { x, y, label: p.label });
+                transformed.push(crate::subject_selection::SubjectPoint {
+                    x,
+                    y,
+                    label: p.label,
+                });
                 i += 1;
             }
         }
@@ -672,7 +709,11 @@ pub async fn generate_ai_subject_mask(
         crate::subject_selection::box_or_point(unrotated_start_point, unrotated_end_point)
     };
     let mask_bitmap = crate::subject_selection::select(
-        &decoder_session, &embeddings, &input_points, selection_id.as_deref(), whole_subject.unwrap_or(true),
+        &decoder_session,
+        &embeddings,
+        &input_points,
+        selection_id.as_deref(),
+        whole_subject.unwrap_or(true),
     )
     .map_err(|e| e.to_string())?;
     let base64_data = encode_to_base64_png(&mask_bitmap)?;
@@ -813,8 +854,16 @@ pub async fn generate_ai_paint_mask(
                         let x = cx as i64 + dx;
                         let y = cy as i64 + dy;
                         if x >= 0 && y >= 0 && (x as u32) < img_w && (y as u32) < img_h {
-                            paint.put_pixel(x as u32, y as u32, image::Luma([if erase { 0 } else { 255 }]));
-                            excluded.put_pixel(x as u32, y as u32, image::Luma([if erase { 255 } else { 0 }]));
+                            paint.put_pixel(
+                                x as u32,
+                                y as u32,
+                                image::Luma([if erase { 0 } else { 255 }]),
+                            );
+                            excluded.put_pixel(
+                                x as u32,
+                                y as u32,
+                                image::Luma([if erase { 255 } else { 0 }]),
+                            );
                         }
                     }
                 }
@@ -831,7 +880,12 @@ pub async fn generate_ai_paint_mask(
             let steps = ((dist / (radius / 2.0)).ceil() as usize).max(1);
             for s in 0..=steps {
                 let t = s as f64 / steps as f64;
-                stamp(&mut paint, &mut excluded, x1 + (x2 - x1) * t, y1 + (y2 - y1) * t);
+                stamp(
+                    &mut paint,
+                    &mut excluded,
+                    x1 + (x2 - x1) * t,
+                    y1 + (y2 - y1) * t,
+                );
             }
             stamped += 1;
         }
@@ -841,8 +895,9 @@ pub async fn generate_ai_paint_mask(
     }
 
     let points = crate::subject_selection::paint_points(&paint, &excluded);
-    let mask_bitmap = crate::subject_selection::select(&decoder_session, &embeddings, &points, None, true)
-        .map_err(|e| e.to_string())?;
+    let mask_bitmap =
+        crate::subject_selection::select(&decoder_session, &embeddings, &points, None, true)
+            .map_err(|e| e.to_string())?;
     let base64_data = encode_to_base64_png(&mask_bitmap)?;
 
     Ok(AiSubjectMaskParameters {
@@ -1607,7 +1662,7 @@ fn engine_orientation_active(
     flip_horizontal: bool,
     flip_vertical: bool,
 ) -> bool {
-    orientation_steps % 4 != 0 || flip_horizontal || flip_vertical
+    !orientation_steps.is_multiple_of(4) || flip_horizontal || flip_vertical
 }
 
 fn ai_fill_orientation_from_adjustments(adjustments: &Value) -> (u8, bool, bool) {
@@ -1930,13 +1985,11 @@ impl ReconstructTextureField {
         let tx = gx - x0 as f32;
         let ty = gy - y0 as f32;
         let idx = |xx: usize, yy: usize| yy * self.width + xx;
-        let mut out = [0.0; 3];
-        for c in 0..3 {
+        std::array::from_fn(|c| {
             let a = self.values[idx(x0, y0)][c] * (1.0 - tx) + self.values[idx(x1, y0)][c] * tx;
             let b = self.values[idx(x0, y1)][c] * (1.0 - tx) + self.values[idx(x1, y1)][c] * tx;
-            out[c] = a * (1.0 - ty) + b * ty;
-        }
-        out
+            a * (1.0 - ty) + b * ty
+        })
     }
 }
 
@@ -2407,8 +2460,8 @@ fn render_reconstruct_fallback_crop(
                 }
             }
             let fine = crate::enhancement::grain_noise(y.wrapping_mul(w).wrapping_add(x));
-            for c in 0..3 {
-                color[c] = (color[c] + n * 5.0 * interior + fine * 2.2).clamp(0.0, 255.0);
+            for v in color.iter_mut() {
+                *v = (*v + n * 5.0 * interior + fine * 2.2).clamp(0.0, 255.0);
             }
             out.put_pixel(
                 x,
@@ -2931,7 +2984,6 @@ pub(crate) fn match_tone(
     }
 }
 
-
 #[allow(clippy::too_many_arguments)]
 async fn replace_region_in_context(
     photo: &RgbaImage,
@@ -2952,7 +3004,8 @@ async fn replace_region_in_context(
     // One scene, one sampling pass: disconnected sky gaps must share clouds,
     // and a garment must share folds. The original mask remains the final
     // authority for compositing; the model gets a small working margin only.
-    let full_photo = orient_rgba_for_engine(photo, orientation_steps, flip_horizontal, flip_vertical);
+    let full_photo =
+        orient_rgba_for_engine(photo, orientation_steps, flip_horizontal, flip_vertical);
     let full_mask = orient_gray_for_engine(mask, orientation_steps, flip_horizontal, flip_vertical);
     let (x, y, width, height) = replacement_context_bounds(&full_mask);
     let photo = image::imageops::crop_imm(&full_photo, x, y, width, height).to_image();
@@ -2984,22 +3037,31 @@ async fn replace_region_in_context(
                 if automatic {
                     effective_prompt = replacement_prompt("", true);
                 }
-                log::info!("[fill] sky recognized: whole sky available to model; composite remains inside selection");
+                log::info!(
+                    "[fill] sky recognized: whole sky available to model; composite remains inside selection"
+                );
             } else {
-                log::info!("[fill] sky recognition did not identify a majority of this selection; using general replacement");
+                log::info!(
+                    "[fill] sky recognition did not identify a majority of this selection; using general replacement"
+                );
             }
         } else {
             log::info!("[fill] sky recognition unavailable; using general replacement");
         }
     }
-    save_debug_json(app_handle, debug_run_id, "replace-plan", &serde_json::json!({
-        "crop": {"x": x, "y": y, "width": width, "height": height},
-        "effectivePrompt": effective_prompt,
-        "automatic": automatic,
-        "fullWidth": full_photo.width(), "fullHeight": full_photo.height(),
-        "orientationSteps": orientation_steps,
-        "flipHorizontal": flip_horizontal, "flipVertical": flip_vertical,
-    }));
+    save_debug_json(
+        app_handle,
+        debug_run_id,
+        "replace-plan",
+        &serde_json::json!({
+            "crop": {"x": x, "y": y, "width": width, "height": height},
+            "effectivePrompt": effective_prompt,
+            "automatic": automatic,
+            "fullWidth": full_photo.width(), "fullHeight": full_photo.height(),
+            "orientationSteps": orientation_steps,
+            "flipHorizontal": flip_horizontal, "flipVertical": flip_vertical,
+        }),
+    );
     // Immutable post-processing inputs. Saving these does not change the
     // working canvas, model mask, prompt, seed, or sampling recipe.
     save_debug_rgba(app_handle, debug_run_id, "replace-source-crop", &photo);
@@ -3012,28 +3074,53 @@ async fn replace_region_in_context(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.subsec_nanos() as u64 ^ (d.as_secs() << 20))
         .unwrap_or(42);
-    log::info!("[fill] context replacement: model={kind:?}, seed={seed}, prompt={effective_prompt:?}");
-    save_debug_json(app_handle, debug_run_id, "replace-recipe", &serde_json::json!({
-        "seed": seed, "model": format!("{kind:?}"), "prompt": effective_prompt,
-        "loras": loras, "canvasMaxSide": 1536, "replaceContent": true,
-    }));
+    log::info!(
+        "[fill] context replacement: model={kind:?}, seed={seed}, prompt={effective_prompt:?}"
+    );
+    save_debug_json(
+        app_handle,
+        debug_run_id,
+        "replace-recipe",
+        &serde_json::json!({
+            "seed": seed, "model": format!("{kind:?}"), "prompt": effective_prompt,
+            "loras": loras, "canvasMaxSide": 1536, "replaceContent": true,
+        }),
+    );
     let png = crate::comfy_engine::run_generative_fill(
-        app_handle, state, kind, image_png, mask_png, &effective_prompt, seed, loras, true, |_| {},
+        app_handle,
+        state,
+        kind,
+        image_png,
+        mask_png,
+        &effective_prompt,
+        seed,
+        loras,
+        true,
+        |_| {},
     )
     .await
     .map_err(|e| format!("Context replacement failed: {e}"))?;
     save_debug_bytes(app_handle, debug_run_id, "replace-raw-output", &png);
-    let decoded = image::load_from_memory(&png).map_err(|e| e.to_string())?.to_rgba8();
+    let decoded = image::load_from_memory(&png)
+        .map_err(|e| e.to_string())?
+        .to_rgba8();
     let generated = image::imageops::resize(
-        &decoded, photo.width(), photo.height(), image::imageops::FilterType::Lanczos3,
+        &decoded,
+        photo.width(),
+        photo.height(),
+        image::imageops::FilterType::Lanczos3,
     );
     // Preserve the generated interior: matching a shirt to skin or clouds to
     // nearby trees changes the requested material. Restrict correction to seams.
-    let blended = crate::heal_blend::blend_generated(&photo, &generated, &mask, margin as f32 * 2.0);
+    let blended =
+        crate::heal_blend::blend_generated(&photo, &generated, &mask, margin as f32 * 2.0);
     let mut result = full_photo;
     image::imageops::replace(&mut result, &blended, x as i64, y as i64);
     Ok(deorient_rgba_from_engine(
-        &result, orientation_steps, flip_horizontal, flip_vertical,
+        &result,
+        orientation_steps,
+        flip_horizontal,
+        flip_vertical,
     ))
 }
 
@@ -3042,11 +3129,18 @@ fn replacement_context_bounds(mask: &GrayImage) -> (u32, u32, u32, u32) {
     let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0, 0);
     for (x, y, p) in mask.enumerate_pixels() {
         if p[0] > 0 {
-            x0 = x0.min(x); y0 = y0.min(y); x1 = x1.max(x); y1 = y1.max(y);
+            x0 = x0.min(x);
+            y0 = y0.min(y);
+            x1 = x1.max(x);
+            y1 = y1.max(y);
         }
     }
-    if x0 == w { return (0, 0, w, h); }
-    let pad = ((x1 - x0 + 1).max(y1 - y0 + 1) / 2).max(w.max(h) / 12).max(16);
+    if x0 == w {
+        return (0, 0, w, h);
+    }
+    let pad = ((x1 - x0 + 1).max(y1 - y0 + 1) / 2)
+        .max(w.max(h) / 12)
+        .max(16);
     x0 = x0.saturating_sub(pad);
     y0 = y0.saturating_sub(pad);
     x1 = x1.saturating_add(pad).min(w - 1);
@@ -3062,7 +3156,9 @@ fn replacement_prompt(user_prompt: &str, explicit_sky: bool) -> String {
     } else {
         "Plausible, naturally detailed replacement content inferred from the visible photograph"
     };
-    format!("{subject}. Photorealistic photograph. The replacement fits the surrounding scene's perspective, lighting direction, scale, shape and focus. Preserve the surrounding photograph.")
+    format!(
+        "{subject}. Photorealistic photograph. The replacement fits the surrounding scene's perspective, lighting direction, scale, shape and focus. Preserve the surrounding photograph."
+    )
 }
 
 fn selection_is_sky(selection: &GrayImage, sky: &GrayImage) -> bool {
@@ -3088,34 +3184,54 @@ mod context_replacement_tests {
 
     #[test]
     fn context_crop_contains_every_selected_region_and_surrounding_scene() {
-        let mask = GrayImage::from_fn(800, 600, |x, y| image::Luma([
-            if (300..340).contains(&x) && (200..230).contains(&y)
-                || (420..450).contains(&x) && (260..280).contains(&y) {255} else {0}
-        ]));
+        let mask = GrayImage::from_fn(800, 600, |x, y| {
+            image::Luma([
+                if (300..340).contains(&x) && (200..230).contains(&y)
+                    || (420..450).contains(&x) && (260..280).contains(&y)
+                {
+                    255
+                } else {
+                    0
+                },
+            ])
+        });
         let (x, y, w, h) = replacement_context_bounds(&mask);
         assert!(x < 300 && y < 200);
         assert!(x + w > 450 && y + h > 280);
-        assert!(w < 800 && h < 600, "small selection must not spend model resolution on the whole frame");
+        assert!(
+            w < 800 && h < 600,
+            "small selection must not spend model resolution on the whole frame"
+        );
         for (mx, my, p) in mask.enumerate_pixels() {
-            if p[0] > 0 { assert!(mx >= x && mx < x+w && my >= y && my < y+h); }
+            if p[0] > 0 {
+                assert!(mx >= x && mx < x + w && my >= y && my < y + h);
+            }
         }
-        assert_eq!(replacement_context_bounds(&GrayImage::new(800,600)), (0,0,800,600));
+        assert_eq!(
+            replacement_context_bounds(&GrayImage::new(800, 600)),
+            (0, 0, 800, 600)
+        );
     }
 
     #[test]
     fn sky_membership_uses_a_majority_not_a_probability_cutoff() {
-        let selection = GrayImage::from_pixel(10,10,image::Luma([255]));
-        let sky = GrayImage::from_fn(10,10,|x,_|image::Luma([if x<6 {160} else {0}]));
-        assert!(selection_is_sky(&selection,&sky));
-        let ambiguous = GrayImage::from_fn(10,10,|x,_|image::Luma([if x<5 {255} else {0}]));
-        assert!(!selection_is_sky(&selection,&ambiguous));
+        let selection = GrayImage::from_pixel(10, 10, image::Luma([255]));
+        let sky = GrayImage::from_fn(10, 10, |x, _| image::Luma([if x < 6 { 160 } else { 0 }]));
+        assert!(selection_is_sky(&selection, &sky));
+        let ambiguous =
+            GrayImage::from_fn(10, 10, |x, _| image::Luma([if x < 5 { 255 } else { 0 }]));
+        assert!(!selection_is_sky(&selection, &ambiguous));
     }
 
     #[test]
     fn sky_recognition_requires_overlap_with_the_selection() {
         let sky = GrayImage::from_fn(80, 60, |_, y| image::Luma([if y < 25 { 255 } else { 0 }]));
-        let sky_selection = GrayImage::from_fn(80, 60, |x, y| image::Luma([if x % 3 == 0 && y < 20 { 255 } else { 0 }]));
-        let shirt_selection = GrayImage::from_fn(80, 60, |x, y| image::Luma([if x > 25 && x < 50 && y > 30 { 255 } else { 0 }]));
+        let sky_selection = GrayImage::from_fn(80, 60, |x, y| {
+            image::Luma([if x % 3 == 0 && y < 20 { 255 } else { 0 }])
+        });
+        let shirt_selection = GrayImage::from_fn(80, 60, |x, y| {
+            image::Luma([if x > 25 && x < 50 && y > 30 { 255 } else { 0 }])
+        });
         assert!(selection_is_sky(&sky_selection, &sky));
         assert!(!selection_is_sky(&shirt_selection, &sky));
         assert!(!selection_is_sky(&GrayImage::new(80, 60), &sky));
@@ -3126,14 +3242,27 @@ mod context_replacement_tests {
     fn contextual_composite_preserves_unselected_pixels_after_every_orientation() {
         let source = RgbaImage::from_fn(80, 60, |x, y| Rgba([x as u8, y as u8, 100, 255]));
         // Disconnected openings, including a protected hole within a region.
-        let mask = GrayImage::from_fn(80, 60, |x, y| image::Luma([if (x < 30 || x > 50) && y < 40 && !(x > 10 && x < 20 && y > 10 && y < 20) { 255 } else { 0 }]));
+        let mask = GrayImage::from_fn(80, 60, |x, y| {
+            image::Luma([
+                if !(30..=50).contains(&x) && y < 40 && !(x > 10 && x < 20 && y > 10 && y < 20) {
+                    255
+                } else {
+                    0
+                },
+            ])
+        });
         for steps in 0..4 {
             for flip_h in [false, true] {
                 for flip_v in [false, true] {
                     let photo = orient_rgba_for_engine(&source, steps, flip_h, flip_v);
                     let oriented_mask = orient_gray_for_engine(&mask, steps, flip_h, flip_v);
-                    let generated = RgbaImage::from_pixel(photo.width(), photo.height(), Rgba([80, 150, 230, 255]));
-                    let blended = crate::heal_blend::blend_generated(&photo, &generated, &oriented_mask, 4.0);
+                    let generated = RgbaImage::from_pixel(
+                        photo.width(),
+                        photo.height(),
+                        Rgba([80, 150, 230, 255]),
+                    );
+                    let blended =
+                        crate::heal_blend::blend_generated(&photo, &generated, &oriented_mask, 4.0);
                     let result = deorient_rgba_from_engine(&blended, steps, flip_h, flip_v);
                     assert_eq!(result.dimensions(), source.dimensions());
                     for (x, y, p) in result.enumerate_pixels() {
@@ -3154,8 +3283,11 @@ fn replacement_sky_mask(
     state: &tauri::State<'_, AppState>,
 ) -> Option<GrayImage> {
     let result = (|| -> anyhow::Result<Option<GrayImage>> {
-        let registry = crate::model_registry::get_or_init_registry(app_handle, &state.model_registry)?;
-        let Some(model) = registry.select_for_task(TaskType::Mask, None, mask_subtype_filter("sky")) else {
+        let registry =
+            crate::model_registry::get_or_init_registry(app_handle, &state.model_registry)?;
+        let Some(model) =
+            registry.select_for_task(TaskType::Mask, None, mask_subtype_filter("sky"))
+        else {
             return Ok(None);
         };
         if !model.available {
@@ -3165,10 +3297,17 @@ fn replacement_sky_mask(
         // Match the sky model's reference preprocessing without changing the
         // behavior of existing user-created sky masks in this feature patch.
         let square = DynamicImage::ImageRgba8(photo.clone()).resize_exact(
-            320, 320, image::imageops::FilterType::Triangle,
+            320,
+            320,
+            image::imageops::FilterType::Triangle,
         );
         let sky = run_sky_seg_model(&square, &session)?;
-        Ok(Some(image::imageops::resize(&sky, photo.width(), photo.height(), image::imageops::FilterType::Triangle)))
+        Ok(Some(image::imageops::resize(
+            &sky,
+            photo.width(),
+            photo.height(),
+            image::imageops::FilterType::Triangle,
+        )))
     })();
     match result {
         Ok(mask) => mask,
@@ -3230,9 +3369,19 @@ async fn run_engine_inpaint_patch(
     // component routing. All disconnected selected regions share a generation.
     if generate_mode {
         let replaced = replace_region_in_context(
-            &encoded_full, mask, prompt, kind, loras, debug_run_id,
-            orientation_steps, flip_horizontal, flip_vertical, app_handle, state,
-        ).await?;
+            &encoded_full,
+            mask,
+            prompt,
+            kind,
+            loras,
+            debug_run_id,
+            orientation_steps,
+            flip_horizontal,
+            flip_vertical,
+            app_handle,
+            state,
+        )
+        .await?;
         return Ok(EngineInpaintResult {
             image: replaced,
             is_linear,
@@ -3557,7 +3706,11 @@ async fn run_engine_inpaint_patch(
         // lands mostly on the selection itself or on blown-out pixels, widen
         // the view until there is real scene in it.
         const WANT_INFORMATIVE: f32 = 0.35;
-        let before = informative_fraction(&encoded_full, |x, y| mask.get_pixel(x, y)[0] > 127, (x0, y0, x1, y1));
+        let before = informative_fraction(
+            &encoded_full,
+            |x, y| mask.get_pixel(x, y)[0] > 127,
+            (x0, y0, x1, y1),
+        );
         let (x0, y0, x1, y1) = if before < WANT_INFORMATIVE {
             let grown = grow_context_for_information(
                 &encoded_full,
@@ -3572,7 +3725,8 @@ async fn run_engine_inpaint_patch(
                 grown.2 - grown.0 + 1,
                 grown.3 - grown.1 + 1,
                 before * 100.0,
-                informative_fraction(&encoded_full, |x, y| mask.get_pixel(x, y)[0] > 127, grown) * 100.0
+                informative_fraction(&encoded_full, |x, y| mask.get_pixel(x, y)[0] > 127, grown)
+                    * 100.0
             );
             grown
         } else {
@@ -3773,7 +3927,8 @@ async fn run_engine_inpaint_patch(
             .pixels()
             .filter(|p| p[0] > 127)
             .count() as u32;
-        let engine_crop_px = (engine_mask_for_model.width() * engine_mask_for_model.height()).max(1);
+        let engine_crop_px =
+            (engine_mask_for_model.width() * engine_mask_for_model.height()).max(1);
         let blob_coverage = engine_masked_px as f32 / engine_crop_px as f32;
         let canvas_scale = (canvas_long_edge as f32
             / engine_crop_img.width().max(engine_crop_img.height()).max(1) as f32)
@@ -3800,8 +3955,7 @@ async fn run_engine_inpaint_patch(
             let (mut region_sum, mut region_n) = (0.0f64, 0u32);
             let (mut ring_sum, mut ring_sq, mut ring_n) = (0.0f64, 0.0f64, 0u32);
             for (x, y, p) in original_crop.enumerate_pixels() {
-                let luma =
-                    0.2126 * p[0] as f64 + 0.7152 * p[1] as f64 + 0.0722 * p[2] as f64;
+                let luma = 0.2126 * p[0] as f64 + 0.7152 * p[1] as f64 + 0.0722 * p[2] as f64;
                 if crop_mask.get_pixel(x, y)[0] > 127 {
                     region_sum += luma;
                     region_n += 1;
@@ -3816,8 +3970,9 @@ async fn run_engine_inpaint_patch(
             if region_n > 0 && ring_n > 32 {
                 let region_mean = (region_sum / region_n as f64) as f32;
                 let ring_mean = ring_sum / ring_n as f64;
-                let ring_std =
-                    ((ring_sq / ring_n as f64) - ring_mean * ring_mean).max(0.0).sqrt() as f32;
+                let ring_std = ((ring_sq / ring_n as f64) - ring_mean * ring_mean)
+                    .max(0.0)
+                    .sqrt() as f32;
                 log::info!(
                     "[fill] {blob_prefix} pre-flight: region_mean={region_mean:.1} ring_std={ring_std:.1} density={:.2}",
                     component_density(comp)
@@ -4269,7 +4424,10 @@ pub(crate) fn auto_clone_offset(
     let bh = (by1 - by0 + 1) as i32;
     let size = bw.max(bh).max(8);
     let luma = |x: i32, y: i32| -> f32 {
-        let p = image.get_pixel(x.clamp(0, w as i32 - 1) as u32, y.clamp(0, h as i32 - 1) as u32);
+        let p = image.get_pixel(
+            x.clamp(0, w as i32 - 1) as u32,
+            y.clamp(0, h as i32 - 1) as u32,
+        );
         0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32
     };
 
@@ -4440,9 +4598,15 @@ pub async fn apply_clone_patch(
 
     // Brush strokes are recorded in display space; the patch composites in
     // original space. On a flipped or rotated photo those differ.
-    let steps = current_adjustments["orientationSteps"].as_u64().unwrap_or(0) as u32;
-    let flip_h = current_adjustments["flipHorizontal"].as_bool().unwrap_or(false);
-    let flip_v = current_adjustments["flipVertical"].as_bool().unwrap_or(false);
+    let steps = current_adjustments["orientationSteps"]
+        .as_u64()
+        .unwrap_or(0) as u32;
+    let flip_h = current_adjustments["flipHorizontal"]
+        .as_bool()
+        .unwrap_or(false);
+    let flip_v = current_adjustments["flipVertical"]
+        .as_bool()
+        .unwrap_or(false);
     let rotation = current_adjustments["rotation"].as_f64().unwrap_or(0.0);
     let needs_mapping =
         map_strokes_to_image_space(&mut sub_masks, img_w, img_h, &current_adjustments);
@@ -4528,14 +4692,9 @@ pub async fn apply_clone_patch(
     for (unit, unit_offset) in units {
         let t_mask = std::time::Instant::now();
         let unit_def = build_def(vec![unit]);
-        let Some(bitmap) = generate_mask_bitmap(
-            &unit_def,
-            img_w,
-            img_h,
-            1.0,
-            (0.0, 0.0),
-            warped.as_deref(),
-        ) else {
+        let Some(bitmap) =
+            generate_mask_bitmap(&unit_def, img_w, img_h, 1.0, (0.0, 0.0), warped.as_deref())
+        else {
             continue;
         };
         let unwarped = apply_unwarp_geometry(
@@ -4614,7 +4773,8 @@ pub async fn invoke_generative_replace_with_mask_def(
     state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
     let settings = load_settings(app_handle.clone()).unwrap_or_default();
-    let semantic_replace = patch_definition.generate_mode || !patch_definition.prompt.trim().is_empty();
+    let semantic_replace =
+        patch_definition.generate_mode || !patch_definition.prompt.trim().is_empty();
     let reconstruct_fill = patch_uses_clipped_reconstruct(&patch_definition);
     let reconstruct_single_path = reconstruct_fill && patch_definition.reconstruct_single_path;
     let preserve_negative_refinements = patch_has_negative_refinement(&patch_definition);
@@ -4622,7 +4782,8 @@ pub async fn invoke_generative_replace_with_mask_def(
         ai_fill_orientation_from_adjustments(&current_adjustments);
     let force_engine_for_reconstruct =
         reconstruct_fill && (reconstruct_single_path || !patch_definition.prompt.trim().is_empty());
-    let effective_use_fast_inpaint = use_fast_inpaint && !force_engine_for_reconstruct && !semantic_replace;
+    let effective_use_fast_inpaint =
+        use_fast_inpaint && !force_engine_for_reconstruct && !semantic_replace;
     if force_engine_for_reconstruct && use_fast_inpaint {
         log::info!(
             "[fill] Reconstruct requested fast mode; using prompt-conditioned engine instead"
@@ -4743,7 +4904,7 @@ pub async fn invoke_generative_replace_with_mask_def(
     // (measured: 6,304 specks = ~an hour of compute for invisible dust
     // healing). When the mask is badly fragmented, close nearby specks
     // into solid regions and drop isolated dust outright.
-    if !semantic_replace && !(reconstruct_fill && preserve_negative_refinements) {
+    if !(semantic_replace || (reconstruct_fill && preserve_negative_refinements)) {
         let (_, comps) = mask_components(&mask_bitmap, 127);
         if comps.len() > 200 {
             let scale = (mask_bitmap.width().max(mask_bitmap.height()) as f32 / 2000.0).max(1.0);
@@ -4800,7 +4961,10 @@ pub async fn invoke_generative_replace_with_mask_def(
             "The selection is empty — brush over the area to remove, then try again.".to_string(),
         );
     }
-    let composite_mask_bitmap = if reconstruct_fill && !effective_use_fast_inpaint && !semantic_replace {
+    let composite_mask_bitmap = if reconstruct_fill
+        && !effective_use_fast_inpaint
+        && !semantic_replace
+    {
         let blend = reconstruct_composite_mask(&mask_bitmap, preserve_negative_refinements);
         let blend_nonzero = blend.pixels().filter(|p| p[0] > 0).count();
         let blend_strong = blend.pixels().filter(|p| p[0] > 127).count();
@@ -4824,9 +4988,12 @@ pub async fn invoke_generative_replace_with_mask_def(
         ReconstructAutoHint::Generic
     };
     let prompt_for_engine: Cow<'_, str> = Cow::Owned(if semantic_replace {
-        replacement_prompt(&user_prompt, mask_def_for_generation.sub_masks.iter().any(|sm| {
-            sm.visible && sm.mask_type == "ai-sky" && sm.mode == SubMaskMode::Additive
-        }))
+        replacement_prompt(
+            &user_prompt,
+            mask_def_for_generation.sub_masks.iter().any(|sm| {
+                sm.visible && sm.mask_type == "ai-sky" && sm.mode == SubMaskMode::Additive
+            }),
+        )
     } else {
         user_prompt.clone()
     });
@@ -4899,8 +5066,15 @@ pub async fn invoke_generative_replace_with_mask_def(
             Ok(model) => Some(model),
             Err(error) => {
                 log::warn!("[fill] local generative model unavailable: {error}");
-                if semantic_replace && !matches!(settings.ai_provider.as_deref(), Some("cloud" | "ai-connector")) {
-                    return Err(format!("Replacement needs a generative fill model. Select or install Flux Fill or SDXL Fill in the model library. {error}"));
+                if semantic_replace
+                    && !matches!(
+                        settings.ai_provider.as_deref(),
+                        Some("cloud" | "ai-connector")
+                    )
+                {
+                    return Err(format!(
+                        "Replacement needs a generative fill model. Select or install Flux Fill or SDXL Fill in the model library. {error}"
+                    ));
                 }
                 None
             }
@@ -5033,10 +5207,20 @@ pub async fn invoke_generative_replace_with_mask_def(
     )?;
 
     if patch_result.active_kind == Some("context-replace") {
-        save_debug_json(&app_handle, &debug_run_id, "replace-original-payload", &payload);
-        save_debug_json(&app_handle, &debug_run_id, "replace-protection", &serde_json::json!({
-            "allowExpansion": !preserve_negative_refinements,
-        }));
+        save_debug_json(
+            &app_handle,
+            &debug_run_id,
+            "replace-original-payload",
+            &payload,
+        );
+        save_debug_json(
+            &app_handle,
+            &debug_run_id,
+            "replace-protection",
+            &serde_json::json!({
+                "allowExpansion": !preserve_negative_refinements,
+            }),
+        );
         payload["replacementRunId"] = serde_json::json!(debug_run_id);
     }
 
@@ -5084,56 +5268,109 @@ pub async fn reblend_replacement(
         .and_then(Value::as_str).filter(|s|!s.is_empty() && s.len()<160
             && s.bytes().all(|c|c.is_ascii_alphanumeric() || c==b'-'))
         .ok_or("This older result has no saved generation. Its existing blend has been left unchanged.")?.to_string();
-    let dir = app_handle.path().app_data_dir().map_err(|e|e.to_string())?
-        .join("ai-fill-debug").join(&run_id);
+    let dir = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("ai-fill-debug")
+        .join(&run_id);
     if !dir.join("replace-raw-output.png").is_file() {
         return Err("The saved AI output is unavailable. Your current result is unchanged; no generation was rerun.".into());
     }
-    let geometry_path=if dir.join("replace-cache-geometry.json").is_file() {
+    let geometry_path = if dir.join("replace-cache-geometry.json").is_file() {
         dir.join("replace-cache-geometry.json")
-    } else {dir.join("replace-plan.json")};
-    let plan: Value = serde_json::from_slice(&fs::read(geometry_path).map_err(|e|e.to_string())?)
-        .map_err(|e|e.to_string())?;
-    let crop = plan.get("crop").ok_or("Saved crop information is missing.")?;
-    let number = |key:&str| -> Result<u32,String> {
-        crop.get(key).and_then(Value::as_u64).and_then(|n|u32::try_from(n).ok())
-            .ok_or_else(||format!("Invalid saved crop {key}."))
+    } else {
+        dir.join("replace-plan.json")
     };
-    let (x,y,w,h) = (number("x")?,number("y")?,number("width")?,number("height")?);
-    let original_path=dir.join("replace-original-payload.json");
+    let plan: Value = serde_json::from_slice(&fs::read(geometry_path).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    let crop = plan
+        .get("crop")
+        .ok_or("Saved crop information is missing.")?;
+    let number = |key: &str| -> Result<u32, String> {
+        crop.get(key)
+            .and_then(Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok())
+            .ok_or_else(|| format!("Invalid saved crop {key}."))
+    };
+    let (x, y, w, h) = (
+        number("x")?,
+        number("y")?,
+        number("width")?,
+        number("height")?,
+    );
+    let original_path = dir.join("replace-original-payload.json");
     let original = if original_path.is_file() {
-        serde_json::from_slice::<Value>(&fs::read(&original_path).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?
+        serde_json::from_slice::<Value>(&fs::read(&original_path).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?
     } else {
         serde_json::json!({"color":pd.get("color"),"mask":pd.get("mask"),"encoding":pd.get("encoding")})
     };
-    let patch = current_adjustments.get("aiPatches").and_then(Value::as_array)
-        .and_then(|ps|ps.iter().find(|p|p.get("id").and_then(Value::as_str)==Some(&patch_id)))
+    let patch = current_adjustments
+        .get("aiPatches")
+        .and_then(Value::as_array)
+        .and_then(|ps| {
+            ps.iter()
+                .find(|p| p.get("id").and_then(Value::as_str) == Some(&patch_id))
+        })
         .ok_or("Selection no longer exists.")?;
-    let definition: AiPatchDefinition=serde_json::from_value(patch.clone()).map_err(|e|e.to_string())?;
-    let mut allow_expansion=!patch_has_negative_refinement(&definition);
-    if let Ok(bytes)=fs::read(dir.join("replace-protection.json")) {
-        let protection:Value=serde_json::from_slice(&bytes).map_err(|e|e.to_string())?;
-        allow_expansion &= protection.get("allowExpansion").and_then(Value::as_bool).unwrap_or(false);
+    let definition: AiPatchDefinition =
+        serde_json::from_value(patch.clone()).map_err(|e| e.to_string())?;
+    let mut allow_expansion = !patch_has_negative_refinement(&definition);
+    if let Ok(bytes) = fs::read(dir.join("replace-protection.json")) {
+        let protection: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        allow_expansion &= protection
+            .get("allowExpansion")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
     }
-    let orientation=if plan.get("fullWidth").is_some() {
-        (plan["orientationSteps"].as_u64().unwrap_or(0) as u8,
-            plan["flipHorizontal"].as_bool().unwrap_or(false),plan["flipVertical"].as_bool().unwrap_or(false))
-    } else { ai_fill_orientation_from_adjustments(&current_adjustments) };
+    let orientation = if plan.get("fullWidth").is_some() {
+        (
+            plan["orientationSteps"].as_u64().unwrap_or(0) as u8,
+            plan["flipHorizontal"].as_bool().unwrap_or(false),
+            plan["flipVertical"].as_bool().unwrap_or(false),
+        )
+    } else {
+        ai_fill_orientation_from_adjustments(&current_adjustments)
+    };
     // Legacy successful runs saved the raw output but not the source crop.
     // Reconstruct it once, then compare with the saved model context before
     // accepting it. A changed source/orientation must not silently misalign it.
-    let legacy_source=if options.improved && !dir.join("replace-source-crop.png").is_file() {
-        let mut source_adjustments=current_adjustments.clone();
-        if let Some(ps)=source_adjustments.get_mut("aiPatches").and_then(Value::as_array_mut) {
-            ps.retain(|p|p.get("id").and_then(Value::as_str)!=Some(&patch_id));
+    let legacy_source = if options.improved && !dir.join("replace-source-crop.png").is_file() {
+        let mut source_adjustments = current_adjustments.clone();
+        if let Some(ps) = source_adjustments
+            .get_mut("aiPatches")
+            .and_then(Value::as_array_mut)
+        {
+            ps.retain(|p| p.get("id").and_then(Value::as_str) != Some(&patch_id));
         }
-        let (base,_) = get_full_image_for_processing(&state)?;
-        let source=composite_patches_on_image(&base,&source_adjustments).map_err(|e|e.to_string())?;
-        let is_raw=state.original_image.lock().unwrap().as_ref().is_some_and(|l|l.is_raw)
-            && matches!(source,DynamicImage::ImageRgb32F(_)|DynamicImage::ImageRgba32F(_));
-        let encoded=if is_raw {ai_processing::gamma_encode_rgba8(&source)} else {source.to_rgba8()};
-        Some(orient_rgba_for_engine(&encoded,orientation.0,orientation.1,orientation.2))
-    } else {None};
+        let (base, _) = get_full_image_for_processing(&state)?;
+        let source =
+            composite_patches_on_image(&base, &source_adjustments).map_err(|e| e.to_string())?;
+        let is_raw = state
+            .original_image
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|l| l.is_raw)
+            && matches!(
+                source,
+                DynamicImage::ImageRgb32F(_) | DynamicImage::ImageRgba32F(_)
+            );
+        let encoded = if is_raw {
+            ai_processing::gamma_encode_rgba8(&source)
+        } else {
+            source.to_rgba8()
+        };
+        Some(orient_rgba_for_engine(
+            &encoded,
+            orientation.0,
+            orientation.1,
+            orientation.2,
+        ))
+    } else {
+        None
+    };
     tauri::async_runtime::spawn_blocking(move || -> Result<String,String> {
         let decode = |key:&str| -> Result<DynamicImage,String> {
             let bytes=general_purpose::STANDARD.decode(original.get(key).and_then(Value::as_str)
@@ -6629,7 +6866,11 @@ pub(crate) fn map_strokes_to_image_space(
         return false;
     }
     for sm in sub_masks.iter_mut() {
-        let Some(lines) = sm.parameters.get_mut("lines").and_then(|v| v.as_array_mut()) else {
+        let Some(lines) = sm
+            .parameters
+            .get_mut("lines")
+            .and_then(|v| v.as_array_mut())
+        else {
             continue;
         };
         for line in lines.iter_mut() {
@@ -6743,16 +6984,13 @@ mod context_growth_tests {
         }
         // The hole sits up in the blown area, well clear of the scene.
         let hole = (250u32, 90u32, 650u32, 330u32);
-        let masked = |x: u32, y: u32| {
-            x >= hole.0 && x <= hole.2 && y >= hole.1 && y <= hole.3
-        };
+        let masked = |x: u32, y: u32| x >= hole.0 && x <= hole.2 && y >= hole.1 && y <= hole.3;
 
         // A crop-wide measure sweeps in the textured bottom third and is
         // reassured by it.
         let crop_wide = informative_fraction(&img, masked, (0, 0, w - 1, h - 1));
         // The boundary measure only looks where the hole meets the photo.
-        let at_boundary =
-            ring_informative_fraction(&img, masked, hole, ring_width_for_span(400));
+        let at_boundary = ring_informative_fraction(&img, masked, hole, ring_width_for_span(400));
 
         assert!(
             crop_wide > 0.25,
@@ -6777,9 +7015,7 @@ mod context_growth_tests {
         }
         // A small object entirely inside real scenery — the stop sign case.
         let hole = (280u32, 280u32, 340u32, 340u32);
-        let masked = |x: u32, y: u32| {
-            x >= hole.0 && x <= hole.2 && y >= hole.1 && y <= hole.3
-        };
+        let masked = |x: u32, y: u32| x >= hole.0 && x <= hole.2 && y >= hole.1 && y <= hole.3;
         let at_boundary = ring_informative_fraction(&img, masked, hole, ring_width_for_span(60));
         assert!(
             at_boundary > 0.8,
@@ -6977,7 +7213,10 @@ mod neutralize_orientation_tests {
     fn brush_masks_keep_their_orientation() {
         let mut masks = [sub("brush")];
         neutralize_display_orientation(&mut masks);
-        assert!(!is_neutral(&masks[0]), "a brush mask must keep its orientation");
+        assert!(
+            !is_neutral(&masks[0]),
+            "a brush mask must keep its orientation"
+        );
     }
 }
 
@@ -7289,7 +7528,12 @@ mod tone_match_tests {
         let before = tone_stats(&img, FULL, |_, _| true).unwrap();
         let start = before.0.iter().sum::<f32>() / 3.0;
         match_tone(&mut img, FULL, before, ([203.0, 203.0, 203.0], 25.0), 0.5);
-        let mean = tone_stats(&img, FULL, |_, _| true).unwrap().0.iter().sum::<f32>() / 3.0;
+        let mean = tone_stats(&img, FULL, |_, _| true)
+            .unwrap()
+            .0
+            .iter()
+            .sum::<f32>()
+            / 3.0;
         let midpoint = (start + 203.0) / 2.0;
         assert!(
             (mean - midpoint).abs() < 8.0,
@@ -7334,7 +7578,10 @@ mod tone_match_tests {
         let only_dark = tone_stats(&img, (0, 0, 59, 59), |_, y| y < 30).unwrap();
         assert!((only_dark.0[0] - 100.0).abs() < 1.0);
         let everything = tone_stats(&img, (0, 0, 59, 59), |_, _| true).unwrap();
-        assert!(everything.0[0] > 150.0, "unfiltered stats should include the white half");
+        assert!(
+            everything.0[0] > 150.0,
+            "unfiltered stats should include the white half"
+        );
     }
 }
 

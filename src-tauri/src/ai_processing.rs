@@ -954,20 +954,36 @@ fn u2net_stretched_mask(
     let scale = if range > 1e-6 { 255.0 / range } else { 0.0 };
     let data: Vec<u8> = probabilities
         .iter()
-        .map(|&v| if range > 1e-6 { ((v - min_val) * scale) as u8 } else { 0 })
+        .map(|&v| {
+            if range > 1e-6 {
+                ((v - min_val) * scale) as u8
+            } else {
+                0
+            }
+        })
         .collect();
     let cropped_mask = GrayImage::from_raw(w, h, data)
         .ok_or_else(|| anyhow::anyhow!("Failed to create mask from {what} output"))?;
-    Ok(imageops::resize(&cropped_mask, orig_width, orig_height, FilterType::Triangle))
+    Ok(imageops::resize(
+        &cropped_mask,
+        orig_width,
+        orig_height,
+        FilterType::Triangle,
+    ))
 }
 
 /// BiRefNet (dichotomous image segmentation): foreground probability at the
 /// model's fixed 1024×1024 input, which the photo is resized to directly
 /// (no letterbox), as the reference implementation does. Returns
 /// probabilities (sigmoid applied) and the map size.
-pub fn run_birefnet(image: &DynamicImage, session: &Mutex<Session>) -> Result<(Vec<f32>, u32, u32)> {
+pub fn run_birefnet(
+    image: &DynamicImage,
+    session: &Mutex<Session>,
+) -> Result<(Vec<f32>, u32, u32)> {
     const SIZE: u32 = 1024;
-    let resized = image.resize_exact(SIZE, SIZE, FilterType::Triangle).into_rgb8();
+    let resized = image
+        .resize_exact(SIZE, SIZE, FilterType::Triangle)
+        .into_rgb8();
     let mean = [0.485f32, 0.456, 0.406];
     let std = [0.229f32, 0.224, 0.225];
     let n = (SIZE * SIZE) as usize;
@@ -983,7 +999,11 @@ pub fn run_birefnet(image: &DynamicImage, session: &Mutex<Session>) -> Result<(V
     let outputs = session.run(ort::inputs![t_input])?;
     let out = outputs[0].try_extract_array::<f32>()?;
     let probs: Vec<f32> = out.iter().map(|&v| 1.0 / (1.0 + (-v).exp())).collect();
-    anyhow::ensure!(probs.len() == n, "unexpected BiRefNet output size {}", probs.len());
+    anyhow::ensure!(
+        probs.len() == n,
+        "unexpected BiRefNet output size {}",
+        probs.len()
+    );
     Ok((probs, SIZE, SIZE))
 }
 
@@ -1020,7 +1040,9 @@ pub fn run_scene_labels(
     );
     let classes = shape[1];
     let flat = out.as_standard_layout();
-    let flat = flat.as_slice().ok_or_else(|| anyhow::anyhow!("non-contiguous output"))?;
+    let flat = flat
+        .as_slice()
+        .ok_or_else(|| anyhow::anyhow!("non-contiguous output"))?;
     let (rwu, rhu) = (rw as usize, rh as usize);
     let mut cropped = Vec::with_capacity(classes * rwu * rhu);
     for c in 0..classes {
@@ -1123,7 +1145,13 @@ pub fn run_depth_anything_model(
     let scale = if range > 1e-6 { 255.0 / range } else { 0.0 };
     let data: Vec<u8> = raw
         .iter()
-        .map(|&v| if range > 1e-6 { ((v - min_val) * scale) as u8 } else { 0 })
+        .map(|&v| {
+            if range > 1e-6 {
+                ((v - min_val) * scale) as u8
+            } else {
+                0
+            }
+        })
         .collect();
     let cropped = GrayImage::from_raw(w, h, data)
         .ok_or_else(|| anyhow::anyhow!("Failed to create depth map from model output"))?;

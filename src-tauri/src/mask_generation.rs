@@ -1172,7 +1172,10 @@ fn generate_ai_subject_bitmap(
 
     // Shift uncertain coverage without moving confident foreground/background.
     // Work from the saved soft matte so this slider never re-runs inference.
-    let balance = params_value.get("edgeBalance").and_then(Value::as_f64).unwrap_or(0.0);
+    let balance = params_value
+        .get("edgeBalance")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
     if balance.is_finite() && balance.abs() > 0.01 {
         let odds = (balance.clamp(-100.0, 100.0) as f32 * 0.03).exp();
         for p in mask.pixels_mut() {

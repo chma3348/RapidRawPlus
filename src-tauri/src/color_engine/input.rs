@@ -1,6 +1,6 @@
 //! Profile-aware input for the opt-in engine. Never used by legacy edits.
 use super::config::{Primaries, ReferenceDomain, SourceColor, Transfer};
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader, Rgba32FImage};
 use moxcms::{
     ColorProfile, DataColorSpace, Layout, ProfileClass, RenderingIntent, ToneReprCurve,
@@ -41,8 +41,10 @@ pub fn decode_profiled_photo(bytes: &[u8]) -> Result<DecodedFrame> {
             image.apply_orientation(orientation);
             frame.pixels = image.to_rgba32f();
         }
-        frame.provenance.interpretation =
-            format!("{} (decoded by macOS, {extension})", frame.provenance.interpretation);
+        frame.provenance.interpretation = format!(
+            "{} (decoded by macOS, {extension})",
+            frame.provenance.interpretation
+        );
         return Ok(frame);
     }
     let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
@@ -84,7 +86,10 @@ pub fn decode_profiled_photo(bytes: &[u8]) -> Result<DecodedFrame> {
         if let Some(cicp) = &info.coding_independent_code_points {
             let sdr_curve = matches!(cicp.transfer_function, 1 | 4 | 6 | 8 | 13 | 14 | 15);
             ensure!(
-                icc.is_some() && sdr_curve && cicp.matrix_coefficients == 0 && cicp.is_video_full_range_image,
+                icc.is_some()
+                    && sdr_curve
+                    && cicp.matrix_coefficients == 0
+                    && cicp.is_video_full_range_image,
                 "PNG CICP declares HDR or video data (transfer {}, matrix {}); that needs an explicit supported input adapter",
                 cicp.transfer_function,
                 cicp.matrix_coefficients
@@ -106,20 +111,21 @@ pub fn decode_profiled_photo(bytes: &[u8]) -> Result<DecodedFrame> {
             let png = png::Decoder::new(Cursor::new(bytes)).read_info()?;
             let info = png.info();
             // Do not silently overwrite alternate gamma/chromaticity tags.
-            ensure!(info.srgb.is_some() || (info.gama_chunk.is_none() && info.chrm_chunk.is_none()),
-                "PNG declares gamma/chromaticities without an ICC or sRGB profile; cannot assume sRGB");
+            ensure!(
+                info.srgb.is_some() || (info.gama_chunk.is_none() && info.chrm_chunk.is_none()),
+                "PNG declares gamma/chromaticities without an ICC or sRGB profile; cannot assume sRGB"
+            );
         }
         // EXIF Adobe RGB/uncalibrated cannot be safely treated as untagged sRGB.
-        if let Ok(exif) = exif::Reader::new().read_from_container(&mut Cursor::new(bytes)) {
-            if let Some(value) = exif
+        if let Ok(exif) = exif::Reader::new().read_from_container(&mut Cursor::new(bytes))
+            && let Some(value) = exif
                 .get_field(exif::Tag::ColorSpace, exif::In::PRIMARY)
                 .and_then(|f| f.value.get_uint(0))
-            {
-                ensure!(
-                    value == 1,
-                    "EXIF declares a non-sRGB or uncalibrated color space without an ICC profile"
-                );
-            }
+        {
+            ensure!(
+                value == 1,
+                "EXIF declares a non-sRGB or uncalibrated color space without an ICC profile"
+            );
         }
         warnings.push("No embedded ICC profile: using the documented sRGB fallback for standard PNG/JPEG photos.".into());
         (
@@ -127,8 +133,10 @@ pub fn decode_profiled_photo(bytes: &[u8]) -> Result<DecodedFrame> {
             "srgb_fallback",
         )
     };
-    ensure!(profile.color_space == DataColorSpace::Rgb,
-        "Only RGB ICC profiles are supported by this adapter; refusing to apply a gray/CMYK profile to decoded RGB pixels");
+    ensure!(
+        profile.color_space == DataColorSpace::Rgb,
+        "Only RGB ICC profiles are supported by this adapter; refusing to apply a gray/CMYK profile to decoded RGB pixels"
+    );
     ensure!(
         matches!(
             profile.profile_class,
@@ -164,11 +172,19 @@ fn tiff_icc_profile(bytes: &[u8]) -> Option<Vec<u8>> {
     };
     let u16_at = |at: usize| -> Option<u16> {
         let b: [u8; 2] = bytes.get(at..at + 2)?.try_into().ok()?;
-        Some(if little { u16::from_le_bytes(b) } else { u16::from_be_bytes(b) })
+        Some(if little {
+            u16::from_le_bytes(b)
+        } else {
+            u16::from_be_bytes(b)
+        })
     };
     let u32_at = |at: usize| -> Option<u32> {
         let b: [u8; 4] = bytes.get(at..at + 4)?.try_into().ok()?;
-        Some(if little { u32::from_le_bytes(b) } else { u32::from_be_bytes(b) })
+        Some(if little {
+            u32::from_le_bytes(b)
+        } else {
+            u32::from_be_bytes(b)
+        })
     };
     let ifd = u32_at(4)? as usize;
     let entries = u16_at(ifd)? as usize;
@@ -181,8 +197,14 @@ fn tiff_icc_profile(bytes: &[u8]) -> Option<Vec<u8>> {
             return None;
         }
         let count = u32_at(entry + 4)? as usize;
-        let start = if count <= 4 { entry + 8 } else { u32_at(entry + 8)? as usize };
-        return bytes.get(start..start.checked_add(count)?).map(<[u8]>::to_vec);
+        let start = if count <= 4 {
+            entry + 8
+        } else {
+            u32_at(entry + 8)? as usize
+        };
+        return bytes
+            .get(start..start.checked_add(count)?)
+            .map(<[u8]>::to_vec);
     }
     None
 }
@@ -363,7 +385,9 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         // A small wide-gamut source: saturated P3 red, which sRGB cannot hold.
         let source = dir.join("p3.png");
-        image::RgbImage::from_pixel(16, 8, image::Rgb([255, 0, 0])).save(&source).unwrap();
+        image::RgbImage::from_pixel(16, 8, image::Rgb([255, 0, 0]))
+            .save(&source)
+            .unwrap();
         let tagged = dir.join("p3-tagged.png");
         let profile = "/System/Library/ColorSync/Profiles/Display P3.icc";
         if !std::path::Path::new(profile).exists() {
@@ -381,7 +405,10 @@ mod tests {
         }
         let reference = decode_profiled_photo(&std::fs::read(&tagged).unwrap()).unwrap();
         let red = reference.pixels.get_pixel(0, 0).0;
-        assert!(red[0] > 1.0 || red[1] < 0.0, "P3 red should fall outside sRGB: {red:?}");
+        assert!(
+            red[0] > 1.0 || red[1] < 0.0,
+            "P3 red should fall outside sRGB: {red:?}"
+        );
         for format in ["heic", "avif", "psd", "tiff"] {
             let out = dir.join(format!("p3.{format}"));
             let converted = std::process::Command::new("sips")
@@ -416,7 +443,9 @@ mod tests {
     fn decode_cost() {
         let path = std::path::Path::new(&std::env::var("HOME").unwrap())
             .join("Desktop/Test Photos/NYC/DSC08270.JPG");
-        let Ok(bytes) = std::fs::read(&path) else { return };
+        let Ok(bytes) = std::fs::read(&path) else {
+            return;
+        };
         let start = std::time::Instant::now();
         let frame = decode_profiled_photo(&bytes).unwrap();
         println!(

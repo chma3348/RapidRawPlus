@@ -203,9 +203,14 @@ fn gpu_color_pipeline_contracts() {
     let reference = engine.render(&input, &graded_plan, true).unwrap();
     let reference_graded = engine.render_graded(&input, &graded_plan).unwrap();
     for pixels in [1000, 4096, 65536] {
-        let small = ColorEngine::new(context.clone()).unwrap().with_chunk_pixels(pixels);
+        let small = ColorEngine::new(context.clone())
+            .unwrap()
+            .with_chunk_pixels(pixels);
         let chunked = small.render(&input, &graded_plan, true).unwrap();
-        assert_eq!(chunked.encoded_srgb, reference.encoded_srgb, "{pixels}-pixel chunks changed output");
+        assert_eq!(
+            chunked.encoded_srgb, reference.encoded_srgb,
+            "{pixels}-pixel chunks changed output"
+        );
         assert_eq!(
             chunked.stages.as_ref().unwrap().graded,
             reference.stages.as_ref().unwrap().graded,
@@ -244,7 +249,9 @@ fn gpu_color_pipeline_contracts() {
         let run = |image: &image::RgbaImage| {
             let mut longest = 1;
             let mut current = 1;
-            let row: Vec<u8> = (0..image.width()).map(|x| image.get_pixel(x, 0)[0]).collect();
+            let row: Vec<u8> = (0..image.width())
+                .map(|x| image.get_pixel(x, 0)[0])
+                .collect();
             for pair in row.windows(2) {
                 current = if pair[0] == pair[1] { current + 1 } else { 1 };
                 longest = longest.max(current);
@@ -486,12 +493,15 @@ fn detail_contracts(context: &GpuContext) {
     // Neutral detail is exactly no detail.
     let idle = json!({"processVersion":3,"v3":{"detail":{"threshold":40}},"masks":[]});
     assert_eq!(
-        render_file(context, &state, path, &idle, None).unwrap().encoded_srgb,
+        render_file(context, &state, path, &idle, None)
+            .unwrap()
+            .encoded_srgb,
         base.encoded_srgb,
         "a threshold with no sharpening changed the image"
     );
 
-    let clarity = json!({"processVersion":3,"v3":{"detail":{"clarity":80,"structure":60}},"masks":[]});
+    let clarity =
+        json!({"processVersion":3,"v3":{"detail":{"clarity":80,"structure":60}},"masks":[]});
     let full = render_file(context, &state, path, &clarity, None).unwrap();
     assert_ne!(full.encoded_srgb, base.encoded_srgb, "detail had no effect");
 
@@ -513,7 +523,11 @@ fn detail_contracts(context: &GpuContext) {
         image::imageops::FilterType::Triangle,
     );
     let mean_gap = |a: &image::Rgba32FImage, b: &image::Rgba32FImage| {
-        a.as_raw().iter().zip(b.as_raw()).map(|(x, y)| (x - y).abs()).sum::<f32>()
+        a.as_raw()
+            .iter()
+            .zip(b.as_raw())
+            .map(|(x, y)| (x - y).abs())
+            .sum::<f32>()
             / a.as_raw().len() as f32
     };
     let to_preview = mean_gap(&preview.encoded_srgb, &down);
@@ -524,16 +538,21 @@ fn detail_contracts(context: &GpuContext) {
     );
 
     // A cached detail pass must not survive a change to it.
-    let stronger = json!({"processVersion":3,"v3":{"detail":{"clarity":100,"structure":60}},"masks":[]});
+    let stronger =
+        json!({"processVersion":3,"v3":{"detail":{"clarity":100,"structure":60}},"masks":[]});
     assert_ne!(
-        render_file(context, &state, path, &stronger, None).unwrap().encoded_srgb,
+        render_file(context, &state, path, &stronger, None)
+            .unwrap()
+            .encoded_srgb,
         full.encoded_srgb,
         "detail cache returned a stale result"
     );
     // Other sliders reuse it, and still take effect.
     let brighter = json!({"processVersion":3,"v3":{"exposure":0.5,"detail":{"clarity":80,"structure":60}},"masks":[]});
     assert_ne!(
-        render_file(context, &state, path, &brighter, None).unwrap().encoded_srgb,
+        render_file(context, &state, path, &brighter, None)
+            .unwrap()
+            .encoded_srgb,
         full.encoded_srgb
     );
 
@@ -547,9 +566,20 @@ fn detail_contracts(context: &GpuContext) {
             "parameters":{"startX":0,"startY":1000,"endX":100,"endY":1000,"range":1}}]
     }]});
     let with_grain = render_file(context, &state, path, &grainy, None).unwrap();
-    assert_ne!(with_grain.encoded_srgb, base.encoded_srgb, "grain had no effect");
-    let gap = mean_gap(&render_file(context, &state, path, &grainy_masked, None).unwrap().encoded_srgb, &with_grain.encoded_srgb);
-    assert!(gap < 1e-4, "grain was lost or doubled when a mask was present: {gap}");
+    assert_ne!(
+        with_grain.encoded_srgb, base.encoded_srgb,
+        "grain had no effect"
+    );
+    let gap = mean_gap(
+        &render_file(context, &state, path, &grainy_masked, None)
+            .unwrap()
+            .encoded_srgb,
+        &with_grain.encoded_srgb,
+    );
+    assert!(
+        gap < 1e-4,
+        "grain was lost or doubled when a mask was present: {gap}"
+    );
 
     // Detail inside a mask. Luminance is the same quantity in any primaries,
     // so a mask covering everything must do what the global control does.
@@ -561,11 +591,16 @@ fn detail_contracts(context: &GpuContext) {
     }]});
     let local = render_file(context, &state, path, &masked, None).unwrap();
     let gap = mean_gap(&local.encoded_srgb, &full.encoded_srgb);
-    assert!(gap < 1e-3, "full-coverage mask detail differs from global detail by {gap}");
+    assert!(
+        gap < 1e-3,
+        "full-coverage mask detail differs from global detail by {gap}"
+    );
     // And a mask at zero opacity does nothing.
     masked["masks"][0]["opacity"] = json!(0);
     assert_eq!(
-        render_file(context, &state, path, &masked, None).unwrap().encoded_srgb,
+        render_file(context, &state, path, &masked, None)
+            .unwrap()
+            .encoded_srgb,
         base.encoded_srgb
     );
 }
@@ -655,8 +690,7 @@ fn application_contracts(context: &GpuContext) {
     let b = render_file(context, &state, path, &graded, None).unwrap();
     assert_ne!(a.encoded_srgb, b.encoded_srgb, "grade had no effect");
     let mut elsewhere = masked.clone();
-    elsewhere["masks"][0]["subMasks"][0]["parameters"] =
-        json!({"targetX": 32, "targetY": 16, "tolerance": 40, "swatchHue": 0.0, "swatchWidth": 2.0});
+    elsewhere["masks"][0]["subMasks"][0]["parameters"] = json!({"targetX": 32, "targetY": 16, "tolerance": 40, "swatchHue": 0.0, "swatchWidth": 2.0});
     let none = render_file(context, &state, path, &elsewhere, None).unwrap();
     for (a, b) in none
         .encoded_srgb
@@ -753,15 +787,24 @@ fn channel_curve_contracts(engine: &ColorEngine) {
     let warm = graded(c.clone());
     let mut last = f32::MIN;
     for (w, b) in warm.pixels().zip(base.pixels()) {
-        assert!((w[1] - b[1]).abs() < 1e-5 && (w[2] - b[2]).abs() < 1e-5, "green or blue moved");
+        assert!(
+            (w[1] - b[1]).abs() < 1e-5 && (w[2] - b[2]).abs() < 1e-5,
+            "green or blue moved"
+        );
         assert!(w[0] >= b[0] - 1e-6, "a lifted curve darkened red");
         assert!(w[0] >= last - 1e-5, "red curve reversed tones");
         last = w[0];
     }
-    assert!(warm.get_pixel(64, 0)[0] > base.get_pixel(64, 0)[0] * 1.1, "red was not lifted");
+    assert!(
+        warm.get_pixel(64, 0)[0] > base.get_pixel(64, 0)[0] * 1.1,
+        "red was not lifted"
+    );
     // Above the encoding's range the end tangent continues: no clamp.
     let top = warm.get_pixel(1024, 0)[0];
-    assert!(top.is_finite() && top > warm.get_pixel(900, 0)[0], "highlights clamped by the curve");
+    assert!(
+        top.is_finite() && top > warm.get_pixel(900, 0)[0],
+        "highlights clamped by the curve"
+    );
 }
 
 /// Vignette and grain: position-dependent, so they get their own checks.
@@ -777,11 +820,20 @@ fn effects_contracts(engine: &ColorEngine) {
     dark.controls.effects.vignette_amount = -70.0;
     let v = render(dark.clone());
     let (centre, corner) = (v.get_pixel(100, 50)[0], v.get_pixel(0, 0)[0]);
-    assert!((centre - base.get_pixel(100, 50)[0]).abs() < 1e-4, "vignette touched the centre");
-    assert!(corner < base.get_pixel(0, 0)[0] - 0.05, "vignette did not darken the corner");
+    assert!(
+        (centre - base.get_pixel(100, 50)[0]).abs() < 1e-4,
+        "vignette touched the centre"
+    );
+    assert!(
+        corner < base.get_pixel(0, 0)[0] - 0.05,
+        "vignette did not darken the corner"
+    );
     // Symmetric about the centre: all four corners alike.
     for (x, y) in [(199, 0), (0, 99), (199, 99)] {
-        assert!((v.get_pixel(x, y)[0] - corner).abs() < 1e-3, "vignette not symmetric");
+        assert!(
+            (v.get_pixel(x, y)[0] - corner).abs() < 1e-3,
+            "vignette not symmetric"
+        );
     }
     let mut light = config();
     light.controls.effects.vignette_amount = 70.0;
@@ -792,11 +844,19 @@ fn effects_contracts(engine: &ColorEngine) {
     grainy.controls.effects.grain_amount = 80.0;
     let g = render(grainy.clone());
     assert_eq!(g, render(grainy), "grain must be deterministic");
-    let deltas: Vec<f32> = g.pixels().zip(base.pixels()).map(|(a, b)| a[0] - b[0]).collect();
+    let deltas: Vec<f32> = g
+        .pixels()
+        .zip(base.pixels())
+        .map(|(a, b)| a[0] - b[0])
+        .collect();
     let mean = deltas.iter().sum::<f32>() / deltas.len() as f32;
-    let spread = (deltas.iter().map(|d| (d - mean).powi(2)).sum::<f32>() / deltas.len() as f32).sqrt();
+    let spread =
+        (deltas.iter().map(|d| (d - mean).powi(2)).sum::<f32>() / deltas.len() as f32).sqrt();
     assert!(spread > 0.005, "no visible grain: {spread}");
-    assert!(mean.abs() < spread * 0.5, "grain shifted the brightness: mean {mean} spread {spread}");
+    assert!(
+        mean.abs() < spread * 0.5,
+        "grain shifted the brightness: mean {mean} spread {spread}"
+    );
     // Grain keeps its size relative to the photograph: rendering at half
     // scale must sample the same pattern at half the pixel spacing.
     let mut half = RenderPlan::build({
@@ -876,9 +936,8 @@ fn captured_transform_contracts(engine: &ColorEngine) {
         .unwrap();
     let graded = rendered.stages.as_ref().unwrap().graded.clone();
     for (working, out) in graded.pixels().zip(rendered.encoded_srgb.pixels()) {
-        let logged: [f32; 3] = std::array::from_fn(|i| {
-            spaces::encode_intermediate(working[i] as f64) as f32
-        });
+        let logged: [f32; 3] =
+            std::array::from_fn(|i| spaces::encode_intermediate(working[i] as f64) as f32);
         let want = cube.sample(logged);
         for c in 0..3 {
             // Tetrahedral on the GPU against trilinear here: they agree

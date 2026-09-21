@@ -111,7 +111,9 @@ fn choose_candidate(
             .chain(ranked.iter())
             .max_by(|a, b| {
                 // Committed candidates rank first; among equals, raw score.
-                (committed(a), a.1).partial_cmp(&(committed(b), b.1)).unwrap()
+                (committed(a), a.1)
+                    .partial_cmp(&(committed(b), b.1))
+                    .unwrap()
             })
             .map(|r| r.0)
             .unwrap_or(0);
@@ -141,7 +143,9 @@ fn choose_candidate(
             .chain(ranked.iter())
             .max_by(|a, b| {
                 // Committed candidates rank first; among equals, raw score.
-                (committed(a), a.1).partial_cmp(&(committed(b), b.1)).unwrap()
+                (committed(a), a.1)
+                    .partial_cmp(&(committed(b), b.1))
+                    .unwrap()
             })
             .map(|r| r.0)
             .unwrap_or(0);
@@ -457,8 +461,17 @@ fn stabilize_interiors(logits: &mut [f32], side: usize) {
 }
 
 fn mask_iou(a: &[f32], b: &[f32]) -> f32 {
-    let intersection = a.iter().zip(b).filter(|(x, y)| **x > 0.0 && **y > 0.0).count();
-    let union = a.iter().zip(b).filter(|(x, y)| **x > 0.0 || **y > 0.0).count().max(1);
+    let intersection = a
+        .iter()
+        .zip(b)
+        .filter(|(x, y)| **x > 0.0 && **y > 0.0)
+        .count();
+    let union = a
+        .iter()
+        .zip(b)
+        .filter(|(x, y)| **x > 0.0 || **y > 0.0)
+        .count()
+        .max(1);
     intersection as f32 / union as f32
 }
 
@@ -731,9 +744,25 @@ pub fn select(
             let within_bounds = grew_to <= grew_from * 5 / 2 && grew_to <= valid * 3 / 5;
             let accepted = if grown_box.is_some() {
                 within_bounds
-                    && growth_accepted(&logits, candidate, quality, scores[best], side, points, scale)
+                    && growth_accepted(
+                        &logits,
+                        candidate,
+                        quality,
+                        scores[best],
+                        side,
+                        points,
+                        scale,
+                    )
             } else {
-                accept_refinement(&logits, candidate, quality, scores[best], side, points, scale)
+                accept_refinement(
+                    &logits,
+                    candidate,
+                    quality,
+                    scores[best],
+                    side,
+                    points,
+                    scale,
+                )
             };
             if !accepted {
                 break;

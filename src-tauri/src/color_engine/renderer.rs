@@ -105,8 +105,7 @@ impl RenderedFrame {
 /// Deterministic value in [0,1) for one pixel and channel. Fixed per pixel so
 /// the same frame always encodes the same way.
 fn uniform(x: u32, y: u32, channel: u32) -> f32 {
-    let mut h = x
-        .wrapping_mul(0x9E37_79B9)
+    let mut h = x.wrapping_mul(0x9E37_79B9)
         ^ y.wrapping_mul(0x85EB_CA6B)
         ^ channel.wrapping_mul(0xC2B2_AE35);
     h ^= h >> 15;

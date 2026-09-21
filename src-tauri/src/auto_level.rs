@@ -96,7 +96,12 @@ pub fn estimate_level(image: &DynamicImage) -> Option<LevelEstimate> {
         image.clone()
     };
     let (luma, valid) = luma_and_validity(&small);
-    let analysis = analyse(&luma, &valid, small.width() as usize, small.height() as usize)?;
+    let analysis = analyse(
+        &luma,
+        &valid,
+        small.width() as usize,
+        small.height() as usize,
+    )?;
     decide(&analysis)
 }
 
@@ -124,8 +129,12 @@ pub fn estimate_level_verbose(image: &DynamicImage) -> (Option<LevelEstimate>, V
         image.clone()
     };
     let (luma, valid) = luma_and_validity(&small);
-    let Some(analysis) = analyse(&luma, &valid, small.width() as usize, small.height() as usize)
-    else {
+    let Some(analysis) = analyse(
+        &luma,
+        &valid,
+        small.width() as usize,
+        small.height() as usize,
+    ) else {
         return (None, Vec::new());
     };
     let mut peaks = Vec::new();
@@ -135,7 +144,9 @@ pub fn estimate_level_verbose(image: &DynamicImage) -> (Option<LevelEstimate>, V
         let hi = ((45.0 + MAX_TILT_DEG) / BIN_DEG) as usize;
         for b in lo..=hi {
             let v = smoothed[b];
-            if v > 0.0 && (b == 0 || smoothed[b - 1] < v) && (b + 1 >= BINS || smoothed[b + 1] <= v)
+            if v > 0.0
+                && (b == 0 || smoothed[b - 1] < v)
+                && (b + 1 >= BINS || smoothed[b + 1] <= v)
                 && let Some(p) = refine_peak(hist, b)
             {
                 peaks.push(PeakReport {
@@ -389,7 +400,8 @@ fn find_peak(hist: &[f32]) -> Option<Peak> {
         let mb = (mirror_centre + span).min(hi - 1);
         // The mirror has to be a real local maximum, not merely the highest
         // bin of a flat stretch next to the winner's own tail.
-        let is_local_max = |b: usize| smoothed[b] > smoothed[b - 1] && smoothed[b] >= smoothed[b + 1];
+        let is_local_max =
+            |b: usize| smoothed[b] > smoothed[b - 1] && smoothed[b] >= smoothed[b + 1];
         if ma <= mb
             && let Some((mbin, _)) = (ma..=mb)
                 .filter(|&b| is_local_max(b))
@@ -416,9 +428,17 @@ fn corroborates(hist: &[f32], peak: Peak) -> bool {
     let b = (centre + span).min(BINS - 1);
     let smoothed = smooth(hist);
     (a..=b)
-        .filter(|&i| i > 0 && i + 1 < BINS && smoothed[i] >= smoothed[i - 1] && smoothed[i] >= smoothed[i + 1])
+        .filter(|&i| {
+            i > 0
+                && i + 1 < BINS
+                && smoothed[i] >= smoothed[i - 1]
+                && smoothed[i] >= smoothed[i + 1]
+        })
         .filter_map(|i| refine_peak(hist, i))
-        .any(|p| (p.tilt - peak.tilt).abs() <= CORROBORATION_TOLERANCE_DEG && p.mass >= CORROBORATION_MIN_RATIO * peak.mass)
+        .any(|p| {
+            (p.tilt - peak.tilt).abs() <= CORROBORATION_TOLERANCE_DEG
+                && p.mass >= CORROBORATION_MIN_RATIO * peak.mass
+        })
 }
 
 fn bin_centre(bin: usize) -> f32 {
@@ -513,8 +533,8 @@ fn box_blur(src: &[f32], w: usize, h: usize, radius: usize) -> Vec<f32> {
     let norm = 1.0 / (2 * radius + 1) as f32;
     for y in 0..h {
         let row = &src[y * w..(y + 1) * w];
-        let mut acc: f32 = (0..=radius.min(w - 1)).map(|x| row[x]).sum::<f32>()
-            + row[0] * radius as f32;
+        let mut acc: f32 =
+            (0..=radius.min(w - 1)).map(|x| row[x]).sum::<f32>() + row[0] * radius as f32;
         for x in 0..w {
             tmp[y * w + x] = acc * norm;
             let add = row[(x + radius + 1).min(w - 1)];
@@ -524,8 +544,8 @@ fn box_blur(src: &[f32], w: usize, h: usize, radius: usize) -> Vec<f32> {
     }
     let mut out = vec![0.0f32; w * h];
     for x in 0..w {
-        let mut acc: f32 = (0..=radius.min(h - 1)).map(|y| tmp[y * w + x]).sum::<f32>()
-            + tmp[x] * radius as f32;
+        let mut acc: f32 =
+            (0..=radius.min(h - 1)).map(|y| tmp[y * w + x]).sum::<f32>() + tmp[x] * radius as f32;
         for y in 0..h {
             out[y * w + x] = acc * norm;
             let add = tmp[(y + radius + 1).min(h - 1) * w + x];
@@ -552,13 +572,10 @@ pub async fn auto_level(
         let start = std::time::Instant::now();
         let oriented =
             crate::image_processing::apply_coarse_rotation(warped.as_ref(), orientation_steps);
-        let oriented = crate::image_processing::apply_flip(oriented, flip_horizontal, flip_vertical);
+        let oriented =
+            crate::image_processing::apply_flip(oriented, flip_horizontal, flip_vertical);
         let result = estimate_level(oriented.as_ref());
-        log::info!(
-            "auto_level: {:?} in {:.1?}",
-            result,
-            start.elapsed()
-        );
+        log::info!("auto_level: {:?} in {:.1?}", result, start.elapsed());
         result
     })
     .await
@@ -663,7 +680,8 @@ mod tests {
             // anyone's reasoning about sign conventions: applying the
             // returned angle must produce a level image.
             let levelled = centre_crop(&apply_rotation(&tilted, est.angle), 0.7);
-            let again = estimate_level(&levelled).expect("levelled image should still be confident");
+            let again =
+                estimate_level(&levelled).expect("levelled image should still be confident");
             assert_close(again.angle, 0.0, 0.2, &format!("re-estimate after {tilt}"));
         }
     }
@@ -684,7 +702,10 @@ mod tests {
         // of a sloped roof, so the tool must decline rather than guess.
         let scene = horizon_scene(1000, 700);
         let tilted = centre_crop(&apply_rotation(&scene, 9.0), 0.65);
-        assert!(estimate_level(&tilted).is_none(), "uncorroborated 9° should be refused");
+        assert!(
+            estimate_level(&tilted).is_none(),
+            "uncorroborated 9° should be refused"
+        );
     }
 
     #[test]
@@ -698,7 +719,8 @@ mod tests {
 
     #[test]
     fn featureless_image_returns_none() {
-        let flat = DynamicImage::ImageRgba8(RgbaImage::from_pixel(600, 400, Rgba([120, 120, 120, 255])));
+        let flat =
+            DynamicImage::ImageRgba8(RgbaImage::from_pixel(600, 400, Rgba([120, 120, 120, 255])));
         assert!(estimate_level(&flat).is_none());
     }
 

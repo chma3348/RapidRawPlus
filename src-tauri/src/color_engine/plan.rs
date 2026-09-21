@@ -141,12 +141,7 @@ impl RenderPlan {
                 u32::from(!c.color_is_neutral()),
                 cube.as_ref().map_or(0, |c| c.size),
             ],
-            tone: [
-                (c.contrast / 100.).exp2(),
-                c.pivot,
-                c.exposure.exp2(),
-                0.,
-            ],
+            tone: [(c.contrast / 100.).exp2(), c.pivot, c.exposure.exp2(), 0.],
             zones: [
                 c.shadows * 0.02,
                 c.highlights * 0.02,
@@ -191,7 +186,10 @@ impl RenderPlan {
             channel_curves: {
                 let mut knots = [[0.0f32; 4]; 15];
                 for (c, curve) in c.channel_curves.iter().enumerate() {
-                    for (k, knot) in super::controls::curve_parameters(*curve).into_iter().enumerate() {
+                    for (k, knot) in super::controls::curve_parameters(*curve)
+                        .into_iter()
+                        .enumerate()
+                    {
                         knots[c * 5 + k] = knot;
                     }
                 }

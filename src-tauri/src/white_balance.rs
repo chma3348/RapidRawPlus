@@ -114,10 +114,18 @@ pub fn match_samples(
     let residual: [f32; 3] = std::array::from_fn(|c| 1.0 / gains[c]);
     let (r, g, b) = (residual[0], residual[1], residual[2]);
     let sum_rb = r + b;
-    let temperature = if sum_rb > 1e-4 { ((b - r) / sum_rb) * 125.0 } else { 0.0 };
+    let temperature = if sum_rb > 1e-4 {
+        ((b - r) / sum_rb) * 125.0
+    } else {
+        0.0
+    };
     let mid = sum_rb / 2.0;
     let sum_gm = g + mid;
-    let tint = if sum_gm > 1e-4 { ((g - mid) / sum_gm) * 400.0 } else { 0.0 };
+    let tint = if sum_gm > 1e-4 {
+        ((g - mid) / sum_gm) * 400.0
+    } else {
+        0.0
+    };
     if temperature.abs() < 0.25 && tint.abs() < 0.25 {
         return Err(SampleProblem::NothingToDo);
     }
@@ -168,7 +176,10 @@ mod tests {
         // Same colours, both samples twice as bright.
         let b = match_samples([0.55, 0.60, 0.74], [0.82, 0.72, 0.60]).unwrap();
         // Not identical (sRGB is non-linear), but the same correction in kind.
-        assert!(a.temperature.signum() == b.temperature.signum(), "{a:?} {b:?}");
+        assert!(
+            a.temperature.signum() == b.temperature.signum(),
+            "{a:?} {b:?}"
+        );
         assert!(a.tint.signum() == b.tint.signum(), "{a:?} {b:?}");
     }
 
@@ -195,15 +206,24 @@ mod tests {
         let green = match_samples([0.40, 0.60, 0.40], [0.50, 0.50, 0.50]).unwrap();
         let magenta = match_samples([0.60, 0.40, 0.60], [0.50, 0.50, 0.50]).unwrap();
         assert!(green.tint > 0.0, "green should ask for magenta: {green:?}");
-        assert!(magenta.tint < 0.0, "magenta should ask for green: {magenta:?}");
+        assert!(
+            magenta.tint < 0.0,
+            "magenta should ask for green: {magenta:?}"
+        );
         // And the correction cancels the cast: green's gains lift red/blue.
         assert!(green.gains[0] > 1.0 && green.gains[1] < 1.0, "{green:?}");
     }
 
     #[test]
     fn clipped_or_black_samples_are_refused() {
-        assert_eq!(match_samples([1.0, 1.0, 1.0], [0.5, 0.5, 0.45]), Err(SampleProblem::Clipped));
-        assert_eq!(match_samples([0.5, 0.5, 0.45], [0.0, 0.0, 0.0]), Err(SampleProblem::Clipped));
+        assert_eq!(
+            match_samples([1.0, 1.0, 1.0], [0.5, 0.5, 0.45]),
+            Err(SampleProblem::Clipped)
+        );
+        assert_eq!(
+            match_samples([0.5, 0.5, 0.45], [0.0, 0.0, 0.0]),
+            Err(SampleProblem::Clipped)
+        );
     }
 
     #[test]

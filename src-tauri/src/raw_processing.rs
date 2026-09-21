@@ -284,15 +284,19 @@ mod decode_probe {
     #[test]
     #[ignore]
     fn dump_linear() {
-        let Ok(path) = std::env::var("RAPIDRAW_TEST_RAW") else { return };
+        let Ok(path) = std::env::var("RAPIDRAW_TEST_RAW") else {
+            return;
+        };
         let out = std::env::var("RAPIDRAW_DUMP_OUT").unwrap_or("/tmp/linear.f32".into());
-        let tw: u32 = std::env::var("RAPIDRAW_DUMP_W").ok()
-            .and_then(|v| v.parse().ok()).unwrap_or(1440);
+        let tw: u32 = std::env::var("RAPIDRAW_DUMP_W")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1440);
         let bytes = std::fs::read(&path).expect("read raw");
         let settings = crate::AppSettings::default();
-        let img = crate::image_loader::load_base_image_from_bytes(
-            &bytes, &path, false, &settings, None,
-        ).expect("load");
+        let img =
+            crate::image_loader::load_base_image_from_bytes(&bytes, &path, false, &settings, None)
+                .expect("load");
         let (w, h) = (img.width(), img.height());
         let th = ((tw as u64 * h as u64) / w as u64) as u32;
         // The image crate clamps f32 buffers to [0,1] when resampling, which
@@ -305,9 +309,7 @@ mod decode_probe {
                 *v /= scale;
             }
         }
-        let small = image::imageops::resize(
-            &buf, tw, th, image::imageops::FilterType::Lanczos3,
-        );
+        let small = image::imageops::resize(&buf, tw, th, image::imageops::FilterType::Lanczos3);
         let mut f = std::fs::File::create(&out).expect("create");
         use std::io::Write;
         f.write_all(&(tw as u32).to_le_bytes()).unwrap();
@@ -323,16 +325,24 @@ mod decode_probe {
     #[test]
     #[ignore]
     fn brightness_bisect() {
-        let Ok(path) = std::env::var("RAPIDRAW_TEST_RAW") else { return };
+        let Ok(path) = std::env::var("RAPIDRAW_TEST_RAW") else {
+            return;
+        };
         let bytes = std::fs::read(&path).expect("read raw");
         let stats = |label: &str, img: &image::DynamicImage| {
             let rgb = img.to_rgba32f();
-            let mut mx: Vec<f32> = rgb.pixels().map(|p| p.0[0].max(p.0[1]).max(p.0[2])).collect();
+            let mut mx: Vec<f32> = rgb
+                .pixels()
+                .map(|p| p.0[0].max(p.0[1]).max(p.0[2]))
+                .collect();
             mx.sort_by(|a, b| a.partial_cmp(b).unwrap());
             let q = |f: f64| mx[((mx.len() - 1) as f64 * f) as usize];
             println!(
                 "  {label:28} max {:.3}  p99.9 {:.3}  p99 {:.3}  p50 {:.3}  above 1.0: {:.3}%",
-                mx[mx.len() - 1], q(0.999), q(0.99), q(0.50),
+                mx[mx.len() - 1],
+                q(0.999),
+                q(0.99),
+                q(0.50),
                 100.0 * mx.iter().filter(|v| **v > 1.0).count() as f64 / mx.len() as f64
             );
         };
@@ -340,10 +350,9 @@ mod decode_probe {
             .expect("develop");
         stats("after develop_raw_image", &developed);
         let settings = crate::AppSettings::default();
-        let loaded = crate::image_loader::load_base_image_from_bytes(
-            &bytes, &path, false, &settings, None,
-        )
-        .expect("load");
+        let loaded =
+            crate::image_loader::load_base_image_from_bytes(&bytes, &path, false, &settings, None)
+                .expect("load");
         stats("after load_base_image", &loaded);
     }
 
@@ -378,10 +387,7 @@ mod decode_probe {
             let mean_sat: f32 = bright.iter().map(|p| sat(p)).sum::<f32>() / bright.len() as f32;
             let mean_max: f32 =
                 bright.iter().map(|p| p[0].max(p[1]).max(p[2])).sum::<f32>() / bright.len() as f32;
-            let above_one = px
-                .iter()
-                .filter(|p| p[0].max(p[1]).max(p[2]) > 1.0)
-                .count() as f64
+            let above_one = px.iter().filter(|p| p[0].max(p[1]).max(p[2]) > 1.0).count() as f64
                 / px.len() as f64;
             println!(
                 "  hc {hc:>4.1}: top-0.1% mean sat {mean_sat:.4}  mean max-channel {mean_max:.3}  \

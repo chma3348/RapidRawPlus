@@ -104,71 +104,71 @@ pub fn blend(
             distances[i] = 0;
         }
     }
-    if allow_expansion && radius > 0 {
-        if let Some(allowed) = &allowed {
-            // Do not turn isolated clipped specks into large new islands.
-            // Only substantial components seed the outward transition.
-            let mut visited = vec![false; w * h];
-            for start in 0..w * h {
-                if visited[start] || selection.as_raw()[start] == 0 {
-                    continue;
-                }
-                let mut component = VecDeque::from([start]);
-                let mut boundary = Vec::new();
-                let mut area = 0u64;
-                visited[start] = true;
-                while let Some(i) = component.pop_front() {
-                    area += 1;
-                    let (x, y) = (i % w, i / w);
-                    let mut is_boundary = false;
-                    for (nx, ny) in [
-                        (x.saturating_sub(1), y),
-                        ((x + 1).min(w - 1), y),
-                        (x, y.saturating_sub(1)),
-                        (x, (y + 1).min(h - 1)),
-                    ] {
-                        let n = ny * w + nx;
-                        if selection.as_raw()[n] == 0 {
-                            is_boundary = true;
-                        } else if !visited[n] {
-                            visited[n] = true;
-                            component.push_back(n);
-                        }
-                    }
-                    if is_boundary {
-                        boundary.push(i);
+    if allow_expansion
+        && radius > 0
+        && let Some(allowed) = &allowed
+    {
+        // Do not turn isolated clipped specks into large new islands.
+        // Only substantial components seed the outward transition.
+        let mut visited = vec![false; w * h];
+        for start in 0..w * h {
+            if visited[start] || selection.as_raw()[start] == 0 {
+                continue;
+            }
+            let mut component = VecDeque::from([start]);
+            let mut boundary = Vec::new();
+            let mut area = 0u64;
+            visited[start] = true;
+            while let Some(i) = component.pop_front() {
+                area += 1;
+                let (x, y) = (i % w, i / w);
+                let mut is_boundary = false;
+                for (nx, ny) in [
+                    (x.saturating_sub(1), y),
+                    ((x + 1).min(w - 1), y),
+                    (x, y.saturating_sub(1)),
+                    (x, (y + 1).min(h - 1)),
+                ] {
+                    let n = ny * w + nx;
+                    if selection.as_raw()[n] == 0 {
+                        is_boundary = true;
+                    } else if !visited[n] {
+                        visited[n] = true;
+                        component.push_back(n);
                     }
                 }
-                if area >= (radius as u64 * radius as u64 / 4).max(16) {
-                    for i in boundary {
-                        queue.push(Reverse((0u32, i)));
-                    }
+                if is_boundary {
+                    boundary.push(i);
                 }
             }
-            while let Some(Reverse((distance, i))) = queue.pop() {
-                if distance != distances[i] {
-                    continue;
+            if area >= (radius as u64 * radius as u64 / 4).max(16) {
+                for i in boundary {
+                    queue.push(Reverse((0u32, i)));
                 }
-                let (x, y) = (i % w, i / w);
-                for ny in y.saturating_sub(1)..=(y + 1).min(h - 1) {
-                    for nx in x.saturating_sub(1)..=(x + 1).min(w - 1) {
-                        let n = ny * w + nx;
-                        let diagonal = nx != x && ny != y;
-                        let next = distance + if diagonal { 14 } else { 10 };
-                        if next > radius * 10 {
-                            continue;
-                        }
-                        // Diagonal paths may not cut corners around a barrier.
-                        if diagonal
-                            && (allowed.as_raw()[y * w + nx] == 0
-                                || allowed.as_raw()[ny * w + x] == 0)
-                        {
-                            continue;
-                        }
-                        if distances[n] > next && allowed.as_raw()[n] > 0 {
-                            distances[n] = next;
-                            queue.push(Reverse((next, n)));
-                        }
+            }
+        }
+        while let Some(Reverse((distance, i))) = queue.pop() {
+            if distance != distances[i] {
+                continue;
+            }
+            let (x, y) = (i % w, i / w);
+            for ny in y.saturating_sub(1)..=(y + 1).min(h - 1) {
+                for nx in x.saturating_sub(1)..=(x + 1).min(w - 1) {
+                    let n = ny * w + nx;
+                    let diagonal = nx != x && ny != y;
+                    let next = distance + if diagonal { 14 } else { 10 };
+                    if next > radius * 10 {
+                        continue;
+                    }
+                    // Diagonal paths may not cut corners around a barrier.
+                    if diagonal
+                        && (allowed.as_raw()[y * w + nx] == 0 || allowed.as_raw()[ny * w + x] == 0)
+                    {
+                        continue;
+                    }
+                    if distances[n] > next && allowed.as_raw()[n] > 0 {
+                        distances[n] = next;
+                        queue.push(Reverse((next, n)));
                     }
                 }
             }

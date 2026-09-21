@@ -417,7 +417,8 @@ fn stitch_images(image_paths: Vec<String>, app_handle: AppHandle) -> Result<Dyna
                         }
                         let a = source.get_pixel((x as u32).min(sw - 1), (y as u32).min(sh - 1));
                         let b = target.get_pixel(mx as u32, my as u32);
-                        let luma = |p: &image::Rgb<f32>| 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
+                        let luma =
+                            |p: &image::Rgb<f32>| 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
                         samples.push((luma(a), luma(b)));
                     }
                 }

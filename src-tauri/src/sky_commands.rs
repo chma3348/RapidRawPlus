@@ -98,7 +98,11 @@ pub struct SkyPreparation {
 }
 
 fn skies_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    Ok(app.path().app_data_dir().map_err(|e| e.to_string())?.join("skies"))
+    Ok(app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("skies"))
 }
 
 /// The plate library, with small thumbnails made on first use and kept.
@@ -125,7 +129,11 @@ pub async fn list_sky_plates(app_handle: tauri::AppHandle) -> Result<Vec<SkyPlat
                 let thumb = thumbs.join(format!("{}.jpg", p.file));
                 if !thumb.is_file() {
                     let image = image::open(&full).ok()?;
-                    image.thumbnail(THUMB_EDGE, THUMB_EDGE).to_rgb8().save(&thumb).ok()?;
+                    image
+                        .thumbnail(THUMB_EDGE, THUMB_EDGE)
+                        .to_rgb8()
+                        .save(&thumb)
+                        .ok()?;
                 }
                 Some(SkyPlate {
                     file: p.file,
@@ -202,7 +210,9 @@ pub async fn prepare_sky_replacement(
         let rgb = image.to_rgb32f();
         RgbImage::from_fn(rgb.width(), rgb.height(), |x, y| {
             let p = rgb.get_pixel(x, y);
-            Rgb(p.0.map(|v| (v.clamp(0.0, 1.0).powf(1.0 / STORED_GAMMA) * 255.0).round() as u8))
+            Rgb(p
+                .0
+                .map(|v| (v.clamp(0.0, 1.0).powf(1.0 / STORED_GAMMA) * 255.0).round() as u8))
         })
     } else {
         image.to_rgb8()
@@ -240,12 +250,21 @@ pub async fn preview_sky_replacement(
 ) -> Result<String, String> {
     let (base, alpha, gamma, plate_image) = session_inputs(&state, &app_handle, &plate, true)?;
     tauri::async_runtime::spawn_blocking(move || {
-        let result = replace_sky(&DynamicImage::ImageRgb8((*base).clone()), &alpha, &plate_image, &options)
-            .map_err(|e| e.to_string())?
-            .to_rgb8();
+        let result = replace_sky(
+            &DynamicImage::ImageRgb8((*base).clone()),
+            &alpha,
+            &plate_image,
+            &options,
+        )
+        .map_err(|e| e.to_string())?
+        .to_rgb8();
         // A RAW's stored encoding is not a display encoding; show it as one
         // for choosing, which is all this is for.
-        let shown = if gamma { gamma_to_display(&result) } else { result };
+        let shown = if gamma {
+            gamma_to_display(&result)
+        } else {
+            result
+        };
         let mut bytes = Cursor::new(Vec::new());
         image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 85)
             .encode_image(&shown)
@@ -269,9 +288,14 @@ pub async fn apply_sky_replacement(
 ) -> Result<serde_json::Value, String> {
     let (base, alpha, gamma, plate_image) = session_inputs(&state, &app_handle, &plate, false)?;
     tauri::async_runtime::spawn_blocking(move || {
-        let result = replace_sky(&DynamicImage::ImageRgb8((*base).clone()), &alpha, &plate_image, &options)
-            .map_err(|e| e.to_string())?
-            .to_rgb8();
+        let result = replace_sky(
+            &DynamicImage::ImageRgb8((*base).clone()),
+            &alpha,
+            &plate_image,
+            &options,
+        )
+        .map_err(|e| e.to_string())?
+        .to_rgb8();
         encode_patch(&base, &result, &alpha, &options, gamma)
     })
     .await
@@ -298,16 +322,27 @@ fn session_inputs(
         Some((name, image)) if name == plate => image.clone(),
         _ => {
             let image = Arc::new(
-                image::open(skies_dir(app)?.join(plate)).map_err(|e| format!("Could not open {plate}: {e}"))?,
+                image::open(skies_dir(app)?.join(plate))
+                    .map_err(|e| format!("Could not open {plate}: {e}"))?,
             );
             session.plate = Some((plate.to_string(), image.clone()));
             image
         }
     };
     Ok(if preview {
-        (session.preview_base.clone(), session.preview_alpha.clone(), session.gamma, plate_image)
+        (
+            session.preview_base.clone(),
+            session.preview_alpha.clone(),
+            session.gamma,
+            plate_image,
+        )
     } else {
-        (session.base.clone(), session.alpha.clone(), session.gamma, plate_image)
+        (
+            session.base.clone(),
+            session.alpha.clone(),
+            session.gamma,
+            plate_image,
+        )
     })
 }
 
@@ -341,7 +376,8 @@ pub fn encode_patch(
         .map_err(|e| e.to_string())?;
     let color_bytes = color.into_inner();
     let mut mask_bytes = Cursor::new(Vec::new());
-    mask.write_to(&mut mask_bytes, ImageFormat::Png).map_err(|e| e.to_string())?;
+    mask.write_to(&mut mask_bytes, ImageFormat::Png)
+        .map_err(|e| e.to_string())?;
     Ok(serde_json::json!({
         "color": general_purpose::STANDARD.encode(&color_bytes),
         "mask": general_purpose::STANDARD.encode(mask_bytes.get_ref()),
@@ -355,7 +391,10 @@ fn coverage(alpha: &GrayImage) -> f32 {
 
 fn fit(w: u32, h: u32, edge: u32) -> (u32, u32) {
     let s = (edge as f32 / w.max(h) as f32).min(1.0);
-    (((w as f32 * s).round() as u32).max(1), ((h as f32 * s).round() as u32).max(1))
+    (
+        ((w as f32 * s).round() as u32).max(1),
+        ((h as f32 * s).round() as u32).max(1),
+    )
 }
 
 /// Any coverage within `radius` pixels becomes full coverage.
@@ -363,7 +402,11 @@ fn grow(alpha: &GrayImage, radius: u32) -> GrayImage {
     let binary = GrayImage::from_fn(alpha.width(), alpha.height(), |x, y| {
         image::Luma([if alpha.get_pixel(x, y)[0] > 0 { 255 } else { 0 }])
     });
-    imageproc::morphology::dilate(&binary, imageproc::distance_transform::Norm::LInf, radius.min(255) as u8)
+    imageproc::morphology::dilate(
+        &binary,
+        imageproc::distance_transform::Norm::LInf,
+        radius.min(255) as u8,
+    )
 }
 
 fn gamma_to_display(stored: &RgbImage) -> RgbImage {
@@ -386,21 +429,34 @@ mod tests {
 
     fn sky_photo() -> (RgbImage, GrayImage) {
         let photo = RgbImage::from_fn(64, 48, |_, y| {
-            if y < 24 { Rgb([200, 210, 220]) } else { Rgb([60, 80, 40]) }
+            if y < 24 {
+                Rgb([200, 210, 220])
+            } else {
+                Rgb([60, 80, 40])
+            }
         });
         let alpha = GrayImage::from_fn(64, 48, |_, y| image::Luma([if y < 24 { 255 } else { 0 }]));
         (photo, alpha)
     }
 
     fn decode(v: &serde_json::Value, key: &str) -> DynamicImage {
-        image::load_from_memory(&general_purpose::STANDARD.decode(v[key].as_str().unwrap()).unwrap()).unwrap()
+        image::load_from_memory(
+            &general_purpose::STANDARD
+                .decode(v[key].as_str().unwrap())
+                .unwrap(),
+        )
+        .unwrap()
     }
 
     #[test]
     fn a_sky_only_patch_leaves_the_foreground_out() {
         let (photo, alpha) = sky_photo();
         let result = RgbImage::from_pixel(64, 48, Rgb([10, 20, 200]));
-        let options = SkyReplaceOptions { relight: 0.0, haze: 0.0, ..SkyReplaceOptions::as_shot() };
+        let options = SkyReplaceOptions {
+            relight: 0.0,
+            haze: 0.0,
+            ..SkyReplaceOptions::as_shot()
+        };
         let patch = encode_patch(&photo, &result, &alpha, &options, false).unwrap();
         let mask = decode(&patch, "mask").to_luma8();
         assert_eq!(mask.get_pixel(10, 5)[0], 255, "sky must be covered");
@@ -412,9 +468,19 @@ mod tests {
     fn relighting_makes_a_whole_frame_patch() {
         let (photo, alpha) = sky_photo();
         let result = RgbImage::from_pixel(64, 48, Rgb([10, 20, 200]));
-        let patch = encode_patch(&photo, &result, &alpha, &SkyReplaceOptions::auto_match(), true).unwrap();
+        let patch = encode_patch(
+            &photo,
+            &result,
+            &alpha,
+            &SkyReplaceOptions::auto_match(),
+            true,
+        )
+        .unwrap();
         let mask = decode(&patch, "mask").to_luma8();
-        assert!(mask.pixels().all(|p| p[0] == 255), "relight changes the foreground too");
+        assert!(
+            mask.pixels().all(|p| p[0] == 255),
+            "relight changes the foreground too"
+        );
         assert_eq!(patch["encoding"], "gamma");
         let colour = decode(&patch, "color").to_rgb8();
         assert_eq!(colour.dimensions(), (64, 48));
@@ -424,7 +490,11 @@ mod tests {
     fn the_edge_band_is_carried() {
         let (_, alpha) = sky_photo();
         let grown = grow(&alpha, 3);
-        assert_eq!(grown.get_pixel(10, 26)[0], 255, "rim below the horizon should be included");
+        assert_eq!(
+            grown.get_pixel(10, 26)[0],
+            255,
+            "rim below the horizon should be included"
+        );
         assert_eq!(grown.get_pixel(10, 40)[0], 0);
     }
 }

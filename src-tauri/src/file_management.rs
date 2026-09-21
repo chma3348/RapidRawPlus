@@ -30,7 +30,9 @@ use crate::android_integration::*;
 use crate::app_settings::*;
 use crate::cache_utils::calculate_geometry_hash;
 use crate::exif_processing;
-use crate::formats::{is_raw_file, is_supported_image_file, is_supported_media_file, is_video_file};
+use crate::formats::{
+    is_raw_file, is_supported_image_file, is_supported_media_file, is_video_file,
+};
 use crate::gpu_processing;
 use crate::image_loader;
 use crate::image_processing::{
@@ -1092,10 +1094,20 @@ pub fn generate_thumbnail_data(
 
     if crate::color_engine::application::enabled(&adjustments) {
         let state = app_handle.state::<AppState>();
-        let context = gpu_context.ok_or_else(||anyhow::anyhow!("V3 thumbnail needs GPU rendering"))?;
-        let dimension=load_settings(app_handle.clone()).unwrap_or_default().thumbnail_resolution.unwrap_or(720);
-        return crate::color_engine::application::render_file(context,&state,path_str,&adjustments,Some(dimension))
-            .map(|f|DynamicImage::ImageRgba8(f.preview_rgba8()));
+        let context =
+            gpu_context.ok_or_else(|| anyhow::anyhow!("V3 thumbnail needs GPU rendering"))?;
+        let dimension = load_settings(app_handle.clone())
+            .unwrap_or_default()
+            .thumbnail_resolution
+            .unwrap_or(720);
+        return crate::color_engine::application::render_file(
+            context,
+            &state,
+            path_str,
+            &adjustments,
+            Some(dimension),
+        )
+        .map(|f| DynamicImage::ImageRgba8(f.preview_rgba8()));
     }
 
     if let Some(context) = gpu_context
@@ -1245,7 +1257,9 @@ pub fn generate_thumbnail_data(
         let flip_horizontal = render_adjustments["flipHorizontal"]
             .as_bool()
             .unwrap_or(false);
-        let flip_vertical = render_adjustments["flipVertical"].as_bool().unwrap_or(false);
+        let flip_vertical = render_adjustments["flipVertical"]
+            .as_bool()
+            .unwrap_or(false);
 
         let flipped_image = apply_flip(Cow::Owned(processing_base), flip_horizontal, flip_vertical);
         let rotated_image = apply_rotation(flipped_image, rotation_degrees);
@@ -1363,9 +1377,7 @@ pub fn generate_thumbnail_data(
         adjustments.is_null() || adjustments.as_object().is_some_and(|obj| obj.is_empty());
     let mut rendered_neutral_on_gpu = false;
 
-    if adjustments_are_empty
-        && let Some(context) = gpu_context
-    {
+    if adjustments_are_empty && let Some(context) = gpu_context {
         let state = app_handle.state::<AppState>();
         let render_adjustments_cow = render_adjustments_for_empty(&adjustments);
         let render_adjustments = render_adjustments_cow.as_ref();

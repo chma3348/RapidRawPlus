@@ -34,24 +34,63 @@ fn main() -> Result<()> {
     let time = |label: &str, edits: serde_json::Value, dim: Option<u32>| -> Result<()> {
         let start = std::time::Instant::now();
         render_file(&context, &state, &path, &edits, dim)?;
-        println!("{label:44} {:>7.0} ms", start.elapsed().as_secs_f64() * 1000.0);
+        println!(
+            "{label:44} {:>7.0} ms",
+            start.elapsed().as_secs_f64() * 1000.0
+        );
         Ok(())
     };
     let preview = Some(1600);
-    time("decode + first preview", json!({"processVersion":3,"v3":{},"masks":[]}), preview)?;
-    time("preview, warm", json!({"processVersion":3,"v3":{"exposure":0.3},"masks":[]}), preview)?;
-    time("add a colour range mask (cold sampling)", json!({"processVersion":3,"v3":{},"masks":mask(1200.0)}), preview)?;
-    time("move a slider with the mask (warm)", json!({"processVersion":3,"v3":{"exposure":0.4},"masks":mask(1200.0)}), preview)?;
-    time("re-click the mask (warm sampling)", json!({"processVersion":3,"v3":{},"masks":mask(2400.0)}), preview)?;
-    time("rotate 1 degree (sampling rebuilt)", json!({"processVersion":3,"v3":{},"rotation":1.0,"masks":mask(2400.0)}), preview)?;
+    time(
+        "decode + first preview",
+        json!({"processVersion":3,"v3":{},"masks":[]}),
+        preview,
+    )?;
+    time(
+        "preview, warm",
+        json!({"processVersion":3,"v3":{"exposure":0.3},"masks":[]}),
+        preview,
+    )?;
+    time(
+        "add a colour range mask (cold sampling)",
+        json!({"processVersion":3,"v3":{},"masks":mask(1200.0)}),
+        preview,
+    )?;
+    time(
+        "move a slider with the mask (warm)",
+        json!({"processVersion":3,"v3":{"exposure":0.4},"masks":mask(1200.0)}),
+        preview,
+    )?;
+    time(
+        "re-click the mask (warm sampling)",
+        json!({"processVersion":3,"v3":{},"masks":mask(2400.0)}),
+        preview,
+    )?;
+    time(
+        "rotate 1 degree (sampling rebuilt)",
+        json!({"processVersion":3,"v3":{},"rotation":1.0,"masks":mask(2400.0)}),
+        preview,
+    )?;
     let linear = json!([{
         "id":"l","name":"l","visible":true,"invert":false,"opacity":100,
         "adjustments":{"v3":{"exposure":0.5}},
         "subMasks":[{"id":"g","type":"linear","visible":true,"mode":"additive",
             "parameters":{"startX":0,"startY":0,"endX":6000,"endY":4000,"range":1000}}]
     }]);
-    time("gradient mask instead (no sampling)", json!({"processVersion":3,"v3":{},"rotation":1.0,"masks":linear.clone()}), preview)?;
-    time("gradient mask, slider moved", json!({"processVersion":3,"v3":{"exposure":0.2},"rotation":1.0,"masks":linear}), preview)?;
-    time("full-resolution export with the mask", json!({"processVersion":3,"v3":{},"rotation":1.0,"masks":mask(2400.0)}), None)?;
+    time(
+        "gradient mask instead (no sampling)",
+        json!({"processVersion":3,"v3":{},"rotation":1.0,"masks":linear.clone()}),
+        preview,
+    )?;
+    time(
+        "gradient mask, slider moved",
+        json!({"processVersion":3,"v3":{"exposure":0.2},"rotation":1.0,"masks":linear}),
+        preview,
+    )?;
+    time(
+        "full-resolution export with the mask",
+        json!({"processVersion":3,"v3":{},"rotation":1.0,"masks":mask(2400.0)}),
+        None,
+    )?;
     Ok(())
 }

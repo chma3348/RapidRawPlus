@@ -32,7 +32,7 @@ use serde_json::Value;
 /// The curve generative fills are stored through. Mirrors `LAMA_GAMMA`.
 const STORED_GAMMA: f32 = 2.4;
 
-pub fn visible<'a>(edits: &'a Value) -> Vec<&'a Value> {
+pub fn visible(edits: &Value) -> Vec<&Value> {
     edits["aiPatches"]
         .as_array()
         .map(|patches| {
@@ -179,7 +179,8 @@ fn to_source_space(
                 }
             }
             if color.primaries != Primaries::Srgb {
-                let matrix = crate::color_engine::spaces::conversion(Primaries::Srgb, color.primaries);
+                let matrix =
+                    crate::color_engine::spaces::conversion(Primaries::Srgb, color.primaries);
                 for pixel in colour.pixels_mut() {
                     let v = glam::DVec3::new(pixel[0] as f64, pixel[1] as f64, pixel[2] as f64);
                     let converted = matrix * v;
@@ -279,10 +280,10 @@ mod tests {
     #[test]
     fn the_mask_decides_where_a_patch_lands() {
         let colour = image::ImageBuffer::from_pixel(4, 1, image::Rgb([255u8, 255, 255]));
-        let mask = image::ImageBuffer::from_fn(4, 1, |x, _| {
-            image::Luma([if x < 2 { 255u8 } else { 0 }])
-        });
-        let mut base = image::ImageBuffer::from_pixel(4, 1, image::Rgba([0.25f32, 0.25, 0.25, 1.0]));
+        let mask =
+            image::ImageBuffer::from_fn(4, 1, |x, _| image::Luma([if x < 2 { 255u8 } else { 0 }]));
+        let mut base =
+            image::ImageBuffer::from_pixel(4, 1, image::Rgba([0.25f32, 0.25, 0.25, 1.0]));
         composite(
             &mut base,
             &patch_json(colour, mask, "srgb"),
@@ -290,7 +291,10 @@ mod tests {
             None,
         )
         .unwrap();
-        assert!(base.get_pixel(0, 0)[0] > 0.9, "covered pixel was not patched");
+        assert!(
+            base.get_pixel(0, 0)[0] > 0.9,
+            "covered pixel was not patched"
+        );
         assert_eq!(
             base.get_pixel(3, 0)[0],
             0.25,

@@ -45,14 +45,19 @@ fn single_file_peaks() {
 #[ignore = "diagnostic"]
 fn directory_report() {
     let dir = std::env::var("AUTO_LEVEL_DIR").expect("AUTO_LEVEL_DIR");
-    let tilt: Option<f32> = std::env::var("AUTO_LEVEL_TILT").ok().map(|s| s.parse().unwrap());
+    let tilt: Option<f32> = std::env::var("AUTO_LEVEL_TILT")
+        .ok()
+        .map(|s| s.parse().unwrap());
     let mut entries: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| {
             matches!(
-                p.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref(),
+                p.extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.to_ascii_lowercase())
+                    .as_deref(),
                 Some("jpg" | "jpeg" | "png")
             )
         })
@@ -60,7 +65,9 @@ fn directory_report() {
     entries.sort();
     let mut errors = Vec::new();
     for path in entries {
-        let Ok(img) = image::open(&path) else { continue };
+        let Ok(img) = image::open(&path) else {
+            continue;
+        };
         let t0 = Instant::now();
         let est = auto_level::estimate_level(&img);
         let ms = t0.elapsed().as_millis();
@@ -68,7 +75,9 @@ fn directory_report() {
         match est {
             Some(e) => print!(
                 "{name:<20} {:>6.2}°  conf {:.3}  {:<10} {ms:>4} ms",
-                e.angle, e.confidence, format!("{:?}", e.reference)
+                e.angle,
+                e.confidence,
+                format!("{:?}", e.reference)
             ),
             None => print!("{name:<20}   none                          {ms:>4} ms"),
         }
@@ -93,6 +102,9 @@ fn directory_report() {
         errors.sort_by(|a, b| a.total_cmp(b));
         let median = errors[errors.len() / 2];
         let max = errors[errors.len() - 1];
-        println!("tilt-recovery error over {} photos: median {median:.2}°, max {max:.2}°", errors.len());
+        println!(
+            "tilt-recovery error over {} photos: median {median:.2}°, max {max:.2}°",
+            errors.len()
+        );
     }
 }

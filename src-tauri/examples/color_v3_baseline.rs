@@ -204,15 +204,15 @@ fn load(
     };
     let mut pixels = pixels;
     let mut color = decoded.color;
-    if let Some(cube) = input_transform {
-        if color.reference == ReferenceDomain::Display {
-            rapidraw_lib::color_engine::cube::apply_input_transform(cube, &mut pixels);
-            color = SourceColor {
-                primaries: Primaries::DavinciWideGamut,
-                transfer: Transfer::Linear,
-                reference: ReferenceDomain::Scene,
-            };
-        }
+    if let Some(cube) = input_transform
+        && color.reference == ReferenceDomain::Display
+    {
+        rapidraw_lib::color_engine::cube::apply_input_transform(cube, &mut pixels);
+        color = SourceColor {
+            primaries: Primaries::DavinciWideGamut,
+            transfer: Transfer::Linear,
+            reference: ReferenceDomain::Scene,
+        };
     }
     Ok((pixels, color))
 }

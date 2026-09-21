@@ -144,39 +144,39 @@ pub fn read_frame_meta(path: &str) -> FrameMeta {
     }
 
     // Cached sidecar covers files whose EXIF sat past the prefix.
-    if meta.exposure_secs.is_none() || meta.aperture.is_none() {
-        if let Some(map) = read_rrexif_sidecar(Path::new(path)) {
-            if meta.exposure_secs.is_none()
-                && let Some(raw) = map.get("ExposureTime")
-            {
-                let cleaned = raw.replace(" s", "");
-                meta.exposure_secs = if let Some((n, d)) = cleaned.split_once('/') {
-                    match (n.trim().parse::<f64>(), d.trim().parse::<f64>()) {
-                        (Ok(n), Ok(d)) if d != 0.0 => Some(n / d),
-                        _ => None,
-                    }
-                } else {
-                    cleaned.trim().parse::<f64>().ok()
-                };
-            }
-            if meta.aperture.is_none()
-                && let Some(raw) = map.get("FNumber")
-            {
-                meta.aperture = raw.trim_start_matches("f/").trim().parse::<f64>().ok();
-            }
-            if meta.focal.is_none()
-                && let Some(raw) = map.get("FocalLength")
-            {
-                meta.focal = raw
-                    .split(|c: char| !c.is_ascii_digit() && c != '.')
-                    .find(|t| !t.is_empty())
-                    .and_then(|t| t.parse::<f64>().ok());
-            }
-            if meta.iso.is_none()
-                && let Some(raw) = map.get("ISOSpeed")
-            {
-                meta.iso = raw.trim().parse::<f64>().ok();
-            }
+    if (meta.exposure_secs.is_none() || meta.aperture.is_none())
+        && let Some(map) = read_rrexif_sidecar(Path::new(path))
+    {
+        if meta.exposure_secs.is_none()
+            && let Some(raw) = map.get("ExposureTime")
+        {
+            let cleaned = raw.replace(" s", "");
+            meta.exposure_secs = if let Some((n, d)) = cleaned.split_once('/') {
+                match (n.trim().parse::<f64>(), d.trim().parse::<f64>()) {
+                    (Ok(n), Ok(d)) if d != 0.0 => Some(n / d),
+                    _ => None,
+                }
+            } else {
+                cleaned.trim().parse::<f64>().ok()
+            };
+        }
+        if meta.aperture.is_none()
+            && let Some(raw) = map.get("FNumber")
+        {
+            meta.aperture = raw.trim_start_matches("f/").trim().parse::<f64>().ok();
+        }
+        if meta.focal.is_none()
+            && let Some(raw) = map.get("FocalLength")
+        {
+            meta.focal = raw
+                .split(|c: char| !c.is_ascii_digit() && c != '.')
+                .find(|t| !t.is_empty())
+                .and_then(|t| t.parse::<f64>().ok());
+        }
+        if meta.iso.is_none()
+            && let Some(raw) = map.get("ISOSpeed")
+        {
+            meta.iso = raw.trim().parse::<f64>().ok();
         }
     }
 
@@ -360,7 +360,10 @@ mod tests {
         let c = classify_burst(&burst).expect("bracket not detected");
         assert_eq!(c.kind, "hdr");
         assert_eq!(c.frame_count, 3);
-        assert_eq!(c.confidence, "high", "even 2-stop steps should read as high confidence");
+        assert_eq!(
+            c.confidence, "high",
+            "even 2-stop steps should read as high confidence"
+        );
     }
 
     /// Continuous shooting in aperture priority: shutter drifts slightly.
@@ -383,7 +386,16 @@ mod tests {
     #[test]
     fn detects_pano_sweep() {
         let burst: Vec<FrameMeta> = (0..6)
-            .map(|i| frame(&format!("p{i}.arw"), 200 + i as i64, 1.0 / 250.0, 8.0, 35.0, 100.0))
+            .map(|i| {
+                frame(
+                    &format!("p{i}.arw"),
+                    200 + i as i64,
+                    1.0 / 250.0,
+                    8.0,
+                    35.0,
+                    100.0,
+                )
+            })
             .collect();
         let c = classify_burst(&burst).expect("sweep not detected");
         assert_eq!(c.kind, "panorama");
@@ -411,13 +423,24 @@ mod tests {
             frame("h2.arw", 102, 1.0 / 30.0, 8.0, 24.0, 100.0),
         ];
         frames.extend((0..5).map(|i| {
-            frame(&format!("p{i}.arw"), 300 + i as i64, 1.0 / 250.0, 8.0, 35.0, 100.0)
+            frame(
+                &format!("p{i}.arw"),
+                300 + i as i64,
+                1.0 / 250.0,
+                8.0,
+                35.0,
+                100.0,
+            )
         }));
         let candidates: Vec<MergeCandidate> = cluster_bursts(&frames)
             .iter()
             .filter_map(|b| classify_burst(b))
             .collect();
-        assert_eq!(candidates.len(), 2, "expected one bracket + one sweep: {candidates:?}");
+        assert_eq!(
+            candidates.len(),
+            2,
+            "expected one bracket + one sweep: {candidates:?}"
+        );
         assert!(candidates.iter().any(|c| c.kind == "hdr"));
         assert!(candidates.iter().any(|c| c.kind == "panorama"));
     }

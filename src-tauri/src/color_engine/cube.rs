@@ -105,15 +105,13 @@ impl CubeLut {
     /// `cube_matches_the_reference_lookup` keeps the two honest.
     pub fn sample(&self, rgb: [f32; 3]) -> [f32; 3] {
         let last = (self.size - 1) as f32;
-        let at = |r: u32, g: u32, b: u32| {
-            self.entries[(r + (g + b * self.size) * self.size) as usize]
-        };
+        let at =
+            |r: u32, g: u32, b: u32| self.entries[(r + (g + b * self.size) * self.size) as usize];
         let scaled = rgb.map(|v| v.clamp(0.0, 1.0) * last);
         let base = scaled.map(|v| v.floor().min(last - 1.0));
         let frac: [f32; 3] = std::array::from_fn(|i| scaled[i] - base[i]);
         let index = base.map(|v| v as u32);
-        let mut out = [0.0f32; 3];
-        for c in 0..3 {
+        std::array::from_fn(|c| {
             let corner = |r: u32, g: u32, b: u32| at(index[0] + r, index[1] + g, index[2] + b)[c];
             // Trilinear, which is what the shader's tetrahedral lookup must
             // agree with to within the difference between the two schemes.
@@ -122,13 +120,8 @@ impl CubeLut {
             let x10 = lerp(corner(0, 1, 0), corner(1, 1, 0), frac[0]);
             let x01 = lerp(corner(0, 0, 1), corner(1, 0, 1), frac[0]);
             let x11 = lerp(corner(0, 1, 1), corner(1, 1, 1), frac[0]);
-            out[c] = lerp(
-                lerp(x00, x10, frac[1]),
-                lerp(x01, x11, frac[1]),
-                frac[2],
-            );
-        }
-        out
+            lerp(lerp(x00, x10, frac[1]), lerp(x01, x11, frac[1]), frac[2])
+        })
     }
 }
 
@@ -138,7 +131,8 @@ mod tests {
 
     /// A 2x2x2 cube that doubles red, halves green and leaves blue alone.
     fn tiny() -> String {
-        let mut text = String::from("TITLE \"tiny\"\nLUT_3D_SIZE 2\nDOMAIN_MIN 0 0 0\nDOMAIN_MAX 1 1 1\n");
+        let mut text =
+            String::from("TITLE \"tiny\"\nLUT_3D_SIZE 2\nDOMAIN_MIN 0 0 0\nDOMAIN_MAX 1 1 1\n");
         for b in 0..2 {
             for g in 0..2 {
                 for r in 0..2 {
@@ -167,7 +161,10 @@ mod tests {
     #[test]
     fn refuses_what_it_cannot_honour() {
         assert!(CubeLut::parse("LUT_1D_SIZE 32\n0 0 0\n").is_err());
-        assert!(CubeLut::parse("LUT_3D_SIZE 2\n0 0 0\n").is_err(), "short cube");
+        assert!(
+            CubeLut::parse("LUT_3D_SIZE 2\n0 0 0\n").is_err(),
+            "short cube"
+        );
         assert!(CubeLut::parse("0 0 0\n").is_err(), "no declared size");
         let shifted = tiny().replace("DOMAIN_MAX 1 1 1", "DOMAIN_MAX 2 2 2");
         assert!(CubeLut::parse(&shifted).is_err(), "domain must be honoured");
@@ -206,7 +203,7 @@ pub fn apply_input_transform(cube: &CubeLut, pixels: &mut image::Rgba32FImage) {
     };
     let decode_intermediate = |v: f32| {
         if v <= 0.02740668 {
-            v / 10.44426855
+            v / 10.444_268
         } else {
             (v / 0.07329248 - 7.0).exp2() - 0.0075
         }
@@ -284,12 +281,17 @@ mod input_tests {
     fn input_transform_cost() {
         let path = std::path::Path::new(&std::env::var("HOME").unwrap())
             .join("Library/Application Support/io.github.CyberTimon.RapidRAW/input-transform.cube");
-        let Ok(cube) = CubeLut::load(&path) else { return };
+        let Ok(cube) = CubeLut::load(&path) else {
+            return;
+        };
         let mut image = image::ImageBuffer::from_fn(7008, 4672, |x, y| {
             image::Rgba([(x % 256) as f32 / 300.0, (y % 256) as f32 / 300.0, 0.2, 1.0])
         });
         let start = std::time::Instant::now();
         apply_input_transform(&cube, &mut image);
-        println!("input transform, 33 MP: {:.0} ms", start.elapsed().as_secs_f64() * 1000.0);
+        println!(
+            "input transform, 33 MP: {:.0} ms",
+            start.elapsed().as_secs_f64() * 1000.0
+        );
     }
 }

@@ -205,7 +205,11 @@ pub fn adjust_edges(alpha: &GrayImage, shift: f32, feather: f32) -> GrayImage {
     let values: Vec<f32> = alpha.pixels().map(|p| p[0] as f32 / 255.0).collect();
     let blurred = box_mean(&box_mean(&values, wu, hu, radius), wu, hu, radius);
     // Each unit of blurred value is roughly `radius` pixels of distance.
-    let slope = if feather >= 0.5 { radius as f32 / feather } else { 6.0 };
+    let slope = if feather >= 0.5 {
+        radius as f32 / feather
+    } else {
+        6.0
+    };
     let offset = shift / radius.max(1) as f32 * 0.5;
     GrayImage::from_raw(
         w,
@@ -233,7 +237,10 @@ pub fn white_balance_gains(plate_mean: [f32; 3], scene_mean: [f32; 3], strength:
         let ratio = ((scene_mean[c] / sl) + 1e-4) / ((plate_mean[c] / pl) + 1e-4);
         // Bounded: matching should tint the sky toward the photo's light,
         // never recolour it into a different sky.
-        gains[c] = ratio.clamp(0.25, 4.0).powf(strength.clamp(0.0, 1.0)).clamp(0.72, 1.38);
+        gains[c] = ratio
+            .clamp(0.25, 4.0)
+            .powf(strength.clamp(0.0, 1.0))
+            .clamp(0.72, 1.38);
     }
     let g_lum = 0.2126 * gains[0] + 0.7152 * gains[1] + 0.0722 * gains[2];
     for g in gains.iter_mut() {
@@ -260,17 +267,25 @@ pub fn grade_sky(sky: &mut RgbImage, o: &SkyReplaceOptions) {
         return;
     }
     // Warm raises red and drops blue; tint trades green against magenta.
-    let raw = [
-        1.0 + 0.30 * temp,
-        1.0 - 0.12 * tint,
-        1.0 - 0.30 * temp,
-    ];
+    let raw = [1.0 + 0.30 * temp, 1.0 - 0.12 * tint, 1.0 - 0.30 * temp];
     let lum = 0.2126 * raw[0] + 0.7152 * raw[1] + 0.0722 * raw[2];
     let gains: [f32; 3] = std::array::from_fn(|c| raw[c] / lum.max(1e-4));
     let gain = 2f32.powf(exposure);
     let slope = 1.0 + contrast;
-    let to_linear = |v: f32| if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
-    let to_srgb = |v: f32| if v <= 0.0031308 { v * 12.92 } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 };
+    let to_linear = |v: f32| {
+        if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let to_srgb = |v: f32| {
+        if v <= 0.0031308 {
+            v * 12.92
+        } else {
+            1.055 * v.powf(1.0 / 2.4) - 0.055
+        }
+    };
     const PIVOT: f32 = 0.18;
 
     sky.par_pixels_mut().for_each(|px| {
@@ -332,8 +347,7 @@ pub fn replace_sky(
     );
     let long = w.max(h) as f32;
     let alpha = &adjust_edges(alpha, o.edge_shift * long, o.edge_feather * long);
-    let horizon = (horizon_row(alpha) as i64
-        + (o.horizon_offset * h as f32).round() as i64)
+    let horizon = (horizon_row(alpha) as i64 + (o.horizon_offset * h as f32).round() as i64)
         .clamp(1, h as i64 - 1) as u32;
     let mut new_sky = place_plate(plate, (w, h), horizon, o);
 
@@ -454,7 +468,8 @@ pub fn replace_sky(
                     let pixel = rgb.as_raw()[i * 3 + c] as f32 / 255.0;
                     let mut sky = new_sky.as_raw()[i * 3 + c] as f32 / 255.0;
                     if grain > 0.0 {
-                        sky = (sky + grain * hash_noise(x as u32, y as u32, c as u32)).clamp(0.0, 1.0);
+                        sky = (sky + grain * hash_noise(x as u32, y as u32, c as u32))
+                            .clamp(0.0, 1.0);
                     }
                     // Un-mix: take the old sky back out of this pixel.
                     let old_c = old[c][i];
@@ -551,7 +566,13 @@ mod tests {
     #[test]
     fn sky_is_replaced_and_ground_is_kept() {
         let size = (120, 90);
-        let opts = SkyReplaceOptions { relight: 0.0, haze: 0.0, match_grain: false, white_balance_match: 0.0, ..Default::default() };
+        let opts = SkyReplaceOptions {
+            relight: 0.0,
+            haze: 0.0,
+            match_grain: false,
+            white_balance_match: 0.0,
+            ..Default::default()
+        };
         let out = replace_sky(
             &photo([200, 210, 240], [60, 90, 50], 45, size),
             &matte(45, size),
@@ -561,7 +582,11 @@ mod tests {
         .unwrap()
         .to_rgb8();
         assert_eq!(out.get_pixel(60, 10).0, [250, 120, 40], "sky not replaced");
-        assert_eq!(out.get_pixel(60, 80).0, [60, 90, 50], "ground changed with relight off");
+        assert_eq!(
+            out.get_pixel(60, 80).0,
+            [60, 90, 50],
+            "ground changed with relight off"
+        );
     }
 
     /// The point of un-mixing: a half-transparent edge pixel carries the old
@@ -591,15 +616,25 @@ mod tests {
                 _ => 0,
             }])
         });
-        let opts = SkyReplaceOptions { relight: 0.0, haze: 0.0, match_grain: false, white_balance_match: 0.0, ..Default::default() };
-        let out = replace_sky(&DynamicImage::ImageRgb8(rgb), &alpha, &plain_plate([250, 120, 40]), &opts)
-            .unwrap()
-            .to_rgb8();
+        let opts = SkyReplaceOptions {
+            relight: 0.0,
+            haze: 0.0,
+            match_grain: false,
+            white_balance_match: 0.0,
+            ..Default::default()
+        };
+        let out = replace_sky(
+            &DynamicImage::ImageRgb8(rgb),
+            &alpha,
+            &plain_plate([250, 120, 40]),
+            &opts,
+        )
+        .unwrap()
+        .to_rgb8();
         let edge = out.get_pixel(60, 45).0;
         // Expected: half the new sky, half the object.
-        let want: [f32; 3] = std::array::from_fn(|c| {
-            0.5 * [250.0, 120.0, 40.0][c] + 0.5 * object[c]
-        });
+        let want: [f32; 3] =
+            std::array::from_fn(|c| 0.5 * [250.0, 120.0, 40.0][c] + 0.5 * object[c]);
         for c in 0..3 {
             assert!(
                 (edge[c] as f32 - want[c]).abs() <= 6.0,
@@ -615,10 +650,23 @@ mod tests {
         let size = (120, 90);
         let base = photo([200, 210, 240], [80, 80, 80], 45, size);
         let warm = plain_plate([250, 140, 40]);
-        let neutral = SkyReplaceOptions { relight: 0.0, haze: 0.0, match_grain: false, white_balance_match: 0.0, ..Default::default() };
-        let lit = SkyReplaceOptions { relight: 1.0, ..neutral };
-        let a = replace_sky(&base, &matte(45, size), &warm, &neutral).unwrap().to_rgb8();
-        let b = replace_sky(&base, &matte(45, size), &warm, &lit).unwrap().to_rgb8();
+        let neutral = SkyReplaceOptions {
+            relight: 0.0,
+            haze: 0.0,
+            match_grain: false,
+            white_balance_match: 0.0,
+            ..Default::default()
+        };
+        let lit = SkyReplaceOptions {
+            relight: 1.0,
+            ..neutral
+        };
+        let a = replace_sky(&base, &matte(45, size), &warm, &neutral)
+            .unwrap()
+            .to_rgb8();
+        let b = replace_sky(&base, &matte(45, size), &warm, &lit)
+            .unwrap()
+            .to_rgb8();
         let (pa, pb) = (a.get_pixel(60, 70).0, b.get_pixel(60, 70).0);
         assert!(pb[0] > pa[0] + 5, "red not lifted: {pa:?} -> {pb:?}");
         assert!(pb[2] < pa[2], "blue not reduced: {pa:?} -> {pb:?}");
@@ -632,7 +680,10 @@ mod tests {
         let column: Vec<u8> = (38..52).map(|y| soft.get_pixel(60, y)[0]).collect();
         let midtones = column.iter().filter(|&&v| v > 20 && v < 235).count();
         assert!(midtones >= 4, "no hand-over band: {column:?}");
-        assert!(soft.get_pixel(60, 10)[0] > 250 && soft.get_pixel(60, 85)[0] < 5, "interiors moved");
+        assert!(
+            soft.get_pixel(60, 10)[0] > 250 && soft.get_pixel(60, 85)[0] < 5,
+            "interiors moved"
+        );
     }
 
     #[test]
@@ -644,7 +695,10 @@ mod tests {
         let grown = sky(&adjust_edges(&hard, 4.0, 2.0));
         let shrunk = sky(&adjust_edges(&hard, -4.0, 2.0));
         assert!(grown > base + 200, "sky did not grow: {base} -> {grown}");
-        assert!(shrunk + 200 < base, "sky did not shrink: {base} -> {shrunk}");
+        assert!(
+            shrunk + 200 < base,
+            "sky did not shrink: {base} -> {shrunk}"
+        );
     }
 
     #[test]
@@ -665,14 +719,33 @@ mod tests {
         // Warm sunlit ground under a neutral sky; the plate is cold blue.
         let base = photo([220, 220, 220], [210, 170, 120], 60, size);
         let plate = plain_plate([90, 130, 220]);
-        let off = SkyReplaceOptions { relight: 0.0, haze: 0.0, match_grain: false, white_balance_match: 0.0, ..Default::default() };
-        let on = SkyReplaceOptions { white_balance_match: 1.0, ..off };
-        let a = replace_sky(&base, &matte(60, size), &plate, &off).unwrap().to_rgb8();
-        let b = replace_sky(&base, &matte(60, size), &plate, &on).unwrap().to_rgb8();
+        let off = SkyReplaceOptions {
+            relight: 0.0,
+            haze: 0.0,
+            match_grain: false,
+            white_balance_match: 0.0,
+            ..Default::default()
+        };
+        let on = SkyReplaceOptions {
+            white_balance_match: 1.0,
+            ..off
+        };
+        let a = replace_sky(&base, &matte(60, size), &plate, &off)
+            .unwrap()
+            .to_rgb8();
+        let b = replace_sky(&base, &matte(60, size), &plate, &on)
+            .unwrap()
+            .to_rgb8();
         let (pa, pb) = (a.get_pixel(80, 20).0, b.get_pixel(80, 20).0);
-        assert!(pb[0] > pa[0] && pb[2] < pa[2], "sky not warmed toward the scene: {pa:?} -> {pb:?}");
+        assert!(
+            pb[0] > pa[0] && pb[2] < pa[2],
+            "sky not warmed toward the scene: {pa:?} -> {pb:?}"
+        );
         let lum = |p: [u8; 3]| 0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32;
-        assert!((lum(pb) - lum(pa)).abs() < 18.0, "brightness swung: {pa:?} -> {pb:?}");
+        assert!(
+            (lum(pb) - lum(pa)).abs() < 18.0,
+            "brightness swung: {pa:?} -> {pb:?}"
+        );
     }
 
     fn graded(plate: [u8; 3], edit: impl Fn(&mut SkyReplaceOptions)) -> [u8; 3] {
@@ -706,11 +779,23 @@ mod tests {
         let base = graded([120, 150, 205], |_| {});
         let warm = graded([120, 150, 205], |o| o.sky_temperature = 60.0);
         let cool = graded([120, 150, 205], |o| o.sky_temperature = -60.0);
-        assert!(warm[0] > base[0] && warm[2] < base[2], "not warmed: {base:?} -> {warm:?}");
-        assert!(cool[0] < base[0] && cool[2] > base[2], "not cooled: {base:?} -> {cool:?}");
-        assert!((luma(warm) - luma(base)).abs() < 12.0, "brightness moved: {base:?} -> {warm:?}");
+        assert!(
+            warm[0] > base[0] && warm[2] < base[2],
+            "not warmed: {base:?} -> {warm:?}"
+        );
+        assert!(
+            cool[0] < base[0] && cool[2] > base[2],
+            "not cooled: {base:?} -> {cool:?}"
+        );
+        assert!(
+            (luma(warm) - luma(base)).abs() < 12.0,
+            "brightness moved: {base:?} -> {warm:?}"
+        );
         let green = graded([120, 150, 205], |o| o.sky_tint = -80.0);
-        assert!(green[1] > base[1], "tint did not move green: {base:?} -> {green:?}");
+        assert!(
+            green[1] > base[1],
+            "tint did not move green: {base:?} -> {green:?}"
+        );
     }
 
     #[test]
@@ -729,7 +814,10 @@ mod tests {
         .to_rgb8();
         // +1 stop doubles linear light: 100/255 sRGB = 0.1275 linear → 0.2550 → 138.
         let sky = out.get_pixel(60, 12).0;
-        assert!((sky[0] as i32 - 138).abs() <= 3, "one stop is not one stop: {sky:?}");
+        assert!(
+            (sky[0] as i32 - 138).abs() <= 3,
+            "one stop is not one stop: {sky:?}"
+        );
         assert_eq!(out.get_pixel(60, 80).0, [90, 95, 90], "foreground changed");
     }
 
@@ -743,8 +831,14 @@ mod tests {
         let dark_more = graded([60, 60, 60], |o| o.sky_contrast = 60.0);
         let bright_base = graded([220, 220, 220], |_| {});
         let bright_more = graded([220, 220, 220], |o| o.sky_contrast = 60.0);
-        assert!(dark_more[0] < dark_base[0], "dark not deepened: {dark_base:?} -> {dark_more:?}");
-        assert!(bright_more[0] > bright_base[0], "bright not lifted: {bright_base:?} -> {bright_more:?}");
+        assert!(
+            dark_more[0] < dark_base[0],
+            "dark not deepened: {dark_base:?} -> {dark_more:?}"
+        );
+        assert!(
+            bright_more[0] > bright_base[0],
+            "bright not lifted: {bright_base:?} -> {bright_more:?}"
+        );
     }
 
     #[test]
@@ -753,16 +847,40 @@ mod tests {
         // Warm sunlit ground, cold blue plate: one click should visibly change it.
         let base = photo([215, 215, 215], [205, 165, 115], 60, size);
         let plate = plain_plate([90, 130, 220]);
-        let a = replace_sky(&base, &matte(60, size), &plate, &SkyReplaceOptions::as_shot()).unwrap().to_rgb8();
-        let b = replace_sky(&base, &matte(60, size), &plate, &SkyReplaceOptions::auto_match()).unwrap().to_rgb8();
+        let a = replace_sky(
+            &base,
+            &matte(60, size),
+            &plate,
+            &SkyReplaceOptions::as_shot(),
+        )
+        .unwrap()
+        .to_rgb8();
+        let b = replace_sky(
+            &base,
+            &matte(60, size),
+            &plate,
+            &SkyReplaceOptions::auto_match(),
+        )
+        .unwrap()
+        .to_rgb8();
         // as-shot still matches grain, which moves a level or two.
         let kept = a.get_pixel(80, 20).0;
         for (c, want) in [90, 130, 220].iter().enumerate() {
-            assert!((kept[c] as i32 - want).abs() <= 3, "as-shot altered the plate: {kept:?}");
+            assert!(
+                (kept[c] as i32 - want).abs() <= 3,
+                "as-shot altered the plate: {kept:?}"
+            );
         }
         let m = b.get_pixel(80, 20).0;
-        assert!(m[0] > 100 && m[2] < 220, "auto match did not warm the sky: {m:?}");
-        assert_ne!(a.get_pixel(80, 100).0, b.get_pixel(80, 100).0, "auto match did not relight the ground");
+        assert!(
+            m[0] > 100 && m[2] < 220,
+            "auto match did not warm the sky: {m:?}"
+        );
+        assert_ne!(
+            a.get_pixel(80, 100).0,
+            b.get_pixel(80, 100).0,
+            "auto match did not relight the ground"
+        );
     }
 
     #[test]
@@ -770,14 +888,32 @@ mod tests {
         let size = (120, 200);
         let base = photo([200, 205, 215], [60, 90, 50], 150, size);
         let plate = plain_plate([250, 120, 40]);
-        let opts = SkyReplaceOptions { relight: 0.0, haze: 0.0, match_grain: false, white_balance_match: 0.0,
-                                       horizon_fade: 0.2, ..Default::default() };
-        let out = replace_sky(&base, &matte(150, size), &plate, &opts).unwrap().to_rgb8();
+        let opts = SkyReplaceOptions {
+            relight: 0.0,
+            haze: 0.0,
+            match_grain: false,
+            white_balance_match: 0.0,
+            horizon_fade: 0.2,
+            ..Default::default()
+        };
+        let out = replace_sky(&base, &matte(150, size), &plate, &opts)
+            .unwrap()
+            .to_rgb8();
         let at_seam = out.get_pixel(60, 148).0;
         let high = out.get_pixel(60, 40).0;
-        assert_eq!(high, [250, 120, 40], "sky above the fade should be the plate");
-        assert!(at_seam[2] > 100, "seam kept none of the original sky: {at_seam:?}");
-        assert!(at_seam[0] > 190 && at_seam[0] < 250, "seam is not a blend: {at_seam:?}");
+        assert_eq!(
+            high,
+            [250, 120, 40],
+            "sky above the fade should be the plate"
+        );
+        assert!(
+            at_seam[2] > 100,
+            "seam kept none of the original sky: {at_seam:?}"
+        );
+        assert!(
+            at_seam[0] > 190 && at_seam[0] < 250,
+            "seam is not a blend: {at_seam:?}"
+        );
     }
 
     #[test]
@@ -793,6 +929,10 @@ mod tests {
         // Going up, it runs backwards then forwards again, never flat.
         let column: Vec<u8> = (0..380).map(|y| placed.get_pixel(10, y)[0]).collect();
         let distinct: std::collections::HashSet<u8> = column.iter().copied().collect();
-        assert!(distinct.len() >= 30, "plate looks stretched: {} levels", distinct.len());
+        assert!(
+            distinct.len() >= 30,
+            "plate looks stretched: {} levels",
+            distinct.len()
+        );
     }
 }

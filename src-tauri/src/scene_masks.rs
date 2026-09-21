@@ -266,7 +266,9 @@ pub fn guided_upsample(coarse: &ProbabilityMap, guide: &RgbImage, band: f32) -> 
         std::array::from_fn(|c| small.pixels().map(|p| p[c] as f32 / 255.0).collect());
     // The coarse model's own footprint: one model pixel, twice over, at
     // statistics resolution. That is the distance an edge may be moved.
-    let radius = ((w.max(h) as f32 / pw.max(ph) as f32) * 2.0).ceil().max(1.0) as usize;
+    let radius = ((w.max(h) as f32 / pw.max(ph) as f32) * 2.0)
+        .ceil()
+        .max(1.0) as usize;
     let mean = |v: &[f32]| box_mean(v, w, h, radius);
     let mp = mean(&p);
     let mc: [Vec<f32>; 3] = std::array::from_fn(|c| mean(&rgb[c]));
@@ -285,29 +287,32 @@ pub fn guided_upsample(coarse: &ProbabilityMap, guide: &RgbImage, band: f32) -> 
         .map(|&(a, b)| cross(&rgb[a], &rgb[b], &mc[a], &mc[b]))
         .collect();
     let mut coefficients = vec![[0.0; 4]; w * h];
-    coefficients.par_iter_mut().enumerate().for_each(|(i, out)| {
-        let cov = Matrix3::new(
-            covariance[0][i] + 0.0025,
-            covariance[1][i],
-            covariance[2][i],
-            covariance[1][i],
-            covariance[3][i] + 0.0025,
-            covariance[4][i],
-            covariance[2][i],
-            covariance[4][i],
-            covariance[5][i] + 0.0025,
-        );
-        let a = cov
-            .cholesky()
-            .map(|m| m.solve(&Vector3::new(cp[0][i], cp[1][i], cp[2][i])))
-            .unwrap_or_else(Vector3::zeros);
-        *out = [
-            a[0],
-            a[1],
-            a[2],
-            mp[i] - (0..3).map(|c| a[c] * mc[c][i]).sum::<f32>(),
-        ];
-    });
+    coefficients
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(i, out)| {
+            let cov = Matrix3::new(
+                covariance[0][i] + 0.0025,
+                covariance[1][i],
+                covariance[2][i],
+                covariance[1][i],
+                covariance[3][i] + 0.0025,
+                covariance[4][i],
+                covariance[2][i],
+                covariance[4][i],
+                covariance[5][i] + 0.0025,
+            );
+            let a = cov
+                .cholesky()
+                .map(|m| m.solve(&Vector3::new(cp[0][i], cp[1][i], cp[2][i])))
+                .unwrap_or_else(Vector3::zeros);
+            *out = [
+                a[0],
+                a[1],
+                a[2],
+                mp[i] - (0..3).map(|c| a[c] * mc[c][i]).sum::<f32>(),
+            ];
+        });
     let averaged: [Vec<f32>; 4] =
         std::array::from_fn(|c| mean(&coefficients.iter().map(|v| v[c]).collect::<Vec<_>>()));
     let mut result = vec![0u8; width as usize * height as usize];
@@ -365,7 +370,11 @@ pub fn otsu(values: &[f32]) -> (f32, f32) {
     if total == 0.0 {
         return (0.5, 0.0);
     }
-    let sum_all: f64 = hist.iter().enumerate().map(|(i, &c)| i as f64 * c as f64).sum();
+    let sum_all: f64 = hist
+        .iter()
+        .enumerate()
+        .map(|(i, &c)| i as f64 * c as f64)
+        .sum();
     let mean_all = sum_all / total;
     let var_all: f64 = hist
         .iter()
@@ -399,8 +408,15 @@ pub fn otsu(values: &[f32]) -> (f32, f32) {
             best_hi = t;
         }
     }
-    let separability = if var_all > 0.0 { (best_var / var_all) as f32 } else { 0.0 };
-    (((best_lo + best_hi) as f32 / 2.0 + 0.5) / 255.0, separability)
+    let separability = if var_all > 0.0 {
+        (best_var / var_all) as f32
+    } else {
+        0.0
+    };
+    (
+        ((best_lo + best_hi) as f32 / 2.0 + 0.5) / 255.0,
+        separability,
+    )
 }
 
 fn coverage(mask: &GrayImage) -> f32 {
@@ -441,7 +457,13 @@ pub fn sky_refine(probs: &ProbabilityMap, guide: &RgbImage) -> GrayImage {
     let w = (width as f64 * scale).round().max(1.0) as usize;
     let h = (height as f64 * scale).round().max(1.0) as usize;
     let small = imageops::resize(guide, w as u32, h as u32, FilterType::Triangle);
-    let p = resample(probs.as_raw(), probs.width() as usize, probs.height() as usize, w, h);
+    let p = resample(
+        probs.as_raw(),
+        probs.width() as usize,
+        probs.height() as usize,
+        w,
+        h,
+    );
     let sky: Vec<f32> = p.iter().map(|&v| (v > 0.9) as u8 as f32).collect();
     let land: Vec<f32> = p.iter().map(|&v| (v < 0.1) as u8 as f32).collect();
     // Two sampling scales: a tight one (σ ≈ 12 px at 1024) that keeps the
@@ -454,11 +476,29 @@ pub fn sky_refine(probs: &ProbabilityMap, guide: &RgbImage) -> GrayImage {
         let ws = blur3(&sky, w, h, radius);
         let wf = blur3(&land, w, h, radius);
         let sc: [Vec<f32>; 3] = std::array::from_fn(|c| {
-            let num = blur3(&channels[c].iter().zip(&sky).map(|(a, b)| a * b).collect::<Vec<_>>(), w, h, radius);
+            let num = blur3(
+                &channels[c]
+                    .iter()
+                    .zip(&sky)
+                    .map(|(a, b)| a * b)
+                    .collect::<Vec<_>>(),
+                w,
+                h,
+                radius,
+            );
             num.iter().zip(&ws).map(|(n, d)| n / d.max(1e-4)).collect()
         });
         let fc: [Vec<f32>; 3] = std::array::from_fn(|c| {
-            let num = blur3(&channels[c].iter().zip(&land).map(|(a, b)| a * b).collect::<Vec<_>>(), w, h, radius);
+            let num = blur3(
+                &channels[c]
+                    .iter()
+                    .zip(&land)
+                    .map(|(a, b)| a * b)
+                    .collect::<Vec<_>>(),
+                w,
+                h,
+                radius,
+            );
             num.iter().zip(&wf).map(|(n, d)| n / d.max(1e-4)).collect()
         });
         (ws, wf, sc, fc)
@@ -518,7 +558,13 @@ pub fn sky_refine(probs: &ProbabilityMap, guide: &RgbImage) -> GrayImage {
             (var / 3.0).sqrt().max(0.02)
         }
     };
-    let p_full = resample(probs.as_raw(), probs.width() as usize, probs.height() as usize, width as usize, height as usize);
+    let p_full = resample(
+        probs.as_raw(),
+        probs.width() as usize,
+        probs.height() as usize,
+        width as usize,
+        height as usize,
+    );
     let mut out = guided.clone();
     out.as_mut()
         .par_chunks_mut(width as usize)
@@ -533,7 +579,8 @@ pub fn sky_refine(probs: &ProbabilityMap, guide: &RgbImage) -> GrayImage {
                 if pv >= 0.98 {
                     continue;
                 }
-                let sx = ((x as f32 + 0.5) * w as f32 / width as f32 - 0.5).clamp(0.0, (w - 1) as f32);
+                let sx =
+                    ((x as f32 + 0.5) * w as f32 / width as f32 - 0.5).clamp(0.0, (w - 1) as f32);
                 let x0 = sx.floor() as usize;
                 let x1 = (x0 + 1).min(w - 1);
                 let fx = sx - x0 as f32;
@@ -620,7 +667,10 @@ fn scene_sky_tiled(
             return vec![0];
         }
         let step = tile / 2;
-        let mut v: Vec<u32> = (0..).map(|i| i * step).take_while(|&s| s + tile < len).collect();
+        let mut v: Vec<u32> = (0..)
+            .map(|i| i * step)
+            .take_while(|&s| s + tile < len)
+            .collect();
         v.push(len - tile);
         v
     };
@@ -649,7 +699,10 @@ fn scene_sky_tiled(
                     ((v as f32 / from as f32) * to as f32).round() as usize
                 };
                 let (gx0, gy0) = (to_g(x0, w, gw), to_g(y0, h, gh));
-                let (gx1, gy1) = (to_g(x0 + tile, w, gw).min(gw), to_g(y0 + tile, h, gh).min(gh));
+                let (gx1, gy1) = (
+                    to_g(x0 + tile, w, gw).min(gw),
+                    to_g(y0 + tile, h, gh).min(gh),
+                );
                 let mut count = 0usize;
                 for gy in gy0..gy1 {
                     for gx in gx0..gx1 {
@@ -756,7 +809,11 @@ pub fn map_agreement(a: &ProbabilityMap, b: &ProbabilityMap) -> f32 {
         inter += (x && y) as usize;
         union += (x || y) as usize;
     }
-    if union == 0 { 1.0 } else { inter as f32 / union as f32 }
+    if union == 0 {
+        1.0
+    } else {
+        inter as f32 / union as f32
+    }
 }
 
 /// Is the >50% region's centroid in the upper half of the frame as the
@@ -846,7 +903,9 @@ impl ForegroundDecline {
                 "No subject to measure the foreground against. Add a Subject mask first, then Foreground."
             }
             Self::NothingInFront => "Nothing in this photo is in front of the subject.",
-            Self::Unstable => "The depth in front of the subject is too ambiguous to select reliably.",
+            Self::Unstable => {
+                "The depth in front of the subject is too ambiguous to select reliably."
+            }
         }
     }
 }
@@ -879,9 +938,7 @@ fn in_front(depth: &ProbabilityMap, subject: &ProbabilityMap, cut: f32) -> Proba
     ProbabilityMap::from_fn(depth.width(), depth.height(), |x, y| {
         let d = depth.get_pixel(x, y).0[0];
         let s = subject.get_pixel(x, y).0[0];
-        Luma([
-            smoothstep(cut - FOREGROUND_SOFT_BAND, cut + FOREGROUND_SOFT_BAND, d) * (1.0 - s),
-        ])
+        Luma([smoothstep(cut - FOREGROUND_SOFT_BAND, cut + FOREGROUND_SOFT_BAND, d) * (1.0 - s)])
     })
 }
 
@@ -928,7 +985,10 @@ pub fn foreground_mask(
     let oriented = orient(image, o);
     let a = ai_processing::run_depth_anything_model(&oriented, depth_session)?;
     let b = ai_processing::run_depth_anything_model(&oriented.fliph(), depth_session)?;
-    ensure!(a.dimensions() == b.dimensions(), "mirrored depth pass changed size");
+    ensure!(
+        a.dimensions() == b.dimensions(),
+        "mirrored depth pass changed size"
+    );
     let (w, h) = a.dimensions();
     let a = map_from(a.pixels().map(|p| p[0] as f32 / 255.0).collect(), w, h);
     let b = imageops::flip_horizontal(&map_from(
@@ -1059,7 +1119,11 @@ fn iou(a: &GrayImage, b: &GrayImage) -> f32 {
         inter += (x && y) as usize;
         union += (x || y) as usize;
     }
-    if union == 0 { 1.0 } else { inter as f32 / union as f32 }
+    if union == 0 {
+        1.0
+    } else {
+        inter as f32 / union as f32
+    }
 }
 
 /// Result of an automatic subject selection.
@@ -1152,13 +1216,18 @@ pub fn auto_subject_from_saliency(
         return Ok(None);
     }
     let borders = border_shares(&mask);
-    let touched = borders.iter().filter(|&&s| s >= SUBJECT_BORDER_SHARE).count();
+    let touched = borders
+        .iter()
+        .filter(|&&s| s >= SUBJECT_BORDER_SHARE)
+        .count();
     if touched >= SUBJECT_MAX_BORDERS {
         log::info!("auto subject: touches {touched} borders; declining");
         return Ok(None);
     }
     if borders[1] >= SUBJECT_GROUND_BOTTOM_SHARE && coverage >= SUBJECT_GROUND_MIN_COVERAGE {
-        log::info!("auto subject: spans the whole bottom edge at {coverage:.2} coverage; declining as ground");
+        log::info!(
+            "auto subject: spans the whole bottom edge at {coverage:.2} coverage; declining as ground"
+        );
         return Ok(None);
     }
     Ok(Some(AutoSubject {
@@ -1183,7 +1252,10 @@ pub fn auto_subject_birefnet(
 
 /// Shared by the app and the tests: gate and refine a BiRefNet map (stored
 /// layout, any aspect: it is stretched back to the photo).
-pub fn auto_subject_from_birefnet(probs: &ProbabilityMap, image: &DynamicImage) -> Option<AutoSubject> {
+pub fn auto_subject_from_birefnet(
+    probs: &ProbabilityMap,
+    image: &DynamicImage,
+) -> Option<AutoSubject> {
     let peak = probs.pixels().map(|p| p.0[0]).fold(0.0f32, f32::max);
     if peak < SUBJECT_MIN_PEAK {
         return None;
@@ -1206,7 +1278,11 @@ pub fn auto_subject_from_birefnet(probs: &ProbabilityMap, image: &DynamicImage) 
     }
     let cleaned = ProbabilityMap::from_fn(probs.width(), probs.height(), |x, y| {
         let v = probs.get_pixel(x, y).0[0];
-        Luma([if keep[y as usize * mw + x as usize] { v } else { 0.0 }])
+        Luma([if keep[y as usize * mw + x as usize] {
+            v
+        } else {
+            0.0
+        }])
     });
     let mask = guided_upsample(&cleaned, &image.to_rgb8(), 0.25);
     let coverage = coverage(&mask);
@@ -1223,10 +1299,18 @@ pub fn auto_subject_from_birefnet(probs: &ProbabilityMap, image: &DynamicImage) 
         let (sx, sy) = (iw as f64 / map_size.0 as f64, ih as f64 / map_size.1 as f64);
         comps
             .iter()
-            .map(|c| SubjectPoint { x: c.centroid.0 * sx, y: c.centroid.1 * sy, label: 1 })
+            .map(|c| SubjectPoint {
+                x: c.centroid.0 * sx,
+                y: c.centroid.1 * sy,
+                label: 1,
+            })
             .collect()
     };
-    Some(AutoSubject { scene: SceneMask { mask, coverage }, points, from_sam: false })
+    Some(AutoSubject {
+        scene: SceneMask { mask, coverage },
+        points,
+        from_sam: false,
+    })
 }
 
 /// Number of frame borders along which the mask runs for at least
@@ -1280,7 +1364,10 @@ pub fn to_display_space(
     let (cx, cy) = (cw / 2.0, ch / 2.0);
     let a = (rotation_deg as f64).to_radians();
     let (px, py) = (x - cx, y - cy);
-    (px * a.cos() - py * a.sin() + cx, px * a.sin() + py * a.cos() + cy)
+    (
+        px * a.cos() - py * a.sin() + cx,
+        px * a.sin() + py * a.cos() + cy,
+    )
 }
 
 #[cfg(test)]
@@ -1328,7 +1415,11 @@ mod tests {
         let m = map(7, 5, |x, y| (x * 5 + y) as f32);
         for steps in 0..4u8 {
             for flips in 0..4u8 {
-                let o = Orientation { steps, flip_horizontal: flips & 1 == 1, flip_vertical: flips & 2 == 2 };
+                let o = Orientation {
+                    steps,
+                    flip_horizontal: flips & 1 == 1,
+                    flip_vertical: flips & 2 == 2,
+                };
                 let back = unorient_map(&orient_map(&m, o), o);
                 assert!(back.pixels().zip(m.pixels()).all(|(a, b)| a == b), "{o:?}");
             }
@@ -1341,27 +1432,65 @@ mod tests {
         let top = map(20, 10, |_, y| if y < 4 { 0.9 } else { 0.1 });
         assert!(sky_is_up(&top, Orientation::default()));
         // ...is at the bottom once the user rotates the photo 180°.
-        assert!(!sky_is_up(&top, Orientation { steps: 2, ..Default::default() }));
+        assert!(!sky_is_up(
+            &top,
+            Orientation {
+                steps: 2,
+                ..Default::default()
+            }
+        ));
         // A vertical flip alone also puts it at the bottom.
-        assert!(!sky_is_up(&top, Orientation { flip_vertical: true, ..Default::default() }));
+        assert!(!sky_is_up(
+            &top,
+            Orientation {
+                flip_vertical: true,
+                ..Default::default()
+            }
+        ));
         // Stored sideways (sky on the left), displayed rotated 90° clockwise:
         // the left edge becomes the top.
         let left = map(10, 20, |x, _| if x < 4 { 0.9 } else { 0.1 });
-        assert!(sky_is_up(&left, Orientation { steps: 1, ..Default::default() }));
-        assert!(!sky_is_up(&left, Orientation { steps: 3, ..Default::default() }));
+        assert!(sky_is_up(
+            &left,
+            Orientation {
+                steps: 1,
+                ..Default::default()
+            }
+        ));
+        assert!(!sky_is_up(
+            &left,
+            Orientation {
+                steps: 3,
+                ..Default::default()
+            }
+        ));
     }
 
     #[test]
     fn border_count_separates_objects_from_backgrounds() {
-        let object = GrayImage::from_fn(100, 100, |x, y| Luma([if (30..70).contains(&x) && y >= 30 { 255 } else { 0 }]));
+        let object = GrayImage::from_fn(100, 100, |x, y| {
+            Luma([if (30..70).contains(&x) && y >= 30 {
+                255
+            } else {
+                0
+            }])
+        });
         assert_eq!(borders_touched(&object), 1);
         let water = GrayImage::from_fn(100, 100, |_, y| Luma([if y < 60 { 255 } else { 0 }]));
         assert_eq!(borders_touched(&water), 3);
-        let ground = GrayImage::from_fn(100, 100, |x, y| Luma([if y > 60 && (x > 10 || y > 80) { 255 } else { 0 }]));
+        let ground = GrayImage::from_fn(100, 100, |x, y| {
+            Luma([if y > 60 && (x > 10 || y > 80) { 255 } else { 0 }])
+        });
         let shares = border_shares(&ground);
         assert!(shares[1] > 0.95 && shares[0] == 0.0, "{shares:?}");
-        assert_eq!(map_agreement(&map(4, 4, |_, _| 0.9), &map(4, 4, |_, _| 0.9)), 1.0);
-        assert_eq!(map_agreement(&map(4, 4, |_, _| 0.9), &map(4, 4, |_, _| 0.1)), 0.0);
+        assert_eq!(
+            map_agreement(&map(4, 4, |_, _| 0.9), &map(4, 4, |_, _| 0.9)),
+            1.0
+        );
+        assert_eq!(
+            map_agreement(&map(4, 4, |_, _| 0.9), &map(4, 4, |_, _| 0.1)),
+            0.0
+        );
     }
 
     #[test]
@@ -1379,11 +1508,18 @@ mod tests {
                     let p = (123.0, 77.0);
                     let d = to_display_space(p, (iw, ih), o, rot);
                     // apply the click transform from ai_commands
-                    let (crw, crh) = if steps % 2 == 1 { (ih as f64, iw as f64) } else { (iw as f64, ih as f64) };
+                    let (crw, crh) = if steps % 2 == 1 {
+                        (ih as f64, iw as f64)
+                    } else {
+                        (iw as f64, ih as f64)
+                    };
                     let c = (crw / 2.0, crh / 2.0);
                     let a = (rot as f64).to_radians();
                     let (px, py) = (d.0 - c.0, d.1 - c.1);
-                    let (ux, uy) = (px * a.cos() + py * a.sin() + c.0, -px * a.sin() + py * a.cos() + c.1);
+                    let (ux, uy) = (
+                        px * a.cos() + py * a.sin() + c.0,
+                        -px * a.sin() + py * a.cos() + c.1,
+                    );
                     let (fx, fy) = (
                         if o.flip_horizontal { crw - ux } else { ux },
                         if o.flip_vertical { crh - uy } else { uy },
@@ -1394,7 +1530,10 @@ mod tests {
                         3 => (iw as f64 - fy, fx),
                         _ => (fx, fy),
                     };
-                    assert!((back.0 - p.0).abs() < 1e-6 && (back.1 - p.1).abs() < 1e-6, "{o:?} rot {rot}: {back:?}");
+                    assert!(
+                        (back.0 - p.0).abs() < 1e-6 && (back.1 - p.1).abs() < 1e-6,
+                        "{o:?} rot {rot}: {back:?}"
+                    );
                 }
             }
         }
@@ -1406,7 +1545,11 @@ mod tests {
     fn sky_refine_snaps_the_edge_to_the_colour_boundary() {
         let (w, h) = (256u32, 160u32);
         let guide = RgbImage::from_fn(w, h, |_, y| {
-            if y < 80 { Rgb([245, 245, 250]) } else { Rgb([40, 45, 40]) }
+            if y < 80 {
+                Rgb([245, 245, 250])
+            } else {
+                Rgb([40, 45, 40])
+            }
         });
         let coarse = map(32, 20, |_, y| {
             let fy = (y as f32 + 0.5) * 8.0;
@@ -1420,8 +1563,18 @@ mod tests {
         assert!(col(150) < 0.06, "land interior selected: {}", col(150));
         // Below the true boundary the model still claimed sky; colour must
         // push it down (the ±0.35 band bounds how far a single pass may go).
-        assert!(col(90) < coarse_at(90) - 0.3, "edge not pulled up: {} vs {}", col(90), coarse_at(90));
-        assert!(col(95) < coarse_at(95) - 0.3, "edge not pulled up: {} vs {}", col(95), coarse_at(95));
+        assert!(
+            col(90) < coarse_at(90) - 0.3,
+            "edge not pulled up: {} vs {}",
+            col(90),
+            coarse_at(90)
+        );
+        assert!(
+            col(95) < coarse_at(95) - 0.3,
+            "edge not pulled up: {} vs {}",
+            col(95),
+            coarse_at(95)
+        );
         assert!(col(70) > 0.9, "sky above the boundary lost: {}", col(70));
     }
 
@@ -1432,16 +1585,24 @@ mod tests {
     #[test]
     fn sky_refine_recovers_gaps_between_branches() {
         let (w, h) = (256u32, 256u32);
-        let branch = |x: u32, y: u32| y >= 96 && (x / 4) % 3 == 0;
+        let branch = |x: u32, y: u32| y >= 96 && (x / 4).is_multiple_of(3);
         let guide = RgbImage::from_fn(w, h, |x, y| {
-            if branch(x, y) { Rgb([25, 30, 25]) } else { Rgb([240, 240, 245]) }
+            if branch(x, y) {
+                Rgb([25, 30, 25])
+            } else {
+                Rgb([240, 240, 245])
+            }
         });
         // The model: sky above the crown, nothing inside it.
         let coarse = map(32, 32, |_, y| if y < 12 { 0.99 } else { 0.0 });
         let out = sky_refine(&coarse, &guide);
         let at = |x: u32, y: u32| out.get_pixel(x, y)[0];
         // A gap between branches, well inside the crown.
-        assert!(at(6, 160) > 180, "gap between branches not recovered: {}", at(6, 160));
+        assert!(
+            at(6, 160) > 180,
+            "gap between branches not recovered: {}",
+            at(6, 160)
+        );
         // A branch itself stays out.
         assert!(at(1, 160) < 60, "branch selected as sky: {}", at(1, 160));
         assert!(at(128, 20) > 240, "open sky lost: {}", at(128, 20));
@@ -1454,7 +1615,11 @@ mod tests {
     fn sky_refine_defers_to_the_model_when_colours_match() {
         let (w, h) = (256u32, 160u32);
         let guide = RgbImage::from_fn(w, h, |_, y| {
-            if y < 80 { Rgb([200, 200, 200]) } else { Rgb([197, 198, 197]) }
+            if y < 80 {
+                Rgb([200, 200, 200])
+            } else {
+                Rgb([197, 198, 197])
+            }
         });
         let coarse = map(32, 20, |_, y| {
             let fy = (y as f32 + 0.5) * 8.0;
@@ -1475,13 +1640,27 @@ mod tests {
         }));
         // A close portrait: 60% of the frame, touching left, right, bottom.
         let portrait = map(100, 100, |x, y| {
-            if (15..85).contains(&x) && y > 20 { 0.99 } else { 0.01 }
+            if (15..85).contains(&x) && y > 20 {
+                0.99
+            } else {
+                0.01
+            }
         });
         let got = auto_subject_from_birefnet(&portrait, &image).expect("portrait kept");
         assert!(got.scene.coverage > 0.5, "{}", got.scene.coverage);
-        assert_eq!(got.points.len(), 2, "one component should give a box prompt");
+        assert_eq!(
+            got.points.len(),
+            2,
+            "one component should give a box prompt"
+        );
         // A wall: every border, nearly the whole frame.
-        let wall = map(100, 100, |x, y| if (1..99).contains(&x) && (1..99).contains(&y) { 0.99 } else { 0.4 });
+        let wall = map(100, 100, |x, y| {
+            if (1..99).contains(&x) && (1..99).contains(&y) {
+                0.99
+            } else {
+                0.4
+            }
+        });
         assert!(auto_subject_from_birefnet(&wall, &image).is_none());
         // Nothing salient.
         assert!(auto_subject_from_birefnet(&map(100, 100, |_, _| 0.05), &image).is_none());
@@ -1505,13 +1684,18 @@ mod tests {
 
     #[test]
     fn otsu_splits_a_bimodal_depth_and_flags_a_flat_one() {
-        let bimodal: Vec<f32> = (0..1000).map(|i| if i % 3 == 0 { 0.2 } else { 0.8 }).collect();
+        let bimodal: Vec<f32> = (0..1000)
+            .map(|i| if i % 3 == 0 { 0.2 } else { 0.8 })
+            .collect();
         let (t, sep) = otsu(&bimodal);
         assert!(t > 0.2 && t < 0.8, "threshold {t}");
         assert!(sep > 0.95, "separability {sep}");
         let ramp: Vec<f32> = (0..1000).map(|i| i as f32 / 1000.0).collect();
         let (_, sep_ramp) = otsu(&ramp);
-        assert!(sep_ramp < 0.8, "a uniform ramp is not a clean split: {sep_ramp}");
+        assert!(
+            sep_ramp < 0.8,
+            "a uniform ramp is not a clean split: {sep_ramp}"
+        );
         let flat = vec![0.4f32; 500];
         assert_eq!(otsu(&flat).1, 0.0);
     }
@@ -1521,7 +1705,13 @@ mod tests {
     #[test]
     fn guided_upsample_snaps_to_the_guide_edge() {
         let (w, h) = (256u32, 128u32);
-        let guide = RgbImage::from_fn(w, h, |x, _| if x < 140 { Rgb([200, 200, 200]) } else { Rgb([30, 30, 30]) });
+        let guide = RgbImage::from_fn(w, h, |x, _| {
+            if x < 140 {
+                Rgb([200, 200, 200])
+            } else {
+                Rgb([30, 30, 30])
+            }
+        });
         // Coarse map: 32×16, soft transition centred at x≈120 in full-res
         // terms (i.e. 20 px left of the true edge).
         let coarse = map(32, 16, |x, _| {
@@ -1530,10 +1720,20 @@ mod tests {
         });
         let mask = guided_upsample(&coarse, &guide, 0.35);
         let row = |x: u32| mask.get_pixel(x, 64)[0];
-        assert!(row(20) > 240 && row(240) < 15, "interiors preserved: {} {}", row(20), row(240));
+        assert!(
+            row(20) > 240 && row(240) < 15,
+            "interiors preserved: {} {}",
+            row(20),
+            row(240)
+        );
         // Inside the coarse transition band the guide must decide: bright
         // side high, dark side low, with the steep change at the true edge.
-        assert!(row(130) > row(150) + 60, "edge not snapped: {} vs {}", row(130), row(150));
+        assert!(
+            row(130) > row(150) + 60,
+            "edge not snapped: {} vs {}",
+            row(130),
+            row(150)
+        );
     }
 
     #[test]
@@ -1555,9 +1755,17 @@ mod tests {
         });
         // Subject: a block in the middle layer, full resolution 128x128.
         let subject = GrayImage::from_fn(128, 128, |x, y| {
-            Luma([if (48..80).contains(&x) && (40..80).contains(&y) { 255 } else { 0 }])
+            Luma([if (48..80).contains(&x) && (40..80).contains(&y) {
+                255
+            } else {
+                0
+            }])
         });
-        (depth, subject, RgbImage::from_pixel(128, 128, Rgb([100, 100, 100])))
+        (
+            depth,
+            subject,
+            RgbImage::from_pixel(128, 128, Rgb([100, 100, 100])),
+        )
     }
 
     #[test]
@@ -1568,7 +1776,10 @@ mod tests {
         // subject's own layer do not.
         assert!((fg.coverage - 12.0 / 32.0).abs() < 0.05, "{}", fg.coverage);
         assert!(fg.mask.get_pixel(10, 10)[0] < 10, "background selected");
-        assert!(fg.mask.get_pixel(10, 60)[0] < 10, "subject's depth layer selected");
+        assert!(
+            fg.mask.get_pixel(10, 60)[0] < 10,
+            "subject's depth layer selected"
+        );
         assert!(fg.mask.get_pixel(10, 120)[0] > 245, "near ground missed");
     }
 
@@ -1577,7 +1788,11 @@ mod tests {
         let (depth, _, guide) = layered_scene();
         // A subject whose legs reach down into the near layer.
         let subject = GrayImage::from_fn(128, 128, |x, y| {
-            Luma([if (48..80).contains(&x) && (40..110).contains(&y) { 255 } else { 0 }])
+            Luma([if (48..80).contains(&x) && (40..110).contains(&y) {
+                255
+            } else {
+                0
+            }])
         });
         let fg = foreground_from_subject(&depth, &subject, &guide).expect("foreground");
         for (m, s) in fg.mask.pixels().zip(subject.pixels()) {
@@ -1590,10 +1805,17 @@ mod tests {
     fn foreground_declines_without_a_subject_or_anything_in_front() {
         let (depth, _, guide) = layered_scene();
         let none = GrayImage::new(128, 128);
-        assert_eq!(foreground_from_subject(&depth, &none, &guide).err(), Some(ForegroundDecline::NoSubject));
+        assert_eq!(
+            foreground_from_subject(&depth, &none, &guide).err(),
+            Some(ForegroundDecline::NoSubject)
+        );
         // Subject on the nearest layer: nothing can be in front of it.
         let nearest = GrayImage::from_fn(128, 128, |x, y| {
-            Luma([if (48..80).contains(&x) && y >= 90 { 255 } else { 0 }])
+            Luma([if (48..80).contains(&x) && y >= 90 {
+                255
+            } else {
+                0
+            }])
         });
         assert_eq!(
             foreground_from_subject(&depth, &nearest, &guide).err(),

@@ -9,16 +9,10 @@ mod adjustment_utils;
 mod ai_commands;
 mod ai_connector;
 pub mod ai_processing;
-pub mod subject_selection;
 mod android_integration;
 mod app_settings;
 mod app_state;
 pub mod auto_level;
-pub mod scene_masks;
-pub mod sky_replace;
-pub mod sky_commands;
-pub mod white_balance;
-pub mod video;
 mod cache_utils;
 pub mod color_engine;
 pub mod comfy_engine;
@@ -32,16 +26,15 @@ mod file_management;
 pub mod flat_field;
 mod flog2c;
 pub mod formats;
-pub mod heal_blend;
-pub mod replacement_blend;
 pub mod gpu_processing;
+pub mod hdr_merge;
+pub mod heal_blend;
 pub mod image_loader;
 pub mod image_processing;
 mod lens_correction;
-pub mod hdr_merge;
-pub mod merge_discovery;
 mod lut_processing;
 mod mask_generation;
+pub mod merge_discovery;
 pub mod model_library;
 pub mod model_registry;
 mod negative_conversion;
@@ -49,8 +42,15 @@ mod panorama_stitching;
 mod panorama_utils;
 mod preset_converter;
 mod raw_processing;
+pub mod replacement_blend;
+pub mod scene_masks;
+pub mod sky_commands;
+pub mod sky_replace;
+pub mod subject_selection;
 mod tagging;
 mod tagging_utils;
+pub mod video;
+pub mod white_balance;
 mod window_customizer;
 
 use std::collections::{HashMap, hash_map::DefaultHasher};
@@ -84,8 +84,8 @@ use tauri::{Emitter, Manager, ipc::Response};
 use tempfile::NamedTempFile;
 
 use crate::cache_utils::{
-    GEOMETRY_KEYS, calculate_full_job_hash, calculate_geometry_hash,
-    calculate_transform_hash, calculate_visual_hash,
+    GEOMETRY_KEYS, calculate_full_job_hash, calculate_geometry_hash, calculate_transform_hash,
+    calculate_visual_hash,
 };
 use crate::exif_processing::{read_exposure_time_secs, read_iso};
 use crate::file_management::{parse_virtual_path, read_file_mapped};
@@ -98,8 +98,7 @@ use crate::image_processing::{
     apply_flip, apply_geometry_warp, apply_linear_to_srgb, apply_srgb_to_linear,
     default_render_adjustments_json, downscale_f32_image, get_all_adjustments_from_json,
     get_or_init_gpu_context, process_and_get_dynamic_image, render_adjustments_for_empty,
-    resolve_tonemapper_override,
-    resolve_tonemapper_override_from_handle, warp_image_geometry,
+    resolve_tonemapper_override, resolve_tonemapper_override_from_handle, warp_image_geometry,
 };
 use crate::mask_generation::{
     MaskDefinition, generate_mask_bitmap, get_cached_or_generate_mask,
@@ -350,16 +349,39 @@ fn process_preview_job(
 
     if color_engine::application::enabled(&adjustments_clone) {
         let settings = load_settings(app_handle.clone()).unwrap_or_default();
-        let dimension = target_resolution.unwrap_or(settings.editor_preview_resolution.unwrap_or(1920));
-        let dimension = if is_interactive {dimension.min(1280)} else {dimension};
-        let frame = color_engine::application::render_file(&context,&state,&loaded_image.path,&adjustments_clone,Some(dimension)).map_err(|e|e.to_string())?;
-        let (width,height) = frame.encoded_srgb.dimensions();
+        let dimension =
+            target_resolution.unwrap_or(settings.editor_preview_resolution.unwrap_or(1920));
+        let dimension = if is_interactive {
+            dimension.min(1280)
+        } else {
+            dimension
+        };
+        let frame = color_engine::application::render_file(
+            &context,
+            &state,
+            &loaded_image.path,
+            &adjustments_clone,
+            Some(dimension),
+        )
+        .map_err(|e| e.to_string())?;
+        let (width, height) = frame.encoded_srgb.dimensions();
         if let Some(sender) = state.analytics_worker_tx.lock().unwrap().clone() {
-            let _ = sender.send(AnalyticsJob {path:loaded_image.path.clone(),image:Arc::new(DynamicImage::ImageRgba8(frame.preview_rgba8())),compute_waveform,active_waveform_channel:active_waveform_channel.map(str::to_owned)});
+            let _ = sender.send(AnalyticsJob {
+                path: loaded_image.path.clone(),
+                image: Arc::new(DynamicImage::ImageRgba8(frame.preview_rgba8())),
+                compute_waveform,
+                active_waveform_channel: active_waveform_channel.map(str::to_owned),
+            });
         }
         let mut response = Vec::new();
-        if is_interactive { for v in [0u32,0,width,height,width,height] {response.extend_from_slice(&v.to_le_bytes());} }
-        frame.write_display_png(&mut response).map_err(|e|e.to_string())?;
+        if is_interactive {
+            for v in [0u32, 0, width, height, width, height] {
+                response.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        frame
+            .write_display_png(&mut response)
+            .map_err(|e| e.to_string())?;
         return Ok(response);
     }
 
@@ -756,11 +778,19 @@ fn generate_uncropped_preview(
         let state = app_handle.state::<AppState>();
         let path = loaded_image.path.clone();
         if color_engine::application::enabled(&adjustments_clone) {
-            let mut edits=adjustments_clone.clone();
-            edits["crop"]=Value::Null;
-            match color_engine::application::preview_bytes(&context,&state,&path,&edits,1920) {
-                Ok(bytes)=>{let _=app_handle.emit("preview-update-uncropped",format!("data:image/png;base64,{}",general_purpose::STANDARD.encode(bytes)));},
-                Err(e)=>log::error!("V3 uncropped preview: {e}"),
+            let mut edits = adjustments_clone.clone();
+            edits["crop"] = Value::Null;
+            match color_engine::application::preview_bytes(&context, &state, &path, &edits, 1920) {
+                Ok(bytes) => {
+                    let _ = app_handle.emit(
+                        "preview-update-uncropped",
+                        format!(
+                            "data:image/png;base64,{}",
+                            general_purpose::STANDARD.encode(bytes)
+                        ),
+                    );
+                }
+                Err(e) => log::error!("V3 uncropped preview: {e}"),
             }
             return;
         }
@@ -894,15 +924,27 @@ fn generate_original_transformed_preview(
     hydrate_adjustments(&state, &mut adjustments_clone);
 
     if color_engine::application::enabled(&adjustments_clone) {
-        let context=get_or_init_gpu_context(&state,&app_handle)?;
-        adjustments_clone["v3"]=serde_json::to_value(color_engine::controls::Controls::default()).unwrap();
-        adjustments_clone["masks"]=serde_json::json!([]);
-        let bytes=color_engine::application::preview_bytes(&context,&state,&loaded_image.path,&adjustments_clone,target_resolution.unwrap_or(1920))?;
-        return Ok(format!("data:image/png;base64,{}",general_purpose::STANDARD.encode(bytes)));
+        let context = get_or_init_gpu_context(&state, &app_handle)?;
+        adjustments_clone["v3"] =
+            serde_json::to_value(color_engine::controls::Controls::default()).unwrap();
+        adjustments_clone["masks"] = serde_json::json!([]);
+        let bytes = color_engine::application::preview_bytes(
+            &context,
+            &state,
+            &loaded_image.path,
+            &adjustments_clone,
+            target_resolution.unwrap_or(1920),
+        )?;
+        return Ok(format!(
+            "data:image/png;base64,{}",
+            general_purpose::STANDARD.encode(bytes)
+        ));
     }
 
-    let (transformed_full_res, _unscaled_crop_offset) =
-        apply_all_transformations(Cow::Borrowed(loaded_image.image.as_ref()), &adjustments_clone);
+    let (transformed_full_res, _unscaled_crop_offset) = apply_all_transformations(
+        Cow::Borrowed(loaded_image.image.as_ref()),
+        &adjustments_clone,
+    );
 
     let settings = load_settings(app_handle.clone()).unwrap_or_default();
     let default_dim = settings.editor_preview_resolution.unwrap_or(1920);
@@ -1180,15 +1222,26 @@ fn generate_preset_preview(
         .clone()
         .ok_or("No original image loaded for preset preview")?;
     if color_engine::application::enabled(render_adjustments) {
-        return color_engine::application::preview_bytes(&context,&state,&loaded_image.path,render_adjustments,400).map(Response::new);
+        return color_engine::application::preview_bytes(
+            &context,
+            &state,
+            &loaded_image.path,
+            render_adjustments,
+            400,
+        )
+        .map(Response::new);
     }
     let is_raw = loaded_image.is_raw;
     let unique_hash = calculate_full_job_hash(&loaded_image.path, render_adjustments);
 
     const PRESET_PREVIEW_DIM: u32 = 400;
 
-    let (preview_image, scale_for_gpu, unscaled_crop_offset) =
-        generate_transformed_preview(&state, &loaded_image, render_adjustments, PRESET_PREVIEW_DIM)?;
+    let (preview_image, scale_for_gpu, unscaled_crop_offset) = generate_transformed_preview(
+        &state,
+        &loaded_image,
+        render_adjustments,
+        PRESET_PREVIEW_DIM,
+    )?;
 
     let (img_w, img_h) = preview_image.dimensions();
 
@@ -1492,7 +1545,9 @@ async fn merge_hdr(
 
             // ISO only scales effective exposure; a missing value is no
             // longer fatal, it just means "same sensitivity as the others".
-            let gains = read_iso(path, &file_bytes).map(|v| v as f32).unwrap_or(100.0);
+            let gains = read_iso(path, &file_bytes)
+                .map(|v| v as f32)
+                .unwrap_or(100.0);
 
             let exposure = match read_exposure_time_secs(path, &file_bytes) {
                 None => return Err(format!("Image {} is missing ExposureTime data", path)),
@@ -1529,7 +1584,11 @@ async fn merge_hdr(
 
     // Effective exposure folds ISO in, so ISO-varied brackets merge
     // correctly too; the reference frame's ISO sets the scale.
-    let reference_iso = loaded_items.first().map(|(_, _, _, g)| *g).unwrap_or(100.0).max(1.0);
+    let reference_iso = loaded_items
+        .first()
+        .map(|(_, _, _, g)| *g)
+        .unwrap_or(100.0)
+        .max(1.0);
     let exposures: Vec<f32> = loaded_items
         .iter()
         .map(|(_, _, exposure, gains)| exposure.as_secs_f32() * (gains / reference_iso))
@@ -1545,7 +1604,10 @@ async fn merge_hdr(
         if *dx != 0 || *dy != 0 {
             log::info!(
                 "[hdr] aligned '{}' by ({dx}, {dy}) px",
-                Path::new(path).file_name().unwrap_or_default().to_string_lossy()
+                Path::new(path)
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
             );
         }
     }
@@ -1672,7 +1734,14 @@ fn generate_preview_for_path(
     let render_adjustments_cow = render_adjustments_for_empty(&js_adjustments);
     let render_adjustments = render_adjustments_cow.as_ref();
     if color_engine::application::enabled(render_adjustments) {
-        return color_engine::application::preview_bytes(&context,&state,&path,render_adjustments,1920).map(Response::new);
+        return color_engine::application::preview_bytes(
+            &context,
+            &state,
+            &path,
+            render_adjustments,
+            1920,
+        )
+        .map(Response::new);
     }
     let (source_path, _) = parse_virtual_path(&path);
     let source_path_str = source_path.to_string_lossy().to_string();
@@ -1716,7 +1785,8 @@ fn generate_preview_for_path(
         .and_then(|m| serde_json::from_value(m.clone()).ok())
         .unwrap_or_default();
 
-    let warped_image = resolve_warped_image_for_masks(&state, render_adjustments, &mask_definitions);
+    let warped_image =
+        resolve_warped_image_for_masks(&state, render_adjustments, &mask_definitions);
     let mask_bitmaps: Vec<ImageBuffer<Luma<u8>, Vec<u8>>> = mask_definitions
         .iter()
         .filter_map(|def| {
