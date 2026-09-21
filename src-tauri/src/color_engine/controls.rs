@@ -11,8 +11,10 @@ pub struct ColorRange {
     pub adjustment: [f32; 3],
 }
 
-/// Vignette and grain, with the previous engine's slider meanings so they
-/// feel the same. Both depend on where a pixel is, not only its colour.
+/// Vignette, grain and the lens and film effects, with the previous
+/// engine's slider meanings so they feel the same. All of them depend on
+/// where a pixel is, not only its colour. Vignette and grain run in the GPU
+/// pass; the rest are spatial and run in `optics`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Effects {
@@ -27,6 +29,15 @@ pub struct Effects {
     pub grain_amount: f32,
     pub grain_size: f32,
     pub grain_roughness: f32,
+    /// 0..100: light spread from bright areas.
+    pub glow_amount: f32,
+    /// 0..100: red-orange spill around highlights, as film's does.
+    pub halation_amount: f32,
+    /// 0..100: starburst, ghosts and streak thrown by highlights.
+    pub flare_amount: f32,
+    /// -100..100: red and blue scaled about the centre, ±1% at the ends.
+    pub ca_red_cyan: f32,
+    pub ca_blue_yellow: f32,
 }
 
 impl Default for Effects {
@@ -39,6 +50,11 @@ impl Default for Effects {
             grain_amount: 0.,
             grain_size: 25.,
             grain_roughness: 50.,
+            glow_amount: 0.,
+            halation_amount: 0.,
+            flare_amount: 0.,
+            ca_red_cyan: 0.,
+            ca_blue_yellow: 0.,
         }
     }
 }
@@ -49,22 +65,27 @@ impl Effects {
         ensure!(
             within(self.vignette_amount, -100., 100.)
                 && within(self.vignette_roundness, -100., 100.)
+                && within(self.ca_red_cyan, -100., 100.)
+                && within(self.ca_blue_yellow, -100., 100.)
                 && [
                     self.vignette_midpoint,
                     self.vignette_feather,
                     self.grain_amount,
                     self.grain_size,
-                    self.grain_roughness
+                    self.grain_roughness,
+                    self.glow_amount,
+                    self.halation_amount,
+                    self.flare_amount
                 ]
                 .iter()
                 .all(|v| within(*v, 0., 100.)),
-            "Vignette and grain settings are out of range"
+            "Effect settings are out of range"
         );
         Ok(())
     }
 
     pub fn is_neutral(&self) -> bool {
-        self.vignette_amount == 0. && self.grain_amount == 0.
+        self.vignette_amount == 0. && self.grain_amount == 0. && super::optics::is_neutral(self)
     }
 }
 

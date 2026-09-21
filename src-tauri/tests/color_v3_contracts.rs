@@ -445,6 +445,7 @@ fn gpu_color_pipeline_contracts() {
         );
     }
     captured_transform_contracts(&engine);
+    look_contracts(&engine);
     effects_contracts(&engine);
     channel_curve_contracts(&engine);
     application_contracts(&context);
@@ -961,6 +962,150 @@ fn captured_transform_contracts(engine: &ColorEngine) {
         (out.encoded_srgb.get_pixel(0, 0)[0] - want[0]).abs() < 4e-3,
         "a second encode ran after the captured transform: {:?} vs {want:?}",
         out.encoded_srgb.get_pixel(0, 0)
+    );
+}
+
+/// A creative LUT goes where its input exists: on display code values after
+/// the rendering, on DaVinci Intermediate scene data before it, or — for a
+/// film simulation — in place of the rendering. Each is checked against a
+/// CPU evaluation of exactly that placement.
+fn look_contracts(engine: &ColorEngine) {
+    use rapidraw_lib::color_engine::cube::CubeLut;
+    use rapidraw_lib::color_engine::plan::{Look, LookSpace};
+    use rapidraw_lib::lut_processing::Lut;
+    let size = 17usize;
+    let axis = |i: usize| i as f32 / (size - 1) as f32;
+    let build = |f: &dyn Fn([f32; 3]) -> [f32; 3]| {
+        let (mut data, mut text) = (Vec::new(), format!("LUT_3D_SIZE {size}\n"));
+        for b in 0..size {
+            for g in 0..size {
+                for r in 0..size {
+                    let v = f([axis(r), axis(g), axis(b)]);
+                    data.extend(v);
+                    text.push_str(&format!("{} {} {}\n", v[0], v[1], v[2]));
+                }
+            }
+        }
+        (
+            Arc::new(Lut {
+                size: size as u32,
+                data,
+            }),
+            CubeLut::parse(&text).unwrap(),
+        )
+    };
+    let (identity, _) = build(&|c| c);
+    let (awkward, reference) = build(&|[r, g, b]| {
+        [
+            (r * 0.8 + g * 0.2).powf(1.6),
+            (g * 0.9 + b * 0.1).powf(0.8),
+            (b * 0.7 + r * 0.3).powf(1.2),
+        ]
+    });
+    let look = |lut: &Arc<Lut>, space, intensity, exposure| Look {
+        lut: lut.clone(),
+        space,
+        intensity,
+        exposure,
+    };
+    let probe = ImageBuffer::from_fn(64, 1, |x, _| {
+        let t = x as f32 / 63.0;
+        Rgba([t, (t * 7.0).fract(), 1.0 - t * 0.8, 1.0])
+    });
+    let render = |look: Option<Look>| {
+        let mut plan = RenderPlan::build(config()).unwrap();
+        if let Some(look) = look {
+            plan.set_look(&look).unwrap();
+        }
+        engine.render(&probe, &plan, true).unwrap()
+    };
+    let base = render(None);
+    let graded = base.stages.as_ref().unwrap().graded.clone();
+    let close = |a: &[f32], b: &[f32], tolerance: f32, what: &str| {
+        for c in 0..3 {
+            assert!((a[c] - b[c]).abs() < tolerance, "{what}: {a:?} vs {b:?}");
+        }
+    };
+
+    // An identity LUT is invisible, in either space that keeps the rendering.
+    for space in [LookSpace::Display, LookSpace::Intermediate] {
+        let out = render(Some(look(&identity, space, 1.0, 0.0)));
+        for (a, b) in out.encoded_srgb.pixels().zip(base.encoded_srgb.pixels()) {
+            close(&a.0, &b.0, 2e-4, &format!("identity {space:?}"));
+        }
+    }
+
+    // Display: on the finished code values; intensity mixes with them.
+    let full = render(Some(look(&awkward, LookSpace::Display, 1.0, 0.0)));
+    let half = render(Some(look(&awkward, LookSpace::Display, 0.5, 0.0)));
+    for ((b, f), h) in base
+        .encoded_srgb
+        .pixels()
+        .zip(full.encoded_srgb.pixels())
+        .zip(half.encoded_srgb.pixels())
+    {
+        let want = reference.sample([b[0], b[1], b[2]]);
+        close(&f.0, &want, 4e-3, "display LUT");
+        let mixed: [f32; 3] = std::array::from_fn(|c| (b[c] + want[c]) / 2.0);
+        close(&h.0, &mixed, 4e-3, "display LUT at half intensity");
+    }
+
+    // Intermediate: on graded scene data, before the rendering.
+    let out = render(Some(look(&awkward, LookSpace::Intermediate, 1.0, 0.0)));
+    let to_srgb = spaces::conversion(Primaries::DavinciWideGamut, Primaries::Srgb);
+    let encode_srgb = |v: f64| {
+        let v = v.clamp(0.0, 1.0);
+        if v <= 0.0031308 {
+            12.92 * v
+        } else {
+            1.055 * v.powf(1.0 / 2.4) - 0.055
+        }
+    };
+    for (g, o) in graded.pixels().zip(out.encoded_srgb.pixels()) {
+        let logged = [0, 1, 2].map(|c| spaces::encode_intermediate(g[c] as f64) as f32);
+        let looked = reference.sample(logged);
+        let linear = glam::DVec3::from_array(
+            looked.map(|v| spaces::decode(v as f64, Transfer::DavinciIntermediate)),
+        );
+        let display = (to_srgb * linear).to_array().map(|v| encode_srgb(v) as f32);
+        close(&o.0, &display, 4e-3, "intermediate LUT");
+    }
+
+    // F-Log2 C: the scene encoded as the camera would, in place of the
+    // rendering — and the exposure setting is the camera's exposure.
+    let fgamut = glam::DMat3::from_cols_array_2d(&[
+        [0.51706902, 0.08861716, 0.01775004],
+        [0.41293468, 0.80926315, 0.10944762],
+        [0.06999630, 0.10211969, 0.87280234],
+    ]) * to_srgb;
+    let flog2 = |x: f64| {
+        let t = x.max(0.0);
+        if t >= 0.000889 {
+            0.245281 * (5.555556 * t + 0.064829).log10() + 0.384316
+        } else {
+            8.799461 * t + 0.092864
+        }
+    };
+    for stops in [0.0f32, 1.0] {
+        let out = render(Some(look(&awkward, LookSpace::FLog2C, 1.0, stops)));
+        for (g, o) in graded.pixels().zip(out.encoded_srgb.pixels()) {
+            let scene = glam::DVec3::new(g[0] as f64, g[1] as f64, g[2] as f64)
+                .max(glam::DVec3::ZERO)
+                * 2f64.powf(stops as f64);
+            let camera = (fgamut * scene).to_array().map(|v| flog2(v) as f32);
+            close(&o.0, &reference.sample(camera), 4e-3, "film simulation");
+        }
+    }
+
+    // A malformed lattice is refused rather than read out of bounds.
+    let broken = Arc::new(Lut {
+        size: 17,
+        data: vec![0.0; 10],
+    });
+    let mut plan = RenderPlan::build(config()).unwrap();
+    assert!(
+        plan.set_look(&look(&broken, LookSpace::Display, 1.0, 0.0))
+            .is_err()
     );
 }
 

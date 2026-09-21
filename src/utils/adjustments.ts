@@ -209,7 +209,7 @@ export interface Adjustments {
   lutIntensity?: number;
   lutName?: string | null;
   lutPath?: string | null;
-  lutInputSpace?: 'display' | 'flog2c';
+  lutInputSpace?: 'display' | 'flog2c' | 'intermediate';
   lutSimExposure?: number;
   lutSize?: number;
   masks: Array<MaskContainer>;

@@ -7,6 +7,7 @@ pub mod controls;
 pub mod cube;
 pub mod detail;
 pub mod input;
+pub mod optics;
 pub mod patches;
 pub mod plan;
 pub mod raw;

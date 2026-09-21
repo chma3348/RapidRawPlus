@@ -1,7 +1,10 @@
 //! The one application entry point shared by v3 previews and file exports.
 use super::{
-    ColorEngine, RenderedFrame, config::*, controls::Controls, input::DecodedFrame,
-    plan::RenderPlan,
+    ColorEngine, RenderedFrame,
+    config::*,
+    controls::Controls,
+    input::DecodedFrame,
+    plan::{Look, LookSpace, RenderPlan},
 };
 use crate::{AppState, image_processing::GpuContext};
 use anyhow::{Context, Result, ensure};
@@ -106,12 +109,45 @@ pub fn validate_features(edits: &Value) -> Result<()> {
         edits["flatFieldProfile"].is_null(),
         "V3 flat-field profiles need a color-space adapter; return to the previous engine."
     );
-    // A legacy look must not be silently evaluated in a different color space.
-    ensure!(
-        edits["lutPath"].as_str().is_none_or(|s| s.is_empty()),
-        "Remove the legacy LUT before enabling v3; its input/output color-space contract is not defined for this engine."
-    );
     Ok(())
+}
+
+/// The creative LUT the edits ask for, with the input space it was made for.
+/// The same settings the previous engine reads, so film simulations, presets
+/// and copy/paste carry over; what is new is that the space decides where in
+/// the pipeline the LUT goes (see `LookSpace`).
+fn look(state: &AppState, edits: &Value) -> Result<Option<Look>> {
+    let Some(path) = edits["lutPath"].as_str().filter(|p| !p.is_empty()) else {
+        return Ok(None);
+    };
+    // Hiding the effects section hides its LUT, as it always has.
+    if edits["sectionVisibility"]["effects"].as_bool() == Some(false) {
+        return Ok(None);
+    }
+    let cached = state
+        .lut_cache
+        .lock()
+        .ok()
+        .and_then(|c| c.get(path).cloned());
+    let lut = match cached {
+        Some(lut) => lut,
+        None => {
+            let lut = Arc::new(
+                crate::lut_processing::parse_lut_file(path)
+                    .with_context(|| format!("Could not load the LUT {path}"))?,
+            );
+            if let Ok(mut cache) = state.lut_cache.lock() {
+                cache.insert(path.to_string(), lut.clone());
+            }
+            lut
+        }
+    };
+    Ok(Some(Look {
+        lut,
+        space: LookSpace::from_setting(edits["lutInputSpace"].as_str()),
+        intensity: edits["lutIntensity"].as_f64().unwrap_or(100.) as f32 / 100.,
+        exposure: edits["lutSimExposure"].as_f64().unwrap_or(0.) as f32,
+    }))
 }
 
 /// The rendering step, and where a captured transform displaces it.
@@ -224,22 +260,40 @@ fn mask_bitmap(
     Ok(bitmap)
 }
 
-/// The prepared image with detail applied, cached against everything that
-/// determines it, so dragging any other slider does not redo a spatial pass.
+/// The prepared image with the spatial stages applied — chromatic
+/// aberration correction, detail, then glow, halation and flare — cached
+/// against everything that determines them, so dragging any other slider does
+/// not redo a spatial pass.
 #[allow(clippy::too_many_arguments)]
-fn detailed(
+fn spatial(
     state: &AppState,
     source: &Arc<DecodedFrame>,
     image: Arc<DynamicImage>,
-    detail: &super::detail::Detail,
+    controls: &Controls,
     transform: u64,
     patches: u64,
     dimension: Option<u32>,
     scale: f32,
 ) -> Result<Arc<DynamicImage>> {
     use std::hash::{Hash, Hasher};
+    let effects = &controls.effects;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    serde_json::to_string(detail)?.hash(&mut hasher);
+    serde_json::to_string(&controls.detail)?.hash(&mut hasher);
+    [effects.ca_red_cyan, effects.ca_blue_yellow]
+        .map(f32::to_bits)
+        .hash(&mut hasher);
+    // The light effects' thresholds follow exposure; nothing else here does,
+    // so exposure is only part of the key when they are on.
+    if !super::optics::light_is_neutral(effects) {
+        [
+            effects.glow_amount,
+            effects.halation_amount,
+            effects.flare_amount,
+            controls.exposure,
+        ]
+        .map(f32::to_bits)
+        .hash(&mut hasher);
+    }
     transform.hash(&mut hasher);
     patches.hash(&mut hasher);
     dimension.hash(&mut hasher);
@@ -257,7 +311,14 @@ fn detailed(
     let y = super::spaces::rgb_to_xyz(source.color.primaries).row(1);
     let weights = [y.x as f32, y.y as f32, y.z as f32];
     let mut pixels = image.to_rgba32f();
-    super::detail::apply(&mut pixels, detail, weights, scale);
+    super::optics::correct_chromatic_aberration(&mut pixels, effects);
+    super::detail::apply(&mut pixels, &controls.detail, weights, scale);
+    super::optics::add_light(
+        &mut pixels,
+        effects,
+        controls.exposure,
+        source.color.primaries,
+    );
     let result = Arc::new(DynamicImage::ImageRgba32F(pixels));
     if let Ok(mut cache) = state.v3_detail.lock() {
         *cache = Some(DetailCache {
@@ -295,6 +356,7 @@ fn sampling_image(
     let mut neutral = edits.clone();
     neutral["v3"] = serde_json::json!({});
     neutral["masks"] = serde_json::json!([]);
+    neutral["lutPath"] = Value::Null;
     // The sampling render goes through the same prepared-image cache as the
     // preview. Put the preview's entry back afterwards, or the next slider
     // move pays to rebuild it from the full-resolution source.
@@ -419,14 +481,14 @@ pub(crate) fn render_file_with_capture(
     let p = prepared.as_ref().unwrap();
     let (image, offset, scale) = (p.image.clone(), p.offset, p.scale);
     drop(prepared);
-    let image = if controls.detail.is_neutral() {
+    let image = if controls.detail.is_neutral() && super::optics::is_neutral(&controls.effects) {
         image
     } else {
-        detailed(
+        spatial(
             state,
             &source,
             image,
-            &controls.detail,
+            &controls,
             transform,
             patches,
             max_dimension,
@@ -475,12 +537,18 @@ pub(crate) fn render_file_with_capture(
     }
     let engine = &cache.as_ref().unwrap().engine;
     let grain = super::controls::Effects {
-        vignette_amount: 0.,
-        ..controls.effects.clone()
+        grain_amount: controls.effects.grain_amount,
+        grain_size: controls.effects.grain_size,
+        grain_roughness: controls.effects.grain_roughness,
+        ..Default::default()
     };
+    let look = look(state, edits)?;
     let mut initial_plan = plan(source.color.clone(), controls, output_transform(state))?;
     initial_plan.set_render_scale(scale);
     if active.is_empty() {
+        if let Some(look) = &look {
+            initial_plan.set_look(look)?;
+        }
         return engine.render(&image.to_rgba32f(), &initial_plan, capture);
     }
     // With masks, the first pass only feeds the local adjustments, which read
@@ -506,11 +574,12 @@ pub(crate) fn render_file_with_capture(
     };
     for mask in active {
         let local = self::controls(&mask.adjustments)?;
-        // Vignette and grain describe the whole frame; a mask carrying them
-        // would be applying a frame effect to part of a frame.
+        // Vignette, grain and the lens effects describe the whole frame; a
+        // mask carrying them would be applying a frame effect to part of a
+        // frame.
         ensure!(
             local.effects.is_neutral(),
-            "Vignette and grain apply to the whole photo, not inside a mask."
+            "Vignette, grain and lens effects apply to the whole photo, not inside a mask."
         );
         // `is_neutral` is about the pointwise pass; detail is its own stage.
         if local.is_neutral() && local.detail.is_neutral() {
@@ -572,6 +641,9 @@ pub(crate) fn render_file_with_capture(
         output_transform(state),
     )?;
     final_plan.set_render_scale(scale);
+    if let Some(look) = &look {
+        final_plan.set_look(look)?;
+    }
     let frame = engine.render(&working, &final_plan, false);
     watch.lap("final pass");
     frame

@@ -44,7 +44,7 @@ export const defaultV3Detail = (): V3Detail => ({
   dehaze: 0,
 });
 
-/** Vignette and grain, with the previous engine's slider meanings. */
+/** Vignette, grain, glow, halation, flare and chromatic aberration, with the previous engine's slider meanings. */
 export interface V3Effects {
   vignette_amount: number;
   vignette_midpoint: number;
@@ -53,6 +53,11 @@ export interface V3Effects {
   grain_amount: number;
   grain_size: number;
   grain_roughness: number;
+  glow_amount: number;
+  halation_amount: number;
+  flare_amount: number;
+  ca_red_cyan: number;
+  ca_blue_yellow: number;
 }
 export const defaultV3Effects = (): V3Effects => ({
   vignette_amount: 0,
@@ -62,6 +67,11 @@ export const defaultV3Effects = (): V3Effects => ({
   grain_amount: 0,
   grain_size: 25,
   grain_roughness: 50,
+  glow_amount: 0,
+  halation_amount: 0,
+  flare_amount: 0,
+  ca_red_cyan: 0,
+  ca_blue_yellow: 0,
 });
 
 export interface V3Controls {
@@ -122,13 +132,18 @@ export function mixV3Controls(preset: Partial<V3Controls>, intensity: number): V
     if (key === 'revision') continue;
     if (key === 'effects') {
       // Only the amounts fade: a half-strength preset keeps the vignette's
-      // shape and the grain's size, at half the effect.
+      // shape and the grain's size, at half the effect. Chromatic aberration
+      // is a correction for the lens, not a look, so it does not fade.
       const from = neutral.effects;
       const to = { ...from, ...(target.effects ?? {}) };
+      const fade = (k: keyof V3Effects) => from[k] + (to[k] - from[k]) * fraction;
       result.effects = {
         ...to,
-        vignette_amount: from.vignette_amount + (to.vignette_amount - from.vignette_amount) * fraction,
-        grain_amount: from.grain_amount + (to.grain_amount - from.grain_amount) * fraction,
+        vignette_amount: fade('vignette_amount'),
+        grain_amount: fade('grain_amount'),
+        glow_amount: fade('glow_amount'),
+        halation_amount: fade('halation_amount'),
+        flare_amount: fade('flare_amount'),
       };
     } else if (key === 'detail') {
       // Every detail value fades toward neutral, the threshold included, so

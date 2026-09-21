@@ -173,12 +173,12 @@ impl Plan {
 /// A Gaussian approximated by three box passes, which costs the same at any
 /// radius — structure's 40 pixels at full resolution included.
 #[derive(Clone, Copy)]
-struct Gaussian {
+pub(super) struct Gaussian {
     radii: [usize; 3],
 }
 
 impl Gaussian {
-    fn new(sigma: f32) -> Self {
+    pub(super) fn new(sigma: f32) -> Self {
         let n = 3.0f32;
         let ideal = (12.0 * sigma * sigma / n + 1.0).sqrt();
         let mut low = ideal.floor() as i32;
@@ -567,7 +567,7 @@ fn guided(guide: &[f32], input: &[f32], w: usize, h: usize, radius: usize, eps: 
         .collect()
 }
 
-fn blur(plane: &[f32], w: usize, h: usize, g: Gaussian) -> Vec<f32> {
+pub(super) fn blur(plane: &[f32], w: usize, h: usize, g: Gaussian) -> Vec<f32> {
     let mut rows = plane.to_vec();
     for r in g.radii {
         rows = box_rows(&rows, w, h, r);

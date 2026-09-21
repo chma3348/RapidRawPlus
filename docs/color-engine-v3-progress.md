@@ -1,6 +1,6 @@
 # Color Engine v3 — implementation and verification
 
-## Where v3 stands — September 20, 2026
+## Where v3 stands — September 21, 2026
 
 **Colour chain.** Linear DaVinci Wide Gamut working space. Resolve's own input
 and output transforms, captured from this machine's Resolve 21.0.4 and
@@ -14,7 +14,9 @@ blacks, whites; luminance curve and red/green/blue curves (in DaVinci
 Intermediate, as Resolve's curves are); saturation, vibrance, hue; eight
 selective-colour bands and eight custom ranges with a picker; four grading
 wheels; dehaze, sharpening with threshold, texture, clarity, structure,
-luminance and colour noise reduction; vignette and grain.
+luminance and colour noise reduction; vignette and grain; glow, halation and
+light flares; chromatic aberration correction; creative LUTs in three input
+spaces (display, DaVinci Intermediate, F-Log2 C film simulations).
 
 **Local work.** Brush, gradient and bitmap masks; colour and luminance range
 masks; detail inside masks; heal, clone, generative and Sky Replace patches.
@@ -25,15 +27,59 @@ each with its colour profile honoured. 16-bit export with profile tags.
 **Speed, 24–33 megapixels on this machine.** First preview about 0.3 s; a
 slider move about 11 ms, 28 ms with masks; export about 1 s plus detail.
 
-**Not in v3.** Glow, halation and light flares; chromatic aberration; the
-centre control; flat-field correction; legacy LUTs (their colour-space
-contract is undefined for this engine); vignette and grain inside masks.
+**Not in v3.** The centre control; flat-field correction; vignette, grain,
+glow, halation, flare, chromatic aberration and LUTs inside masks (they
+describe the whole frame, and a mask carrying them is refused with a message).
 The grading controls are v3's own, not yet Resolve's: matching them is
 prepared (`docs/resolve-controls.md`) and waits on fourteen captures.
 
 **Tests.** 260 library tests, the v3 GPU contracts (including forced chunk
 boundaries, preview/export agreement and the strip contract), frontend
 preset and history tests; `cargo fmt --check` and `clippy -D warnings` clean.
+
+## Lens and film effects, and LUTs — September 21, 2026
+
+The last creative controls the previous engine had that v3 did not.
+
+**Glow, halation, light flares.** Light added to light, so computed on linear
+values in their own CPU stage (`color_engine/optics.rs`), after detail and
+before the GPU pass. What they respond to is how bright a highlight *will be*:
+thresholds are in post-exposure units, so raising exposure makes more of the
+picture glow, as through a real lens, and the added light scales with
+exposure like everything else (`exposure_decides_what_glows`). The shapes and
+colours are the previous engine's, defined in linear sRGB and converted to
+whatever primaries the prepared image holds, so a DWG source gets the same
+light (`wide_gamut_sources_get_the_same_light`). They are computed on a grid no
+larger than 1024 pixels with radii as fractions of it, thresholded at full
+resolution first so a small bright point still glows; preview and export
+therefore agree (`preview_and_export_agree`). The flare is the previous
+engine's starburst, ghosts, halos and streak, on a 256² map in normalised
+coordinates. The stage is cached with detail; exposure is part of the key only
+while one of these is on.
+
+**Chromatic aberration.** Red and blue scaled about the frame's centre
+relative to green, the previous engine's slider (±100 = ±1% of the distance
+from centre), sampled bilinearly rather than rounded to whole pixels. Applied
+first, before detail, so sharpening sees the corrected edge.
+
+**LUTs.** The previous engine applied every LUT to its display output, which
+left the LUT's input undefined in v3's terms — hence the refusal until now.
+The same settings (`lutPath`, `lutIntensity`, `lutInputSpace`,
+`lutSimExposure`) are read, so film simulations, presets and copy/paste carry
+over, and the input space now decides where the LUT goes:
+
+| Space | Fed | Placed |
+|---|---|---|
+| Display | sRGB code values | after the rendering, as before |
+| DaVinci Intermediate | graded scene data, DI-encoded | before the rendering, as a node in a DWG timeline; output decoded back to linear |
+| F-Log2 C | the scene as a Fujifilm camera encodes it (F-Gamut C, F-Log2), times the simulation exposure | *instead of* the rendering, because the LUT is one |
+
+The lattice is a second storage binding in the GPU pass, sharing the
+tetrahedral weights with the captured output transform. Each placement is
+pinned against a CPU evaluation of exactly that placement in
+`look_contracts`, including intensity mixing and the simulation exposure; a
+malformed lattice is refused rather than read out of bounds. Range masks
+sample the picture before the LUT, like every other grade.
 
 ## Detail — September 20, 2026
 

@@ -1,9 +1,12 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useTranslation } from 'react-i18next';
 import Slider from '../ui/Slider';
+import Dropdown from '../ui/Dropdown';
+import LUTControl from '../ui/LUTControl';
 import ColorV3Advanced from './ColorV3Advanced';
 import { useEditorStore } from '../../store/useEditorStore';
+import { useEditorActions } from '../../hooks/useEditorActions';
 import { defaultV3Controls, defaultV3Detail, defaultV3Effects, V3Controls, V3Detail, V3Effects } from '../../utils/colorV3';
 
 export function ColorV3Switch({
@@ -25,10 +28,10 @@ export function ColorV3Switch({
       return;
     }
     if (!selectedImage) return;
-    if (adjustments.lutPath || adjustments.flatFieldProfile) {
+    if (adjustments.flatFieldProfile) {
       setError(
-        t('colorV3.incompatibleLut', {
-          defaultValue: 'Remove the legacy LUT or flat-field profile before trying v3.',
+        t('colorV3.incompatibleFlatField', {
+          defaultValue: 'Remove the flat-field profile before trying v3.',
         }),
       );
       return;
@@ -76,8 +79,8 @@ export function ColorV3Switch({
       </p>
       {active && (
         <p className="mt-2 leading-relaxed">
-          {t('colorV3.limitsLut', {
-            defaultValue: 'Legacy LUTs and flat-field profiles are not available in this mode.',
+          {t('colorV3.limitsFlatField', {
+            defaultValue: 'Flat-field profiles are not available in this mode.',
           })}
         </p>
       )}
@@ -87,6 +90,128 @@ export function ColorV3Switch({
         </p>
       )}
     </div>
+  );
+}
+
+/**
+ * The creative LUT. The settings are the previous engine's own — film
+ * simulations, presets and copy/paste all carry over — plus the one thing v3
+ * needs to know to place a LUT correctly: what it expects to be fed.
+ */
+function V3LookSection({
+  adjustments,
+  setAdjustments,
+  onDragStateChange,
+}: {
+  adjustments: any;
+  setAdjustments: (fn: any) => void;
+  onDragStateChange?: (v: boolean) => void;
+}) {
+  const { t } = useTranslation();
+  const { handleLutSelect, setLutPreviewOverride } = useEditorActions();
+  const [simulations, setSimulations] = useState<Array<any>>([]);
+  useEffect(() => {
+    invoke('list_managed_luts')
+      .then((l: any) => setSimulations(l || []))
+      .catch(() => setSimulations([]));
+  }, []);
+  const space = adjustments.lutInputSpace ?? 'display';
+  const spaces = [
+    {
+      value: 'display',
+      label: t('colorV3.lutDisplay', { defaultValue: 'Display (sRGB) — most downloaded LUTs' }),
+    },
+    {
+      value: 'intermediate',
+      label: t('colorV3.lutIntermediate', { defaultValue: 'DaVinci Intermediate — a look made in Resolve' }),
+    },
+    {
+      value: 'flog2c',
+      label: t('colorV3.lutFlog2c', { defaultValue: 'F-Log2 C — Fujifilm film simulation' }),
+    },
+  ];
+  const explanation: Record<string, string> = {
+    display: t('colorV3.lutDisplayHelp', {
+      defaultValue: 'Applied to the finished picture, after the rendering.',
+    }),
+    intermediate: t('colorV3.lutIntermediateHelp', {
+      defaultValue:
+        'Applied to the graded scene before the rendering, as a node would in a DaVinci Wide Gamut timeline.',
+    }),
+    flog2c: t('colorV3.lutFlog2cHelp', {
+      defaultValue: 'Replaces the rendering: the LUT receives the scene as the camera would have encoded it.',
+    }),
+  };
+  return (
+    <>
+      <h3 className="mt-3 text-sm font-medium text-text-primary">{t('colorV3.lut', { defaultValue: 'LUT' })}</h3>
+      {simulations.length > 0 && (
+        <Dropdown
+          options={simulations.map((p) => ({
+            label: p.inputSpace === 'flog2c' ? `${p.name} (Fujifilm)` : p.name,
+            value: p.path,
+          }))}
+          value={adjustments.lutPath || ''}
+          onChange={(path: string) => {
+            const preset = simulations.find((p) => p.path === path);
+            if (!preset) return;
+            handleLutSelect(preset.path);
+            setAdjustments((prev: any) => ({ ...prev, lutInputSpace: preset.inputSpace }));
+          }}
+        />
+      )}
+      <LUTControl
+        lutPath={adjustments.lutPath || null}
+        lutName={adjustments.lutName || null}
+        lutIntensity={adjustments.lutIntensity ?? 100}
+        onLutSelect={handleLutSelect}
+        onLutHover={setLutPreviewOverride}
+        onIntensityChange={(intensity: number) => setAdjustments((prev: any) => ({ ...prev, lutIntensity: intensity }))}
+        onClear={() =>
+          setAdjustments((prev: any) => ({
+            ...prev,
+            lutPath: null,
+            lutName: null,
+            lutData: null,
+            lutSize: 0,
+            lutIntensity: 100,
+            lutInputSpace: 'display',
+          }))
+        }
+        onDragStateChange={onDragStateChange}
+      />
+      {adjustments.lutPath && (
+        <>
+          <label className="text-sm text-text-primary">
+            {t('colorV3.lutSpace', { defaultValue: 'Made for' })}
+            <select
+              className="mt-2 w-full bg-surface text-text-primary rounded-md p-2"
+              value={space}
+              onChange={(e) => setAdjustments((prev: any) => ({ ...prev, lutInputSpace: e.target.value }))}
+            >
+              {spaces.map((s) => (
+                <option value={s.value} key={s.value}>
+                  {s.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <p className="text-xs text-text-secondary leading-relaxed">{explanation[space] ?? explanation.display}</p>
+          {space === 'flog2c' && (
+            <Slider
+              label={t('adjustments.effects.simExposure', { defaultValue: 'Simulation exposure' })}
+              min={-3}
+              max={3}
+              step={0.05}
+              defaultValue={0}
+              value={adjustments.lutSimExposure ?? 0}
+              onChange={(e: any) => setAdjustments((prev: any) => ({ ...prev, lutSimExposure: parseFloat(e.target.value) }))}
+              onDragStateChange={onDragStateChange}
+            />
+          )}
+        </>
+      )}
+    </>
   );
 }
 
@@ -102,7 +227,7 @@ export default function ColorV3Controls({
   onDragStateChange?: (v: boolean) => void;
   /** Lets a host hide the detail section; every current host shows it. */
   showDetail?: boolean;
-  /** Vignette and grain describe the whole frame, so masks do not offer them. */
+  /** Effects, lens corrections and LUTs describe the whole frame, so masks do not offer them. */
   showEffects?: boolean;
 }) {
   const { t } = useTranslation();
@@ -277,6 +402,27 @@ export default function ColorV3Controls({
           {effectSlider('grain_amount', t('colorV3.grain', { defaultValue: 'Grain' }), 0, 100)}
           {effectSlider('grain_size', t('colorV3.grainSize', { defaultValue: 'Grain size' }), 0, 100)}
           {effectSlider('grain_roughness', t('colorV3.grainRoughness', { defaultValue: 'Grain roughness' }), 0, 100)}
+          <h3 className="mt-3 text-sm font-medium text-text-primary">
+            {t('colorV3.light', { defaultValue: 'Glow, halation and flare' })}
+          </h3>
+          {effectSlider('glow_amount', t('colorV3.glow', { defaultValue: 'Glow' }), 0, 100)}
+          {effectSlider('halation_amount', t('colorV3.halation', { defaultValue: 'Halation' }), 0, 100)}
+          {effectSlider('flare_amount', t('colorV3.flare', { defaultValue: 'Light flares' }), 0, 100)}
+          <p className="text-xs text-text-secondary leading-relaxed">
+            {t('colorV3.lightHelp', {
+              defaultValue: 'These respond to how bright highlights are after exposure, so raising exposure makes more of the picture glow.',
+            })}
+          </p>
+          <h3 className="mt-3 text-sm font-medium text-text-primary">
+            {t('colorV3.lens', { defaultValue: 'Chromatic aberration' })}
+          </h3>
+          {effectSlider('ca_red_cyan', t('colorV3.caRedCyan', { defaultValue: 'Red / cyan fringe' }), -100, 100)}
+          {effectSlider('ca_blue_yellow', t('colorV3.caBlueYellow', { defaultValue: 'Blue / yellow fringe' }), -100, 100)}
+          <V3LookSection
+            adjustments={adjustments}
+            setAdjustments={setAdjustments}
+            onDragStateChange={onDragStateChange}
+          />
         </>
       )}
     </div>

@@ -36,12 +36,63 @@ pub(crate) struct GpuParameters {
     pub channel_curves: [[f32; 4]; 15],
     /// x: channel curves active.
     pub curve_flags: [u32; 4],
+    /// A creative LUT: [intensity, exposure gain into the film simulation,
+    /// 0, 0].
+    pub look: [f32; 4],
+    /// [lattice size (0 = none), input space: 1 display sRGB, 2 F-Log2 C,
+    ///  3 DaVinci Intermediate, 0, 0].
+    pub look_flags: [u32; 4],
+    /// Working space to the film simulation's F-Gamut C.
+    pub work_to_look: [[f32; 4]; 3],
+}
+
+/// What a creative LUT expects to be fed, and therefore where in the
+/// pipeline it goes. A LUT is a function from one encoding to another; using
+/// one without saying which is how a look ends up rendered twice or not at
+/// all, so each is placed where its input actually exists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LookSpace {
+    /// sRGB display code values in and out: after the output rendering, as
+    /// the previous engine applied every LUT and most downloadable looks
+    /// expect.
+    Display,
+    /// DaVinci Intermediate in and out: a look made in a Resolve
+    /// DaVinci Wide Gamut timeline. It runs on the graded scene data before
+    /// the output rendering, as its node would in Resolve.
+    Intermediate,
+    /// F-Log2 C in, finished BT.709 display out: a Fujifilm film simulation.
+    /// It *is* a rendering, so it takes the place of the output rendering.
+    FLog2C,
+}
+
+impl LookSpace {
+    pub fn from_setting(value: Option<&str>) -> Self {
+        match value {
+            Some("flog2c") => Self::FLog2C,
+            Some("intermediate") => Self::Intermediate,
+            _ => Self::Display,
+        }
+    }
+}
+
+/// A creative LUT and how to apply it.
+#[derive(Clone)]
+pub struct Look {
+    pub lut: std::sync::Arc<crate::lut_processing::Lut>,
+    pub space: LookSpace,
+    /// 0..1: mixed with what the pipeline would otherwise have produced.
+    pub intensity: f32,
+    /// Stops, into a film simulation only: what the camera's exposure would
+    /// have been, which such a LUT is very sensitive to.
+    pub exposure: f32,
 }
 
 pub struct RenderPlan {
     config: PipelineConfig,
     pub(crate) parameters: GpuParameters,
     pub(crate) cube: Option<CubeLut>,
+    /// The creative LUT's lattice, padded to `vec4`, when one is set.
+    pub(crate) look: Option<Vec<[f32; 4]>>,
 }
 
 impl RenderPlan {
@@ -196,6 +247,15 @@ impl RenderPlan {
                 knots
             },
             curve_flags: [u32::from(!c.channel_curves_are_neutral()), 0, 0, 0],
+            look: [0.; 4],
+            look_flags: [0; 4],
+            work_to_look: packed(
+                glam::DMat3::from_cols_array_2d(
+                    &crate::flog2c::SRGB_TO_FGAMUT_C.map(|r| r.map(f64::from)),
+                )
+                .transpose()
+                    * spaces::conversion(config.working_space, Primaries::Srgb),
+            ),
             effects: [
                 [
                     c.effects.vignette_amount / 100.,
@@ -225,7 +285,50 @@ impl RenderPlan {
             config,
             parameters,
             cube,
+            look: None,
         })
+    }
+
+    /// Apply a creative LUT on this plan's output. Only the pass that
+    /// produces the finished picture should carry one.
+    pub fn set_look(&mut self, look: &Look) -> Result<()> {
+        let size = look.lut.size;
+        ensure!(
+            (2..=256).contains(&size) && look.lut.data.len() == (size as usize).pow(3) * 3,
+            "The LUT's lattice is malformed"
+        );
+        ensure!(
+            look.lut.data.iter().all(|v| v.is_finite()),
+            "The LUT contains non-finite values"
+        );
+        ensure!(
+            look.intensity.is_finite() && look.exposure.is_finite(),
+            "Invalid LUT settings"
+        );
+        self.look = Some(
+            look.lut
+                .data
+                .chunks_exact(3)
+                .map(|c| [c[0], c[1], c[2], 0.])
+                .collect(),
+        );
+        self.parameters.look = [
+            look.intensity.clamp(0., 1.),
+            look.exposure.clamp(-3., 3.).exp2(),
+            0.,
+            0.,
+        ];
+        self.parameters.look_flags = [
+            size,
+            match look.space {
+                LookSpace::Display => 1,
+                LookSpace::FLog2C => 2,
+                LookSpace::Intermediate => 3,
+            },
+            0,
+            0,
+        ];
+        Ok(())
     }
 
     /// How much smaller than the full-resolution photograph the image being
@@ -248,6 +351,11 @@ impl RenderPlan {
         // The cube's contents, not the path it was read from.
         if let Some(cube) = &self.cube {
             hash.update(cube.digest.as_bytes());
+        }
+        if let Some(look) = &self.look {
+            hash.update(bytemuck::cast_slice(look));
+            hash.update(bytemuck::bytes_of(&self.parameters.look));
+            hash.update(bytemuck::bytes_of(&self.parameters.look_flags));
         }
         hash.update(source_revision.as_bytes());
         hash.finalize().to_hex().to_string()

@@ -243,6 +243,15 @@ impl ColorEngine {
             ),
             usage: wgpu::BufferUsages::STORAGE,
         });
+        let look = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("V3 creative LUT"),
+            contents: bytemuck::cast_slice(
+                plan.look
+                    .as_ref()
+                    .map_or(&[[0.0f32; 4]][..], |l| l.as_slice()),
+            ),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
         let parameters = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("V3 parameters"),
             contents: bytemuck::bytes_of(&plan.parameters),
@@ -267,6 +276,10 @@ impl ColorEngine {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: cube.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: look.as_entire_binding(),
                 },
             ],
         });

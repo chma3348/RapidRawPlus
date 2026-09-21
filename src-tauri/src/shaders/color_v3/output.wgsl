@@ -95,50 +95,98 @@ fn encode_intermediate(v: f32) -> f32 {
     return (log2(max(v + 0.0075, 1e-10)) + 7.0) * 0.07329248;
 }
 
-fn cube_at(r: u32, g: u32, b: u32) -> vec3<f32> {
-    let size = parameters.flags.w;
-    return cube[r + (g + b * size) * size].rgb;
+// Tetrahedral rather than trilinear: it is what LUT engines use, it keeps the
+// neutral axis exact, and it reads four lattice points instead of eight. The
+// weights are computed once and shared by both lattices — the captured
+// transform and a creative LUT — since WGSL cannot pass a storage buffer to a
+// function.
+struct Tetra {
+    corners: array<vec3<u32>, 4>,
+    weights: vec4<f32>,
 }
 
-// Tetrahedral rather than trilinear: it is what LUT engines use, it keeps the
-// neutral axis exact, and on a transform this smooth it costs four lookups
-// instead of eight.
-fn cube_lookup(coordinate: vec3<f32>) -> vec3<f32> {
-    let last = f32(parameters.flags.w - 1u);
+fn tetra(coordinate: vec3<f32>, size: u32) -> Tetra {
+    let last = f32(size - 1u);
     let scaled = clamp(coordinate, vec3<f32>(0.0), vec3<f32>(1.0)) * last;
     let base = min(floor(scaled), vec3<f32>(last - 1.0));
     let f = scaled - base;
     let i = vec3<u32>(base);
-    let c000 = cube_at(i.x, i.y, i.z);
-    let c111 = cube_at(i.x + 1u, i.y + 1u, i.z + 1u);
+    let x = vec3<u32>(1u, 0u, 0u);
+    let y = vec3<u32>(0u, 1u, 0u);
+    let z = vec3<u32>(0u, 0u, 1u);
+    // The first and second axes to step along, and the fractions sorted.
+    var e1: vec3<u32>; var e2: vec3<u32>; var s: vec3<f32>;
     if f.x >= f.y {
-        if f.y >= f.z {
-            let c100 = cube_at(i.x + 1u, i.y, i.z);
-            let c110 = cube_at(i.x + 1u, i.y + 1u, i.z);
-            return c000 + (c100 - c000) * f.x + (c110 - c100) * f.y + (c111 - c110) * f.z;
-        }
-        if f.x >= f.z {
-            let c100 = cube_at(i.x + 1u, i.y, i.z);
-            let c101 = cube_at(i.x + 1u, i.y, i.z + 1u);
-            return c000 + (c100 - c000) * f.x + (c111 - c101) * f.y + (c101 - c100) * f.z;
-        }
-        let c001 = cube_at(i.x, i.y, i.z + 1u);
-        let c101 = cube_at(i.x + 1u, i.y, i.z + 1u);
-        return c000 + (c101 - c001) * f.x + (c111 - c101) * f.y + (c001 - c000) * f.z;
+        if f.y >= f.z { e1 = x; e2 = x + y; s = f.xyz; }
+        else if f.x >= f.z { e1 = x; e2 = x + z; s = f.xzy; }
+        else { e1 = z; e2 = z + x; s = f.zxy; }
+    } else {
+        if f.z > f.y { e1 = z; e2 = z + y; s = f.zyx; }
+        else if f.z > f.x { e1 = y; e2 = y + z; s = f.yzx; }
+        else { e1 = y; e2 = y + x; s = f.yxz; }
     }
-    if f.z > f.y {
-        let c001 = cube_at(i.x, i.y, i.z + 1u);
-        let c011 = cube_at(i.x, i.y + 1u, i.z + 1u);
-        return c000 + (c111 - c011) * f.x + (c011 - c001) * f.y + (c001 - c000) * f.z;
+    var t: Tetra;
+    t.corners = array<vec3<u32>, 4>(i, i + e1, i + e2, i + vec3<u32>(1u));
+    t.weights = vec4<f32>(1.0 - s.x, s.x - s.y, s.y - s.z, s.z);
+    return t;
+}
+
+fn cube_at(c: vec3<u32>) -> vec3<f32> {
+    let size = parameters.flags.w;
+    return cube[c.x + (c.y + c.z * size) * size].rgb;
+}
+
+fn cube_lookup(coordinate: vec3<f32>) -> vec3<f32> {
+    let t = tetra(coordinate, parameters.flags.w);
+    return cube_at(t.corners[0]) * t.weights.x + cube_at(t.corners[1]) * t.weights.y
+        + cube_at(t.corners[2]) * t.weights.z + cube_at(t.corners[3]) * t.weights.w;
+}
+
+fn look_at(c: vec3<u32>) -> vec3<f32> {
+    let size = parameters.look_flags.x;
+    return look_table[c.x + (c.y + c.z * size) * size].rgb;
+}
+
+fn look_lookup(coordinate: vec3<f32>) -> vec3<f32> {
+    let t = tetra(coordinate, parameters.look_flags.x);
+    return look_at(t.corners[0]) * t.weights.x + look_at(t.corners[1]) * t.weights.y
+        + look_at(t.corners[2]) * t.weights.z + look_at(t.corners[3]) * t.weights.w;
+}
+
+fn decode_intermediate(v: f32) -> f32 { return decode_component(v, 2u); }
+
+// Fujifilm F-Log2 (the curve is shared by F-Log2 C); see flog2c.rs.
+fn flog2_encode(x: f32) -> f32 {
+    let t = max(x, 0.0);
+    if t >= 0.000889 { return 0.245281 * log2(5.555556 * t + 0.064829) * 0.30102999566 + 0.384316; }
+    return 8.799461 * t + 0.092864;
+}
+
+/// A look made for DaVinci Intermediate: on scene data, before rendering.
+fn look_scene(graded: vec3<f32>) -> vec3<f32> {
+    if parameters.look_flags.x == 0u || parameters.look_flags.y != 3u { return graded; }
+    let logged = vec3<f32>(encode_intermediate(graded.r), encode_intermediate(graded.g),
+        encode_intermediate(graded.b));
+    let looked = look_lookup(logged);
+    let linear = vec3<f32>(decode_intermediate(looked.r), decode_intermediate(looked.g),
+        decode_intermediate(looked.b));
+    return mix(graded, linear, parameters.look.x);
+}
+
+/// A look on display code values, or a film simulation in place of the
+/// rendering; either way the result is display-encoded.
+fn look_display(encoded: vec3<f32>, graded: vec3<f32>) -> vec3<f32> {
+    let space = parameters.look_flags.y;
+    if parameters.look_flags.x == 0u || space == 3u { return encoded; }
+    var looked: vec3<f32>;
+    if space == 2u {
+        let camera = parameters.work_to_look * (max(graded, vec3<f32>(0.0)) * parameters.look.y);
+        looked = look_lookup(vec3<f32>(flog2_encode(camera.r), flog2_encode(camera.g),
+            flog2_encode(camera.b)));
+    } else {
+        looked = look_lookup(encoded);
     }
-    if f.z > f.x {
-        let c010 = cube_at(i.x, i.y + 1u, i.z);
-        let c011 = cube_at(i.x, i.y + 1u, i.z + 1u);
-        return c000 + (c111 - c011) * f.x + (c010 - c000) * f.y + (c011 - c010) * f.z;
-    }
-    let c010 = cube_at(i.x, i.y + 1u, i.z);
-    let c110 = cube_at(i.x + 1u, i.y + 1u, i.z);
-    return c000 + (c110 - c010) * f.x + (c010 - c000) * f.y + (c111 - c110) * f.z;
+    return mix(encoded, clamp(looked, vec3<f32>(0.0), vec3<f32>(1.0)), parameters.look.x);
 }
 
 /// Working linear DWG straight to display-encoded output.

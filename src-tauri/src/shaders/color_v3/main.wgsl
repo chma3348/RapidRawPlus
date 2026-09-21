@@ -19,12 +19,17 @@ struct Parameters {
     effects: array<vec4<f32>,2>,
     channel_curves: array<vec4<f32>,15>,
     curve_flags: vec4<u32>,
+    look: vec4<f32>,
+    look_flags: vec4<u32>,
+    work_to_look: mat3x3<f32>,
 }
 @group(0) @binding(0) var<storage, read> source: array<vec4<f32>>;
 @group(0) @binding(1) var<storage, read_write> results: array<vec4<f32>>;
 @group(0) @binding(2) var<uniform> parameters: Parameters;
 // One dummy entry when no captured transform is in use: the layout is fixed.
 @group(0) @binding(3) var<storage, read> cube: array<vec4<f32>>;
+// A creative LUT, likewise one dummy entry when there is none.
+@group(0) @binding(4) var<storage, read> look_table: array<vec4<f32>>;
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -41,13 +46,15 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let graded = vignette(grade(working), position, dims);
     // A captured transform replaces the whole rendering step, encode included,
     // and reads working values directly: its domain is the working space.
+    let scene = look_scene(graded);
     var encoded: vec3<f32>;
     if parameters.modes.y == 6u {
-        encoded = render_captured(graded);
+        encoded = render_captured(scene);
     } else {
-        let display = render_output(parameters.work_to_output * graded, parameters.modes.y);
+        let display = render_output(parameters.work_to_output * scene, parameters.modes.y);
         encoded = vec3<f32>(encode_srgb(display.r), encode_srgb(display.g), encode_srgb(display.b));
     }
+    encoded = look_display(encoded, graded);
     encoded = film_grain(encoded, position);
     if parameters.modes.w == 1u {
         results[id.x*3u] = vec4<f32>(working, pixel.a);

@@ -32,7 +32,7 @@ pub mod heal_blend;
 pub mod image_loader;
 pub mod image_processing;
 mod lens_correction;
-mod lut_processing;
+pub mod lut_processing;
 mod mask_generation;
 pub mod merge_discovery;
 pub mod model_library;
