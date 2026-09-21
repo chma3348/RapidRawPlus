@@ -14,9 +14,9 @@
 //! toward the new sky's colour, and adds haze near the horizon, so with
 //! either on the whole frame changes and the patch covers the whole frame.
 //! With both off only the sky and its edge band change, and the patch is
-//! limited to them. A whole-frame patch is stored as JPEG at quality 95
-//! rather than PNG: at 24 megapixels a PNG runs to tens of megabytes in the
-//! sidecar, which is rewritten on every edit.
+//! limited to them. Colour is stored as JPEG at quality 95 either way — a
+//! half-sky 33-megapixel frame came to 32 MB as PNG, in a sidecar that is
+//! rewritten on every edit — and the mask as lossless PNG.
 //!
 //! **RAW.** Patches from float sources are stored through a 1/2.4 curve, as
 //! the fill tool does, so the compositor works on that encoding of the scene
@@ -311,8 +311,9 @@ fn session_inputs(
     })
 }
 
-/// Patch data in the shape the fill tool writes.
-fn encode_patch(
+/// Patch data in the shape the fill tool writes. Public for the end-to-end
+/// probe that puts it back through both engines.
+pub fn encode_patch(
     base: &RgbImage,
     result: &RgbImage,
     alpha: &GrayImage,
@@ -321,24 +322,24 @@ fn encode_patch(
 ) -> Result<serde_json::Value, String> {
     let (w, h) = base.dimensions();
     let whole_frame = options.relight > 0.001 || options.haze > 0.001;
-    let (color_bytes, mask) = if whole_frame {
-        let mut bytes = Cursor::new(Vec::new());
-        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 95)
-            .encode_image(result)
-            .map_err(|e| e.to_string())?;
-        (bytes.into_inner(), GrayImage::from_pixel(w, h, image::Luma([255])))
+    let mask = if whole_frame {
+        GrayImage::from_pixel(w, h, image::Luma([255]))
     } else {
         // Only the sky and its edge band changed. Widen the mask a little so
         // the un-mixed rim — foreground pixels that lost their old-sky tint —
         // is carried by the patch too.
-        let mask = grow(alpha, ((w.max(h) as f32) * 0.004).ceil() as u32);
-        let colour = RgbImage::from_fn(w, h, |x, y| {
-            if mask.get_pixel(x, y)[0] > 0 { *result.get_pixel(x, y) } else { Rgb([0, 0, 0]) }
-        });
-        let mut bytes = Cursor::new(Vec::new());
-        colour.write_to(&mut bytes, ImageFormat::Png).map_err(|e| e.to_string())?;
-        (bytes.into_inner(), mask)
+        grow(alpha, ((w.max(h) as f32) * 0.004).ceil() as u32)
     };
+    // JPEG at quality 95 either way. A sky covering half of a 33-megapixel
+    // frame came to 32 MB as PNG, and the sidecar holding it is rewritten on
+    // every edit. Outside the mask the colour is ignored, so it keeps the
+    // real image rather than black: no hard edge for JPEG to ring against
+    // where the mask is partial. The mask itself stays lossless.
+    let mut color = Cursor::new(Vec::new());
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut color, 95)
+        .encode_image(result)
+        .map_err(|e| e.to_string())?;
+    let color_bytes = color.into_inner();
     let mut mask_bytes = Cursor::new(Vec::new());
     mask.write_to(&mut mask_bytes, ImageFormat::Png).map_err(|e| e.to_string())?;
     Ok(serde_json::json!({
