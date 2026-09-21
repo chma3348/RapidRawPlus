@@ -1,5 +1,40 @@
 # Color Engine v3 — implementation and verification
 
+## Where v3 stands — September 20, 2026
+
+**Colour chain.** Linear DaVinci Wide Gamut working space. Resolve's own input
+and output transforms, captured from this machine's Resolve 21.0.4 and
+installed as cubes, verified against Resolve's Photo page on six real
+photographs to within about a level out of 255 with no channel bias
+(`docs/resolve-output-transform.md`). Without the cubes, a built-in rendering
+with soft gamut compression.
+
+**Controls.** Exposure, warmth/tint, contrast and pivot, shadows, highlights,
+blacks, whites; luminance curve and red/green/blue curves (in DaVinci
+Intermediate, as Resolve's curves are); saturation, vibrance, hue; eight
+selective-colour bands and eight custom ranges with a picker; four grading
+wheels; dehaze, sharpening with threshold, texture, clarity, structure,
+luminance and colour noise reduction; vignette and grain.
+
+**Local work.** Brush, gradient and bitmap masks; colour and luminance range
+masks; detail inside masks; heal, clone, generative and Sky Replace patches.
+
+**Files.** JPEG, PNG, TIFF, WebP, HEIC, AVIF, Photoshop (flattened) and RAW,
+each with its colour profile honoured. 16-bit export with profile tags.
+
+**Speed, 24–33 megapixels on this machine.** First preview about 0.3 s; a
+slider move about 11 ms, 28 ms with masks; export about 1 s plus detail.
+
+**Not in v3.** Glow, halation and light flares; chromatic aberration; the
+centre control; flat-field correction; legacy LUTs (their colour-space
+contract is undefined for this engine); vignette and grain inside masks.
+The grading controls are v3's own, not yet Resolve's: matching them is
+prepared (`docs/resolve-controls.md`) and waits on fourteen captures.
+
+**Tests.** 260 library tests, the v3 GPU contracts (including forced chunk
+boundaries, preview/export agreement and the strip contract), frontend
+preset and history tests; `cargo fmt --check` and `clippy -D warnings` clean.
+
 ## Detail — September 20, 2026
 
 Sharpening (with threshold), texture, clarity, structure, and luminance and
