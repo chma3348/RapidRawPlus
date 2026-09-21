@@ -70,3 +70,13 @@ test('preset intensity fades detail toward neutral, threshold included', () => {
   delete legacy.detail;
   assert.deepEqual(mixV3Controls(legacy, 100).detail, defaultV3Controls().detail);
 });
+
+test('preset intensity fades effect amounts but keeps their shape', () => {
+  const base = defaultV3Controls();
+  const preset = { ...base, effects: { ...base.effects, vignette_amount: -60, vignette_midpoint: 20, grain_amount: 40, grain_size: 80 } };
+  const half = mixV3Controls(preset, 50);
+  assert.equal(half.effects.vignette_amount, -30);
+  assert.equal(half.effects.grain_amount, 20);
+  assert.equal(half.effects.vignette_midpoint, 20);
+  assert.equal(half.effects.grain_size, 80);
+});

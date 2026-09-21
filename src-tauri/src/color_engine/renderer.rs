@@ -267,10 +267,13 @@ impl ColorEngine {
         let mut output = Vec::with_capacity(input.as_raw().len());
         let mut working = capture.then(|| Vec::with_capacity(input.as_raw().len()));
         let mut graded = capture.then(|| Vec::with_capacity(input.as_raw().len()));
+        let mut first_pixel = 0u32;
         for chunk in input.as_raw().chunks(capacity * 4) {
             let count = chunk.len() / 4;
             let mut params = plan.parameters;
             params.modes[2] = count as u32;
+            params.frame = [width, height, first_pixel, 0];
+            first_pixel += count as u32;
             params.modes[3] = mode;
             queue.write_buffer(&source, 0, bytemuck::cast_slice(chunk));
             queue.write_buffer(&parameters, 0, bytemuck::bytes_of(&params));

@@ -42,6 +42,26 @@ export const defaultV3Detail = (): V3Detail => ({
   color_noise: 0,
 });
 
+/** Vignette and grain, with the previous engine's slider meanings. */
+export interface V3Effects {
+  vignette_amount: number;
+  vignette_midpoint: number;
+  vignette_roundness: number;
+  vignette_feather: number;
+  grain_amount: number;
+  grain_size: number;
+  grain_roughness: number;
+}
+export const defaultV3Effects = (): V3Effects => ({
+  vignette_amount: 0,
+  vignette_midpoint: 50,
+  vignette_roundness: 0,
+  vignette_feather: 50,
+  grain_amount: 0,
+  grain_size: 25,
+  grain_roughness: 50,
+});
+
 export interface V3Controls {
   revision: number;
   exposure: number;
@@ -61,6 +81,7 @@ export interface V3Controls {
   curve: number[];
   ranges: V3ColorRange[];
   detail: V3Detail;
+  effects: V3Effects;
 }
 export function defaultV3Controls(): V3Controls {
   return {
@@ -82,6 +103,7 @@ export function defaultV3Controls(): V3Controls {
     curve: [0, 0.25, 0.5, 0.75, 1],
     ranges: [],
     detail: defaultV3Detail(),
+    effects: defaultV3Effects(),
   };
 }
 
@@ -93,7 +115,17 @@ export function mixV3Controls(preset: Partial<V3Controls>, intensity: number): V
   const result = { ...target };
   for (const key of Object.keys(neutral) as (keyof V3Controls)[]) {
     if (key === 'revision') continue;
-    if (key === 'detail') {
+    if (key === 'effects') {
+      // Only the amounts fade: a half-strength preset keeps the vignette's
+      // shape and the grain's size, at half the effect.
+      const from = neutral.effects;
+      const to = { ...from, ...(target.effects ?? {}) };
+      result.effects = {
+        ...to,
+        vignette_amount: from.vignette_amount + (to.vignette_amount - from.vignette_amount) * fraction,
+        grain_amount: from.grain_amount + (to.grain_amount - from.grain_amount) * fraction,
+      };
+    } else if (key === 'detail') {
       // Every detail value fades toward neutral, the threshold included, so
       // a half-strength preset is a half-strength preset.
       const from = neutral.detail;

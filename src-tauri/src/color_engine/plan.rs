@@ -24,6 +24,14 @@ pub(crate) struct GpuParameters {
     pub range_center: [[f32; 4]; 8],
     pub range_width: [[f32; 4]; 8],
     pub range_adjustment: [[f32; 4]; 8],
+    /// Width, height, and the first pixel of the chunk being rendered — the
+    /// pass walks the image as a flat list, and effects need to know where a
+    /// pixel is. Set by the renderer per chunk.
+    pub frame: [u32; 4],
+    /// [vignette amount, midpoint, roundness, feather],
+    /// [grain amplitude, cell size in full-resolution pixels, roughness,
+    ///  render scale].
+    pub effects: [[f32; 4]; 2],
 }
 
 pub struct RenderPlan {
@@ -175,6 +183,21 @@ impl RenderPlan {
                     [r.width[0].to_radians(), r.width[1], r.width[2], 0.]
                 })
             }),
+            frame: [0; 4],
+            effects: [
+                [
+                    c.effects.vignette_amount / 100.,
+                    c.effects.vignette_midpoint / 100.,
+                    c.effects.vignette_roundness / 100.,
+                    c.effects.vignette_feather / 100.,
+                ],
+                [
+                    c.effects.grain_amount / 200. * 0.5,
+                    c.effects.grain_size / 50.,
+                    c.effects.grain_roughness / 100.,
+                    1.0,
+                ],
+            ],
             range_adjustment: std::array::from_fn(|i| {
                 c.ranges.get(i).map_or([0.; 4], |r| {
                     [
@@ -191,6 +214,12 @@ impl RenderPlan {
             parameters,
             cube,
         })
+    }
+
+    /// How much smaller than the full-resolution photograph the image being
+    /// rendered is, so grain keeps its size relative to the photograph.
+    pub fn set_render_scale(&mut self, scale: f32) {
+        self.parameters.effects[1][3] = scale.max(1e-4);
     }
 
     pub fn config(&self) -> &PipelineConfig {

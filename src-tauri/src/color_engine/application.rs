@@ -447,7 +447,12 @@ pub(crate) fn render_file_with_capture(
         });
     }
     let engine = &cache.as_ref().unwrap().engine;
-    let initial_plan = plan(source.color.clone(), controls, output_transform(state))?;
+    let grain = super::controls::Effects {
+        vignette_amount: 0.,
+        ..controls.effects.clone()
+    };
+    let mut initial_plan = plan(source.color.clone(), controls, output_transform(state))?;
+    initial_plan.set_render_scale(scale);
     if active.is_empty() {
         return engine.render(&image.to_rgba32f(), &initial_plan, capture);
     }
@@ -474,6 +479,12 @@ pub(crate) fn render_file_with_capture(
     };
     for mask in active {
         let local = self::controls(&mask.adjustments)?;
+        // Vignette and grain describe the whole frame; a mask carrying them
+        // would be applying a frame effect to part of a frame.
+        ensure!(
+            local.effects.is_neutral(),
+            "Vignette and grain apply to the whole photo, not inside a mask."
+        );
         // `is_neutral` is about the pointwise pass; detail is its own stage.
         if local.is_neutral() && local.detail.is_neutral() {
             continue;
@@ -523,11 +534,18 @@ pub(crate) fn render_file_with_capture(
     watch.lap("mask blends");
     // Only this last pass produces output, so only it renders through the
     // captured transform.
-    let frame = engine.render(
-        &working,
-        &plan(working_color, Controls::default(), output_transform(state))?,
-        false,
-    );
+    // The vignette is already in `working`; grain belongs on the finished
+    // image, which is this pass's, so it carries the grain settings.
+    let mut final_plan = plan(
+        working_color,
+        Controls {
+            effects: grain,
+            ..Controls::default()
+        },
+        output_transform(state),
+    )?;
+    final_plan.set_render_scale(scale);
+    let frame = engine.render(&working, &final_plan, false);
     watch.lap("final pass");
     frame
 }

@@ -194,7 +194,12 @@ fn gpu_color_pipeline_contracts() {
     let mut graded_plan_config = config();
     graded_plan_config.controls.exposure = 0.7;
     graded_plan_config.controls.saturation = 30.0;
-    let graded_plan = RenderPlan::build(graded_plan_config).unwrap();
+    // Vignette and grain depend on where a pixel is, so they are what proves
+    // each chunk knows its true position in the frame.
+    graded_plan_config.controls.effects.vignette_amount = -60.0;
+    graded_plan_config.controls.effects.grain_amount = 60.0;
+    let mut graded_plan = RenderPlan::build(graded_plan_config).unwrap();
+    graded_plan.set_render_scale(0.5);
     let reference = engine.render(&input, &graded_plan, true).unwrap();
     let reference_graded = engine.render_graded(&input, &graded_plan).unwrap();
     for pixels in [1000, 4096, 65536] {
@@ -433,6 +438,7 @@ fn gpu_color_pipeline_contracts() {
         );
     }
     captured_transform_contracts(&engine);
+    effects_contracts(&engine);
     application_contracts(&context);
     advanced_control_contracts(&engine);
     output_and_grading_contracts(&engine);
@@ -529,6 +535,20 @@ fn detail_contracts(context: &GpuContext) {
         render_file(context, &state, path, &brighter, None).unwrap().encoded_srgb,
         full.encoded_srgb
     );
+
+    // Grain belongs to the finished image, so it must survive the mask path
+    // — where the last pass has neutral controls of its own.
+    let grainy = json!({"processVersion":3,"v3":{"effects":{"grain_amount":80}},"masks":[]});
+    let grainy_masked = json!({"processVersion":3,"v3":{"effects":{"grain_amount":80}},"masks":[{
+        "id":"z","name":"z","visible":true,"invert":false,"opacity":0,
+        "adjustments":{"v3":{"exposure":0.5}},
+        "subMasks":[{"id":"l","type":"linear","visible":true,"mode":"additive",
+            "parameters":{"startX":0,"startY":1000,"endX":100,"endY":1000,"range":1}}]
+    }]});
+    let with_grain = render_file(context, &state, path, &grainy, None).unwrap();
+    assert_ne!(with_grain.encoded_srgb, base.encoded_srgb, "grain had no effect");
+    let gap = mean_gap(&render_file(context, &state, path, &grainy_masked, None).unwrap().encoded_srgb, &with_grain.encoded_srgb);
+    assert!(gap < 1e-4, "grain was lost or doubled when a mask was present: {gap}");
 
     // Detail inside a mask. Luminance is the same quantity in any primaries,
     // so a mask covering everything must do what the global control does.
@@ -706,6 +726,62 @@ fn application_contracts(context: &GpuContext) {
 /// The behaviours changed alongside the soft gamut mapper: wheels keyed to the
 /// tone-mapped image, a shadow wheel that can lift black, and out-of-gamut
 /// colours that stay distinguishable.
+/// Vignette and grain: position-dependent, so they get their own checks.
+fn effects_contracts(engine: &ColorEngine) {
+    let grey = ImageBuffer::from_pixel(200, 100, Rgba([0.3f32, 0.3, 0.3, 1.0]));
+    let render = |c: PipelineConfig| {
+        let mut plan = RenderPlan::build(c).unwrap();
+        plan.set_render_scale(1.0);
+        engine.render(&grey, &plan, false).unwrap().encoded_srgb
+    };
+    let base = render(config());
+    let mut dark = config();
+    dark.controls.effects.vignette_amount = -70.0;
+    let v = render(dark.clone());
+    let (centre, corner) = (v.get_pixel(100, 50)[0], v.get_pixel(0, 0)[0]);
+    assert!((centre - base.get_pixel(100, 50)[0]).abs() < 1e-4, "vignette touched the centre");
+    assert!(corner < base.get_pixel(0, 0)[0] - 0.05, "vignette did not darken the corner");
+    // Symmetric about the centre: all four corners alike.
+    for (x, y) in [(199, 0), (0, 99), (199, 99)] {
+        assert!((v.get_pixel(x, y)[0] - corner).abs() < 1e-3, "vignette not symmetric");
+    }
+    let mut light = config();
+    light.controls.effects.vignette_amount = 70.0;
+    assert!(render(light).get_pixel(0, 0)[0] > base.get_pixel(0, 0)[0] + 0.05);
+
+    // Grain: present, deterministic, roughly zero-mean, absent at zero.
+    let mut grainy = config();
+    grainy.controls.effects.grain_amount = 80.0;
+    let g = render(grainy.clone());
+    assert_eq!(g, render(grainy), "grain must be deterministic");
+    let deltas: Vec<f32> = g.pixels().zip(base.pixels()).map(|(a, b)| a[0] - b[0]).collect();
+    let mean = deltas.iter().sum::<f32>() / deltas.len() as f32;
+    let spread = (deltas.iter().map(|d| (d - mean).powi(2)).sum::<f32>() / deltas.len() as f32).sqrt();
+    assert!(spread > 0.005, "no visible grain: {spread}");
+    assert!(mean.abs() < spread * 0.5, "grain shifted the brightness: mean {mean} spread {spread}");
+    // Grain keeps its size relative to the photograph: rendering at half
+    // scale must sample the same pattern at half the pixel spacing.
+    let mut half = RenderPlan::build({
+        let mut c = config();
+        c.controls.effects.grain_amount = 80.0;
+        c
+    })
+    .unwrap();
+    half.set_render_scale(0.5);
+    let small = ImageBuffer::from_pixel(100, 50, Rgba([0.3f32, 0.3, 0.3, 1.0]));
+    let half_frame = engine.render(&small, &half, false).unwrap().encoded_srgb;
+    // Pixel (x, y) at half scale is centred on full-resolution (2x+1, 2y+1).
+    let mut agree = 0;
+    for (x, y) in [(10, 10), (40, 20), (70, 35), (25, 40)] {
+        let a = half_frame.get_pixel(x, y)[0] - base.get_pixel(0, 0)[0];
+        let b = g.get_pixel(2 * x + 1, 2 * y + 1)[0] - base.get_pixel(0, 0)[0];
+        if (a - b).abs() < 0.02 {
+            agree += 1;
+        }
+    }
+    assert!(agree >= 3, "grain pattern does not follow the render scale");
+}
+
 /// A transform captured from Resolve is only worth having if what runs on the
 /// GPU is the transform that was captured.
 fn captured_transform_contracts(engine: &ColorEngine) {

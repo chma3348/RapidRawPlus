@@ -11,6 +11,63 @@ pub struct ColorRange {
     pub adjustment: [f32; 3],
 }
 
+/// Vignette and grain, with the previous engine's slider meanings so they
+/// feel the same. Both depend on where a pixel is, not only its colour.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Effects {
+    /// -100..100: darken (negative) or lighten the corners, in stops.
+    pub vignette_amount: f32,
+    /// 0..100: where the falloff begins.
+    pub vignette_midpoint: f32,
+    /// -100..100: from rectangular to round.
+    pub vignette_roundness: f32,
+    /// 0..100: how gradual the falloff is.
+    pub vignette_feather: f32,
+    pub grain_amount: f32,
+    pub grain_size: f32,
+    pub grain_roughness: f32,
+}
+
+impl Default for Effects {
+    fn default() -> Self {
+        Self {
+            vignette_amount: 0.,
+            vignette_midpoint: 50.,
+            vignette_roundness: 0.,
+            vignette_feather: 50.,
+            grain_amount: 0.,
+            grain_size: 25.,
+            grain_roughness: 50.,
+        }
+    }
+}
+
+impl Effects {
+    pub fn validate(&self) -> Result<()> {
+        let within = |v: f32, a: f32, b: f32| v.is_finite() && (a..=b).contains(&v);
+        ensure!(
+            within(self.vignette_amount, -100., 100.)
+                && within(self.vignette_roundness, -100., 100.)
+                && [
+                    self.vignette_midpoint,
+                    self.vignette_feather,
+                    self.grain_amount,
+                    self.grain_size,
+                    self.grain_roughness
+                ]
+                .iter()
+                .all(|v| within(*v, 0., 100.)),
+            "Vignette and grain settings are out of range"
+        );
+        Ok(())
+    }
+
+    pub fn is_neutral(&self) -> bool {
+        self.vignette_amount == 0. && self.grain_amount == 0.
+    }
+}
+
 /// V3 controls have their own saved namespace. Legacy settings are never
 /// reinterpreted or overwritten when the user opts into this engine.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -41,6 +98,9 @@ pub struct Controls {
     /// Spatial controls, applied as their own stage before the pointwise GPU
     /// pass. Older v3 settings without this load as neutral.
     pub detail: super::detail::Detail,
+    /// Position-dependent effects: a vignette in the working space, grain on
+    /// the finished image. Older v3 settings without this load as neutral.
+    pub effects: Effects,
 }
 impl Default for Controls {
     fn default() -> Self {
@@ -63,6 +123,7 @@ impl Default for Controls {
             curve: Self::IDENTITY_CURVE,
             ranges: Vec::new(),
             detail: super::detail::Detail::default(),
+            effects: Effects::default(),
         }
     }
 }
@@ -112,6 +173,7 @@ impl Controls {
             "Curve points must stay ordered with at least 0.01 separation"
         );
         self.detail.validate()?;
+        self.effects.validate()?;
         ensure!(
             self.ranges.len() <= 8,
             "At most eight custom color ranges are supported"
@@ -169,6 +231,7 @@ impl Controls {
                     pivot: self.pivot,
                     ranges: self.ranges.clone(),
                     detail: self.detail.clone(),
+                    effects: self.effects.clone(),
                     ..Self::default()
                 }
     }

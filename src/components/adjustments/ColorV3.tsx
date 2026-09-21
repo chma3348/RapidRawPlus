@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next';
 import Slider from '../ui/Slider';
 import ColorV3Advanced from './ColorV3Advanced';
 import { useEditorStore } from '../../store/useEditorStore';
-import { defaultV3Controls, defaultV3Detail, V3Controls, V3Detail } from '../../utils/colorV3';
+import { defaultV3Controls, defaultV3Detail, defaultV3Effects, V3Controls, V3Detail, V3Effects } from '../../utils/colorV3';
 
 export function ColorV3Switch({
   adjustments,
@@ -95,12 +95,15 @@ export default function ColorV3Controls({
   setAdjustments,
   onDragStateChange,
   showDetail = true,
+  showEffects = true,
 }: {
   adjustments: any;
   setAdjustments: (fn: any) => void;
   onDragStateChange?: (v: boolean) => void;
   /** Lets a host hide the detail section; every current host shows it. */
   showDetail?: boolean;
+  /** Vignette and grain describe the whole frame, so masks do not offer them. */
+  showEffects?: boolean;
 }) {
   const { t } = useTranslation();
   const values: V3Controls = { ...defaultV3Controls(), ...adjustments.v3 };
@@ -135,6 +138,20 @@ export default function ColorV3Controls({
       defaultValue={fallback}
       onDragStateChange={onDragStateChange}
       onChange={(e: any) => update('detail', { ...detail, [key]: Number(e.target.value) })}
+    />
+  );
+  const effects: V3Effects = { ...defaultV3Effects(), ...values.effects };
+  const effectSlider = (key: keyof V3Effects, label: string, min: number, max: number) => (
+    <Slider
+      key={`effect-${key}`}
+      label={label}
+      value={effects[key]}
+      min={min}
+      max={max}
+      step={1}
+      defaultValue={defaultV3Effects()[key]}
+      onDragStateChange={onDragStateChange}
+      onChange={(e: any) => update('effects', { ...effects, [key]: Number(e.target.value) })}
     />
   );
   const bands = ['Red', 'Orange', 'Yellow', 'Green', 'Aqua', 'Blue', 'Purple', 'Magenta'];
@@ -245,6 +262,20 @@ export default function ColorV3Controls({
               defaultValue: 'Sharpening works at the scale of single pixels, so judge it at 100% zoom.',
             })}
           </p>
+        </>
+      )}
+      {showEffects && (
+        <>
+          <h3 className="mt-3 text-sm font-medium text-text-primary">
+            {t('colorV3.effects', { defaultValue: 'Vignette and grain' })}
+          </h3>
+          {effectSlider('vignette_amount', t('colorV3.vignette', { defaultValue: 'Vignette' }), -100, 100)}
+          {effectSlider('vignette_midpoint', t('colorV3.vignetteMidpoint', { defaultValue: 'Vignette midpoint' }), 0, 100)}
+          {effectSlider('vignette_roundness', t('colorV3.vignetteRoundness', { defaultValue: 'Vignette roundness' }), -100, 100)}
+          {effectSlider('vignette_feather', t('colorV3.vignetteFeather', { defaultValue: 'Vignette feather' }), 0, 100)}
+          {effectSlider('grain_amount', t('colorV3.grain', { defaultValue: 'Grain' }), 0, 100)}
+          {effectSlider('grain_size', t('colorV3.grainSize', { defaultValue: 'Grain size' }), 0, 100)}
+          {effectSlider('grain_roughness', t('colorV3.grainRoughness', { defaultValue: 'Grain roughness' }), 0, 100)}
         </>
       )}
     </div>
