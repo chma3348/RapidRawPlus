@@ -1,4 +1,5 @@
 import { Crop } from 'react-image-crop';
+import type { V3Controls } from './colorV3';
 import { v4 as uuidv4 } from 'uuid';
 import { SubMask, SubMaskMode } from '../components/panel/right/Masks';
 
@@ -225,6 +226,8 @@ export interface Adjustments {
   tint: number;
   toneMapper: 'agx' | 'basic' | 'filmic';
   processVersion?: number;
+  v3?: V3Controls;
+  v3PreviousVersion?: number;
   transformDistortion: number;
   transformVertical: number;
   transformHorizontal: number;
@@ -777,7 +780,7 @@ export const ADJUSTMENT_GROUPS: Record<string, AdjustmentGroup[]> = {
   basic: [
     {
       label: 'modals.copyPaste.groups.exposureToneMapper',
-      keys: [BasicAdjustment.Exposure, 'toneMapper', 'processVersion'],
+      keys: [BasicAdjustment.Exposure, 'toneMapper', 'processVersion', 'v3', 'v3PreviousVersion'],
     },
     {
       label: 'modals.copyPaste.groups.tone',
@@ -900,6 +903,8 @@ export const ADJUSTMENT_SECTIONS: Sections = {
     'toneMapper',
     'contrastPivot',
     'processVersion',
+    'v3',
+    'v3PreviousVersion',
   ],
   curves: ['curves', 'pointCurves', 'parametricCurve', 'curveMode'],
   color: [

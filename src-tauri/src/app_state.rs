@@ -156,6 +156,9 @@ pub struct AppState {
     /// luminance range masks sample. Keyed by source, geometry and patches:
     /// everything that changes what the picture is before it is graded.
     pub v3_sampling: Mutex<Option<(u64, std::sync::Arc<image::DynamicImage>)>>,
+    /// The prepared image with detail applied. Detail is spatial and the
+    /// slowest v3 stage, so moving any other slider must not redo it.
+    pub v3_detail: Mutex<Option<crate::color_engine::application::DetailCache>>,
     pub cached_preview: Mutex<Option<CachedPreview>>,
     pub gpu_context: Mutex<Option<GpuContext>>,
     pub gpu_image_cache: Mutex<Option<GpuImageCache>>,
@@ -213,6 +216,7 @@ impl Default for AppState {
             v3_engine: Mutex::new(None),
             v3_prepared: Mutex::new(None),
             v3_sampling: Mutex::new(None),
+            v3_detail: Mutex::new(None),
             cached_preview: Mutex::new(None),
             gpu_context: Mutex::new(None),
             gpu_image_cache: Mutex::new(None),

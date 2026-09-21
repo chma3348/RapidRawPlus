@@ -4,6 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
 import BasicAdjustments from '../../adjustments/Basic';
+import ColorV3Controls, {ColorV3Switch} from '../../adjustments/ColorV3';
 import CurveGraph from '../../adjustments/Curves';
 import ColorPanel from '../../adjustments/Color';
 import DetailsPanel from '../../adjustments/Details';
@@ -221,7 +222,7 @@ export default function Controls() {
         <div className="flex items-center gap-1">
           <button
             className="p-2 rounded-full hover:bg-surface disabled:cursor-not-allowed transition-colors"
-            disabled={!selectedImage?.isReady}
+            disabled={!selectedImage?.isReady || adjustments.processVersion === 3}
             onClick={handleAutoAdjustments}
             data-tooltip={t('editor.adjustments.tooltips.autoAdjust')}
           >
@@ -279,7 +280,8 @@ export default function Controls() {
       </AnimatePresence>
 
       <div className="grow overflow-y-scroll p-4 flex flex-col gap-2">
-        {Object.keys(ADJUSTMENT_SECTIONS).map((sectionName: string) => {
+        <ColorV3Switch adjustments={adjustments} setAdjustments={setAdjustments}/>
+        {adjustments.processVersion === 3 ? <ColorV3Controls adjustments={adjustments} setAdjustments={setAdjustments} onDragStateChange={onDragStateChange}/> : Object.keys(ADJUSTMENT_SECTIONS).map((sectionName: string) => {
           const SectionComponent: any = {
             basic: BasicAdjustments,
             curves: CurveGraph,

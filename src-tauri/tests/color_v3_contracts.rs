@@ -425,6 +425,92 @@ fn gpu_color_pipeline_contracts() {
     );
 }
 
+/// Detail through the application path, on an image with something to act on.
+fn detail_contracts(context: &GpuContext) {
+    use rapidraw_lib::color_engine::application::render_file;
+    use serde_json::json;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("textured.png");
+    // Soft blobs at a few scales: clarity and structure have something to find.
+    ImageBuffer::from_fn(512, 256, |x, y| {
+        let (fx, fy) = (x as f32, y as f32);
+        let v = 0.45
+            + 0.2 * (fx / 37.0).sin() * (fy / 29.0).cos()
+            + 0.1 * (fx / 9.0).sin() * (fy / 11.0).sin();
+        let c = (v.clamp(0.0, 1.0) * 255.0) as u8;
+        Rgba([c, (c as f32 * 0.85) as u8, (c as f32 * 0.7) as u8, 255])
+    })
+    .save(&path)
+    .unwrap();
+    let path = path.to_str().unwrap();
+    let state = rapidraw_lib::AppState::default();
+    let neutral = json!({"processVersion":3,"v3":{},"masks":[]});
+    let base = render_file(context, &state, path, &neutral, None).unwrap();
+
+    // Neutral detail is exactly no detail.
+    let idle = json!({"processVersion":3,"v3":{"detail":{"threshold":40}},"masks":[]});
+    assert_eq!(
+        render_file(context, &state, path, &idle, None).unwrap().encoded_srgb,
+        base.encoded_srgb,
+        "a threshold with no sharpening changed the image"
+    );
+
+    let clarity = json!({"processVersion":3,"v3":{"detail":{"clarity":80,"structure":60}},"masks":[]});
+    let full = render_file(context, &state, path, &clarity, None).unwrap();
+    assert_ne!(full.encoded_srgb, base.encoded_srgb, "detail had no effect");
+
+    // The preview must show what the export will do. Radii scale with the
+    // preview, so a quarter-size render should match the full render scaled
+    // down — not exactly, a smaller image cannot hold the same detail, but
+    // closely, and much closer than to the image without the edit.
+    let preview = render_file(context, &state, path, &clarity, Some(128)).unwrap();
+    let down = image::imageops::resize(
+        &full.encoded_srgb,
+        preview.encoded_srgb.width(),
+        preview.encoded_srgb.height(),
+        image::imageops::FilterType::Triangle,
+    );
+    let base_down = image::imageops::resize(
+        &base.encoded_srgb,
+        preview.encoded_srgb.width(),
+        preview.encoded_srgb.height(),
+        image::imageops::FilterType::Triangle,
+    );
+    let mean_gap = |a: &image::Rgba32FImage, b: &image::Rgba32FImage| {
+        a.as_raw().iter().zip(b.as_raw()).map(|(x, y)| (x - y).abs()).sum::<f32>()
+            / a.as_raw().len() as f32
+    };
+    let to_preview = mean_gap(&preview.encoded_srgb, &down);
+    let effect = mean_gap(&down, &base_down);
+    assert!(
+        to_preview < effect * 0.35,
+        "preview does not show what the export does: preview differs by {to_preview}, the edit itself is {effect}"
+    );
+
+    // A cached detail pass must not survive a change to it.
+    let stronger = json!({"processVersion":3,"v3":{"detail":{"clarity":100,"structure":60}},"masks":[]});
+    assert_ne!(
+        render_file(context, &state, path, &stronger, None).unwrap().encoded_srgb,
+        full.encoded_srgb,
+        "detail cache returned a stale result"
+    );
+    // Other sliders reuse it, and still take effect.
+    let brighter = json!({"processVersion":3,"v3":{"exposure":0.5,"detail":{"clarity":80,"structure":60}},"masks":[]});
+    assert_ne!(
+        render_file(context, &state, path, &brighter, None).unwrap().encoded_srgb,
+        full.encoded_srgb
+    );
+
+    // Detail inside a mask is refused out loud, not silently ignored.
+    let masked = json!({"processVersion":3,"v3":{},"masks":[{
+        "id":"m","name":"m","visible":true,"invert":false,"opacity":100,
+        "adjustments":{"v3":{"detail":{"clarity":50}}},
+        "subMasks":[{"id":"l","type":"linear","visible":true,"mode":"additive",
+            "parameters":{"startX":0,"startY":1000,"endX":100,"endY":1000,"range":1}}]
+    }]});
+    assert!(render_file(context, &state, path, &masked, None).is_err());
+}
+
 fn application_contracts(context: &GpuContext) {
     use rapidraw_lib::color_engine::application::render_file;
     use serde_json::json;
@@ -524,6 +610,7 @@ fn application_contracts(context: &GpuContext) {
             "a colour range that matches nothing must change nothing: {a} {b}"
         );
     }
+    detail_contracts(context);
     let mut invalid = neutral.clone();
     invalid["v3"]["revision"] = json!(999);
     assert!(render_file(context, &state, path, &invalid, None).is_err());

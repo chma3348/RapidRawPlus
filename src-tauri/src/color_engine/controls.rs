@@ -38,6 +38,9 @@ pub struct Controls {
     /// Five fixed input knots in log2(1+16Y)/log2(17). Endpoints stay 0 and 1.
     pub curve: [f32; 5],
     pub ranges: Vec<ColorRange>,
+    /// Spatial controls, applied as their own stage before the pointwise GPU
+    /// pass. Older v3 settings without this load as neutral.
+    pub detail: super::detail::Detail,
 }
 impl Default for Controls {
     fn default() -> Self {
@@ -59,6 +62,7 @@ impl Default for Controls {
             grading: [[0.; 3]; 4],
             curve: Self::IDENTITY_CURVE,
             ranges: Vec::new(),
+            detail: super::detail::Detail::default(),
         }
     }
 }
@@ -107,6 +111,7 @@ impl Controls {
             self.curve.windows(2).all(|p| p[1] - p[0] >= 0.00999),
             "Curve points must stay ordered with at least 0.01 separation"
         );
+        self.detail.validate()?;
         ensure!(
             self.ranges.len() <= 8,
             "At most eight custom color ranges are supported"
@@ -163,6 +168,7 @@ impl Controls {
                 == &Self {
                     pivot: self.pivot,
                     ranges: self.ranges.clone(),
+                    detail: self.detail.clone(),
                     ..Self::default()
                 }
     }

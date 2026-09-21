@@ -20,6 +20,11 @@ pub struct EngineCache {
     device: Arc<wgpu::Device>,
     engine: ColorEngine,
 }
+pub struct DetailCache {
+    source: Arc<DecodedFrame>,
+    key: u64,
+    image: Arc<DynamicImage>,
+}
 pub struct PreparedCache {
     source: Arc<DecodedFrame>,
     transform: u64,
@@ -155,6 +160,51 @@ pub fn input_transform(state: &AppState) -> Option<PathBuf> {
     state.input_transform.lock().unwrap().clone()
 }
 
+/// The prepared image with detail applied, cached against everything that
+/// determines it, so dragging any other slider does not redo a spatial pass.
+#[allow(clippy::too_many_arguments)]
+fn detailed(
+    state: &AppState,
+    source: &Arc<DecodedFrame>,
+    image: Arc<DynamicImage>,
+    detail: &super::detail::Detail,
+    transform: u64,
+    patches: u64,
+    dimension: Option<u32>,
+    scale: f32,
+) -> Result<Arc<DynamicImage>> {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    serde_json::to_string(detail)?.hash(&mut hasher);
+    transform.hash(&mut hasher);
+    patches.hash(&mut hasher);
+    dimension.hash(&mut hasher);
+    scale.to_bits().hash(&mut hasher);
+    let key = hasher.finish();
+    if let Ok(cache) = state.v3_detail.lock()
+        && let Some(c) = cache.as_ref()
+        && Arc::ptr_eq(&c.source, source)
+        && c.key == key
+    {
+        return Ok(c.image.clone());
+    }
+    // Luminance in the source's own primaries: the prepared image has not
+    // been converted to the working space yet.
+    let y = super::spaces::rgb_to_xyz(source.color.primaries).row(1);
+    let weights = [y.x as f32, y.y as f32, y.z as f32];
+    let mut pixels = image.to_rgba32f();
+    super::detail::apply(&mut pixels, detail, weights, scale);
+    let result = Arc::new(DynamicImage::ImageRgba32F(pixels));
+    if let Ok(mut cache) = state.v3_detail.lock() {
+        *cache = Some(DetailCache {
+            source: source.clone(),
+            key,
+            image: result.clone(),
+        });
+    }
+    Ok(result)
+}
+
 /// What a colour or luminance range mask samples: the picture as it stands
 /// before grading, at full resolution.
 fn sampling_image(
@@ -271,6 +321,11 @@ pub(crate) fn render_file_with_capture(
     let p = prepared.as_ref().unwrap();
     let (image, offset, scale) = (p.image.clone(), p.offset, p.scale);
     drop(prepared);
+    let image = if controls.detail.is_neutral() {
+        image
+    } else {
+        detailed(state, &source, image, &controls.detail, transform, patches, max_dimension, scale)?
+    };
     let masks: Vec<crate::mask_generation::MaskDefinition> =
         serde_json::from_value(edits.get("masks").cloned().unwrap_or(serde_json::json!([])))
             .context("Invalid mask definitions")?;
@@ -334,6 +389,12 @@ pub(crate) fn render_file_with_capture(
     };
     for mask in active {
         let local = self::controls(&mask.adjustments)?;
+        // Said rather than silently dropped: a mask's detail values would
+        // otherwise be ignored, and look like a control that does nothing.
+        ensure!(
+            local.detail.is_neutral(),
+            "V3 does not yet apply sharpening, clarity or noise reduction inside a mask. Use them globally, or the previous engine."
+        );
         if local.is_neutral() {
             continue;
         }

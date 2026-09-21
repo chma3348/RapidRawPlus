@@ -23,7 +23,7 @@ export function useImageLoader(cachedEditStateRef: React.RefObject<any>) {
   const setLibrary = useLibraryStore((s) => s.setLibrary);
   const appSettings = useSettingsStore((s) => s.appSettings);
 
-  const isWgpuActive = appSettings?.useWgpuRenderer !== false && selectedImage?.isReady && hasRenderedFirstFrame;
+  const isWgpuActive = adjustments.processVersion !== 3 && appSettings?.useWgpuRenderer !== false && selectedImage?.isReady && hasRenderedFirstFrame;
 
   useEffect(() => {
     if (selectedImage && !selectedImage.isReady && selectedImage.path) {

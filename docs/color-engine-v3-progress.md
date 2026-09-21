@@ -1,5 +1,43 @@
 # Color Engine v3 — implementation and verification
 
+## Detail — September 20, 2026
+
+Sharpening (with threshold), texture, clarity, structure, and luminance and
+colour noise reduction. The last of the three things that stopped v3 being an
+engine you could finish a photo in.
+
+Everything else in v3 is pointwise, which is why its GPU pass walks the image
+in one-dimensional chunks. Detail is defined by neighbourhoods, so it runs as
+its own stage on the prepared image, before that pass. It acts on luminance in
+log2 and scales RGB by the ratio: sharpening cannot put colour fringes on an
+edge, and a control does the same thing in the shadows as in the highlights.
+Colour noise reduction acts on chromaticity — colour with luminance divided out
+— through a guided filter steered by luminance, so it cannot change brightness
+and does not bleed colour across edges.
+
+Radii are the previous engine's (1, 3.5, 8 and 40 full-resolution pixels),
+scaled with the preview. The preview shows what the export will do: a
+quarter-size render matches the downscaled full render far more closely than
+the size of the edit itself. Single-pixel sharpening is the exception no
+preview can escape, and the panel says to judge it at 100%.
+
+The tiling contract: large exports are processed in horizontal strips read with
+a halo wider than every filter that runs on them, and
+`strips_match_the_whole_image` holds that a strip boundary changes no pixel.
+
+Cost at 33 megapixels, this machine: sharpening 84 ms, clarity and structure
+199 ms, both noise reductions 564 ms, everything 801 ms. The result is cached
+against the prepared image and the detail settings, so other sliders do not
+redo it.
+
+Detail inside masks is refused with a message rather than silently ignored;
+the mask panel does not offer it. Dehaze, the centre control and chromatic
+aberration are not ported.
+
+Also fixed: the v3 panel still refused to switch on for photos with patches and
+still said patches and colour-range masks were unavailable, although both had
+been supported since the previous change. Neither was reachable until now.
+
 ## Patches and range masks — September 20, 2026
 
 Two of the three things that stopped v3 being an engine you could finish a

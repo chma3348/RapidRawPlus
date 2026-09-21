@@ -42,6 +42,7 @@ import Text from '../../ui/Text';
 import Slider from '../../ui/Slider';
 import { TextColors, TextVariants, TextWeights } from '../../../types/typography';
 import { Adjustments, INITIAL_ADJUSTMENTS, ADJUSTMENT_GROUPS } from '../../../utils/adjustments';
+import { mixV3Controls } from '../../../utils/colorV3';
 import { Invokes, OPTION_SEPARATOR, Panel, Preset, SelectedImage } from '../../ui/AppProperties';
 import { useEditorStore } from '../../../store/useEditorStore';
 import { useUIStore } from '../../../store/useUIStore';
@@ -129,7 +130,11 @@ const mixAdjustments = (presetObj: any, intensity: number, initialObj: any = INI
   const fraction = intensity / 100;
 
   if (fraction === 1) return { ...presetObj };
-  if (fraction === 0) return { ...initialObj };
+  if (fraction === 0) return {
+    ...initialObj,
+    ...(presetObj.processVersion !== undefined ? {processVersion: presetObj.processVersion} : {}),
+    ...(presetObj.v3 ? {v3: mixV3Controls(presetObj.v3, 0)} : {}),
+  };
 
   const result: any = {};
   const keys = Object.keys(presetObj);
@@ -139,7 +144,11 @@ const mixAdjustments = (presetObj: any, intensity: number, initialObj: any = INI
     const presetVal = presetObj[key];
     const initialVal = initialObj[key] !== undefined ? initialObj[key] : (INITIAL_ADJUSTMENTS as any)[key];
 
-    if (typeof presetVal === 'number') {
+    if (key === 'processVersion' || key === 'v3PreviousVersion' || key === 'revision') {
+      result[key] = presetVal;
+    } else if (key === 'v3') {
+      result[key] = mixV3Controls(presetVal, intensity);
+    } else if (typeof presetVal === 'number') {
       result[key] = typeof initialVal === 'number' ? initialVal + (presetVal - initialVal) * fraction : presetVal;
     } else if (Array.isArray(presetVal)) {
       if (!Array.isArray(initialVal)) {
@@ -677,7 +686,7 @@ export default function PresetsPanel({ onNavigateToCommunity }: PresetsPanelProp
           break;
         }
 
-        const blob = new Blob([imageData], { type: 'image/jpeg' });
+        const blob = new Blob([Uint8Array.from(imageData)], { type: fullPresetAdjustments.processVersion === 3 ? 'image/png' : 'image/jpeg' });
         const url = URL.createObjectURL(blob);
         setPreviews((prev: Record<string, string | null>) => {
           const oldUrl = prev[preset.id];
@@ -743,7 +752,7 @@ export default function PresetsPanel({ onNavigateToCommunity }: PresetsPanelProp
 
         if (pathAtStart !== currentImagePathRef.current) return;
 
-        const blob = new Blob([imageData], { type: 'image/jpeg' });
+        const blob = new Blob([Uint8Array.from(imageData)], { type: fullPresetAdjustments.processVersion === 3 ? 'image/png' : 'image/jpeg' });
         const url = URL.createObjectURL(blob);
 
         setPreviews((prev: Record<string, string | null>) => {

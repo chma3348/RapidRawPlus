@@ -188,6 +188,7 @@ export function useImageProcessing(
         if (currentPath !== selectedImagePathRef.current) return;
 
         if (buffer && buffer.byteLength > 0 && jobId >= latestRenderedJobIdRef.current) {
+          setEditor({colorV3Error: null});
           latestRenderedJobIdRef.current = jobId;
 
           const textDecoder = new TextDecoder();
@@ -210,7 +211,7 @@ export function useImageProcessing(
             const fullH = view.getUint32(20, true);
 
             const imageBuffer = buffer.slice(24);
-            const blob = new Blob([imageBuffer], { type: 'image/jpeg' });
+            const blob = new Blob([imageBuffer], { type: payload.processVersion === 3 ? 'image/png' : 'image/jpeg' });
             const url = URL.createObjectURL(blob);
 
             setEditor((state) => {
@@ -227,7 +228,7 @@ export function useImageProcessing(
               };
             });
           } else {
-            const blob = new Blob([buffer], { type: 'image/jpeg' });
+            const blob = new Blob([buffer], { type: payload.processVersion === 3 ? 'image/png' : 'image/jpeg' });
             const url = URL.createObjectURL(blob);
 
             if (currentPath !== selectedImagePathRef.current || jobId < latestRenderedJobIdRef.current) {
@@ -256,6 +257,9 @@ export function useImageProcessing(
           }
         }
       } catch (err) {
+        if (payload.processVersion === 3 && currentPath === selectedImagePathRef.current && err !== 'Superseded or worker failed') {
+          setEditor({colorV3Error: String(err)});
+        }
         if (err !== 'Superseded or worker failed') {
           console.error('Failed to apply adjustments:', err);
         }

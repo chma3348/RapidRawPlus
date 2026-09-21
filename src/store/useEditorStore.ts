@@ -15,6 +15,7 @@ export interface InteractivePatch {
 }
 
 interface EditorState {
+  colorV3Error: string | null;
   maskMatteView: boolean;
   setMaskMatteView: (v: boolean) => void;
   // Core Image & Adjustments
@@ -97,6 +98,7 @@ export const useEditorStore = create<EditorState>((set) => ({
   historyIndex: 0,
 
   finalPreviewUrl: null,
+  colorV3Error: null,
   uncroppedAdjustedPreviewUrl: null,
   showOriginal: false,
   histogram: null,

@@ -5,6 +5,7 @@ pub mod config;
 pub mod application;
 pub mod controls;
 pub mod cube;
+pub mod detail;
 pub mod patches;
 pub mod selection;
 pub mod input;
