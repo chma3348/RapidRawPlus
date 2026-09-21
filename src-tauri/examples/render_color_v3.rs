@@ -12,9 +12,12 @@ use std::{
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args_os().collect();
     ensure!(
-        args.len() == 4,
-        "Usage: render_color_v3 INPUT NEW_OUTPUT_DIRECTORY CONFIG_JSON_OR_auto_OR_raw_OR_raw-fast"
+        (4..=5).contains(&args.len()),
+        "Usage: render_color_v3 INPUT NEW_OUTPUT_DIRECTORY CONFIG_JSON_OR_auto_OR_raw_OR_raw-fast [CAPTURED.cube]"
     );
+    // An optional captured transform, so the built-in rendering and Resolve's
+    // can be produced from one decode and differ in exactly one step.
+    let captured = args.get(4).map(std::path::PathBuf::from);
     let input_path = PathBuf::from(&args[1]);
     let output = PathBuf::from(&args[2]);
     let bytes = std::fs::read(&input_path)?;
@@ -27,17 +30,17 @@ fn main() -> Result<()> {
         } else {
             rapidraw_lib::color_engine::raw::decode_raw(&bytes, args[3] == "raw-fast", || Ok(()))?
         };
-        let output_rendering = if decoded.color.reference == ReferenceDomain::Scene {
-            OutputRendering::SceneShoulderV1
-        } else {
-            OutputRendering::DisplayPassthroughV1
+        let output_rendering = match (&captured, decoded.color.reference) {
+            (Some(_), _) => OutputRendering::ResolveCubeV1,
+            (None, ReferenceDomain::Scene) => OutputRendering::SceneLuminanceV2,
+            (None, ReferenceDomain::Display) => OutputRendering::DisplayGamutV2,
         };
         let config = PipelineConfig {
             controls: Default::default(),
             process_version: 3,
             source: decoded.color,
             working_space: Primaries::DavinciWideGamut,
-            output_lut: None,
+            output_lut: captured.clone(),
             output_rendering,
         };
         (decoded.pixels, config, Some(decoded.provenance))

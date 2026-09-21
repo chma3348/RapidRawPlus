@@ -37,6 +37,11 @@ struct Manifest {
     /// pointwise, so this changes measurement cost, not measured behaviour.
     #[serde(default = "default_size")]
     max_dimension: u32,
+    /// A transform captured from Resolve. When present every case renders
+    /// through it instead of the built-in rendering, so the two runs differ
+    /// in exactly one thing.
+    #[serde(default)]
+    output_transform: Option<PathBuf>,
     fixtures: Vec<Fixture>,
     cases: Vec<Case>,
 }
@@ -223,16 +228,17 @@ fn main() -> Result<()> {
     let mut measurements = Vec::new();
     for fixture in &manifest.fixtures {
         let (pixels, color) = load(&fixture.path, manifest.max_dimension)?;
-        let rendering = match color.reference {
-            ReferenceDomain::Scene => OutputRendering::SceneLuminanceV2,
-            ReferenceDomain::Display => OutputRendering::DisplayGamutV2,
+        let rendering = match (&manifest.output_transform, color.reference) {
+            (Some(_), _) => OutputRendering::ResolveCubeV1,
+            (None, ReferenceDomain::Scene) => OutputRendering::SceneLuminanceV2,
+            (None, ReferenceDomain::Display) => OutputRendering::DisplayGamutV2,
         };
         for case in &manifest.cases {
             let plan = RenderPlan::build(PipelineConfig {
                 process_version: 3,
                 source: color.clone(),
                 working_space: Primaries::DavinciWideGamut,
-                output_lut: None,
+                output_lut: manifest.output_transform.clone(),
                 output_rendering: rendering,
                 controls: case.controls.clone(),
             })?;

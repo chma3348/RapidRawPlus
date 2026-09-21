@@ -102,7 +102,19 @@ fn plan(
     controls: Controls,
     output_transform: Option<PathBuf>,
 ) -> Result<RenderPlan> {
-    let output_rendering = match (&output_transform, color.reference) {
+    // A captured output transform maps *scene* values to a display, so it
+    // belongs only on scene-referred sources. A rendered photograph has
+    // already been through someone's rendering: putting it through a second
+    // one tone-maps it twice and darkens everything — measured at mid grey,
+    // sRGB 0.461 in, 0.351 out. Resolve does not do that either; it pairs
+    // this transform with an input transform that undoes the first rendering.
+    // Until that input transform is captured too, rendered photographs keep
+    // the built-in path.
+    let captured = match color.reference {
+        ReferenceDomain::Scene => output_transform,
+        ReferenceDomain::Display => None,
+    };
+    let output_rendering = match (&captured, color.reference) {
         (Some(_), _) => OutputRendering::ResolveCubeV1,
         (None, ReferenceDomain::Scene) => OutputRendering::SceneLuminanceV2,
         (None, ReferenceDomain::Display) => OutputRendering::DisplayGamutV2,
@@ -112,7 +124,7 @@ fn plan(
         source: color,
         working_space: Primaries::DavinciWideGamut,
         output_rendering,
-        output_lut: output_transform,
+        output_lut: captured,
         controls,
     })
 }
