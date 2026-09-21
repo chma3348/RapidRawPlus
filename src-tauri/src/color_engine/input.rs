@@ -220,20 +220,26 @@ fn convert_rgb_profile(input: &Rgba32FImage, profile: &ColorProfile) -> Result<R
             ..Default::default()
         },
     )?;
+    // One call over the whole image runs on one core; the transform is
+    // per-pixel, so blocks of it can run on all of them.
+    use rayon::prelude::*;
     let mut pixels = vec![0.0; input.as_raw().len()];
-    transform.transform(input.as_raw(), &mut pixels)?;
-    // Alpha is coverage, never a color coordinate.
-    for (src, dst) in input
-        .as_raw()
-        .chunks_exact(4)
-        .zip(pixels.chunks_exact_mut(4))
-    {
-        dst[3] = src[3];
-    }
-    ensure!(
-        pixels.iter().all(|v| v.is_finite()),
-        "ICC conversion produced non-finite pixels"
-    );
+    const BLOCK: usize = 16384 * 4;
+    pixels
+        .par_chunks_mut(BLOCK)
+        .zip(input.as_raw().par_chunks(BLOCK))
+        .try_for_each(|(dst, src)| {
+            transform.transform(src, dst)?;
+            // Alpha is coverage, never a color coordinate.
+            for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
+                d[3] = s[3];
+            }
+            anyhow::ensure!(
+                dst.iter().all(|v| v.is_finite()),
+                "ICC conversion produced non-finite pixels"
+            );
+            Ok::<(), anyhow::Error>(())
+        })?;
     image::ImageBuffer::from_raw(input.width(), input.height(), pixels)
         .context("Invalid input dimensions")
 }
@@ -401,5 +407,23 @@ mod tests {
             }
             assert_eq!(frame.pixels.dimensions(), (16, 8), "{format} changed size");
         }
+    }
+
+    /// Decode cost on a real 33-megapixel JPEG, when it is on this machine.
+    /// `cargo test --release --lib decode_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn decode_cost() {
+        let path = std::path::Path::new(&std::env::var("HOME").unwrap())
+            .join("Desktop/Test Photos/NYC/DSC08270.JPG");
+        let Ok(bytes) = std::fs::read(&path) else { return };
+        let start = std::time::Instant::now();
+        let frame = decode_profiled_photo(&bytes).unwrap();
+        println!(
+            "decode + profile, {}x{}: {:.0} ms",
+            frame.pixels.width(),
+            frame.pixels.height(),
+            start.elapsed().as_secs_f64() * 1000.0
+        );
     }
 }

@@ -211,13 +211,16 @@ pub fn apply_input_transform(cube: &CubeLut, pixels: &mut image::Rgba32FImage) {
             (v / 0.07329248 - 7.0).exp2() - 0.0075
         }
     };
-    for pixel in pixels.pixels_mut() {
+    // Once per photograph, but on every photograph opened in v3 — in
+    // parallel, it costs a fraction of the decode it follows.
+    use rayon::prelude::*;
+    pixels.as_mut().par_chunks_mut(4).for_each(|pixel| {
         let encoded: [f32; 3] = std::array::from_fn(|c| encode(pixel[c].clamp(0.0, 1.0)));
         let logged = cube.sample(encoded);
         for c in 0..3 {
             pixel[c] = decode_intermediate(logged[c]);
         }
-    }
+    });
 }
 
 #[cfg(test)]
@@ -272,5 +275,21 @@ mod input_tests {
             }
             assert_eq!(a[3], b[3], "alpha is not colour");
         }
+    }
+
+    /// What the input transform costs on a 33-megapixel photograph.
+    /// `cargo test --release --lib input_transform_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn input_transform_cost() {
+        let path = std::path::Path::new(&std::env::var("HOME").unwrap())
+            .join("Library/Application Support/io.github.CyberTimon.RapidRAW/input-transform.cube");
+        let Ok(cube) = CubeLut::load(&path) else { return };
+        let mut image = image::ImageBuffer::from_fn(7008, 4672, |x, y| {
+            image::Rgba([(x % 256) as f32 / 300.0, (y % 256) as f32 / 300.0, 0.2, 1.0])
+        });
+        let start = std::time::Instant::now();
+        apply_input_transform(&cube, &mut image);
+        println!("input transform, 33 MP: {:.0} ms", start.elapsed().as_secs_f64() * 1000.0);
     }
 }
