@@ -48,6 +48,29 @@ fn tone_curve(y:f32) -> f32 {
     }
     return (exp2(mapped*log2(17.0))-1.0)/16.0;
 }
+// One channel through its curve, in DaVinci Intermediate: the encoding
+// Resolve's curves act in, so a channel curve here bends the same values a
+// Resolve curve would. Monotone cubic between the knots; beyond the ends the
+// end tangents continue, so values outside the encoding are not clamped.
+fn channel_curve(v: f32, channel: u32) -> f32 {
+    let base = channel * 5u;
+    let x = encode_intermediate(v);
+    var y = 0.0;
+    if x >= 1.0 {
+        y = 1.0 + (x - 1.0) * parameters.channel_curves[base + 4u].y;
+    } else if x <= 0.0 {
+        y = x * parameters.channel_curves[base].y;
+    } else {
+        let i = min(u32(x * 4.0), 3u);
+        let t = x * 4.0 - f32(i);
+        let a = parameters.channel_curves[base + i];
+        let b = parameters.channel_curves[base + i + 1u];
+        y = (2.0*t*t*t - 3.0*t*t + 1.0) * a.x + (t*t*t - 2.0*t*t + t) * a.y * 0.25
+            + (-2.0*t*t*t + 3.0*t*t) * b.x + (t*t*t - t*t) * b.y * 0.25;
+    }
+    return decode_component(y, 2u);
+}
+
 fn grade(input:vec3<f32>) -> vec3<f32> {
     if parameters.flags.x == 0u {return input;}
     var rgb=parameters.white_balance*input*parameters.tone.z;
@@ -73,7 +96,13 @@ fn grade(input:vec3<f32>) -> vec3<f32> {
         scale=mix(1.0,t/max(lit,floor),smoothstep(0.0,floor,lit));
     }
     rgb*=scale;
-    let graded_y=y*scale;
+    var graded_y=y*scale;
+    if parameters.curve_flags.x == 1u {
+        rgb = vec3<f32>(channel_curve(rgb.r, 0u), channel_curve(rgb.g, 1u), channel_curve(rgb.b, 2u));
+        // The wheels read the same image the ranges select from: after the
+        // curves, which move luminance too.
+        graded_y = dot(rgb, vec3<f32>(0.27411851, 0.87363190, -0.14775041));
+    }
     if parameters.flags.z == 0u { return rgb; }
     var lab=to_lab_work(rgb);
     let chroma=length(lab.yz);

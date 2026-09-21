@@ -32,6 +32,10 @@ pub(crate) struct GpuParameters {
     /// [grain amplitude, cell size in full-resolution pixels, roughness,
     ///  render scale].
     pub effects: [[f32; 4]; 2],
+    /// Red, green, blue curve knots, five each: [value, slope, 0, 0].
+    pub channel_curves: [[f32; 4]; 15],
+    /// x: channel curves active.
+    pub curve_flags: [u32; 4],
 }
 
 pub struct RenderPlan {
@@ -184,6 +188,16 @@ impl RenderPlan {
                 })
             }),
             frame: [0; 4],
+            channel_curves: {
+                let mut knots = [[0.0f32; 4]; 15];
+                for (c, curve) in c.channel_curves.iter().enumerate() {
+                    for (k, knot) in super::controls::curve_parameters(*curve).into_iter().enumerate() {
+                        knots[c * 5 + k] = knot;
+                    }
+                }
+                knots
+            },
+            curve_flags: [u32::from(!c.channel_curves_are_neutral()), 0, 0, 0],
             effects: [
                 [
                     c.effects.vignette_amount / 100.,

@@ -94,6 +94,10 @@ pub struct Controls {
     pub grading: [[f32; 3]; 4],
     /// Five fixed input knots in log2(1+16Y)/log2(17). Endpoints stay 0 and 1.
     pub curve: [f32; 5],
+    /// Red, green and blue curves: the same five knots, applied to each
+    /// channel in DaVinci Intermediate — the encoding Resolve's own curves
+    /// act in — so, unlike the luminance curve, they change colour too.
+    pub channel_curves: [[f32; 5]; 3],
     pub ranges: Vec<ColorRange>,
     /// Spatial controls, applied as their own stage before the pointwise GPU
     /// pass. Older v3 settings without this load as neutral.
@@ -121,6 +125,7 @@ impl Default for Controls {
             bands: [[0.; 3]; 8],
             grading: [[0.; 3]; 4],
             curve: Self::IDENTITY_CURVE,
+            channel_curves: [Self::IDENTITY_CURVE; 3],
             ranges: Vec::new(),
             detail: super::detail::Detail::default(),
             effects: Effects::default(),
@@ -164,14 +169,16 @@ impl Controls {
                 "Invalid grading wheel"
             );
         }
-        ensure!(
-            self.curve[0] == 0. && self.curve[4] == 1. && self.curve.iter().all(|v| v.is_finite()),
-            "Invalid curve endpoints"
-        );
-        ensure!(
-            self.curve.windows(2).all(|p| p[1] - p[0] >= 0.00999),
-            "Curve points must stay ordered with at least 0.01 separation"
-        );
+        for curve in std::iter::once(&self.curve).chain(self.channel_curves.iter()) {
+            ensure!(
+                curve[0] == 0. && curve[4] == 1. && curve.iter().all(|v| v.is_finite()),
+                "Invalid curve endpoints"
+            );
+            ensure!(
+                curve.windows(2).all(|p| p[1] - p[0] >= 0.00999),
+                "Curve points must stay ordered with at least 0.01 separation"
+            );
+        }
         self.detail.validate()?;
         self.effects.validate()?;
         ensure!(
@@ -213,6 +220,10 @@ impl Controls {
             && self.blacks == 0.
             && self.whites == 0.
             && self.curve == Self::IDENTITY_CURVE
+    }
+
+    pub fn channel_curves_are_neutral(&self) -> bool {
+        self.channel_curves == [Self::IDENTITY_CURVE; 3]
     }
 
     pub fn color_is_neutral(&self) -> bool {

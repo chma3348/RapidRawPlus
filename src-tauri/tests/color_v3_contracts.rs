@@ -439,6 +439,7 @@ fn gpu_color_pipeline_contracts() {
     }
     captured_transform_contracts(&engine);
     effects_contracts(&engine);
+    channel_curve_contracts(&engine);
     application_contracts(&context);
     advanced_control_contracts(&engine);
     output_and_grading_contracts(&engine);
@@ -726,6 +727,43 @@ fn application_contracts(context: &GpuContext) {
 /// The behaviours changed alongside the soft gamut mapper: wheels keyed to the
 /// tone-mapped image, a shadow wheel that can lift black, and out-of-gamut
 /// colours that stay distinguishable.
+/// RGB curves act per channel in DaVinci Intermediate.
+fn channel_curve_contracts(engine: &ColorEngine) {
+    let mut c = config();
+    c.source.transfer = Transfer::Linear;
+    let ramp = ImageBuffer::from_fn(1025, 1, |x, _| {
+        let v = x as f32 / 256.0;
+        Rgba([v, v, v, 1.0])
+    });
+    let graded = |c: PipelineConfig| {
+        engine
+            .render(&ramp, &RenderPlan::build(c).unwrap(), true)
+            .unwrap()
+            .stages
+            .unwrap()
+            .graded
+    };
+    let base = graded(c.clone());
+    // Identity curves change nothing, bit for bit.
+    c.controls.channel_curves = [rapidraw_lib::color_engine::controls::Controls::IDENTITY_CURVE; 3];
+    assert_eq!(graded(c.clone()), base);
+    // Lifting only the red curve lifts only red: a neutral ramp turns warm,
+    // monotonically, and green and blue are untouched.
+    c.controls.channel_curves[0] = [0.0, 0.32, 0.6, 0.83, 1.0];
+    let warm = graded(c.clone());
+    let mut last = f32::MIN;
+    for (w, b) in warm.pixels().zip(base.pixels()) {
+        assert!((w[1] - b[1]).abs() < 1e-5 && (w[2] - b[2]).abs() < 1e-5, "green or blue moved");
+        assert!(w[0] >= b[0] - 1e-6, "a lifted curve darkened red");
+        assert!(w[0] >= last - 1e-5, "red curve reversed tones");
+        last = w[0];
+    }
+    assert!(warm.get_pixel(64, 0)[0] > base.get_pixel(64, 0)[0] * 1.1, "red was not lifted");
+    // Above the encoding's range the end tangent continues: no clamp.
+    let top = warm.get_pixel(1024, 0)[0];
+    assert!(top.is_finite() && top > warm.get_pixel(900, 0)[0], "highlights clamped by the curve");
+}
+
 /// Vignette and grain: position-dependent, so they get their own checks.
 fn effects_contracts(engine: &ColorEngine) {
     let grey = ImageBuffer::from_pixel(200, 100, Rgba([0.3f32, 0.3, 0.3, 1.0]));

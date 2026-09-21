@@ -80,3 +80,14 @@ test('preset intensity fades effect amounts but keeps their shape', () => {
   assert.equal(half.effects.vignette_midpoint, 20);
   assert.equal(half.effects.grain_size, 80);
 });
+
+test('preset intensity fades channel curves toward identity', () => {
+  const base = defaultV3Controls();
+  const preset = { ...base, channel_curves: [[0, 0.45, 0.5, 0.75, 1], base.channel_curves[1], base.channel_curves[2]] };
+  const half = mixV3Controls(preset, 50);
+  assert.ok(Math.abs(half.channel_curves[0][1] - 0.35) < 1e-9);
+  assert.deepEqual(half.channel_curves[1], base.channel_curves[1]);
+  const legacy = { ...base };
+  delete legacy.channel_curves;
+  assert.deepEqual(mixV3Controls(legacy, 100).channel_curves, base.channel_curves);
+});

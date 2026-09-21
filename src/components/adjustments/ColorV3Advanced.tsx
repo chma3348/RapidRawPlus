@@ -17,13 +17,26 @@ export default function ColorV3Advanced({
 }) {
   const { t } = useTranslation();
   const [selected, setSelected] = useState(0);
+  // 0 = luminance, 1-3 = red, green, blue.
+  const [curveChannel, setCurveChannel] = useState(0);
+  const identity = [0, 0.25, 0.5, 0.75, 1];
+  const activeCurve =
+    curveChannel === 0 ? values.curve : (values.channel_curves?.[curveChannel - 1] ?? identity);
+  const setActiveCurve = (next: number[]) =>
+    curveChannel === 0
+      ? update('curve', next)
+      : update(
+          'channel_curves',
+          [0, 1, 2].map((c) => (c === curveChannel - 1 ? next : (values.channel_curves?.[c] ?? identity))),
+        );
+  const curveColors = ['currentColor', '#e5484d', '#46a758', '#3e63dd'];
   const index = Math.min(selected, Math.max(0, values.ranges.length - 1));
   const range = values.ranges[index];
   const button =
     'rounded-md px-2 py-1 bg-surface hover:bg-card-active focus-visible:outline-2 focus-visible:outline-accent disabled:opacity-50';
   const curvePath = Array.from(
     { length: 101 },
-    (_, i) => `${i === 0 ? 'M' : 'L'} ${i * 2} ${200 - evaluateV3Curve(values.curve, i / 100) * 200}`,
+    (_, i) => `${i === 0 ? 'M' : 'L'} ${i * 2} ${200 - evaluateV3Curve(activeCurve, i / 100) * 200}`,
   ).join(' ');
   const changeRange = (group: 'center' | 'width' | 'adjustment', column: number, value: number) =>
     update(
@@ -59,11 +72,29 @@ export default function ColorV3Advanced({
         <summary className="cursor-pointer text-sm font-medium focus-visible:outline-2 focus-visible:outline-accent">
           {t('colorV3.curveTitle', { defaultValue: 'Tone curve' })}
         </summary>
+        <div className="my-2 flex gap-1" role="group" aria-label={t('colorV3.curveChannel', { defaultValue: 'Curve channel' })}>
+          {['Luminance', 'Red', 'Green', 'Blue'].map((name, i) => (
+            <button
+              key={name}
+              type="button"
+              aria-pressed={curveChannel === i}
+              onClick={() => setCurveChannel(i)}
+              className={`${button} flex-1 text-xs ${curveChannel === i ? 'bg-card-active' : ''}`}
+            >
+              {t(`colorV3.curve${name}`, { defaultValue: name })}
+            </button>
+          ))}
+        </div>
         <p className="my-2 text-sm">
-          {t('colorV3.curveHelp', {
-            defaultValue:
-              'Adjust brightness without reversing tones. The curve continues above white to preserve highlight headroom.',
-          })}
+          {curveChannel === 0
+            ? t('colorV3.curveHelp', {
+                defaultValue:
+                  'Adjust brightness without reversing tones. The curve continues above white to preserve highlight headroom.',
+              })
+            : t('colorV3.channelCurveHelp', {
+                defaultValue:
+                  'Bends one channel, in the same log encoding Resolve’s curves use — so unlike the luminance curve, it changes colour.',
+              })}
         </p>
         <svg
           viewBox="0 0 200 200"
@@ -75,27 +106,22 @@ export default function ColorV3Advanced({
           })}
         >
           <path d="M0 200L200 0" fill="none" stroke="currentColor" strokeOpacity="0.3" />
-          <path d={curvePath} fill="none" stroke="currentColor" strokeWidth="2" />
+          <path d={curvePath} fill="none" stroke={curveColors[curveChannel]} strokeWidth="2" />
         </svg>
         {[1, 2, 3].map((i) => (
           <Slider
-            key={i}
+            key={`${curveChannel}-${i}`}
             label={t(`colorV3.curvePoint${i}`, { defaultValue: ['', 'Lower curve', 'Middle curve', 'Upper curve'][i] })}
-            value={values.curve[i] * 100}
-            min={Math.round((values.curve[i - 1] + 0.01) * 100)}
-            max={Math.round((values.curve[i + 1] - 0.01) * 100)}
+            value={activeCurve[i] * 100}
+            min={Math.round((activeCurve[i - 1] + 0.01) * 100)}
+            max={Math.round((activeCurve[i + 1] - 0.01) * 100)}
             step={1}
-            defaultValue={Math.min(values.curve[i + 1] - 0.01, Math.max(values.curve[i - 1] + 0.01, i / 4)) * 100}
+            defaultValue={Math.min(activeCurve[i + 1] - 0.01, Math.max(activeCurve[i - 1] + 0.01, i / 4)) * 100}
             onDragStateChange={onDragStateChange}
-            onChange={(e: any) =>
-              update(
-                'curve',
-                values.curve.map((v, j) => (j === i ? Number(e.target.value) / 100 : v)),
-              )
-            }
+            onChange={(e: any) => setActiveCurve(activeCurve.map((v, j) => (j === i ? Number(e.target.value) / 100 : v)))}
           />
         ))}
-        <button type="button" className={button} onClick={() => update('curve', [0, 0.25, 0.5, 0.75, 1])}>
+        <button type="button" className={button} onClick={() => setActiveCurve([0, 0.25, 0.5, 0.75, 1])}>
           {t('colorV3.resetCurve', { defaultValue: 'Reset curve' })}
         </button>
       </details>

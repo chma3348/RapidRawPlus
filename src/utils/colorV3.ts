@@ -79,6 +79,8 @@ export interface V3Controls {
   bands: number[][];
   grading: number[][];
   curve: number[];
+  /** Red, green, blue curves, applied per channel in DaVinci Intermediate. */
+  channel_curves: number[][];
   ranges: V3ColorRange[];
   detail: V3Detail;
   effects: V3Effects;
@@ -101,6 +103,7 @@ export function defaultV3Controls(): V3Controls {
     bands: Array.from({ length: 8 }, () => [0, 0, 0]),
     grading: Array.from({ length: 4 }, () => [0, 0, 0]),
     curve: [0, 0.25, 0.5, 0.75, 1],
+    channel_curves: Array.from({ length: 3 }, () => [0, 0.25, 0.5, 0.75, 1]),
     ranges: [],
     detail: defaultV3Detail(),
     effects: defaultV3Effects(),
@@ -133,6 +136,11 @@ export function mixV3Controls(preset: Partial<V3Controls>, intensity: number): V
       result.detail = Object.fromEntries(
         (Object.keys(from) as (keyof V3Detail)[]).map((k) => [k, from[k] + (to[k] - from[k]) * fraction]),
       ) as unknown as V3Detail;
+    } else if (key === 'channel_curves') {
+      const target_curves = target.channel_curves ?? neutral.channel_curves;
+      result.channel_curves = neutral.channel_curves.map((curve, c) =>
+        curve.map((v, i) => v + ((target_curves[c]?.[i] ?? v) - v) * fraction),
+      );
     } else if (key === 'curve') {
       result.curve = neutral.curve.map((v, i) => v + (target.curve[i] - v) * fraction);
     } else if (key === 'ranges') {

@@ -17,6 +17,8 @@ struct Parameters {
     range_adjustment: array<vec4<f32>,8>,
     frame: vec4<u32>,
     effects: array<vec4<f32>,2>,
+    channel_curves: array<vec4<f32>,15>,
+    curve_flags: vec4<u32>,
 }
 @group(0) @binding(0) var<storage, read> source: array<vec4<f32>>;
 @group(0) @binding(1) var<storage, read_write> results: array<vec4<f32>>;
