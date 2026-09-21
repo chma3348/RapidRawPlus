@@ -170,3 +170,34 @@ offset means a transform is wrong while scatter only means precision.
 Agreement is expected at **neutral only**. The transforms are captured; the
 grading controls are still ours, so anything but neutral compares two
 different sets of tools and proves nothing about the colour chain.
+
+## Verified against Resolve, 20 September 2026
+
+Six of Chris's own photographs, straight out of camera, varied subjects,
+exported from Resolve's Photo page with no grade, each clip tagged sRGB,
+output sRGB. The same files rendered through v3 at neutral with both captured
+transforms installed, compared at Resolve's delivery size:
+
+| photo | mean /255 | p99 /255 | Oklab ΔL | bias R G B /255 |
+|---|---|---|---|---|
+| DSC08222 | 0.52 | 2.70 | 0.0015 | −0.11 −0.09 −0.06 |
+| DSC08265 | 1.13 | 8.75 | 0.0034 | +0.09 +0.14 +0.49 |
+| DSC08270 | 0.62 | 3.24 | 0.0018 | −0.11 −0.14 −0.04 |
+| DSC08279 | 1.03 | 9.11 | 0.0037 | +0.21 +0.16 +0.26 |
+| DSC08304 | 0.33 | 1.22 | 0.0010 | −0.08 −0.08 +0.02 |
+| DSC08319 | 0.49 | 1.73 | 0.0014 | −0.09 −0.08 +0.05 |
+
+Under half a level of bias on every channel of every photo: no transform is
+wrong. The remaining scatter is eight-bit rounding, the display dither in our
+render and resampling to Resolve's size.
+
+Two earlier rounds disagreed badly, and both were setup, not maths — worth
+recording because both will recur. Untagged clips in the *HDR DaVinci Wide
+Gamut Intermediate* mode are read as the timeline space, not sRGB. And an
+output colour space left on DaVinci WG/Intermediate produces log-encoded
+exports; those matched the captured input transform alone to within
+0.07–0.36/255, which turned the mistake into an independent check of that
+half on real photographs.
+
+The Photo page uses the project's colour management, so transforms captured
+on the timeline apply to stills.
