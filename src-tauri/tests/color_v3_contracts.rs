@@ -1,0 +1,727 @@
+use image::{ImageBuffer, Rgba};
+use rapidraw_lib::color_engine::{ColorEngine, config::*, plan::RenderPlan, spaces};
+use rapidraw_lib::image_processing::GpuContext;
+use std::sync::{Arc, Mutex};
+
+fn config() -> PipelineConfig {
+    PipelineConfig {
+        controls: Default::default(),
+        process_version: 3,
+        source: SourceColor {
+            primaries: Primaries::Srgb,
+            transfer: Transfer::Srgb,
+            reference: ReferenceDomain::Display,
+        },
+        working_space: Primaries::DavinciWideGamut,
+        output_rendering: OutputRendering::DisplayPassthroughV1,
+    }
+}
+
+#[test]
+fn configuration_is_explicit_and_versioned() {
+    for v in 0..=2 {
+        assert_eq!(engine_for_version(v).unwrap(), EngineVersion::Legacy);
+    }
+    assert_eq!(
+        engine_for_version(3).unwrap(),
+        EngineVersion::ExperimentalV3
+    );
+    assert!(engine_for_version(4).is_err());
+    let c = config();
+    let mut json = serde_json::to_value(&c).unwrap();
+    assert_eq!(
+        serde_json::from_value::<PipelineConfig>(json.clone()).unwrap(),
+        c
+    );
+    json["highlights"] = 30.into();
+    assert!(serde_json::from_value::<PipelineConfig>(json).is_err());
+    for invalid in [f32::NAN, f32::INFINITY, 21.0] {
+        let mut c = config();
+        c.controls.exposure = invalid;
+        assert!(RenderPlan::build(c).is_err());
+    }
+    let mut c = config();
+    c.output_rendering = OutputRendering::SceneShoulderV1;
+    assert!(RenderPlan::build(c).is_err());
+    let p = RenderPlan::build(config()).unwrap();
+    assert_eq!(
+        p.fingerprint("content-A"),
+        RenderPlan::build(config())
+            .unwrap()
+            .fingerprint("content-A")
+    );
+    assert_ne!(p.fingerprint("content-A"), p.fingerprint("content-B"));
+    let mut c = config();
+    c.controls.exposure = 1.0;
+    assert_ne!(
+        p.fingerprint("content-A"),
+        RenderPlan::build(c).unwrap().fingerprint("content-A")
+    );
+}
+
+#[test]
+fn published_space_and_transfer_contracts() {
+    let xyz = spaces::rgb_to_xyz(Primaries::DavinciWideGamut) * glam::DVec3::X;
+    assert!((xyz - glam::DVec3::new(0.70062239, 0.27411851, -0.09896291)).length() < 1e-12);
+    let forward = spaces::conversion(Primaries::Srgb, Primaries::DavinciWideGamut);
+    let inverse = spaces::conversion(Primaries::DavinciWideGamut, Primaries::Srgb);
+    assert!((forward * glam::DVec3::ONE - glam::DVec3::ONE).length() < 1e-7);
+    let signed_hdr = glam::DVec3::new(-0.2, 0.18, 12.0);
+    assert!((inverse * forward * signed_hdr - signed_hdr).length() < 1e-12);
+    for (linear, encoded) in [
+        (-0.01, -0.104443),
+        (0.0, 0.0),
+        (0.18, 0.336043),
+        (1.0, 0.513837),
+        (10.0, 0.756599),
+        (100.0, 1.0),
+    ] {
+        assert!((spaces::encode_intermediate(linear) - encoded).abs() < 1e-6);
+        assert!(
+            (spaces::decode(
+                spaces::encode_intermediate(linear),
+                Transfer::DavinciIntermediate
+            ) - linear)
+                .abs()
+                < 1e-9
+        );
+    }
+}
+
+/// Oklab is defined on XYZ, so composing it with the working primaries and
+/// routing through sRGB first are the same transform. Pinning that is what
+/// lets the shader drop the detour without changing a pixel.
+#[test]
+fn spaces_compose_to_the_same_oklab() {
+    let direct = spaces::lms_from_rgb(Primaries::DavinciWideGamut);
+    let detour = spaces::lms_from_rgb(Primaries::Srgb)
+        * spaces::conversion(Primaries::DavinciWideGamut, Primaries::Srgb);
+    for c in 0..3 {
+        assert!(
+            (direct.col(c) - detour.col(c)).length() < 1e-12,
+            "composed Oklab differs from the sRGB route: {direct} vs {detour}"
+        );
+    }
+    // Oklab's own published constants are not self-consistent: the XYZ route
+    // and the sRGB route differ in the fourth decimal. Record the size of that
+    // gap so a future change to either constant is a deliberate one.
+    let via_xyz = spaces::lms_from_rgb_via_xyz(Primaries::Srgb);
+    let gap = (via_xyz - spaces::lms_from_rgb(Primaries::Srgb))
+        .to_cols_array()
+        .iter()
+        .fold(0.0f64, |m, v| m.max(v.abs()));
+    assert!(
+        (1e-5..1e-3).contains(&gap),
+        "published Oklab constants now disagree by {gap}"
+    );
+    assert!(
+        (spaces::rgb_from_lms(Primaries::DavinciWideGamut) * direct - glam::DMat3::IDENTITY)
+            .to_cols_array()
+            .iter()
+            .all(|v| v.abs() < 1e-9)
+    );
+}
+
+#[test]
+fn creative_controls_are_strict_and_part_of_saved_identity() {
+    use rapidraw_lib::color_engine::{application::controls, controls::Controls};
+    use serde_json::json;
+    assert_eq!(controls(&json!({"v3":{}})).unwrap(), Controls::default());
+    for invalid in [
+        json!({"revision":2}),
+        json!({"exposure":11}),
+        json!({"saturation":101}),
+        json!({"typo":1}),
+        json!({"bands":[[0,0,0]]}),
+    ] {
+        assert!(controls(&json!({"v3":invalid})).is_err());
+    }
+    let mut edited = config();
+    edited.controls.bands[0] = [30., -20., 10.];
+    edited.controls.grading[2] = [240., 25., 0.];
+    let serialized = serde_json::to_string(&edited).unwrap();
+    let reopened: PipelineConfig = serde_json::from_str(&serialized).unwrap();
+    assert_eq!(edited, reopened);
+    assert_eq!(
+        RenderPlan::build(edited).unwrap().fingerprint("source"),
+        RenderPlan::build(reopened).unwrap().fingerprint("source")
+    );
+    let mut c = config();
+    c.controls.hue = f32::NAN;
+    assert!(RenderPlan::build(c).is_err());
+}
+
+#[test]
+fn gpu_color_pipeline_contracts() {
+    // Deliberately fail rather than silently skip on hosts without a GPU.
+    let instance = wgpu::Instance::default();
+    let adapter = pollster::block_on(instance.request_adapter(&Default::default()))
+        .expect("GPU required for v3 contracts");
+    let limits = adapter.limits();
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        required_limits: limits.clone(),
+        ..Default::default()
+    }))
+    .unwrap();
+    let context = GpuContext {
+        device: Arc::new(device),
+        queue: Arc::new(queue),
+        limits,
+        display: Arc::new(Mutex::new(None)),
+    };
+    let engine = ColorEngine::new(context.clone()).unwrap();
+    let plan = RenderPlan::build(config()).unwrap();
+    // Cross the 65536-pixel chunk boundary, with distinct RGB and straight alpha.
+    let input = ImageBuffer::from_fn(257, 257, |x, y| {
+        Rgba([
+            x as f32 / 256.0,
+            y as f32 / 256.0,
+            ((x + y) % 257) as f32 / 256.0,
+            0.64,
+        ])
+    });
+    let result = engine.render(&input, &plan, true).unwrap();
+    for (a, b) in input.as_raw().iter().zip(result.encoded_srgb.as_raw()) {
+        assert!((a - b).abs() < 3e-6, "neutral changed {a} to {b}");
+    }
+    let uncaptured = engine.render(&input, &plan, false).unwrap();
+    assert!(uncaptured.stages.is_none());
+    assert_eq!(uncaptured.encoded_srgb, result.encoded_srgb);
+    let preview = result.preview_rgba8();
+    let export = result.export_rgba16().into_rgba16();
+    for (a, b) in preview.as_raw().iter().zip(export.as_raw()) {
+        assert!((*a as f32 - *b as f32 / 257.0).abs() <= 0.501);
+    }
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba16(export.clone())
+        .write_to(&mut png, image::ImageFormat::Png)
+        .unwrap();
+    let decoded = image::load_from_memory(png.get_ref()).unwrap();
+    assert_eq!(decoded.color(), image::ColorType::Rgba16);
+    assert_eq!(decoded.into_rgba16(), export);
+    let mut tagged = Vec::new();
+    result.write_srgb_png(&mut tagged, true).unwrap();
+    let roundtrip = rapidraw_lib::color_engine::input::decode_profiled_photo(&tagged).unwrap();
+    assert!(roundtrip.provenance.profile_hash.is_some());
+    let mut roundtrip_config = config();
+    roundtrip_config.source = roundtrip.color;
+    let rerendered = engine
+        .render(
+            &roundtrip.pixels,
+            &RenderPlan::build(roundtrip_config).unwrap(),
+            false,
+        )
+        .unwrap();
+    for (a, b) in result
+        .encoded_srgb
+        .as_raw()
+        .iter()
+        .zip(rerendered.encoded_srgb.as_raw())
+    {
+        assert!((a - b).abs() < 5e-5, "profile roundtrip mismatch {a} {b}");
+    }
+
+    let mut scene = config();
+    scene.source.transfer = Transfer::Linear;
+    scene.source.reference = ReferenceDomain::Scene;
+    scene.output_rendering = OutputRendering::SceneShoulderV1;
+    scene.controls.exposure = 1.0;
+    let ramp = ImageBuffer::from_fn(1025, 1, |x, _| {
+        let v = x as f32 / 128.0;
+        Rgba([v, v, v, 1.0])
+    });
+    let rendered = engine
+        .render(&ramp, &RenderPlan::build(scene.clone()).unwrap(), true)
+        .unwrap();
+    let stages = rendered.stages.as_ref().unwrap();
+    for (working, graded) in stages.working.pixels().zip(stages.graded.pixels()) {
+        for c in 0..3 {
+            assert!(
+                (graded[c] - working[c] * 2.0).abs() < 1e-6,
+                "exposure not exact: {} -> {} (want {})",
+                working[c],
+                graded[c],
+                working[c] * 2.0
+            );
+        }
+    }
+    assert!(stages.graded.get_pixel(1024, 0)[0] > 15.9);
+    let mut previous = 0.0;
+    for p in rendered.encoded_srgb.pixels() {
+        assert!(p[0] + 1e-6 >= previous && (0.0..=1.0).contains(&p[0]));
+        previous = p[0];
+    }
+    // Equivalent scene colors, encoded as DWG/Intermediate versus linear sRGB.
+    let samples = ImageBuffer::from_fn(32, 1, |x, _| Rgba([x as f32 / 8.0 - 0.02, 0.18, 0.9, 0.5]));
+    let matrix = spaces::conversion(Primaries::Srgb, Primaries::DavinciWideGamut);
+    let encoded = ImageBuffer::from_fn(32, 1, |x, y| {
+        let p = samples.get_pixel(x, y);
+        let v = matrix * glam::DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64);
+        Rgba([
+            spaces::encode_intermediate(v.x) as f32,
+            spaces::encode_intermediate(v.y) as f32,
+            spaces::encode_intermediate(v.z) as f32,
+            p[3],
+        ])
+    });
+    let linear = engine
+        .render(&samples, &RenderPlan::build(scene.clone()).unwrap(), true)
+        .unwrap();
+    scene.source.primaries = Primaries::DavinciWideGamut;
+    scene.source.transfer = Transfer::DavinciIntermediate;
+    let log = engine
+        .render(&encoded, &RenderPlan::build(scene).unwrap(), true)
+        .unwrap();
+    for (a, b) in linear
+        .encoded_srgb
+        .as_raw()
+        .iter()
+        .zip(log.encoded_srgb.as_raw())
+    {
+        assert!((a - b).abs() < 2e-5, "source mismatch {a} {b}");
+    }
+    let negative = ImageBuffer::from_pixel(1, 1, Rgba([-0.1, -0.1, -0.1, 1.0]));
+    // Exercise the application's output transforms, not only the original
+    // architecture-test transform. Every allowed tonal extreme must preserve
+    // ordering, neutral balance, alpha and finite output.
+    for scene_referred in [false, true] {
+        for amount in [-100.0, 0.0, 100.0] {
+            let mut c = config();
+            c.source.transfer = Transfer::Linear;
+            c.source.reference = if scene_referred {
+                ReferenceDomain::Scene
+            } else {
+                ReferenceDomain::Display
+            };
+            c.output_rendering = if scene_referred {
+                OutputRendering::SceneLuminanceV1
+            } else {
+                OutputRendering::DisplayGamutV1
+            };
+            c.controls.contrast = amount;
+            c.controls.shadows = amount;
+            c.controls.highlights = -amount;
+            c.controls.blacks = amount;
+            c.controls.whites = -amount;
+            let ramp = ImageBuffer::from_fn(4097, 1, |x, _| {
+                let v = x as f32 / 512.0;
+                Rgba([v, v, v, 0.375])
+            });
+            let frame = engine
+                .render(&ramp, &RenderPlan::build(c).unwrap(), true)
+                .unwrap();
+            let mut previous = 0.0;
+            for p in frame.encoded_srgb.pixels() {
+                assert!(p.0.iter().all(|v| v.is_finite()), "nonfinite tonal output");
+                assert!(
+                    p[0] + 3e-6 >= previous,
+                    "tonal reversal at {amount}: {previous} -> {}",
+                    p[0]
+                );
+                assert!(
+                    (p[0] - p[1]).abs() < 1e-5 && (p[1] - p[2]).abs() < 1e-5,
+                    "neutral tint: {p:?}"
+                );
+                assert_eq!(p[3], 0.375);
+                previous = p[0];
+            }
+        }
+    }
+    let mut exposure = config();
+    exposure.controls.exposure = 1.0;
+    let exposed = engine
+        .render(&input, &RenderPlan::build(exposure).unwrap(), true)
+        .unwrap();
+    let stages = exposed.stages.unwrap();
+    for (working, graded) in stages.working.pixels().zip(stages.graded.pixels()) {
+        for c in 0..3 {
+            assert!((graded[c] - 2.0 * working[c]).abs() < 3e-6);
+        }
+    }
+    let mut display = config();
+    display.output_rendering = OutputRendering::DisplayGamutV1;
+    let identity = engine
+        .render(&input, &RenderPlan::build(display).unwrap(), false)
+        .unwrap();
+    for (a, b) in input.as_raw().iter().zip(identity.encoded_srgb.as_raw()) {
+        assert!(
+            (a - b).abs() < 5e-5,
+            "display gamut transform changed in-gamut input: {a} -> {b}"
+        );
+    }
+    application_contracts(&context);
+    advanced_control_contracts(&engine);
+    output_and_grading_contracts(&engine);
+    let signed = engine.render(&negative, &plan, true).unwrap();
+    assert!(signed.stages.unwrap().working.get_pixel(0, 0)[0] < 0.0);
+    assert!(
+        engine
+            .render(&ImageBuffer::new(0, 0), &plan, false)
+            .is_err()
+    );
+    assert!(
+        engine
+            .render(
+                &ImageBuffer::from_pixel(1, 1, Rgba([f32::NAN, 0.0, 0.0, 1.0])),
+                &plan,
+                false
+            )
+            .is_err()
+    );
+}
+
+fn application_contracts(context: &GpuContext) {
+    use rapidraw_lib::color_engine::application::render_file;
+    use serde_json::json;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("source.png");
+    // Constant color makes spatial resizing independent of the color contract.
+    ImageBuffer::from_pixel(64, 32, Rgba([90u8, 120, 150, 255]))
+        .save(&path)
+        .unwrap();
+    let path = path.to_str().unwrap();
+    let state = rapidraw_lib::AppState::default();
+    let neutral = json!({"processVersion":3,"v3":{},"masks":[]});
+    let exposed = json!({"processVersion":3,"v3":{"exposure":1.0},"masks":[]});
+    let base = render_file(context, &state, path, &neutral, None).unwrap();
+    let full = render_file(context, &state, path, &exposed, None).unwrap();
+    assert_ne!(
+        base.encoded_srgb, full.encoded_srgb,
+        "control change reused stale render"
+    );
+    let preview = render_file(context, &state, path, &exposed, Some(32)).unwrap();
+    assert_eq!(preview.encoded_srgb.dimensions(), (32, 16));
+    for (a, b) in preview
+        .encoded_srgb
+        .get_pixel(16, 8)
+        .0
+        .iter()
+        .zip(full.encoded_srgb.get_pixel(32, 16).0)
+    {
+        assert!((a - b).abs() < 2e-5, "preview/export color mismatch");
+    }
+    let mut masked = json!({"processVersion":3,"v3":{},"masks":[{
+        "id":"test","name":"full","visible":true,"invert":false,"opacity":100,
+        "adjustments":{"v3":{"exposure":1.0}},
+        "subMasks":[{"id":"linear","type":"linear","visible":true,"mode":"additive",
+            "parameters":{"startX":0,"startY":1000,"endX":100,"endY":1000,"range":1}}]
+    }]});
+    let local = render_file(context, &state, path, &masked, None).unwrap();
+    for (a, b) in local
+        .encoded_srgb
+        .as_raw()
+        .iter()
+        .zip(full.encoded_srgb.as_raw())
+    {
+        assert!(
+            (a - b).abs() < 2e-5,
+            "full mask differs from global exposure {a} {b}"
+        );
+    }
+    masked["masks"][0]["opacity"] = json!(0);
+    assert_eq!(
+        render_file(context, &state, path, &masked, None)
+            .unwrap()
+            .encoded_srgb,
+        base.encoded_srgb
+    );
+    masked["masks"][0]["opacity"] = json!(100);
+    masked["masks"][0]["subMasks"][0]["type"] = json!("color");
+    assert!(render_file(context, &state, path, &masked, None).is_err());
+    let mut invalid = neutral.clone();
+    invalid["v3"]["revision"] = json!(999);
+    assert!(render_file(context, &state, path, &invalid, None).is_err());
+    use base64::Engine;
+    use rapidraw_lib::color_engine::selection::inspect;
+    let mut selecting = json!({"processVersion":3,"v3":{"ranges":[{"center":[0,0.1,0.5],"width":[45,0.2,0.5],"adjustment":[0,0,0]}]},"masks":[]});
+    let picked = inspect(context, &state, path, &selecting, 0, Some([0.5, 0.5])).unwrap();
+    let center = picked.center.unwrap();
+    assert!(center[1] > 0.01);
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(picked.selection.split(',').nth(1).unwrap())
+        .unwrap();
+    let matte = image::load_from_memory(&decoded).unwrap().to_luma8();
+    assert_eq!(matte.dimensions(), (64, 32));
+    assert_eq!(
+        matte.get_pixel(32, 16)[0],
+        255,
+        "sample did not select its own color"
+    );
+    selecting["v3"]["hue"] = json!(100);
+    selecting["v3"]["ranges"][0]["adjustment"] = json!([60, 100, 100]);
+    assert_eq!(
+        inspect(context, &state, path, &selecting, 0, Some([0.5, 0.5]))
+            .unwrap()
+            .center,
+        Some(center),
+        "sampling moved with selective edits"
+    );
+    assert!(inspect(context, &state, path, &selecting, 9, None).is_err());
+    assert!(inspect(context, &state, path, &selecting, 0, Some([-0.1, 0.5])).is_err());
+    let divided = directory.path().join("divided.png");
+    ImageBuffer::from_fn(64, 32, |x, _| {
+        if x < 32 {
+            Rgba([200u8, 30, 30, 255])
+        } else {
+            Rgba([30u8, 30, 200, 255])
+        }
+    })
+    .save(&divided)
+    .unwrap();
+    let path = divided.to_str().unwrap();
+    let blue = inspect(context, &state, path, &selecting, 0, Some([0.75, 0.5]))
+        .unwrap()
+        .center;
+    selecting["crop"] = json!({"unit":"px","x":32,"y":0,"width":32,"height":32});
+    assert_eq!(
+        inspect(context, &state, path, &selecting, 0, Some([0.5, 0.5]))
+            .unwrap()
+            .center,
+        blue,
+        "crop misregistered sampled color"
+    );
+}
+
+/// The behaviours changed alongside the soft gamut mapper: wheels keyed to the
+/// tone-mapped image, a shadow wheel that can lift black, and out-of-gamut
+/// colours that stay distinguishable.
+fn output_and_grading_contracts(engine: &ColorEngine) {
+    let render = |c: PipelineConfig, image: &image::Rgba32FImage| {
+        engine
+            .render(image, &RenderPlan::build(c).unwrap(), false)
+            .unwrap()
+            .encoded_srgb
+    };
+    let scene = || {
+        let mut c = config();
+        c.source.transfer = Transfer::Linear;
+        c.source.reference = ReferenceDomain::Scene;
+        c.output_rendering = OutputRendering::SceneLuminanceV2;
+        c
+    };
+
+    // Soft compression: in-gamut colours well inside the cube are untouched.
+    let mut display = config();
+    display.output_rendering = OutputRendering::DisplayGamutV2;
+    let modest = ImageBuffer::from_fn(32, 1, |x, _| {
+        let v = x as f32 / 64.0 + 0.1;
+        Rgba([v, v * 0.8, v * 0.6, 1.0])
+    });
+    for (a, b) in modest
+        .as_raw()
+        .iter()
+        .zip(render(display.clone(), &modest).as_raw())
+    {
+        assert!(
+            (a - b).abs() < 5e-5,
+            "soft mapper moved a colour inside the gamut: {a} -> {b}"
+        );
+    }
+
+    // Out of gamut at one fixed lightness, so only chroma is under test.
+    // Projecting lands every one of these on the same gamut shell; the point
+    // of compressing is that they stay apart.
+    let hue = 0.6f64;
+    let sweep = ImageBuffer::from_fn(6, 1, |x, _| {
+        let chroma = 0.16 + x as f64 * 0.03;
+        let rgb = spaces::rgb_from_oklab(
+            Primaries::Srgb,
+            glam::DVec3::new(0.62, chroma * hue.cos(), chroma * hue.sin()),
+        );
+        Rgba([rgb.x as f32, rgb.y as f32, rgb.z as f32, 1.0])
+    });
+    let mut linear = config();
+    linear.source.transfer = Transfer::Linear;
+    let separation = |rendering| {
+        let mut c = linear.clone();
+        c.output_rendering = rendering;
+        let out = render(c, &sweep);
+        let pixels: Vec<_> = out.pixels().map(|p| p.0).collect();
+        pixels
+            .windows(2)
+            .map(|w| (0..3).fold(0.0f32, |m, c| m.max((w[1][c] - w[0][c]).abs())))
+            .collect::<Vec<f32>>()
+    };
+    let soft = separation(OutputRendering::DisplayGamutV2);
+    let hard = separation(OutputRendering::DisplayGamutV1);
+    let smallest = |g: &[f32]| g.iter().fold(f32::MAX, |m, v| m.min(*v));
+    let largest = |g: &[f32]| g.iter().fold(0.0f32, |m, v| m.max(*v));
+    // Total separation is the wrong measure: the hard projection inflates it
+    // with one big jump at the boundary and then flattens. What matters is
+    // that every neighbouring pair stays apart, and that no pair jumps.
+    assert!(
+        smallest(&soft) > 1.0 / 255.0,
+        "soft mapper made neighbouring out-of-gamut colours indistinguishable: {soft:?}"
+    );
+    assert!(
+        smallest(&hard) < 1.0 / 255.0,
+        "hard projection no longer collapses; this contract is measuring nothing: {hard:?}"
+    );
+    assert!(
+        largest(&soft) < largest(&hard),
+        "soft mapper kept the projection's discontinuity: {soft:?} vs {hard:?}"
+    );
+
+    // The shadow wheel's lightness must reach pure black; its tint must not.
+    let black = ImageBuffer::from_pixel(1, 1, Rgba([0.0f32, 0.0, 0.0, 1.0]));
+    let mut lift = scene();
+    lift.controls.grading[1] = [30.0, 0.0, 100.0];
+    let lifted = render(lift.clone(), &black);
+    lift.controls.grading[1] = [30.0, 0.0, 40.0];
+    let lifted_less = render(lift, &black);
+    assert!(
+        lifted.get_pixel(0, 0)[0] > lifted_less.get_pixel(0, 0)[0] + 1.0 / 255.0
+            && lifted_less.get_pixel(0, 0)[0] > 1.0 / 255.0,
+        "shadow wheel could not lift black: {:?}",
+        lifted.get_pixel(0, 0)
+    );
+    let mut tint = scene();
+    tint.controls.grading[1] = [30.0, 100.0, 0.0];
+    let tinted = render(tint, &black);
+    let p = tinted.get_pixel(0, 0).0;
+    assert!(
+        p[0].max(p[1]).max(p[2]) < 1e-3,
+        "shadow wheel tinted pure black: {p:?}"
+    );
+
+    // Wheels follow the tone-mapped image: the same highlight wheel must act
+    // on a patch that exposure has lifted into the highlights.
+    let dim = ImageBuffer::from_pixel(1, 1, Rgba([0.05f32, 0.05, 0.05, 1.0]));
+    let mut wheel = scene();
+    wheel.controls.grading[3] = [30.0, 100.0, 0.0];
+    let before = render(wheel.clone(), &dim).get_pixel(0, 0).0;
+    wheel.controls.exposure = 4.0;
+    let after = render(wheel.clone(), &dim).get_pixel(0, 0).0;
+    let tintedness = |p: [f32; 4]| (p[0] - p[2]).abs();
+    assert!(
+        tintedness(after) > tintedness(before) + 1e-3,
+        "highlight wheel ignored the tone-mapped luminance: {before:?} -> {after:?}"
+    );
+}
+
+fn advanced_control_contracts(engine: &ColorEngine) {
+    use rapidraw_lib::color_engine::controls::ColorRange;
+    let mut c = config();
+    c.source.transfer = Transfer::Linear;
+    let ramp = ImageBuffer::from_fn(4097, 1, |x, _| {
+        let v = x as f32 / 256.;
+        Rgba([v, v, v, 0.7])
+    });
+    for curve in [
+        [0., 0.01, 0.02, 0.03, 1.],
+        [0., 0.97, 0.98, 0.99, 1.],
+        [0., 0.15, 0.5, 0.85, 1.],
+    ] {
+        c.controls.curve = curve;
+        let frame = engine
+            .render(&ramp, &RenderPlan::build(c.clone()).unwrap(), true)
+            .unwrap();
+        let graded = frame.stages.unwrap().graded;
+        let mut last = 0.;
+        for p in graded.pixels() {
+            assert!(
+                p[0] >= last - 2e-5,
+                "curve reversed {curve:?}: {last} -> {}",
+                p[0]
+            );
+            assert!(
+                (p[0] - p[1]).abs() < p[0].abs() * 2e-6 + 1e-6,
+                "curve tinted neutral"
+            );
+            last = p[0];
+        }
+        assert!(last > 1.01, "curve clipped highlight headroom: {curve:?}");
+    }
+    c.controls.curve = [0., 0.5, 0.2, 0.75, 1.];
+    assert!(RenderPlan::build(c.clone()).is_err());
+    c.controls.curve = [0., 0.25, 0.5, 0.75, 1.];
+    let range = ColorRange {
+        center: [0., 0.1, 0.65],
+        width: [40., 0.2, 0.5],
+        adjustment: [30., 40., 0.],
+    };
+    let rgb_from_hue = |h: f64| {
+        let a = 0.1 * h.to_radians().cos();
+        let b = 0.1 * h.to_radians().sin();
+        let l = (0.65 + 0.3963377774 * a + 0.2158037573 * b).powi(3);
+        let m = (0.65 - 0.1055613458 * a - 0.0638541728 * b).powi(3);
+        let s = (0.65 - 0.0894841775 * a - 1.2914855480 * b).powi(3);
+        Rgba([
+            (4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s) as f32,
+            (-1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s) as f32,
+            (-0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s) as f32,
+            1.,
+        ])
+    };
+    let samples = ImageBuffer::from_fn(3, 1, |x, _| rgb_from_hue([359.99, 0.01, 180.][x as usize]));
+    let neutral = engine
+        .render(&samples, &RenderPlan::build(c.clone()).unwrap(), true)
+        .unwrap();
+    c.controls.ranges = vec![range.clone()];
+    let adjusted = engine
+        .render(&samples, &RenderPlan::build(c.clone()).unwrap(), true)
+        .unwrap();
+    let graded = &adjusted.stages.as_ref().unwrap().graded;
+    for ch in 0..3 {
+        assert!(
+            (graded.get_pixel(0, 0)[ch] - graded.get_pixel(1, 0)[ch]).abs() < 0.0002,
+            "hue seam"
+        );
+        assert!(
+            (graded.get_pixel(2, 0)[ch]
+                - neutral.stages.as_ref().unwrap().graded.get_pixel(2, 0)[ch])
+                .abs()
+                < 2e-6,
+            "unselected hue changed"
+        );
+    }
+    assert!(
+        (graded.get_pixel(0, 0)[0] - neutral.stages.as_ref().unwrap().graded.get_pixel(0, 0)[0])
+            .abs()
+            > 0.001,
+        "range had no effect"
+    );
+    c.controls.ranges.push(ColorRange {
+        adjustment: [-20., 10., 5.],
+        ..range
+    });
+    let before = engine
+        .render(&samples, &RenderPlan::build(c.clone()).unwrap(), false)
+        .unwrap();
+    c.controls.ranges.reverse();
+    let after = engine
+        .render(&samples, &RenderPlan::build(c.clone()).unwrap(), false)
+        .unwrap();
+    assert_eq!(
+        before.encoded_srgb, after.encoded_srgb,
+        "range ordering changed pixels"
+    );
+    let saved = serde_json::to_vec(&c).unwrap();
+    let reopened = RenderPlan::build(serde_json::from_slice(&saved).unwrap()).unwrap();
+    assert_eq!(
+        after.encoded_srgb,
+        engine
+            .render(&samples, &reopened, false)
+            .unwrap()
+            .encoded_srgb,
+        "saved advanced controls changed output"
+    );
+    let gray = ImageBuffer::from_pixel(1, 1, Rgba([0.18, 0.18, 0.18, 1.]));
+    let gray_result = engine.render(&gray, &reopened, false).unwrap();
+    let p = gray_result.encoded_srgb.get_pixel(0, 0);
+    assert!(
+        (p[0] - p[1]).abs() < 2e-6 && (p[1] - p[2]).abs() < 2e-6,
+        "range tinted neutral"
+    );
+    c.controls.ranges.push(ColorRange {
+        adjustment: [0.; 3],
+        ..c.controls.ranges[0].clone()
+    });
+    let added_neutral = engine
+        .render(&samples, &RenderPlan::build(c).unwrap(), false)
+        .unwrap();
+    assert_eq!(
+        after.encoded_srgb, added_neutral.encoded_srgb,
+        "untouched range diluted existing adjustments"
+    );
+}

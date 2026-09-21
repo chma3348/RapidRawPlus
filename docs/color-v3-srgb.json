@@ -1,0 +1,10 @@
+{
+  "process_version": 3,
+  "source": {
+    "primaries": "srgb",
+    "transfer": "srgb",
+    "reference": "display"
+  },
+  "working_space": "davinci_wide_gamut",
+  "output_rendering": "display_passthrough_v1"
+}
