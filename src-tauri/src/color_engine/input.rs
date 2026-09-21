@@ -29,23 +29,67 @@ pub struct DecodedFrame {
 /// image. Out-of-sRGB colors retain negative/above-one values until output.
 /// The reference domain remains Display: a linear transfer is not scene data.
 pub fn decode_profiled_photo(bytes: &[u8]) -> Result<DecodedFrame> {
-    let reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
+    // HEIC, AVIF and Photoshop documents: macOS decodes them to PNG with the
+    // source's ICC profile embedded, so they go through exactly the same
+    // interpretation as a PNG. The PNG has no orientation, so the original
+    // file's is applied afterwards.
+    if let Some(extension) = crate::image_loader::system_codec_format(bytes) {
+        let png = crate::image_loader::system_codec_png(bytes, extension)?;
+        let mut frame = decode_profiled_photo(&png)?;
+        if let Some(orientation) = exif_orientation(bytes) {
+            let mut image = DynamicImage::ImageRgba32F(frame.pixels);
+            image.apply_orientation(orientation);
+            frame.pixels = image.to_rgba32f();
+        }
+        frame.provenance.interpretation =
+            format!("{} (decoded by macOS, {extension})", frame.provenance.interpretation);
+        return Ok(frame);
+    }
+    let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
+    // The default allocation limit is sized by pixel count, and on a small
+    // TIFF it is smaller than the embedded ICC profile, which then silently
+    // reads as absent — and a wide-gamut file as sRGB.
+    reader.no_limits();
     let format = reader.format().context("Unrecognized photo format")?;
-    ensure!(matches!(format, ImageFormat::Png | ImageFormat::Jpeg),
-        "Automatic v3 interpretation currently supports PNG/JPEG only; RAW, TIFF, HEIC and HDR need their dedicated adapters");
+    ensure!(
+        matches!(
+            format,
+            ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::Tiff | ImageFormat::WebP
+        ),
+        "Automatic v3 interpretation supports PNG, JPEG, TIFF, WebP, HEIC, AVIF and PSD; RAW and HDR formats need their dedicated adapters"
+    );
     let mut decoder = reader.into_decoder()?;
     let icc = decoder
         .icc_profile()
         .context("Cannot read embedded ICC profile")?;
+    // The image crate reads a TIFF's ICC tag only when it is typed BYTE; the
+    // TIFF specification types it UNDEFINED, and then it silently reports no
+    // profile at all — which would misread every wide-gamut TIFF as sRGB.
+    let icc = match icc {
+        None if format == ImageFormat::Tiff => tiff_icc_profile(bytes),
+        found => found,
+    };
     if format == ImageFormat::Png {
         let png = png::Decoder::new(Cursor::new(bytes)).read_info()?;
         let info = png.info();
         ensure!(
-            info.coding_independent_code_points.is_none()
-                && info.mastering_display_color_volume.is_none()
-                && info.content_light_level.is_none(),
-            "PNG CICP/HDR input requires an explicit supported input adapter"
+            info.mastering_display_color_volume.is_none() && info.content_light_level.is_none(),
+            "PNG HDR mastering metadata requires an explicit supported input adapter"
         );
+        // A CICP tag is accepted only where it cannot mean anything the ICC
+        // profile does not: alongside one, describing an SDR curve in
+        // full-range RGB. macOS writes exactly that when it decodes HEIC,
+        // AVIF and Photoshop files. PQ, HLG, video matrices and narrow range
+        // stay refused — those are HDR or video data, not a photograph.
+        if let Some(cicp) = &info.coding_independent_code_points {
+            let sdr_curve = matches!(cicp.transfer_function, 1 | 4 | 6 | 8 | 13 | 14 | 15);
+            ensure!(
+                icc.is_some() && sdr_curve && cicp.matrix_coefficients == 0 && cicp.is_video_full_range_image,
+                "PNG CICP declares HDR or video data (transfer {}, matrix {}); that needs an explicit supported input adapter",
+                cicp.transfer_function,
+                cicp.matrix_coefficients
+            );
+        }
     }
     let orientation = decoder.orientation()?;
     let mut image = DynamicImage::from_decoder(decoder)?;
@@ -108,6 +152,52 @@ pub fn decode_profiled_photo(bytes: &[u8]) -> Result<DecodedFrame> {
             calibration: None,
         },
     })
+}
+
+/// The ICC profile of a classic (not Big) TIFF, read from its first IFD:
+/// tag 34675, typed BYTE or UNDEFINED, inline or at an offset.
+fn tiff_icc_profile(bytes: &[u8]) -> Option<Vec<u8>> {
+    let little = match bytes.get(..4)? {
+        [b'I', b'I', 42, 0] => true,
+        [b'M', b'M', 0, 42] => false,
+        _ => return None,
+    };
+    let u16_at = |at: usize| -> Option<u16> {
+        let b: [u8; 2] = bytes.get(at..at + 2)?.try_into().ok()?;
+        Some(if little { u16::from_le_bytes(b) } else { u16::from_be_bytes(b) })
+    };
+    let u32_at = |at: usize| -> Option<u32> {
+        let b: [u8; 4] = bytes.get(at..at + 4)?.try_into().ok()?;
+        Some(if little { u32::from_le_bytes(b) } else { u32::from_be_bytes(b) })
+    };
+    let ifd = u32_at(4)? as usize;
+    let entries = u16_at(ifd)? as usize;
+    for i in 0..entries {
+        let entry = ifd + 2 + i * 12;
+        if u16_at(entry)? != 34675 {
+            continue;
+        }
+        if !matches!(u16_at(entry + 2)?, 1 | 7) {
+            return None;
+        }
+        let count = u32_at(entry + 4)? as usize;
+        let start = if count <= 4 { entry + 8 } else { u32_at(entry + 8)? as usize };
+        return bytes.get(start..start.checked_add(count)?).map(<[u8]>::to_vec);
+    }
+    None
+}
+
+/// The EXIF orientation of the original file, for formats whose pixels are
+/// decoded without it.
+fn exif_orientation(bytes: &[u8]) -> Option<image::metadata::Orientation> {
+    let exif = exif::Reader::new()
+        .read_from_container(&mut Cursor::new(bytes))
+        .ok()?;
+    let value = exif
+        .get_field(exif::Tag::Orientation, exif::In::PRIMARY)?
+        .value
+        .get_uint(0)?;
+    image::metadata::Orientation::from_exif(value as u8)
 }
 
 fn convert_rgb_profile(input: &Rgba32FImage, profile: &ColorProfile) -> Result<Rgba32FImage> {
@@ -256,5 +346,60 @@ mod tests {
         )))
         .unwrap();
         assert_eq!(untagged.pixels, tagged.pixels);
+    }
+
+    /// Real files of every system-decoded format, converted from a Display
+    /// P3 JPEG, when the scratch fixtures exist on this machine.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn system_codec_formats_keep_their_profile() {
+        let dir = std::env::temp_dir().join("rapidraw_codec_fixture");
+        let _ = std::fs::create_dir_all(&dir);
+        // A small wide-gamut source: saturated P3 red, which sRGB cannot hold.
+        let source = dir.join("p3.png");
+        image::RgbImage::from_pixel(16, 8, image::Rgb([255, 0, 0])).save(&source).unwrap();
+        let tagged = dir.join("p3-tagged.png");
+        let profile = "/System/Library/ColorSync/Profiles/Display P3.icc";
+        if !std::path::Path::new(profile).exists() {
+            return;
+        }
+        let ok = std::process::Command::new("sips")
+            .args(["--embedProfile", profile])
+            .arg(&source)
+            .arg("--out")
+            .arg(&tagged)
+            .output()
+            .is_ok_and(|o| o.status.success());
+        if !ok {
+            return;
+        }
+        let reference = decode_profiled_photo(&std::fs::read(&tagged).unwrap()).unwrap();
+        let red = reference.pixels.get_pixel(0, 0).0;
+        assert!(red[0] > 1.0 || red[1] < 0.0, "P3 red should fall outside sRGB: {red:?}");
+        for format in ["heic", "avif", "psd", "tiff"] {
+            let out = dir.join(format!("p3.{format}"));
+            let converted = std::process::Command::new("sips")
+                .args(["-s", "format", format])
+                .arg(&tagged)
+                .arg("--out")
+                .arg(&out)
+                .output()
+                .is_ok_and(|o| o.status.success());
+            if !converted {
+                continue;
+            }
+            let frame = decode_profiled_photo(&std::fs::read(&out).unwrap())
+                .unwrap_or_else(|e| panic!("{format}: {e}"));
+            let got = frame.pixels.get_pixel(0, 0).0;
+            // Lossy formats move the value a little; the profile must not be
+            // lost, which would move it a lot.
+            for c in 0..3 {
+                assert!(
+                    (got[c] - red[c]).abs() < 0.06,
+                    "{format} lost its colour profile: {got:?} vs {red:?}"
+                );
+            }
+            assert_eq!(frame.pixels.dimensions(), (16, 8), "{format} changed size");
+        }
     }
 }

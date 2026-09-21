@@ -73,6 +73,8 @@ pub const RAW_EXTENSIONS: &[(&str, &str)] = &[
 pub const NON_RAW_EXTENSIONS: &[&str] = &[
     "jpg", "jpeg", "png", "gif", "bmp", "tiff", "tif", "webp", "jxl", // Standard formats
     "heic", "heif", // Apple/ISO HEIF (decoded via sips on macOS)
+    "avif", // AV1 image (decoded via sips on macOS)
+    "psd",  // Photoshop, flattened composite (decoded via sips on macOS)
     "exr", "hdr", // High Dynamic Range / Wide Gamut
     "tga", "ico", "dds", // Graphics & Icons
     "qoi", "ff", // Simple/Specialist formats
@@ -148,6 +150,13 @@ mod tests {
         for name in ["clip.mkv", "clip.avi", "clip.webm", "notes.txt"] {
             assert!(!is_video_file(name), "{name} should not be offered");
             assert!(!is_supported_media_file(name), "{name} should not list");
+        }
+    }
+
+    #[test]
+    fn avif_and_psd_are_offered() {
+        for name in ["photo.avif", "Layered.PSD", "shot.heic"] {
+            assert!(is_supported_media_file(name), "{name} should be listed");
         }
     }
 }

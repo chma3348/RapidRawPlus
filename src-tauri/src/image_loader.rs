@@ -303,35 +303,47 @@ fn decode_half_float_tiff(bytes: &[u8]) -> Option<DynamicImage> {
     Some(DynamicImage::ImageRgb32F(out))
 }
 
-/// HEIF/HEIC container sniff: ISO-BMFF "ftyp" box with a HEIF brand.
-fn is_heif_container(bytes: &[u8]) -> bool {
-    bytes.len() > 12
-        && &bytes[4..8] == b"ftyp"
-        && matches!(
-            &bytes[8..12],
-            b"heic" | b"heix" | b"hevc" | b"hevx" | b"heim" | b"heis" | b"mif1" | b"msf1"
-        )
+/// Formats the image crate cannot decode but macOS can, identified by their
+/// bytes rather than the file extension: HEIF/HEIC and AVIF (ISO-BMFF with
+/// the matching brand) and Photoshop documents (flattened composite).
+/// Returns the extension `sips` should see.
+pub fn system_codec_format(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"8BPS") {
+        return Some("psd");
+    }
+    if bytes.len() > 12 && &bytes[4..8] == b"ftyp" {
+        return match &bytes[8..12] {
+            b"avif" | b"avis" => Some("avif"),
+            b"heic" | b"heix" | b"hevc" | b"hevx" | b"heim" | b"heis" | b"mif1" | b"msf1" => {
+                Some("heic")
+            }
+            _ => None,
+        };
+    }
+    None
 }
 
-/// Decodes HEIC through macOS's own codec (`sips`) since the image crate
-/// has no HEVC decoder. PNG as the intermediate: sips leaves pixels in
-/// stored (un-rotated) orientation and PNG carries no orientation tag, so
-/// the caller's normal EXIF-orientation pass applies exactly once.
+/// Convert through macOS's own codecs (`sips`) to PNG. PNG as the
+/// intermediate because it is lossless, carries 16-bit samples, and `sips`
+/// embeds the source's colour profile in it — which the v3 input adapter
+/// needs. `sips` leaves pixels in stored orientation and PNG has no
+/// orientation tag, so callers apply the original file's EXIF orientation
+/// exactly once themselves.
 #[cfg(target_os = "macos")]
-fn decode_heic_via_sips(bytes: &[u8]) -> Result<DynamicImage> {
+pub fn system_codec_png(bytes: &[u8], extension: &str) -> Result<Vec<u8>> {
     use std::sync::atomic::AtomicU64;
-    static HEIC_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     let id = format!(
-        "rapidraw_heic_{}_{}",
+        "rapidraw_codec_{}_{}",
         std::process::id(),
-        HEIC_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
     );
     let dir = std::env::temp_dir();
-    let src = dir.join(format!("{id}.heic"));
+    let src = dir.join(format!("{id}.{extension}"));
     let dst = dir.join(format!("{id}.png"));
 
-    std::fs::write(&src, bytes).context("Failed to stage HEIC for decoding")?;
+    std::fs::write(&src, bytes).context("Failed to stage the file for decoding")?;
     let output = std::process::Command::new("sips")
         .args(["-s", "format", "png"])
         .arg(&src)
@@ -339,27 +351,32 @@ fn decode_heic_via_sips(bytes: &[u8]) -> Result<DynamicImage> {
         .arg(&dst)
         .output();
     let _ = std::fs::remove_file(&src);
-    let output = output.context("Failed to run the system HEIC decoder (sips)")?;
+    let output = output.context("Failed to run the system image decoder (sips)")?;
     if !output.status.success() {
         let _ = std::fs::remove_file(&dst);
         return Err(anyhow!(
-            "HEIC decode failed: {}",
+            "{} decode failed: {}",
+            extension.to_uppercase(),
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    let png = std::fs::read(&dst).context("Failed to read decoded HEIC")?;
+    let png = std::fs::read(&dst).context("Failed to read the decoded image");
     let _ = std::fs::remove_file(&dst);
-
-    let mut reader = ImageReader::new(Cursor::new(png.as_slice()))
-        .with_guessed_format()
-        .context("Failed to read decoded HEIC as PNG")?;
-    reader.no_limits();
-    reader.decode().context("Failed to decode HEIC")
+    png
 }
 
 #[cfg(not(target_os = "macos"))]
-fn decode_heic_via_sips(_bytes: &[u8]) -> Result<DynamicImage> {
-    Err(anyhow!("HEIC files are currently only supported on macOS"))
+pub fn system_codec_png(_bytes: &[u8], extension: &str) -> Result<Vec<u8>> {
+    Err(anyhow!("{} files are currently only supported on macOS", extension.to_uppercase()))
+}
+
+fn decode_via_system_codec(bytes: &[u8], extension: &str) -> Result<DynamicImage> {
+    let png = system_codec_png(bytes, extension)?;
+    let mut reader = ImageReader::new(Cursor::new(png.as_slice()))
+        .with_guessed_format()
+        .context("Failed to read the decoded image as PNG")?;
+    reader.no_limits();
+    reader.decode().context("Failed to decode the converted image")
 }
 
 pub fn load_image_with_orientation(
@@ -377,13 +394,13 @@ pub fn load_image_with_orientation(
 
     let cursor = Cursor::new(bytes);
 
-    // HEIC can't be decoded by the image crate; go through the system
-    // codec, then fall through to the shared orientation pass below (the
-    // exif crate reads HEIF containers, so rotation comes from the
+    // HEIC, AVIF and PSD can't be decoded by the image crate; go through
+    // the system codec, then fall through to the shared orientation pass
+    // below (the exif crate reads HEIF containers, so rotation comes from the
     // original bytes like any other format).
-    let image = if is_heif_container(bytes) {
+    let image = if let Some(extension) = system_codec_format(bytes) {
         check_cancel()?;
-        decode_heic_via_sips(bytes)?
+        decode_via_system_codec(bytes, extension)?
     } else {
         let mut reader = ImageReader::new(cursor.clone())
             .with_guessed_format()
@@ -764,5 +781,42 @@ mod patch_feather_tests {
             inward.get_pixel(60, 60)[0] >= 250,
             "core lost full strength"
         );
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod system_codec_tests {
+    use super::*;
+
+    /// Every system-decoded format opens through the ordinary loader, at the
+    /// right size and with the right pixels.
+    #[test]
+    fn heic_avif_and_psd_open() {
+        let dir = std::env::temp_dir().join("rapidraw_loader_codec_fixture");
+        let _ = std::fs::create_dir_all(&dir);
+        let source = dir.join("source.png");
+        image::RgbImage::from_fn(32, 16, |x, _| image::Rgb([if x < 16 { 200 } else { 30 }, 90, 60]))
+            .save(&source)
+            .unwrap();
+        for format in ["heic", "avif", "psd"] {
+            let out = dir.join(format!("fixture.{format}"));
+            let made = std::process::Command::new("sips")
+                .args(["-s", "format", format])
+                .arg(&source)
+                .arg("--out")
+                .arg(&out)
+                .output()
+                .is_ok_and(|o| o.status.success());
+            if !made {
+                continue;
+            }
+            let bytes = std::fs::read(&out).unwrap();
+            assert_eq!(system_codec_format(&bytes), Some(format), "{format} not recognised by its bytes");
+            let image = load_image_with_orientation(&bytes, None).unwrap_or_else(|e| panic!("{format}: {e}"));
+            assert_eq!((image.width(), image.height()), (32, 16), "{format} changed size");
+            let left = image.to_rgb8().get_pixel(4, 8)[0] as i32;
+            let right = image.to_rgb8().get_pixel(28, 8)[0] as i32;
+            assert!(left - right > 120, "{format} lost the image: {left} vs {right}");
+        }
     }
 }
