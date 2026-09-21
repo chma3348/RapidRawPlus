@@ -148,7 +148,25 @@ points of clipped pixels.
 The third column is the trap: an output transform with no input transform
 clips nothing because it has darkened everything first.
 
-Still not verified: that a photograph rendered here and the same photograph
-rendered *in Resolve* agree pixel for pixel. The transforms are captured, the
-grading controls are still ours, so agreement is expected only at neutral.
-That comparison is the next thing worth doing.
+## Checking it against Resolve
+
+Everything above verifies the transforms against each other. What is still
+unverified is the thing they were captured from: that a photograph rendered
+here and the same photograph rendered in Resolve agree.
+
+In the same project, set the output colour space back to **sRGB**, put one of
+your own stills on the timeline, tag its **Input Color Space: sRGB**, add no
+grade, and deliver a 16-bit TIFF at full data levels. Render the same file
+here with no adjustments, then:
+
+```sh
+tools/compare_to_resolve.py --ours ours.png --resolve from-resolve.tif --report sheet.png
+```
+
+It reports encoded difference, Oklab lightness and chroma difference, and the
+per-channel bias — which is the number that matters most, because a constant
+offset means a transform is wrong while scatter only means precision.
+
+Agreement is expected at **neutral only**. The transforms are captured; the
+grading controls are still ours, so anything but neutral compares two
+different sets of tools and proves nothing about the colour chain.
