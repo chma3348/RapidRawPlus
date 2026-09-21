@@ -47,11 +47,32 @@ pub fn source(state: &AppState, path: &str) -> Result<Arc<DecodedFrame>> {
         }
     }
     let bytes = std::fs::read(&path)?;
-    let frame = if crate::formats::is_raw_file(&path) {
+    let mut frame = if crate::formats::is_raw_file(&path) {
         super::raw::decode_raw(&bytes, false, || Ok(()))?
     } else {
         super::input::decode_profiled_photo(&bytes)?
     };
+    // A captured input transform turns a rendered photograph into scene data,
+    // undoing whatever rendering it already carries, exactly as Resolve does
+    // on import. After it the source is indistinguishable from a RAW's, so
+    // everything downstream — including the captured output transform — is
+    // already right for it. Done once here rather than per render: the
+    // decoded source is cached.
+    if frame.color.reference == ReferenceDomain::Display
+        && let Some(path) = input_transform(state)
+    {
+        match super::cube::CubeLut::load(&path) {
+            Ok(cube) => {
+                super::cube::apply_input_transform(&cube, &mut frame.pixels);
+                frame.color = SourceColor {
+                    primaries: Primaries::DavinciWideGamut,
+                    transfer: Transfer::Linear,
+                    reference: ReferenceDomain::Scene,
+                };
+            }
+            Err(error) => log::error!("Ignoring the captured input transform: {error}"),
+        }
+    }
     let frame = Arc::new(frame);
     *cache = Some(SourceCache {
         path,
@@ -106,10 +127,10 @@ fn plan(
     // belongs only on scene-referred sources. A rendered photograph has
     // already been through someone's rendering: putting it through a second
     // one tone-maps it twice and darkens everything — measured at mid grey,
-    // sRGB 0.461 in, 0.351 out. Resolve does not do that either; it pairs
-    // this transform with an input transform that undoes the first rendering.
-    // Until that input transform is captured too, rendered photographs keep
-    // the built-in path.
+    // sRGB 0.461 in, 0.351 out. `source` fixes that at the other end, by
+    // running an installed input transform over rendered photographs so they
+    // arrive here as scene data. What is still Display-referred by this point
+    // has no input transform installed, and keeps the built-in rendering.
     let captured = match color.reference {
         ReferenceDomain::Scene => output_transform,
         ReferenceDomain::Display => None,
@@ -132,6 +153,11 @@ fn plan(
 /// The captured transform this session renders through, if any.
 pub fn output_transform(state: &AppState) -> Option<PathBuf> {
     state.output_transform.lock().unwrap().clone()
+}
+
+/// The captured transform that brings rendered photographs into scene data.
+pub fn input_transform(state: &AppState) -> Option<PathBuf> {
+    state.input_transform.lock().unwrap().clone()
 }
 
 /// `max_dimension` only changes spatial sampling; source decode and all color

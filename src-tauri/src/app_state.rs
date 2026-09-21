@@ -146,6 +146,9 @@ pub struct AppState {
     /// A rendering transform captured from this machine's Resolve, when one
     /// has been installed. Resolved once at startup, not per render.
     pub output_transform: Mutex<Option<PathBuf>>,
+    /// The matching input transform, which undoes the rendering a photograph
+    /// already carries. Without it, rendered sources keep the built-in path.
+    pub input_transform: Mutex<Option<PathBuf>>,
     pub v3_source: Mutex<Option<crate::color_engine::application::SourceCache>>,
     pub v3_engine: Mutex<Option<crate::color_engine::application::EngineCache>>,
     pub v3_prepared: Mutex<Option<crate::color_engine::application::PreparedCache>>,
@@ -239,6 +242,7 @@ impl Default for AppState {
             decoded_image_cache: Mutex::new(DecodedImageCache::new(5)),
             thumbnail_manager: ThumbnailManager::new(),
             output_transform: Mutex::new(None),
+            input_transform: Mutex::new(None),
             model_registry: Mutex::new(None),
             comfy_process: Mutex::new(None),
         }

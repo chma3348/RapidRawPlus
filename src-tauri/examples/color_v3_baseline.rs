@@ -42,6 +42,10 @@ struct Manifest {
     /// in exactly one thing.
     #[serde(default)]
     output_transform: Option<PathBuf>,
+    /// The matching input transform, which undoes the rendering a photograph
+    /// already carries so the output one is not a second rendering.
+    #[serde(default)]
+    input_transform: Option<PathBuf>,
     fixtures: Vec<Fixture>,
     cases: Vec<Case>,
 }
@@ -182,7 +186,11 @@ fn measure(
     }
 }
 
-fn load(path: &Path, max_dimension: u32) -> Result<(image::Rgba32FImage, SourceColor)> {
+fn load(
+    path: &Path,
+    max_dimension: u32,
+    input_transform: Option<&rapidraw_lib::color_engine::cube::CubeLut>,
+) -> Result<(image::Rgba32FImage, SourceColor)> {
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     let decoded = decode_profiled_photo(&bytes)
         .with_context(|| format!("interpreting {}", path.display()))?;
@@ -194,7 +202,19 @@ fn load(path: &Path, max_dimension: u32) -> Result<(image::Rgba32FImage, SourceC
     } else {
         decoded.pixels
     };
-    Ok((pixels, decoded.color))
+    let mut pixels = pixels;
+    let mut color = decoded.color;
+    if let Some(cube) = input_transform {
+        if color.reference == ReferenceDomain::Display {
+            rapidraw_lib::color_engine::cube::apply_input_transform(cube, &mut pixels);
+            color = SourceColor {
+                primaries: Primaries::DavinciWideGamut,
+                transfer: Transfer::Linear,
+                reference: ReferenceDomain::Scene,
+            };
+        }
+    }
+    Ok((pixels, color))
 }
 
 fn main() -> Result<()> {
@@ -225,9 +245,18 @@ fn main() -> Result<()> {
         display: Arc::new(Mutex::new(None)),
     })?;
 
+    let input_transform = manifest
+        .input_transform
+        .as_ref()
+        .map(|p| rapidraw_lib::color_engine::cube::CubeLut::load(p))
+        .transpose()?;
     let mut measurements = Vec::new();
     for fixture in &manifest.fixtures {
-        let (pixels, color) = load(&fixture.path, manifest.max_dimension)?;
+        let (pixels, color) = load(
+            &fixture.path,
+            manifest.max_dimension,
+            input_transform.as_ref(),
+        )?;
         let rendering = match (&manifest.output_transform, color.reference) {
             (Some(_), _) => OutputRendering::ResolveCubeV1,
             (None, ReferenceDomain::Scene) => OutputRendering::SceneLuminanceV2,

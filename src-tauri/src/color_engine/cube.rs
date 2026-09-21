@@ -182,3 +182,95 @@ mod tests {
         assert_ne!(a.digest, c.digest, "an entry is");
     }
 }
+
+/// Bring a rendered photograph into the scene-referred working space through
+/// a captured input transform.
+///
+/// Resolve's rendering transform expects scene values. A photograph has
+/// already been through someone's rendering, so applying it directly
+/// tone-maps the picture twice and darkens everything. Resolve pairs its
+/// output transform with an input one that undoes the first rendering, and
+/// this is that step: sRGB display values go in, linear DaVinci Wide Gamut
+/// scene values come out, and from there the pipeline is the same as a RAW's.
+///
+/// The cube's own domain is sRGB-encoded, so the linear pixels the input
+/// adapter produced are re-encoded on the way in — an exact inverse — and the
+/// Intermediate values it returns are decoded on the way out.
+pub fn apply_input_transform(cube: &CubeLut, pixels: &mut image::Rgba32FImage) {
+    let encode = |v: f32| {
+        if v <= 0.0031308 {
+            12.92 * v
+        } else {
+            1.055 * v.powf(1.0 / 2.4) - 0.055
+        }
+    };
+    let decode_intermediate = |v: f32| {
+        if v <= 0.02740668 {
+            v / 10.44426855
+        } else {
+            (v / 0.07329248 - 7.0).exp2() - 0.0075
+        }
+    };
+    for pixel in pixels.pixels_mut() {
+        let encoded: [f32; 3] = std::array::from_fn(|c| encode(pixel[c].clamp(0.0, 1.0)));
+        let logged = cube.sample(encoded);
+        for c in 0..3 {
+            pixel[c] = decode_intermediate(logged[c]);
+        }
+    }
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::*;
+
+    /// An identity cube must leave a photograph where it found it, once the
+    /// sRGB and Intermediate encodings either side have cancelled.
+    #[test]
+    fn an_identity_cube_is_an_encoding_change_only() {
+        let size = 32usize;
+        let mut text = format!("LUT_3D_SIZE {size}\n");
+        let axis = |i: usize| i as f64 / (size - 1) as f64;
+        for b in 0..size {
+            for g in 0..size {
+                for r in 0..size {
+                    // sRGB in, the same colour expressed in Intermediate out.
+                    let convert = |v: f64| {
+                        let lin = if v <= 0.04045 {
+                            v / 12.92
+                        } else {
+                            ((v + 0.055) / 1.055).powf(2.4)
+                        };
+                        if lin <= 0.00262409 {
+                            lin * 10.44426855
+                        } else {
+                            ((lin + 0.0075).log2() + 7.0) * 0.07329248
+                        }
+                    };
+                    text.push_str(&format!(
+                        "{} {} {}\n",
+                        convert(axis(r)),
+                        convert(axis(g)),
+                        convert(axis(b))
+                    ));
+                }
+            }
+        }
+        let cube = CubeLut::parse(&text).unwrap();
+        let mut image = image::ImageBuffer::from_fn(8, 1, |x, _| {
+            let v = x as f32 / 7.0;
+            image::Rgba([v * 0.9 + 0.02, v * 0.5 + 0.1, 0.4, 1.0])
+        });
+        let before = image.clone();
+        apply_input_transform(&cube, &mut image);
+        for (a, b) in before.pixels().zip(image.pixels()) {
+            for c in 0..3 {
+                assert!(
+                    (a[c] - b[c]).abs() < 6e-3,
+                    "identity input transform moved a pixel: {a:?} -> {b:?}"
+                );
+            }
+            assert_eq!(a[3], b[3], "alpha is not colour");
+        }
+    }
+}

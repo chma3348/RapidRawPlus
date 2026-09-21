@@ -2148,18 +2148,29 @@ pub fn run() {
                 // said out loud: what renders the picture should never be a
                 // silent consequence of a file existing.
                 if let Ok(data_dir) = app.path().app_data_dir() {
-                    let cube = data_dir.join("output-transform.cube");
-                    if cube.is_file() {
+                    for (name, slot) in [
+                        ("output-transform.cube", 0usize),
+                        ("input-transform.cube", 1usize),
+                    ] {
+                        let cube = data_dir.join(name);
+                        if !cube.is_file() {
+                            continue;
+                        }
                         match crate::color_engine::cube::CubeLut::load(&cube) {
                             Ok(lut) => {
                                 log::info!(
-                                    "Color v3 renders through the captured transform at {} (size {}, {})",
-                                    cube.display(),
+                                    "Color v3 uses the captured {} (size {}, {})",
+                                    name,
                                     lut.size,
                                     &lut.digest[..12]
                                 );
-                                *app.state::<AppState>().output_transform.lock().unwrap() =
-                                    Some(cube);
+                                let state = app.state::<AppState>();
+                                let mut held = if slot == 0 {
+                                    state.output_transform.lock().unwrap()
+                                } else {
+                                    state.input_transform.lock().unwrap()
+                                };
+                                *held = Some(cube);
                             }
                             Err(error) => log::error!(
                                 "Ignoring {}: {error}. Color v3 keeps its built-in rendering.",

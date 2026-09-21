@@ -62,6 +62,34 @@ The reader refuses two failures that otherwise produce a confidently wrong
 cube: a frame Resolve resized, and a frame that came back identical to the
 lattice, which means the transform never ran.
 
+## The other half: the input transform
+
+An output transform maps *scene* values to a display. A photograph has already
+been through someone's rendering, so applying it directly renders the picture
+twice — measured over the fixture set, mean Oklab lightness fell from 0.477 to
+0.371, with mid grey going in at sRGB 0.461 and coming out at 0.351.
+
+Resolve does not do that either. On import it applies an *input* transform that
+undoes the rendering a file already carries, and that is what makes an
+untouched sRGB photograph round-trip through a colour-managed project looking
+unchanged. Capture it the same way, with two settings changed:
+
+- Output colour space: **DaVinci WG/Intermediate** (so the output end is
+  identity and only the input transform is measured)
+- The clip's **Input Color Space: sRGB** — on the clip, via right-click in the
+  Media Pool. In the *HDR DaVinci Wide Gamut Intermediate* processing mode
+  there is no project-level input colour space to set instead.
+
+Install it beside the other as `input-transform.cube`. Rendered photographs
+then pass through it at decode, once, and arrive as scene data
+indistinguishable from a RAW's — after which the output transform is the right
+thing to apply, because it is no longer a second rendering.
+
+Measured round trip, sRGB in through both cubes and back: median 0.77/255,
+mean 1.19/255, and within 0.7/255 everywhere on the neutral axis from black to
+white. The outliers (p99 7/255) are in the saturated corners, where the input
+transform expands and the output transform compresses.
+
 ## Installing it
 
 Copy the cube to the app's data directory as `output-transform.cube`:
@@ -95,8 +123,32 @@ cube is applied as captured, on the right axes, and nothing encodes after it.
 of 1D LUTs, short files and shifted domains, and that the digest follows the
 entries rather than the title.
 
-Not yet verified, because it needs the capture to exist: that a real photograph
-rendered here and the same photograph rendered in Resolve actually agree. That
-comparison is the point of the whole exercise and is the next thing to do once
-a cube is captured. `docs/color-engine-baseline.md` has the fixture set to run
-it on.
+## Captured, 20 September 2026
+
+Resolve 21.0.4 free, DaVinci YRGB Color Managed, processing mode *HDR DaVinci
+Wide Gamut Intermediate*, automatic colour management off, output sRGB. Both
+cubes are 64³.
+
+Over the 22-fixture set, against the built-in rendering:
+
+| | built-in | Resolve pair | Resolve output only |
+|---|---|---|---|
+| neutral, mean L | 0.477 | 0.475 | 0.371 |
+| exposure +1, clipped high | 11.85% | 0.90% | 0.00% |
+| contrast 40, clipped high | 3.87% | 1.01% | 0.00% |
+| combined grade, clipped high | 4.16% | 0.57% | 0.00% |
+
+Neutral is preserved — the pair is transparent on an untouched photograph,
+which is the contract. What changes is what happens when you *grade*: pushing
+a stop of exposure clipped nearly 12% of the frame under the built-in
+rendering and under 1% through Resolve's, because it rolls highlights off
+instead of cutting them. On a high-key fixture the difference is 50 percentage
+points of clipped pixels.
+
+The third column is the trap: an output transform with no input transform
+clips nothing because it has darkened everything first.
+
+Still not verified: that a photograph rendered here and the same photograph
+rendered *in Resolve* agree pixel for pixel. The transforms are captured, the
+grading controls are still ours, so agreement is expected only at neutral.
+That comparison is the next thing worth doing.
