@@ -250,6 +250,7 @@ export default function ColorV3Controls({
           <h3 className="mt-3 text-sm font-medium text-text-primary">
             {t('colorV3.detail', { defaultValue: 'Detail' })}
           </h3>
+          {detailSlider('dehaze', t('colorV3.dehaze', { defaultValue: 'Dehaze' }))}
           {detailSlider('sharpening', t('colorV3.sharpening', { defaultValue: 'Sharpening' }))}
           {detailSlider('threshold', t('colorV3.threshold', { defaultValue: 'Sharpening threshold' }), 0, 80, 15)}
           {detailSlider('texture', t('colorV3.texture', { defaultValue: 'Texture' }))}

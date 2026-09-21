@@ -31,6 +31,7 @@ export interface V3Detail {
   structure: number;
   luminance_noise: number;
   color_noise: number;
+  dehaze: number;
 }
 export const defaultV3Detail = (): V3Detail => ({
   sharpening: 0,
@@ -40,6 +41,7 @@ export const defaultV3Detail = (): V3Detail => ({
   structure: 0,
   luminance_noise: 0,
   color_noise: 0,
+  dehaze: 0,
 });
 
 /** Vignette and grain, with the previous engine's slider meanings. */

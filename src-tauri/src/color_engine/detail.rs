@@ -57,6 +57,8 @@ pub struct Detail {
     pub luminance_noise: f32,
     /// 0..100.
     pub color_noise: f32,
+    /// -100..100. Positive removes haze, negative adds it.
+    pub dehaze: f32,
 }
 
 impl Default for Detail {
@@ -69,6 +71,7 @@ impl Default for Detail {
             structure: 0.,
             luminance_noise: 0.,
             color_noise: 0.,
+            dehaze: 0.,
         }
     }
 }
@@ -76,7 +79,13 @@ impl Default for Detail {
 impl Detail {
     pub fn validate(&self) -> Result<()> {
         let within = |v: f32, a: f32, b: f32| v.is_finite() && (a..=b).contains(&v);
-        for v in [self.sharpening, self.texture, self.clarity, self.structure] {
+        for v in [
+            self.sharpening,
+            self.texture,
+            self.clarity,
+            self.structure,
+            self.dehaze,
+        ] {
             ensure!(
                 within(v, -100., 100.),
                 "Detail controls must be within -100..100"
@@ -101,6 +110,7 @@ impl Detail {
             && self.structure == 0.
             && self.luminance_noise == 0.
             && self.color_noise == 0.
+            && self.dehaze == 0.
     }
 }
 
@@ -113,6 +123,9 @@ struct Plan {
     structure: Option<Gaussian>,
     luminance_radius: Option<usize>,
     color_radius: Option<usize>,
+    /// Dehaze: the dark channel's minimum-filter radius and the guided
+    /// filter's radius that refines the transmission map.
+    dehaze: Option<(usize, usize)>,
 }
 
 impl Plan {
@@ -130,6 +143,12 @@ impl Plan {
             color_radius: (detail.color_noise > 0.).then(|| {
                 (((2.0 + 8.0 * detail.color_noise / 100.) * scale).round() as usize).max(1)
             }),
+            dehaze: (detail.dehaze != 0.).then(|| {
+                (
+                    ((15.0 * scale).round() as usize).max(1),
+                    ((30.0 * scale).round() as usize).max(1),
+                )
+            }),
         }
     }
 
@@ -145,7 +164,9 @@ impl Plan {
             .unwrap_or(0);
         let luminance = self.luminance_radius.map_or(0, |r| 2 * r);
         let color = self.color_radius.map_or(0, |r| 2 * r);
-        luminance + color.max(bands)
+        // Dehaze runs first and everything after reads its result.
+        let dehaze = self.dehaze.map_or(0, |(min, guide)| min + 2 * guide);
+        dehaze + luminance + color.max(bands)
     }
 }
 
@@ -214,6 +235,9 @@ fn apply_in_strips(
     let (width, height) = (image.width() as usize, image.height() as usize);
     let halo = plan.halo();
     let source = image.as_raw().clone();
+    // The colour of the haze belongs to the whole photograph. Estimated per
+    // strip, two strips would disagree about it and the seam would show.
+    let airlight = plan.dehaze.map(|_| airlight(&source));
     let output = image.as_mut();
     let mut start = 0;
     while start < height {
@@ -221,7 +245,15 @@ fn apply_in_strips(
         let top = start.saturating_sub(halo);
         let bottom = (end + halo).min(height);
         let region = &source[top * width * 4..bottom * width * 4];
-        let processed = process(region, width, bottom - top, detail, &plan, weights);
+        let processed = process(
+            region,
+            width,
+            bottom - top,
+            detail,
+            &plan,
+            weights,
+            airlight,
+        );
         let skip = (start - top) * width * 4;
         output[start * width * 4..end * width * 4]
             .copy_from_slice(&processed[skip..skip + (end - start) * width * 4]);
@@ -238,8 +270,28 @@ fn process(
     detail: &Detail,
     plan: &Plan,
     weights: [f32; 3],
+    airlight: Option<[f32; 3]>,
 ) -> Vec<f32> {
     let pixels = width * height;
+    // Dehaze first: it changes colour as well as brightness, and every later
+    // stage should act on the clearer image.
+    let dehazed;
+    let rgba = match (plan.dehaze, airlight) {
+        (Some((min_radius, guide_radius)), Some(a)) => {
+            dehazed = dehaze(
+                rgba,
+                width,
+                height,
+                detail.dehaze / 100.,
+                a,
+                min_radius,
+                guide_radius,
+                weights,
+            );
+            &dehazed[..]
+        }
+        _ => rgba,
+    };
     let luminance: Vec<f32> = (0..pixels)
         .into_par_iter()
         .map(|i| {
@@ -349,6 +401,137 @@ fn process(
             }
         }
     });
+    out
+}
+
+/// The haze colour: the mean of the pixels whose darkest channel is
+/// brightest — the top 0.1% of the dark channel, from He, Sun and Tang.
+/// Estimated from a subsample, since it is a statistic of the whole frame.
+fn airlight(rgba: &[f32]) -> [f32; 3] {
+    let pixels = rgba.len() / 4;
+    let stride = (pixels / 1_000_000).max(1);
+    let samples: Vec<(f32, usize)> = (0..pixels)
+        .step_by(stride)
+        .map(|i| {
+            let p = &rgba[i * 4..i * 4 + 3];
+            (p[0].min(p[1]).min(p[2]).max(0.0), i)
+        })
+        .collect();
+    let take = (samples.len() / 1000).max(1);
+    let mut darkest: Vec<f32> = samples.iter().map(|s| s.0).collect();
+    let cut = darkest.len() - take;
+    let threshold = *darkest.select_nth_unstable_by(cut, |a, b| a.total_cmp(b)).1;
+    let mut sum = [0.0f64; 3];
+    let mut n = 0.0f64;
+    for &(dark, i) in &samples {
+        if dark >= threshold {
+            for c in 0..3 {
+                sum[c] += rgba[i * 4 + c].max(0.0) as f64;
+            }
+            n += 1.0;
+        }
+    }
+    sum.map(|v| ((v / n.max(1.0)) as f32).max(0.05))
+}
+
+/// Dark-channel dehazing (He, Sun and Tang): the haze model is
+/// `I = J·t + A·(1 − t)`, so with the airlight `A` known and the transmission
+/// `t` estimated from how bright the darkest channel is locally, the clear
+/// scene `J` can be solved for. The transmission map is refined with a
+/// guided filter so it follows the photograph's edges instead of the blocks
+/// of the minimum filter. A negative amount adds even haze instead.
+#[allow(clippy::too_many_arguments)]
+fn dehaze(
+    rgba: &[f32],
+    width: usize,
+    height: usize,
+    amount: f32,
+    a: [f32; 3],
+    min_radius: usize,
+    guide_radius: usize,
+    weights: [f32; 3],
+) -> Vec<f32> {
+    let pixels = width * height;
+    let mut out = rgba.to_vec();
+    if amount < 0.0 {
+        let t = 1.0 - amount.abs() * 0.6;
+        out.par_chunks_mut(4).for_each(|p| {
+            for c in 0..3 {
+                p[c] = p[c] * t + a[c] * (1.0 - t);
+            }
+        });
+        return out;
+    }
+    let dark_min: Vec<f32> = (0..pixels)
+        .into_par_iter()
+        .map(|i| {
+            let p = &rgba[i * 4..i * 4 + 3];
+            (0..3)
+                .map(|c| p[c].max(0.0) / a[c])
+                .fold(f32::MAX, f32::min)
+        })
+        .collect();
+    let dark = min_filter(&dark_min, width, height, min_radius);
+    let omega = 0.95 * amount.min(1.0);
+    let raw: Vec<f32> = dark.par_iter().map(|d| 1.0 - omega * d).collect();
+    let guide: Vec<f32> = (0..pixels)
+        .into_par_iter()
+        .map(|i| {
+            let p = &rgba[i * 4..i * 4 + 3];
+            weights[0] * p[0] + weights[1] * p[1] + weights[2] * p[2]
+        })
+        .collect();
+    let transmission = guided(&guide, &raw, width, height, guide_radius, 1e-3);
+    out.par_chunks_mut(4)
+        .zip(transmission.par_iter())
+        .for_each(|(p, t)| {
+            let t = t.clamp(0.1, 1.0);
+            for c in 0..3 {
+                p[c] = (p[c] - a[c]) / t + a[c];
+            }
+        });
+    out
+}
+
+/// Minimum over a square window, edges repeated: separable, and linear in
+/// the image size whatever the radius (van Herk / Gil-Werman).
+fn min_filter(plane: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
+    let rows = min_rows(plane, w, h, r);
+    let cols = min_rows(&transpose(&rows, w, h), h, w, r);
+    transpose(&cols, h, w)
+}
+
+fn min_rows(plane: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
+    if r == 0 {
+        return plane.to_vec();
+    }
+    let k = 2 * r + 1;
+    let mut out = vec![0.0f32; w * h];
+    out.par_chunks_mut(w)
+        .zip(plane.par_chunks(w))
+        .take(h)
+        .for_each(|(dst, src)| {
+            // Pad with the edge values, then prefix/suffix minima per block.
+            let padded: Vec<f32> = (0..w + 2 * r)
+                .map(|i| src[(i as isize - r as isize).clamp(0, w as isize - 1) as usize])
+                .collect();
+            let n = padded.len();
+            let mut prefix = padded.clone();
+            let mut suffix = padded.clone();
+            for i in 1..n {
+                if i % k != 0 {
+                    prefix[i] = prefix[i].min(prefix[i - 1]);
+                }
+            }
+            for i in (0..n.saturating_sub(1)).rev() {
+                if (i + 1) % k != 0 {
+                    suffix[i] = suffix[i].min(suffix[i + 1]);
+                }
+            }
+            for (x, d) in dst.iter_mut().enumerate() {
+                *d = suffix[x].min(prefix[x + 2 * r]);
+            }
+        });
     out
 }
 
@@ -632,6 +815,92 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_minimum_filter_is_exact() {
+        let (w, h) = (23, 17);
+        let plane: Vec<f32> = (0..w * h)
+            .map(|i| noise((i % w) as u32, (i / w) as u32))
+            .collect();
+        for r in [1, 3, 5] {
+            let fast = min_filter(&plane, w, h, r);
+            for y in 0..h {
+                for x in 0..w {
+                    let mut m = f32::MAX;
+                    for dy in -(r as isize)..=r as isize {
+                        for dx in -(r as isize)..=r as isize {
+                            let xx = (x as isize + dx).clamp(0, w as isize - 1) as usize;
+                            let yy = (y as isize + dy).clamp(0, h as isize - 1) as usize;
+                            m = m.min(plane[yy * w + xx]);
+                        }
+                    }
+                    assert_eq!(fast[y * w + x], m, "r={r} at {x},{y}");
+                }
+            }
+        }
+    }
+
+    /// Haze a known scene with the model dehazing inverts, and require the
+    /// dehazed result to be much closer to the scene than the hazy one.
+    #[test]
+    fn dehaze_recovers_a_hazed_scene() {
+        let airlight = [0.8f32, 0.82, 0.86];
+        let scene = |x: u32, y: u32| {
+            let block = (x / 12 + y / 9) % 3;
+            let base = [[0.05f32, 0.2, 0.1], [0.3, 0.08, 0.04], [0.06, 0.07, 0.25]][block as usize];
+            base.map(|v| v * (1.0 + 0.2 * noise(x, y)))
+        };
+        // A distant band at the top, almost pure haze — as a real hazy
+        // photograph's sky or horizon is. That is where the haze colour is
+        // read from; a frame hazed evenly everywhere has no pixel showing it.
+        let transmission = |y: u32| if y < 14 { 0.03f32 } else { 0.45 };
+        let hazy = image(96, 72, |x, y| {
+            let (j, t) = (scene(x, y), transmission(y));
+            std::array::from_fn(|c| j[c] * t + airlight[c] * (1.0 - t))
+        });
+        // Judged on the foreground, away from the transmission edge.
+        let error = |img: &image::Rgba32FImage| {
+            let mut sum = 0.0f32;
+            let mut n = 0.0f32;
+            for (x, y, p) in img.enumerate_pixels().filter(|(_, y, _)| *y >= 24) {
+                let j = scene(x, y);
+                sum += (0..3).map(|c| (p[c] - j[c]).abs()).sum::<f32>();
+                n += 3.0;
+            }
+            sum / n
+        };
+        let mut clear = hazy.clone();
+        apply(
+            &mut clear,
+            &Detail {
+                dehaze: 100.,
+                ..Detail::default()
+            },
+            SRGB_Y,
+            1.0,
+        );
+        assert!(
+            error(&clear) < error(&hazy) * 0.5,
+            "dehaze did not recover the scene: {} -> {}",
+            error(&hazy),
+            error(&clear)
+        );
+        // Negative adds haze: the image moves toward the airlight.
+        let mut hazier = hazy.clone();
+        apply(
+            &mut hazier,
+            &Detail {
+                dehaze: -60.,
+                ..Detail::default()
+            },
+            SRGB_Y,
+            1.0,
+        );
+        assert!(
+            error(&hazier) > error(&hazy),
+            "negative dehaze did not add haze"
+        );
+    }
+
     /// The tiling contract: a strip boundary must never change a pixel.
     #[test]
     fn strips_match_the_whole_image() {
@@ -643,6 +912,7 @@ mod tests {
             luminance_noise: 40.,
             color_noise: 60.,
             threshold: 10.,
+            dehaze: 50.,
         };
         let make = || {
             image(96, 200, |x, y| {
@@ -731,6 +1001,7 @@ mod tests {
                     luminance_noise: 50.,
                     color_noise: 50.,
                     threshold: 15.,
+                    dehaze: 50.,
                 },
             ),
         ] {
