@@ -23,6 +23,7 @@ pub struct EngineCache {
 pub struct PreparedCache {
     source: Arc<DecodedFrame>,
     transform: u64,
+    patches: u64,
     dimension: Option<u32>,
     image: Arc<DynamicImage>,
     offset: (f32, f32),
@@ -94,12 +95,6 @@ pub fn controls(edits: &Value) -> Result<Controls> {
 }
 
 pub fn validate_features(edits: &Value) -> Result<()> {
-    ensure!(
-        !edits["aiPatches"]
-            .as_array()
-            .is_some_and(|a| a.iter().any(|p| p["visible"].as_bool() != Some(false))),
-        "V3 does not yet support AI image patches. Hide the patches or return to the previous engine."
-    );
     ensure!(
         edits["flatFieldProfile"].is_null(),
         "V3 flat-field profiles need a color-space adapter; return to the previous engine."
@@ -185,15 +180,41 @@ pub(crate) fn render_file_with_capture(
     let controls = controls(edits)?;
     let source = source(state, path)?;
     let transform = crate::cache_utils::calculate_transform_hash(edits);
+    // Patches are part of what the prepared image *is*, so they belong in its
+    // key. Without this, hiding a patch would leave the old composite on
+    // screen until some unrelated edit happened to invalidate the cache.
+    let patches = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for patch in super::patches::visible(edits) {
+            patch.to_string().hash(&mut hasher);
+        }
+        hasher.finish()
+    };
     let mut prepared = state
         .v3_prepared
         .lock()
         .map_err(|_| anyhow::anyhow!("V3 preview cache unavailable"))?;
     let hit = prepared.as_ref().is_some_and(|p| {
-        Arc::ptr_eq(&p.source, &source) && p.transform == transform && p.dimension == max_dimension
+        Arc::ptr_eq(&p.source, &source)
+            && p.transform == transform
+            && p.patches == patches
+            && p.dimension == max_dimension
     });
     if !hit {
-        let base = DynamicImage::ImageRgba32F(source.pixels.clone());
+        // Patches join at the decoded-source stage, before geometry, because
+        // the mask stored with a patch is in those coordinates.
+        let patched = if super::patches::visible(edits).is_empty() {
+            source.pixels.clone()
+        } else {
+            let cube = input_transform(state)
+                .map(|p| super::cube::CubeLut::load(&p))
+                .transpose()?;
+            let mut pixels = source.pixels.clone();
+            super::patches::composite(&mut pixels, edits, &source.color, cube.as_ref())?;
+            pixels
+        };
+        let base = DynamicImage::ImageRgba32F(patched);
         let (transformed, offset) = crate::apply_all_transformations(&base, edits);
         let full_width = transformed.width();
         let image = if let Some(dim) = max_dimension {
@@ -206,6 +227,7 @@ pub(crate) fn render_file_with_capture(
         *prepared = Some(PreparedCache {
             source: source.clone(),
             transform,
+            patches,
             dimension: max_dimension,
             image: Arc::new(image),
             offset,

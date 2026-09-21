@@ -37,13 +37,13 @@ pub struct LoadImageResult {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct PatchMaskInfo {
-    id: String,
-    name: String,
+pub struct PatchMaskInfo {
+    pub id: String,
+    pub name: String,
     #[serde(default)]
-    invert: bool,
+    pub invert: bool,
     #[serde(default)]
-    sub_masks: Vec<SubMask>,
+    pub sub_masks: Vec<SubMask>,
 }
 
 pub fn load_and_composite(
