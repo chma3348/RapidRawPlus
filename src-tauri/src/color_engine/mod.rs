@@ -14,6 +14,7 @@ mod renderer;
 pub mod selection;
 pub mod spaces;
 
+pub(crate) use renderer::tpdf as renderer_tpdf;
 pub use renderer::{ColorEngine, RenderedFrame, StageCapture};
 
 pub fn shader_source() -> String {

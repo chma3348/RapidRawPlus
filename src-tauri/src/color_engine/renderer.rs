@@ -102,6 +102,13 @@ impl RenderedFrame {
     }
 }
 
+/// Triangular noise in (-1, 1) for one pixel and channel, fixed per pixel:
+/// one LSB of it before rounding to eight bits trades banding for noise too
+/// fine to see, and leaves the average exact.
+pub(crate) fn tpdf(x: u32, y: u32, channel: u32) -> f32 {
+    uniform(x, y, channel * 2) + uniform(x, y, channel * 2 + 1) - 1.0
+}
+
 /// Deterministic value in [0,1) for one pixel and channel. Fixed per pixel so
 /// the same frame always encodes the same way.
 fn uniform(x: u32, y: u32, channel: u32) -> f32 {

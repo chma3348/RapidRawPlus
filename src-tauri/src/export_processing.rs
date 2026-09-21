@@ -46,6 +46,55 @@ use crate::{
 
 #[cfg(test)]
 mod precision_tests {
+    /// Eight-bit exports of a 16-bit render: dither must break the plateaus
+    /// rounding leaves in a slow ramp, keep the average, stay within a level
+    /// of plain rounding, repeat exactly, and leave 8-bit images untouched.
+    #[test]
+    fn eight_bit_exports_are_dithered_from_deeper_renders() {
+        let ramp = DynamicImage::ImageRgba16(ImageBuffer::from_fn(512, 4, |x, _| {
+            let v = (20000 + x * 3) as u16;
+            image::Rgba([v, v, v, 65535])
+        }));
+        let plain = ramp.to_rgb8();
+        let dithered = super::to_rgb8_dithered(&ramp);
+        let longest = |img: &image::RgbImage| {
+            let (mut best, mut run) = (1, 1);
+            for x in 1..img.width() {
+                run = if img.get_pixel(x, 0)[0] == img.get_pixel(x - 1, 0)[0] {
+                    run + 1
+                } else {
+                    1
+                };
+                best = best.max(run);
+            }
+            best
+        };
+        assert!(
+            longest(&dithered) * 4 < longest(&plain),
+            "banding survived: {} vs {}",
+            longest(&dithered),
+            longest(&plain)
+        );
+        let mean = |img: &image::RgbImage| {
+            img.pixels().map(|p| p[0] as f64).sum::<f64>() / img.pixels().len() as f64
+        };
+        assert!((mean(&dithered) - mean(&plain)).abs() < 0.25);
+        for (a, b) in plain.pixels().zip(dithered.pixels()) {
+            assert!(a[0].abs_diff(b[0]) <= 1);
+        }
+        assert_eq!(
+            dithered,
+            super::to_rgb8_dithered(&ramp),
+            "must be deterministic"
+        );
+        let eight = DynamicImage::ImageRgb8(plain.clone());
+        assert_eq!(
+            super::to_rgb8_dithered(&eight),
+            plain,
+            "an 8-bit image must come back unchanged"
+        );
+    }
+
     use super::*;
     use image::Rgba;
 
@@ -511,6 +560,37 @@ fn encode_grayscale_to_png(bitmap: &GrayImage) -> Result<Vec<u8>, String> {
     Ok(buf)
 }
 
+/// Eight bits from a deeper image, dithered. A 16-bit render carries smooth
+/// gradients that plain rounding turns into steps — visible in a JPEG sky.
+/// One LSB of triangular noise, fixed per pixel, trades them for noise too
+/// fine to see. An image already in eight bits comes back unchanged.
+fn to_rgba8_dithered(image: &DynamicImage) -> image::RgbaImage {
+    if matches!(
+        image,
+        DynamicImage::ImageRgba8(_) | DynamicImage::ImageRgb8(_)
+    ) {
+        return image.to_rgba8();
+    }
+    let deep = image.to_rgba32f();
+    ImageBuffer::from_fn(deep.width(), deep.height(), |x, y| {
+        let p = deep.get_pixel(x, y).0;
+        image::Rgba(std::array::from_fn(|c| {
+            let noise = if c == 3 {
+                0.0
+            } else {
+                crate::color_engine::renderer_tpdf(x, y, c as u32)
+            };
+            (p[c].clamp(0.0, 1.0) * 255.0 + noise)
+                .round()
+                .clamp(0.0, 255.0) as u8
+        }))
+    })
+}
+
+fn to_rgb8_dithered(image: &DynamicImage) -> image::RgbImage {
+    DynamicImage::ImageRgba8(to_rgba8_dithered(image)).to_rgb8()
+}
+
 fn encode_image_to_bytes(
     image: &DynamicImage,
     output_format: &str,
@@ -526,12 +606,12 @@ fn encode_image_to_bytes(
 
             let jxl_data = if jpeg_quality == 100 {
                 if has_alpha {
-                    let rgba = image.to_rgba8();
+                    let rgba = to_rgba8_dithered(image);
                     LosslessConfig::new()
                         .encode(rgba.as_raw(), width, height, PixelLayout::Rgba8)
                         .map_err(|e| format!("Failed to encode lossless JXL: {}", e))?
                 } else {
-                    let rgb = image.to_rgb8();
+                    let rgb = to_rgb8_dithered(image);
                     LosslessConfig::new()
                         .encode(rgb.as_raw(), width, height, PixelLayout::Rgb8)
                         .map_err(|e| format!("Failed to encode lossless JXL: {}", e))?
@@ -541,12 +621,12 @@ fn encode_image_to_bytes(
                 let distance = distance.max(0.01);
 
                 if has_alpha {
-                    let rgba = image.to_rgba8();
+                    let rgba = to_rgba8_dithered(image);
                     LossyConfig::new(distance)
                         .encode(rgba.as_raw(), width, height, PixelLayout::Rgba8)
                         .map_err(|e| format!("Failed to encode lossy JXL: {}", e))?
                 } else {
-                    let rgb = image.to_rgb8();
+                    let rgb = to_rgb8_dithered(image);
                     LossyConfig::new(distance)
                         .encode(rgb.as_raw(), width, height, PixelLayout::Rgb8)
                         .map_err(|e| format!("Failed to encode lossy JXL: {}", e))?
@@ -556,14 +636,14 @@ fn encode_image_to_bytes(
             return Ok(jxl_data);
         }
         "webp" => {
-            let webp_image = DynamicImage::ImageRgba8(image.to_rgba8());
+            let webp_image = DynamicImage::ImageRgba8(to_rgba8_dithered(image));
             let encoder = webp::Encoder::from_image(&webp_image)
                 .map_err(|_| "Failed to create WebP encoder".to_string())?;
             let webp_mem = encoder.encode(jpeg_quality as f32);
             return Ok(webp_mem.to_vec());
         }
         "jpg" | "jpeg" => {
-            let rgb_image = image.to_rgb8();
+            let rgb_image = to_rgb8_dithered(image);
             let mut encoder = JpegEncoder::new_with_quality(&mut cursor, jpeg_quality);
             encoder
                 .set_icc_profile(
@@ -609,7 +689,7 @@ fn encode_image_to_bytes(
                 .map_err(|e| e.to_string())?;
         }
         "avif" => {
-            DynamicImage::ImageRgba8(image.to_rgba8())
+            DynamicImage::ImageRgba8(to_rgba8_dithered(image))
                 .write_to(&mut cursor, image::ImageFormat::Avif)
                 .map_err(|e| e.to_string())?;
         }
