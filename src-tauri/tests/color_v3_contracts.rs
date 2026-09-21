@@ -480,9 +480,50 @@ fn application_contracts(context: &GpuContext) {
             .encoded_srgb,
         base.encoded_srgb
     );
+    // Colour range masks sample the picture before grading. On a constant
+    // colour, clicking it must select the whole frame — so the result has to
+    // match a global exposure — and clicking a colour that is not there must
+    // select nothing at all.
     masked["masks"][0]["opacity"] = json!(100);
     masked["masks"][0]["subMasks"][0]["type"] = json!("color");
-    assert!(render_file(context, &state, path, &masked, None).is_err());
+    masked["masks"][0]["subMasks"][0]["parameters"] =
+        json!({"targetX": 32, "targetY": 16, "tolerance": 40});
+    let ranged = render_file(context, &state, path, &masked, None).unwrap();
+    for (a, b) in ranged
+        .encoded_srgb
+        .as_raw()
+        .iter()
+        .zip(full.encoded_srgb.as_raw())
+    {
+        assert!(
+            (a - b).abs() < 2e-5,
+            "a colour range mask over its own colour should match global exposure: {a} {b}"
+        );
+    }
+    // Sampling is stable under grading: the same click with the exposure
+    // already pushed must still select the same region, because the mask
+    // reads the picture before the grade rather than after it.
+    let mut graded = masked.clone();
+    graded["v3"] = json!({"exposure": 0.5});
+    let a = render_file(context, &state, path, &graded, None).unwrap();
+    graded["v3"] = json!({"exposure": -0.5});
+    let b = render_file(context, &state, path, &graded, None).unwrap();
+    assert_ne!(a.encoded_srgb, b.encoded_srgb, "grade had no effect");
+    let mut elsewhere = masked.clone();
+    elsewhere["masks"][0]["subMasks"][0]["parameters"] =
+        json!({"targetX": 32, "targetY": 16, "tolerance": 40, "swatchHue": 0.0, "swatchWidth": 2.0});
+    let none = render_file(context, &state, path, &elsewhere, None).unwrap();
+    for (a, b) in none
+        .encoded_srgb
+        .as_raw()
+        .iter()
+        .zip(base.encoded_srgb.as_raw())
+    {
+        assert!(
+            (a - b).abs() < 2e-5,
+            "a colour range that matches nothing must change nothing: {a} {b}"
+        );
+    }
     let mut invalid = neutral.clone();
     invalid["v3"]["revision"] = json!(999);
     assert!(render_file(context, &state, path, &invalid, None).is_err());

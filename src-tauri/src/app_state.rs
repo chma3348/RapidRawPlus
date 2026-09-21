@@ -152,6 +152,10 @@ pub struct AppState {
     pub v3_source: Mutex<Option<crate::color_engine::application::SourceCache>>,
     pub v3_engine: Mutex<Option<crate::color_engine::application::EngineCache>>,
     pub v3_prepared: Mutex<Option<crate::color_engine::application::PreparedCache>>,
+    /// Full-resolution neutral render of the v3 source, which colour and
+    /// luminance range masks sample. Keyed by source, geometry and patches:
+    /// everything that changes what the picture is before it is graded.
+    pub v3_sampling: Mutex<Option<(u64, std::sync::Arc<image::DynamicImage>)>>,
     pub cached_preview: Mutex<Option<CachedPreview>>,
     pub gpu_context: Mutex<Option<GpuContext>>,
     pub gpu_image_cache: Mutex<Option<GpuImageCache>>,
@@ -208,6 +212,7 @@ impl Default for AppState {
             v3_source: Mutex::new(None),
             v3_engine: Mutex::new(None),
             v3_prepared: Mutex::new(None),
+            v3_sampling: Mutex::new(None),
             cached_preview: Mutex::new(None),
             gpu_context: Mutex::new(None),
             gpu_image_cache: Mutex::new(None),

@@ -155,6 +155,40 @@ pub fn input_transform(state: &AppState) -> Option<PathBuf> {
     state.input_transform.lock().unwrap().clone()
 }
 
+/// What a colour or luminance range mask samples: the picture as it stands
+/// before grading, at full resolution.
+fn sampling_image(
+    context: &GpuContext,
+    state: &AppState,
+    path: &str,
+    edits: &Value,
+    transform: u64,
+    patches: u64,
+) -> Result<Arc<DynamicImage>> {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hasher);
+    transform.hash(&mut hasher);
+    patches.hash(&mut hasher);
+    let key = hasher.finish();
+    if let Ok(cache) = state.v3_sampling.lock()
+        && let Some((cached, image)) = cache.as_ref()
+        && *cached == key
+    {
+        return Ok(image.clone());
+    }
+    // Neutral: the same engine, the same transforms, no controls.
+    let mut neutral = edits.clone();
+    neutral["v3"] = serde_json::json!({});
+    neutral["masks"] = serde_json::json!([]);
+    let frame = render_file(context, state, path, &neutral, None)?;
+    let image = Arc::new(DynamicImage::ImageRgba8(frame.preview_rgba8()));
+    if let Ok(mut cache) = state.v3_sampling.lock() {
+        *cache = Some((key, image.clone()));
+    }
+    Ok(image)
+}
+
 /// `max_dimension` only changes spatial sampling; source decode and all color
 /// operators are identical for interactive, settled and full-size export.
 pub fn render_file(
@@ -244,12 +278,29 @@ pub(crate) fn render_file_with_capture(
         .iter()
         .filter(|m| m.visible && m.opacity > 0. && !m.sub_masks.is_empty())
         .collect();
-    for m in &active {
-        ensure!(
-            !m.requires_warped_image(),
-            "V3 color/luminance range masks require a new sampling contract. Use a brush/gradient/bitmap mask or the previous engine."
-        );
-    }
+    // Colour and luminance range masks need something to sample. The
+    // previous engine hands them the geometrically-warped source before any
+    // adjustment, so the mask does not move as you grade; v3 honours the same
+    // contract, rendered through its own pipeline at neutral so what the mask
+    // measures is what the picture is before grading — not a second opinion
+    // about colour from a different set of transforms.
+    //
+    // Full resolution, because the mask generator maps its coordinates
+    // against the warped image's own dimensions. It is cached against
+    // everything that changes the picture before grading, so it is built once
+    // per geometry or patch change rather than per render.
+    let sampled = if active.iter().any(|m| m.requires_warped_image()) {
+        Some(sampling_image(
+            context,
+            state,
+            path,
+            edits,
+            transform,
+            patches,
+        )?)
+    } else {
+        None
+    };
     let mut cache = state
         .v3_engine
         .lock()
@@ -292,7 +343,7 @@ pub(crate) fn render_file_with_capture(
             image.height(),
             scale,
             (offset.0 * scale, offset.1 * scale),
-            None,
+            sampled.as_deref(),
         )
         .context("Could not generate v3 mask")?;
         let adjusted = engine

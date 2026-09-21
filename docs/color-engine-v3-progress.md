@@ -1,5 +1,46 @@
 # Color Engine v3 — implementation and verification
 
+## Patches and range masks — September 20, 2026
+
+Two of the three things that stopped v3 being an engine you could finish a
+photo in.
+
+**Heal, clone and generative patches.** V3 refused them because nothing said
+what the stored pixels were. The previous engine composites a patch onto
+whatever the decoded base happens to be, which works there only because nothing
+declares a colour space, so nothing can disagree. The patch does record it:
+`encoding: "gamma"` marks pixels lifted from float or RAW data and stored
+through a 1/2.4 curve so deep shadows survive eight bits; anything else came
+from rendered display pixels and is sRGB. They join at the decoded-source
+stage, before geometry, because the mask stored with a patch is in those
+coordinates — and when an input transform is installed the patch goes through
+it too, or it would be the one part of the frame still carrying a rendering the
+rest has had removed. Patches are part of the prepared image's cache key;
+without that, hiding one would leave the old composite on screen.
+
+**Colour and luminance range masks.** These needed a sampling contract, and the
+previous engine already has a good one: they sample the geometrically-warped
+source *before* any adjustment, so the mask does not move as you grade. V3
+honours the same contract, rendered through its own pipeline at neutral, so
+what the mask measures is what the picture is before grading rather than a
+second opinion about colour from a different set of transforms. Full
+resolution, because the mask generator maps coordinates against the warped
+image's own dimensions, and cached against source, geometry and patches so it
+is built once per change rather than per render.
+
+Contracts: a colour range mask clicked on a constant colour selects the whole
+frame and matches a global exposure exactly; a swatch hue that matches nothing
+changes nothing; sampling is unaffected by the grade applied on top. Patch
+tests cover the sRGB and gamma storage paths, mask coverage, and that a hidden
+patch is a no-op.
+
+Still outstanding from that list: detail — sharpening, clarity, structure and
+noise reduction. Those need neighbouring pixels, and v3's renderer is
+deliberately a one-dimensional pass over chunks of a storage buffer. Adding
+them means a second, two-dimensional pass with halo padding and a tiling
+contract, which is the Phase 3 gate about results not changing with zoom,
+preview resolution or export tiling.
+
 ## Output and grading corrections — September 20, 2026
 
 Six changes from a review of the engine as built. None of them adds a control.
