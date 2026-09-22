@@ -13,9 +13,14 @@ interface BasicAdjustmentsProps {
   isForMask?: boolean;
   onDragStateChange?: (isDragging: boolean) => void;
   appSettings?: any;
+  /** Colour engine v3: adds its Resolve rendering to the tone mappers and
+   *  drops the previous engine's Classic/Refined choice, which v3 does not
+   *  have (its Basic sliders are always the Refined ones). */
+  engineV3?: boolean;
 }
 
 interface ToneMapperSwitchProps {
+  engineV3?: boolean;
   selectedMapper: string;
   onMapperChange: (mapper: string) => void;
   evShiftValue: number;
@@ -24,6 +29,7 @@ interface ToneMapperSwitchProps {
 }
 
 const ToneMapperSwitch = ({
+  engineV3 = false,
   selectedMapper,
   onMapperChange,
   evShiftValue,
@@ -37,6 +43,17 @@ const ToneMapperSwitch = ({
 
   const toneMapperOptions = useMemo(
     () => [
+      ...(engineV3
+        ? [
+            {
+              id: 'resolve',
+              label: t('adjustments.basic.mappers.resolve', { defaultValue: 'Resolve' }),
+              title: t('adjustments.basic.mappers.resolveDesc', {
+                defaultValue: "DaVinci Resolve's rendering, captured from your Resolve",
+              }),
+            },
+          ]
+        : []),
       {
         id: 'basic',
         label: t('adjustments.basic.mappers.basic'),
@@ -53,11 +70,11 @@ const ToneMapperSwitch = ({
         title: t('adjustments.basic.mappers.filmicDesc'),
       },
     ],
-    [t],
+    [t, engineV3],
   );
 
   const handleReset = () => {
-    onMapperChange('basic');
+    onMapperChange(engineV3 ? 'resolve' : 'basic');
     onEvShiftChange(0);
   };
 
@@ -167,6 +184,7 @@ export default function BasicAdjustments({
   isForMask = false,
   onDragStateChange,
   appSettings,
+  engineV3 = false,
 }: BasicAdjustmentsProps) {
   const { t } = useTranslation();
 
@@ -178,7 +196,7 @@ export default function BasicAdjustments({
   const handleToneMapperChange = (mapper: string) => {
     setAdjustments((prev: Partial<Adjustments>) => ({
       ...prev,
-      toneMapper: mapper as 'basic' | 'agx' | 'filmic',
+      toneMapper: mapper as 'basic' | 'agx' | 'filmic' | 'resolve',
     }));
   };
 
@@ -199,39 +217,42 @@ export default function BasicAdjustments({
       ) : (
         <>
           <ToneMapperSwitch
-            selectedMapper={adjustments.toneMapper || 'agx'}
+            engineV3={engineV3}
+            selectedMapper={adjustments.toneMapper || (engineV3 ? 'resolve' : 'agx')}
             onMapperChange={handleToneMapperChange}
             evShiftValue={adjustments.exposure}
             onEvShiftChange={(value) => handleAdjustmentChange(BasicAdjustment.Exposure, value)}
             onDragStateChange={onDragStateChange}
           />
-          <div className="flex items-center justify-between mt-2 mb-1 px-1">
-            <Text variant={TextVariants.small} className="opacity-80">
-              {t('adjustments.basic.renderingEngine')}
-            </Text>
-            <div className="flex gap-1">
-              <button
-                onClick={() => setAdjustments((prev: any) => ({ ...prev, processVersion: 1 }))}
-                className={`px-2 py-0.5 rounded text-xs transition-colors ${
-                  (adjustments.processVersion ?? 2) === 1
-                    ? 'bg-accent text-button-text'
-                    : 'bg-bg-primary text-text-secondary hover:bg-card-active'
-                }`}
-              >
-                {t('adjustments.basic.renderingClassic')}
-              </button>
-              <button
-                onClick={() => setAdjustments((prev: any) => ({ ...prev, processVersion: 2 }))}
-                className={`px-2 py-0.5 rounded text-xs transition-colors ${
-                  (adjustments.processVersion ?? 2) === 2
-                    ? 'bg-accent text-button-text'
-                    : 'bg-bg-primary text-text-secondary hover:bg-card-active'
-                }`}
-              >
-                {t('adjustments.basic.renderingRefined')}
-              </button>
+          {!engineV3 && (
+            <div className="flex items-center justify-between mt-2 mb-1 px-1">
+              <Text variant={TextVariants.small} className="opacity-80">
+                {t('adjustments.basic.renderingEngine')}
+              </Text>
+              <div className="flex gap-1">
+                <button
+                  onClick={() => setAdjustments((prev: any) => ({ ...prev, processVersion: 1 }))}
+                  className={`px-2 py-0.5 rounded text-xs transition-colors ${
+                    (adjustments.processVersion ?? 2) === 1
+                      ? 'bg-accent text-button-text'
+                      : 'bg-bg-primary text-text-secondary hover:bg-card-active'
+                  }`}
+                >
+                  {t('adjustments.basic.renderingClassic')}
+                </button>
+                <button
+                  onClick={() => setAdjustments((prev: any) => ({ ...prev, processVersion: 2 }))}
+                  className={`px-2 py-0.5 rounded text-xs transition-colors ${
+                    (adjustments.processVersion ?? 2) === 2
+                      ? 'bg-accent text-button-text'
+                      : 'bg-bg-primary text-text-secondary hover:bg-card-active'
+                  }`}
+                >
+                  {t('adjustments.basic.renderingRefined')}
+                </button>
+              </div>
             </div>
-          </div>
+          )}
         </>
       )}
       <Slider
@@ -258,9 +279,7 @@ export default function BasicAdjustments({
           max={100}
           min={0}
           defaultValue={50}
-          onChange={(e: any) =>
-            setAdjustments((prev: any) => ({ ...prev, contrastPivot: parseFloat(e.target.value) }))
-          }
+          onChange={(e: any) => setAdjustments((prev: any) => ({ ...prev, contrastPivot: parseFloat(e.target.value) }))}
           step={1}
           value={adjustments.contrastPivot ?? 50}
           fillOrigin="min"

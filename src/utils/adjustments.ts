@@ -224,7 +224,7 @@ export interface Adjustments {
   structure: number;
   temperature: number;
   tint: number;
-  toneMapper: 'agx' | 'basic' | 'filmic';
+  toneMapper: 'agx' | 'basic' | 'filmic' | 'resolve';
   processVersion?: number;
   v3?: V3Controls;
   v3PreviousVersion?: number;

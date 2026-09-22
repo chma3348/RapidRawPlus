@@ -1675,7 +1675,7 @@ fn mat3_to_gpu_mat3(m: Mat3) -> GpuMat3 {
     }
 }
 
-fn calculate_agx_matrices_glam() -> (Mat3, Mat3) {
+pub(crate) fn calculate_agx_matrices_glam() -> (Mat3, Mat3) {
     let pipe_work_profile_to_xyz = primaries_to_xyz_matrix(&PRIMARIES_SRGB, WP_D65);
     let base_profile_to_xyz = primaries_to_xyz_matrix(&PRIMARIES_REC2020, WP_D65);
     let xyz_to_base_profile = base_profile_to_xyz.inverse();
@@ -2021,7 +2021,7 @@ fn convert_delta_curve(
     (out, pts.len() as u32)
 }
 
-fn get_global_adjustments_from_json(
+pub(crate) fn get_global_adjustments_from_json(
     js_adjustments: &serde_json::Value,
     is_raw: bool,
     tonemapper_override: Option<u32>,
@@ -2428,7 +2428,7 @@ fn get_global_adjustments_from_json(
     }
 }
 
-fn get_mask_adjustments_from_json(adj: &serde_json::Value) -> MaskAdjustments {
+pub(crate) fn get_mask_adjustments_from_json(adj: &serde_json::Value) -> MaskAdjustments {
     if adj.is_null() {
         return MaskAdjustments::default();
     }

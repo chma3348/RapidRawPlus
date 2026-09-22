@@ -139,6 +139,9 @@ pub struct ColorEngine {
     /// Largest chunk, in pixels. Only tests change it, to force chunk
     /// boundaries through images small enough to check pixel by pixel.
     chunk_pixels: usize,
+    /// The previous engine's measured shadow correction, which the shared
+    /// tone functions read. Uploaded once.
+    shadow_correction: wgpu::Buffer,
 }
 
 impl ColorEngine {
@@ -160,10 +163,24 @@ impl ColorEngine {
         if let Some(error) = pollster::block_on(scope.pop()) {
             return Err(anyhow!("V3 shader validation failed: {error}"));
         }
+        let table: Vec<f32> = include_bytes!("../shaders/shadow_correction_33.bin")
+            .chunks_exact(2)
+            .map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32())
+            .collect();
+        ensure!(
+            table.len() == 33 * 33 * 33,
+            "Shadow correction table is malformed"
+        );
+        let shadow_correction = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("V3 shadow correction"),
+            contents: bytemuck::cast_slice(&table),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
         Ok(Self {
             context,
             pipeline,
             chunk_pixels: 1 << 22,
+            shadow_correction,
         })
     }
 
@@ -221,7 +238,7 @@ impl ColorEngine {
         // still bounds GPU memory for a full-resolution export.
         let capacity = self
             .chunk_pixels
-            .min(limits.max_storage_buffer_binding_size as usize / stride)
+            .min(limits.max_storage_buffer_binding_size as usize / stride.max(32))
             .min(limits.max_buffer_size as usize / stride)
             .min(limits.max_compute_workgroups_per_dimension as usize * 64)
             .min(input.as_raw().len() / 4);
@@ -264,6 +281,24 @@ impl ColorEngine {
             ),
             usage: wgpu::BufferUsages::STORAGE,
         });
+        // Two entries per pixel, chunked with the source; one dummy pair when
+        // the plan carries no neighbourhood.
+        if let Some(n) = &plan.neighbourhood {
+            ensure!(
+                n.len() == input.as_raw().len() / 4 * 2,
+                "Neighbourhood does not match the image"
+            );
+        }
+        let neighbourhood = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("V3 neighbourhood chunk"),
+            size: if plan.neighbourhood.is_some() {
+                (capacity * 32) as u64
+            } else {
+                32
+            },
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let parameters = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("V3 parameters"),
             contents: bytemuck::bytes_of(&plan.parameters),
@@ -293,6 +328,14 @@ impl ColorEngine {
                     binding: 4,
                     resource: look.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: neighbourhood.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: self.shadow_correction.as_entire_binding(),
+                },
             ],
         });
         let mut output = Vec::with_capacity(input.as_raw().len());
@@ -307,6 +350,14 @@ impl ColorEngine {
             first_pixel += count as u32;
             params.modes[3] = mode;
             queue.write_buffer(&source, 0, bytemuck::cast_slice(chunk));
+            if let Some(n) = &plan.neighbourhood {
+                let first = (first_pixel as usize - count) * 2;
+                queue.write_buffer(
+                    &neighbourhood,
+                    0,
+                    bytemuck::cast_slice(&n[first..first + count * 2]),
+                );
+            }
             queue.write_buffer(&parameters, 0, bytemuck::bytes_of(&params));
             let mut encoder = device.create_command_encoder(&Default::default());
             {

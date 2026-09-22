@@ -7,7 +7,6 @@ struct Parameters {
     lms_to_work: mat3x3<f32>,
     white_balance: mat3x3<f32>,
     tone: vec4<f32>,
-    zones: vec4<f32>,
     color: vec4<f32>,
     bands: array<vec4<f32>,8>,
     grading: array<vec4<f32>,4>,
@@ -24,6 +23,10 @@ struct Parameters {
     work_to_look: mat3x3<f32>,
     calibration: array<vec4<f32>,2>,
     srgb_to_work: mat3x3<f32>,
+    basic: array<vec4<f32>,2>,
+    basic_flags: vec4<u32>,
+    agx_to: mat3x3<f32>,
+    agx_from: mat3x3<f32>,
 }
 @group(0) @binding(0) var<storage, read> source: array<vec4<f32>>;
 @group(0) @binding(1) var<storage, read_write> results: array<vec4<f32>>;
@@ -32,6 +35,33 @@ struct Parameters {
 @group(0) @binding(3) var<storage, read> cube: array<vec4<f32>>;
 // A creative LUT, likewise one dummy entry when there is none.
 @group(0) @binding(4) var<storage, read> look_table: array<vec4<f32>>;
+// Per pixel of this chunk: tonal blur, structure blur. A dummy when unbound.
+@group(0) @binding(5) var<storage, read> neighbourhood: array<vec4<f32>>;
+// The previous engine's measured Resolve shadow correction, 33^3, red fastest.
+@group(0) @binding(6) var<storage, read> shadow_correction_table: array<f32>;
+
+// Same table and interpolation as the previous engine's, which samples it
+// from a texture; tone_v2.wgsl calls this.
+fn resolve_shadow_correction(enc: vec3<f32>) -> f32 {
+    let p = clamp(enc, vec3<f32>(0.0), vec3<f32>(1.0)) * 32.0;
+    let b = floor(p);
+    let f = p - b;
+    let i0 = vec3<u32>(b);
+    let i1 = min(i0 + vec3<u32>(1u), vec3<u32>(32u));
+    let c000 = shadow_correction_table[(i0.z * 33u + i0.y) * 33u + i0.x];
+    let c100 = shadow_correction_table[(i0.z * 33u + i0.y) * 33u + i1.x];
+    let c010 = shadow_correction_table[(i0.z * 33u + i1.y) * 33u + i0.x];
+    let c110 = shadow_correction_table[(i0.z * 33u + i1.y) * 33u + i1.x];
+    let c001 = shadow_correction_table[(i1.z * 33u + i0.y) * 33u + i0.x];
+    let c101 = shadow_correction_table[(i1.z * 33u + i0.y) * 33u + i1.x];
+    let c011 = shadow_correction_table[(i1.z * 33u + i1.y) * 33u + i0.x];
+    let c111 = shadow_correction_table[(i1.z * 33u + i1.y) * 33u + i1.x];
+    let c00 = mix(c000, c100, f.x);
+    let c10 = mix(c010, c110, f.x);
+    let c01 = mix(c001, c101, f.x);
+    let c11 = mix(c011, c111, f.x);
+    return mix(mix(c00, c10, f.y), mix(c01, c11, f.y), f.z);
+}
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -45,13 +75,27 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let width = max(parameters.frame.x, 1u);
     let position = vec2<f32>(f32(index % width), f32(index / width)) + vec2<f32>(0.5);
     let dims = vec2<f32>(f32(width), f32(max(parameters.frame.y, 1u)));
-    let graded = film_saturation(vignette(grade(centre(calibrate(working), position, dims)), position, dims));
+    // The unedited neighbourhood the Basic tone controls read; without one
+    // bound they see the pixel itself, in the encoding they expect.
+    var tonal: vec3<f32>;
+    var structure: vec3<f32>;
+    if parameters.basic_flags.z == 1u {
+        tonal = neighbourhood[id.x * 2u].rgb;
+        structure = neighbourhood[id.x * 2u + 1u].rgb;
+    } else {
+        let own = max(parameters.work_to_output * working, vec3<f32>(0.0));
+        tonal = select(linear_to_srgb_extended(own), own, parameters.basic_flags.y == 1u);
+        structure = tonal;
+    }
+    let graded = film_saturation(vignette(grade(centre(calibrate(working), position, dims), tonal, structure), position, dims));
     // A captured transform replaces the whole rendering step, encode included,
     // and reads working values directly: its domain is the working space.
     let scene = look_scene(graded);
     var encoded: vec3<f32>;
     if parameters.modes.y == 6u {
         encoded = render_captured(scene);
+    } else if parameters.modes.y >= 7u {
+        encoded = render_previous(parameters.work_to_output * scene, parameters.modes.y);
     } else {
         let display = render_output(parameters.work_to_output * scene, parameters.modes.y);
         encoded = vec3<f32>(encode_srgb(display.r), encode_srgb(display.g), encode_srgb(display.b));
@@ -69,6 +113,24 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     } else {
         results[id.x] = vec4<f32>(encoded, pixel.a);
     }
+}
+
+// The previous engine's tone mappers, on linear sRGB, after its gamut
+// safety step; each returns display-encoded sRGB. Its Basic mapper had a RAW
+// path and a display path, chosen here as there by the kind of source.
+fn render_previous(linear: vec3<f32>, mode: u32) -> vec3<f32> {
+    let c = compress_gamut_soft(linear);
+    var out: vec3<f32>;
+    if mode == 9u {
+        out = linear_to_srgb(tonemap_filmic(c));
+    } else if mode == 8u {
+        out = agx_full_transform_with(c, parameters.agx_to, parameters.agx_from);
+    } else if parameters.basic_flags.y == 1u {
+        out = basic_raw_rendering(c);
+    } else {
+        out = linear_to_srgb(c);
+    }
+    return clamp(out, vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
 // Vignette as exposure in the working space, so a lightened corner rolls off

@@ -3,14 +3,13 @@ import { test } from 'node:test';
 import { defaultV3Controls, defaultV3Range, evaluateV3Curve, mixV3Controls } from '../src/utils/colorV3.ts';
 
 test('preset intensity preserves versions and grading hue while fading creative amounts', () => {
-  const preset = { ...defaultV3Controls(), exposure: 2 };
+  const preset = { ...defaultV3Controls(), saturation: 20 };
   preset.bands[0] = [40, 80, 20];
   preset.grading[0] = [240, 80, 20];
   for (const intensity of [0, 25, 50, 100]) {
     const result = mixV3Controls(preset, intensity);
     assert.equal(result.revision, 1);
-    assert.equal(result.exposure, (2 * intensity) / 100);
-    assert.equal(result.pivot, 0.18);
+    assert.equal(result.saturation, (20 * intensity) / 100);
     assert.equal(result.bands[0][0], (40 * intensity) / 100);
     assert.equal(result.grading[0][0], 240);
     assert.equal(result.grading[0][1], (80 * intensity) / 100);
@@ -52,7 +51,7 @@ test('advanced preset intensity preserves range targets and blends curves toward
 });
 
 test('partial presets fill neutral arrays without sharing mutable defaults', () => {
-  const result = mixV3Controls({ exposure: 1 }, 50);
+  const result = mixV3Controls({ saturation: 10 }, 50);
   assert.equal(result.bands.length, 8);
   assert.equal(result.grading.length, 4);
   result.bands[0][0] = 60;

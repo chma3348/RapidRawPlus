@@ -30,7 +30,7 @@ fn shader_compiles_and_struct_layout_matches() {
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("adjustments shader under test"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("../src/shaders/shader.wgsl").into()),
+        source: wgpu::ShaderSource::Wgsl(rapidraw_lib::gpu_processing::LEGACY_SHADER.into()),
     });
 
     let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {

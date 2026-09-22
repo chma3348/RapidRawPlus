@@ -15,8 +15,8 @@ pub(crate) struct GpuParameters {
     pub work_to_lms: [[f32; 4]; 3],
     pub lms_to_work: [[f32; 4]; 3],
     pub white_balance: [[f32; 4]; 3],
+    /// [0, 0, exposure gain, 0].
     pub tone: [f32; 4],
-    pub zones: [f32; 4],
     pub color: [f32; 4],
     pub bands: [[f32; 4]; 8],
     pub grading: [[f32; 4]; 4],
@@ -50,6 +50,16 @@ pub(crate) struct GpuParameters {
     pub calibration: [[f32; 4]; 2],
     /// Linear sRGB to the working space, where calibration is defined.
     pub srgb_to_work: [[f32; 4]; 3],
+    /// The Basic panel, shared with the previous engine:
+    /// [brightness, contrast, pivot, highlights], [shadows, whites, blacks, 0].
+    pub basic: [[f32; 4]; 2],
+    /// [active, scene-referred (the previous engine's RAW path),
+    ///  neighbourhood bound, 0].
+    pub basic_flags: [u32; 4],
+    /// AgX's matrices, linear sRGB to its rendering space and back, as the
+    /// previous engine computes them.
+    pub agx_to: [[f32; 4]; 3],
+    pub agx_from: [[f32; 4]; 3],
 }
 
 /// What a creative LUT expects to be fed, and therefore where in the
@@ -99,6 +109,9 @@ pub struct RenderPlan {
     pub(crate) cube: Option<CubeLut>,
     /// The creative LUT's lattice, padded to `vec4`, when one is set.
     pub(crate) look: Option<Vec<[f32; 4]>>,
+    /// Per pixel, the previous engine's tonal (3.5 px) and structure (40 px)
+    /// blurs of the unedited picture, which its local tone controls read.
+    pub(crate) neighbourhood: Option<std::sync::Arc<Vec<[f32; 4]>>>,
 }
 
 impl RenderPlan {
@@ -130,6 +143,11 @@ impl RenderPlan {
                         ReferenceDomain::Display,
                         OutputRendering::DisplayPassthroughV1
                     )
+                    // The previous engine rendered both kinds of source with
+                    // these, choosing its RAW or display path itself.
+                    | (_, OutputRendering::PreviousBasic)
+                    | (_, OutputRendering::PreviousAgx)
+                    | (_, OutputRendering::PreviousFilmic)
             ),
             "Output rendering must match the source reference domain; refusing a double/missing display transform"
         );
@@ -185,6 +203,9 @@ impl RenderPlan {
                     OutputRendering::SceneLuminanceV2 => 4,
                     OutputRendering::DisplayGamutV2 => 5,
                     OutputRendering::ResolveCubeV1 => 6,
+                    OutputRendering::PreviousBasic => 7,
+                    OutputRendering::PreviousAgx => 8,
+                    OutputRendering::PreviousFilmic => 9,
                 },
                 0,
                 0,
@@ -198,12 +219,21 @@ impl RenderPlan {
                 u32::from(!c.color_is_neutral()),
                 cube.as_ref().map_or(0, |c| c.size),
             ],
-            tone: [(c.contrast / 100.).exp2(), c.pivot, c.exposure.exp2(), 0.],
-            zones: [
-                c.shadows * 0.02,
-                c.highlights * 0.02,
-                c.blacks * 0.02,
-                c.whites * 0.02,
+            tone: [0., 0., c.tone.exposure.exp2(), 0.],
+            basic: [
+                [
+                    c.tone.brightness,
+                    c.tone.contrast,
+                    c.tone.pivot,
+                    c.tone.highlights,
+                ],
+                [c.tone.shadows, c.tone.whites, c.tone.blacks, 0.],
+            ],
+            basic_flags: [
+                u32::from(!c.tone.is_neutral()),
+                u32::from(config.source.reference == ReferenceDomain::Scene),
+                0,
+                0,
             ],
             color: [
                 1. + c.saturation / 100.,
@@ -271,6 +301,16 @@ impl RenderPlan {
                 ]
             },
             srgb_to_work: packed(spaces::conversion(Primaries::Srgb, config.working_space)),
+            agx_to: packed(
+                crate::image_processing::calculate_agx_matrices_glam()
+                    .0
+                    .as_dmat3(),
+            ),
+            agx_from: packed(
+                crate::image_processing::calculate_agx_matrices_glam()
+                    .1
+                    .as_dmat3(),
+            ),
             look: [0.; 4],
             look_flags: [0; 4],
             work_to_look: packed(
@@ -316,6 +356,7 @@ impl RenderPlan {
             parameters,
             cube,
             look: None,
+            neighbourhood: None,
         })
     }
 
@@ -359,6 +400,14 @@ impl RenderPlan {
             0,
         ];
         Ok(())
+    }
+
+    /// Bind the neighbourhood the Basic tone controls read: two entries per
+    /// pixel, tonal blur then structure blur, in the encoding the previous
+    /// engine blurred in (see `neighbourhood` in application.rs).
+    pub fn set_neighbourhood(&mut self, blurs: std::sync::Arc<Vec<[f32; 4]>>) {
+        self.neighbourhood = Some(blurs);
+        self.parameters.basic_flags[2] = 1;
     }
 
     /// How much smaller than the full-resolution photograph the image being

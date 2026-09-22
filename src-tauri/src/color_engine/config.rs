@@ -51,6 +51,11 @@ pub enum OutputRendering {
     /// A rendering transform captured from DaVinci Resolve on this machine,
     /// applied in DaVinci Intermediate. Requires `output_lut`.
     ResolveCubeV1,
+    /// The previous engine's tone mappers, its own functions
+    /// (tone_v2.wgsl), for the Basic panel's Tone Mapper switch.
+    PreviousBasic,
+    PreviousAgx,
+    PreviousFilmic,
 }
 
 /// Input interpretation must be explicit. Creative controls default to neutral;

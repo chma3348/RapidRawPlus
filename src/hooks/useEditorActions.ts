@@ -76,12 +76,13 @@ export function useEditorActions() {
     try {
       const current = useEditorStore.getState().adjustments;
       if (current.processVersion === 3) {
-        // V3 measures on its own scene data and sets its own controls.
-        const auto: Record<string, number> = await invoke('auto_color_v3', {
+        // V3 measures on its own scene data. The Basic sliders it sets are
+        // the shared ones, at the top level; its own settings come under v3.
+        const { v3: own, ...shared }: any = await invoke('auto_color_v3', {
           path: selectedImage.path,
           edits: current,
         });
-        setAdjustments((prev: Adjustments) => ({ ...prev, v3: { ...(prev.v3 || {}), ...auto } as any }));
+        setAdjustments((prev: Adjustments) => ({ ...prev, ...shared, v3: { ...(prev.v3 || {}), ...own } as any }));
         return;
       }
       const autoAdjustments: Adjustments = await invoke(Invokes.CalculateAutoAdjustments);

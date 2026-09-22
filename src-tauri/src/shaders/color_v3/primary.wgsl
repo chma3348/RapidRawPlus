@@ -27,13 +27,6 @@ fn from_lab_srgb(lab:vec3<f32>) -> vec3<f32> {
     let t=lab_to_lms(lab);
     return vec3<f32>(dot(t,vec3<f32>(4.0767416621,-3.3077115913,0.2309699292)),dot(t,vec3<f32>(-1.2684380046,2.6097574011,-0.3413193965)),dot(t,vec3<f32>(-0.0041960863,-0.7034186147,1.7076147010)));
 }
-// Each zone curve is monotonic for its supported +/-2-stop range. Apply
-// sequentially so overlapping controls cannot invert a neutral ramp.
-fn zone(y:f32, stops:f32, knee:f32, high:bool) -> f32 {
-    var weight=knee/(y+knee);
-    if high {weight=1.0-weight;}
-    return y*exp2(stops*weight);
-}
 fn tone_curve(y:f32) -> f32 {
     let x=log2(1.0+16.0*y)/log2(17.0);
     var mapped=0.0;
@@ -71,27 +64,38 @@ fn channel_curve(v: f32, channel: u32) -> f32 {
     return decode_component(y, 2u);
 }
 
-fn grade(input:vec3<f32>) -> vec3<f32> {
+// The Basic panel, shared with the previous engine and run through its own
+// functions (tone_v2.wgsl) in its order — brightness, then contrast, shadows,
+// whites and blacks, then highlights — on linear sRGB, the space they were
+// written and tuned in.
+fn basic_v2(rgb: vec3<f32>, tonal: vec3<f32>, structure: vec3<f32>) -> vec3<f32> {
+    if parameters.basic_flags.x == 0u { return rgb; }
+    let a = parameters.basic[0];
+    let b = parameters.basic[1];
+    let raw = parameters.basic_flags.y;
+    var c = parameters.work_to_output * rgb;
+    c = apply_filmic_exposure(c, a.x);
+    c = apply_tonal_adjustments_v2(c, structure, raw, a.y, b.x, b.y, b.z, a.z);
+    c = apply_highlights_adjustment_v2(c, tonal, structure, raw, a.w);
+    return parameters.srgb_to_work * c;
+}
+
+fn grade(input:vec3<f32>, tonal:vec3<f32>, structure:vec3<f32>) -> vec3<f32> {
     if parameters.flags.x == 0u {return input;}
-    var rgb=parameters.white_balance*input*parameters.tone.z;
+    var rgb=basic_v2(parameters.white_balance*input*parameters.tone.z, tonal, structure);
     let y=dot(rgb,vec3<f32>(0.27411851,0.87363190,-0.14775041));
     // DWG's blue coefficient is negative, so a non-physical pixel can land at
-    // or below zero luminance. Fade the tone chain out across the bottom of
-    // the floor instead of switching it off at a threshold, which used to put
-    // a hard edge between two neighbouring near-black pixels.
+    // or below zero luminance. Fade the curve out across the bottom of the
+    // floor instead of switching it off at a threshold, which used to put a
+    // hard edge between two neighbouring near-black pixels.
     let floor=0.0001;
     let lit=max(y,0.0);
     var scale=1.0;
-    // Skipped outright when the chain is neutral: the divide below is not
+    // Skipped outright when the curve is neutral: the divide below is not
     // required to return exactly one, and exposure has to stay an exact
     // scaling.
     if parameters.flags.y == 1u {
         var t=max(lit,floor);
-        t=parameters.tone.y*pow(t/parameters.tone.y,parameters.tone.x);
-        t=zone(t,parameters.zones.x,0.12,false);
-        t=zone(t,parameters.zones.y,0.6,true);
-        t=zone(t,parameters.zones.z,0.02,false);
-        t=zone(t,parameters.zones.w,1.0,true);
         t=tone_curve(t);
         scale=mix(1.0,t/max(lit,floor),smoothstep(0.0,floor,lit));
     }

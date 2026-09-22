@@ -7,6 +7,8 @@ import Dropdown from '../ui/Dropdown';
 import LUTControl from '../ui/LUTControl';
 import FlatFieldControl from './FlatFieldControl';
 import ColorV3Advanced from './ColorV3Advanced';
+import BasicAdjustments from './Basic';
+import { useSettingsStore } from '../../store/useSettingsStore';
 import { useEditorStore } from '../../store/useEditorStore';
 import { useEditorActions } from '../../hooks/useEditorActions';
 import {
@@ -35,7 +37,12 @@ export function ColorV3Switch({
   const change = async () => {
     setError('');
     if (active) {
-      setAdjustments((prev: any) => ({ ...prev, processVersion: prev.v3PreviousVersion ?? 2 }));
+      setAdjustments((prev: any) => ({
+        ...prev,
+        processVersion: prev.v3PreviousVersion ?? 2,
+        // The previous engine has no Resolve rendering; give back its own.
+        toneMapper: prev.toneMapper === 'resolve' ? (prev.v3PreviousToneMapper ?? 'agx') : prev.toneMapper,
+      }));
       return;
     }
     if (!selectedImage) return;
@@ -48,6 +55,10 @@ export function ColorV3Switch({
         ...prev,
         processVersion: 3,
         v3PreviousVersion: prev.processVersion ?? 2,
+        // V3 renders through Resolve by default; the previous engine's
+        // mappers stay one click away, and this is restored on the way back.
+        v3PreviousToneMapper: prev.toneMapper ?? 'agx',
+        toneMapper: 'resolve',
         v3: prev.v3 ?? defaultV3Controls(),
       }));
     } catch (e) {
@@ -236,6 +247,7 @@ export default function ColorV3Controls({
   const { t } = useTranslation();
   const values: V3Controls = { ...defaultV3Controls(), ...adjustments.v3 };
   const renderError = useEditorStore((s) => s.colorV3Error);
+  const appSettings = useSettingsStore((s) => s.appSettings);
   const selectedPath = useEditorStore((s) => s.selectedImage?.path);
   const [band, setBand] = useState(0);
   const [wheel, setWheel] = useState(0);
@@ -249,7 +261,7 @@ export default function ColorV3Controls({
       min={min}
       max={max}
       step={step}
-      defaultValue={key === 'pivot' ? 0.18 : 0}
+      defaultValue={0}
       onChange={(e: any) => update(key, Number(e.target.value))}
       onDragStateChange={onDragStateChange}
     />
@@ -331,8 +343,20 @@ export default function ColorV3Controls({
           {renderError}
         </p>
       )}
-      <h3 className="text-sm font-medium text-text-primary">{t('colorV3.tone', { defaultValue: 'Light and tone' })}</h3>
-      {slider('exposure', t('colorV3.exposure', { defaultValue: 'Exposure (stops)' }), -5, 5, 0.01)}
+      <h3 className="text-sm font-medium text-text-primary">{t('colorV3.basic', { defaultValue: 'Basic' })}</h3>
+      {/* The previous engine's own Basic panel: same sliders, same saved
+          settings, same behaviour — v3 runs its functions for them. */}
+      <BasicAdjustments
+        adjustments={adjustments}
+        setAdjustments={setAdjustments}
+        isForMask={!showEffects}
+        onDragStateChange={onDragStateChange}
+        appSettings={appSettings}
+        engineV3
+      />
+      <h3 className="mt-3 text-sm font-medium text-text-primary">
+        {t('colorV3.whiteBalance', { defaultValue: 'White balance' })}
+      </h3>
       {toggleWbPicker && (
         <button
           type="button"
@@ -348,12 +372,6 @@ export default function ColorV3Controls({
       )}
       {slider('temperature', t('colorV3.temperature', { defaultValue: 'Warmth' }))}
       {slider('tint', t('colorV3.tint', { defaultValue: 'Tint' }))}
-      {slider('contrast', t('colorV3.contrast', { defaultValue: 'Contrast' }))}
-      {slider('pivot', t('colorV3.pivot', { defaultValue: 'Contrast pivot' }), 0.01, 1, 0.01)}
-      {slider('shadows', t('colorV3.shadows', { defaultValue: 'Shadows' }))}
-      {slider('highlights', t('colorV3.highlights', { defaultValue: 'Highlights' }))}
-      {slider('blacks', t('colorV3.blacks', { defaultValue: 'Blacks' }))}
-      {slider('whites', t('colorV3.whites', { defaultValue: 'Whites' }))}
       <ColorV3Advanced
         values={values}
         update={update}

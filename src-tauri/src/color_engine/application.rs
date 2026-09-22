@@ -29,6 +29,11 @@ pub struct DetailCache {
     key: u64,
     image: Arc<DynamicImage>,
 }
+pub struct NeighbourhoodCache {
+    source: Arc<DecodedFrame>,
+    key: u64,
+    blurs: Arc<Vec<[f32; 4]>>,
+}
 pub struct PreparedCache {
     source: Arc<DecodedFrame>,
     transform: u64,
@@ -95,11 +100,68 @@ pub fn source(state: &AppState, path: &str) -> Result<Arc<DecodedFrame>> {
     Ok(frame)
 }
 
+/// The shared settings of the previous engine that v3 reads as controls.
+/// Clearing these, with `v3`, masks and the LUT, gives the picture before
+/// any grading: what range masks and auto adjustment measure.
+const SHARED_CONTROLS: &[&str] = &[
+    "exposure",
+    "brightness",
+    "contrast",
+    "highlights",
+    "shadows",
+    "whites",
+    "blacks",
+];
+
+fn ungraded(edits: &Value) -> Value {
+    let mut neutral = edits.clone();
+    neutral["v3"] = serde_json::json!({});
+    neutral["masks"] = serde_json::json!([]);
+    neutral["lutPath"] = Value::Null;
+    for key in SHARED_CONTROLS {
+        neutral[*key] = serde_json::json!(0);
+    }
+    neutral
+}
+
 pub fn controls(edits: &Value) -> Result<Controls> {
-    let controls: Controls = if edits["v3"].is_null() {
+    controls_for(edits, false)
+}
+
+/// V3's own settings from the `v3` namespace, plus the controls it shares
+/// with the previous engine, read by that engine's own parser so they are
+/// scaled exactly as there. A mask's settings are parsed as a mask's.
+fn controls_for(edits: &Value, mask: bool) -> Result<Controls> {
+    let mut controls: Controls = if edits["v3"].is_null() {
         Controls::default()
     } else {
         serde_json::from_value(edits["v3"].clone()).context("Invalid v3 settings")?
+    };
+    controls.tone = if mask {
+        let m = crate::image_processing::get_mask_adjustments_from_json(edits);
+        super::controls::Tone {
+            exposure: m.exposure,
+            brightness: m.brightness,
+            contrast: m.contrast,
+            // A mask's pivot is stored relative to the classic centre.
+            pivot: 0.5 + m.contrast_pivot,
+            highlights: m.highlights,
+            shadows: m.shadows,
+            whites: m.whites,
+            blacks: m.blacks,
+        }
+    } else {
+        let g = crate::image_processing::get_global_adjustments_from_json(edits, true, None);
+        super::controls::Tone {
+            exposure: g.exposure,
+            brightness: g.brightness,
+            contrast: g.contrast,
+            pivot: g.contrast_pivot,
+            highlights: g.highlights,
+            shadows: g.shadows,
+            whites: g.whites,
+            blacks: g.blacks,
+        }
     };
     controls.validate()?;
     Ok(controls)
@@ -155,11 +217,34 @@ fn look(state: &AppState, edits: &Value) -> Result<Option<Look>> {
 /// one has been installed. It replaces the built-in rendering entirely rather
 /// than running after it — two rendering transforms in series is the mistake
 /// the whole pipeline is arranged to avoid.
+/// The Tone Mapper switch. "resolve", v3's own, renders through the
+/// captured Resolve transform when one is installed (the built-in rendering
+/// otherwise); the others are the previous engine's, kept selectable.
+fn tone_mapper(edits: &Value) -> Option<OutputRendering> {
+    match edits["toneMapper"].as_str() {
+        Some("basic") => Some(OutputRendering::PreviousBasic),
+        Some("agx") => Some(OutputRendering::PreviousAgx),
+        Some("filmic") => Some(OutputRendering::PreviousFilmic),
+        _ => None,
+    }
+}
+
 fn plan(
     color: SourceColor,
     controls: Controls,
     output_transform: Option<PathBuf>,
+    previous: Option<OutputRendering>,
 ) -> Result<RenderPlan> {
+    if let Some(output_rendering) = previous {
+        return RenderPlan::build(PipelineConfig {
+            process_version: 3,
+            source: color,
+            working_space: Primaries::DavinciWideGamut,
+            output_rendering,
+            output_lut: None,
+            controls,
+        });
+    }
     // A captured output transform maps *scene* values to a display, so it
     // belongs only on scene-referred sources. A rendered photograph has
     // already been through someone's rendering: putting it through a second
@@ -288,7 +373,7 @@ fn spatial(
             effects.glow_amount,
             effects.halation_amount,
             effects.flare_amount,
-            controls.exposure,
+            controls.tone.exposure,
         ]
         .map(f32::to_bits)
         .hash(&mut hasher);
@@ -320,7 +405,7 @@ fn spatial(
     super::optics::add_light(
         &mut pixels,
         effects,
-        controls.exposure,
+        controls.tone.exposure,
         source.color.primaries,
     );
     let result = Arc::new(DynamicImage::ImageRgba32F(pixels));
@@ -332,6 +417,123 @@ fn spatial(
         });
     }
     Ok(result)
+}
+
+/// The previous engine's tonal and structure blurs of the unedited picture,
+/// which its local tone controls — contrast, shadows, whites, blacks,
+/// highlights — read. Same radii (3.5 and 40 pixels, scaled by the short edge
+/// over 1080, sigma half the radius), in the encoding it blurred in: linear
+/// light for scene data, which it saw from RAW files, and sRGB code values
+/// for display-referred pictures. Values are in linear sRGB primaries, where
+/// those functions work. Two entries per pixel, tonal then structure.
+fn neighbourhood(
+    state: &AppState,
+    source: &Arc<DecodedFrame>,
+    image: &DynamicImage,
+    key: u64,
+) -> Arc<Vec<[f32; 4]>> {
+    if let Ok(cache) = state.v3_neighbourhood.lock()
+        && let Some(c) = cache.as_ref()
+        && Arc::ptr_eq(&c.source, source)
+        && c.key == key
+    {
+        return c.blurs.clone();
+    }
+    let pixels = image.to_rgba32f();
+    let (w, h) = (pixels.width() as usize, pixels.height() as usize);
+    let m = spaces::conversion(source.color.primaries, Primaries::Srgb)
+        .transpose()
+        .to_cols_array_2d()
+        .map(|r| r.map(|v| v as f32));
+    let scene = source.color.reference == ReferenceDomain::Scene;
+    let encode = |v: f32| {
+        if v <= 0.0031308 {
+            v * 12.92
+        } else {
+            1.055 * v.powf(1. / 2.4) - 0.055
+        }
+    };
+    let mut planes = vec![vec![0f32; w * h]; 3];
+    for (i, p) in pixels.pixels().enumerate() {
+        for (c, plane) in planes.iter_mut().enumerate() {
+            let v = (m[c][0] * p[0] + m[c][1] * p[1] + m[c][2] * p[2]).clamp(0., 65504.);
+            plane[i] = if scene { v } else { encode(v) };
+        }
+    }
+    let scale = w.min(h) as f32 / 1080.;
+    let blurred = |base: f32| -> Vec<Vec<f32>> {
+        let radius = (base * scale).ceil().max(1.) as usize;
+        planes
+            .iter()
+            .map(|p| {
+                // Its exact truncated kernel where that is affordable — at
+                // small radii the three-box approximation rounds to no blur
+                // at all — and the approximation for the wide one, where it
+                // is indistinguishable and the exact kernel would cost
+                // hundreds of taps per pixel.
+                if radius <= 24 {
+                    exact_gaussian(p, w, h, radius)
+                } else {
+                    let g = super::detail::Gaussian::new(radius as f32 / 2.);
+                    super::detail::blur(p, w, h, g)
+                }
+            })
+            .collect()
+    };
+    let (tonal, structure) = (blurred(3.5), blurred(40.));
+    let mut blurs = Vec::with_capacity(w * h * 2);
+    for i in 0..w * h {
+        blurs.push([tonal[0][i], tonal[1][i], tonal[2][i], 0.]);
+        blurs.push([structure[0][i], structure[1][i], structure[2][i], 0.]);
+    }
+    let blurs = Arc::new(blurs);
+    if let Ok(mut cache) = state.v3_neighbourhood.lock() {
+        *cache = Some(NeighbourhoodCache {
+            source: source.clone(),
+            key,
+            blurs: blurs.clone(),
+        });
+    }
+    blurs
+}
+
+/// The previous engine's blur: a Gaussian of sigma radius/2 truncated at
+/// `radius`, edges repeated, rows then columns.
+fn exact_gaussian(plane: &[f32], w: usize, h: usize, radius: usize) -> Vec<f32> {
+    use rayon::prelude::*;
+    let sigma = radius as f32 / 2.;
+    let kernel: Vec<f32> = (0..=2 * radius)
+        .map(|i| {
+            let x = i as f32 - radius as f32;
+            (-(x * x) / (2. * sigma * sigma)).exp()
+        })
+        .collect();
+    let total: f32 = kernel.iter().sum();
+    let r = radius as isize;
+    let mut rows = vec![0f32; w * h];
+    rows.par_chunks_mut(w).enumerate().for_each(|(y, out)| {
+        let src = &plane[y * w..(y + 1) * w];
+        for (x, o) in out.iter_mut().enumerate() {
+            let mut sum = 0.;
+            for (k, weight) in kernel.iter().enumerate() {
+                let sx = (x as isize + k as isize - r).clamp(0, w as isize - 1) as usize;
+                sum += src[sx] * weight;
+            }
+            *o = sum / total;
+        }
+    });
+    let mut out = vec![0f32; w * h];
+    out.par_chunks_mut(w).enumerate().for_each(|(y, dst)| {
+        for (x, o) in dst.iter_mut().enumerate() {
+            let mut sum = 0.;
+            for (k, weight) in kernel.iter().enumerate() {
+                let sy = (y as isize + k as isize - r).clamp(0, h as isize - 1) as usize;
+                sum += rows[sy * w + x] * weight;
+            }
+            *o = sum / total;
+        }
+    });
+    out
 }
 
 /// What a colour or luminance range mask samples: the picture as it stands
@@ -357,10 +559,7 @@ fn sampling_image(
         return Ok(image.clone());
     }
     // Neutral: the same engine, the same transforms, no controls.
-    let mut neutral = edits.clone();
-    neutral["v3"] = serde_json::json!({});
-    neutral["masks"] = serde_json::json!([]);
-    neutral["lutPath"] = Value::Null;
+    let neutral = ungraded(edits);
     // The sampling render goes through the same prepared-image cache as the
     // preview. Put the preview's entry back afterwards, or the next slider
     // move pays to rebuild it from the full-resolution source.
@@ -510,6 +709,24 @@ pub(crate) fn render_file_with_capture(
     let p = prepared.as_ref().unwrap();
     let (image, offset, scale) = (p.image.clone(), p.offset, p.scale);
     drop(prepared);
+    // Built lazily: only a pass whose tone controls move needs it.
+    let neighbourhood_key = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (
+            transform,
+            patches,
+            max_dimension,
+            image.width(),
+            image.height(),
+        )
+            .hash(&mut hasher);
+        hasher.finish()
+    };
+    let unedited = image.clone();
+    let neighbourhood_for = |tone: &super::controls::Tone| {
+        (!tone.is_neutral()).then(|| neighbourhood(state, &source, &unedited, neighbourhood_key))
+    };
     let image = if controls.detail.is_neutral() && super::optics::is_neutral(&controls.effects) {
         image
     } else {
@@ -572,8 +789,17 @@ pub(crate) fn render_file_with_capture(
         ..Default::default()
     };
     let look = look(state, edits)?;
-    let mut initial_plan = plan(source.color.clone(), controls, output_transform(state))?;
+    let initial_blurs = neighbourhood_for(&controls.tone);
+    let mut initial_plan = plan(
+        source.color.clone(),
+        controls,
+        output_transform(state),
+        tone_mapper(edits),
+    )?;
     initial_plan.set_render_scale(scale);
+    if let Some(blurs) = initial_blurs {
+        initial_plan.set_neighbourhood(blurs);
+    }
     if active.is_empty() {
         if let Some(look) = &look {
             initial_plan.set_look(look)?;
@@ -602,7 +828,7 @@ pub(crate) fn render_file_with_capture(
         [y.x as f32, y.y as f32, y.z as f32]
     };
     for mask in active {
-        let local = self::controls(&mask.adjustments)?;
+        let local = controls_for(&mask.adjustments, true)?;
         // Vignette, grain and the lens effects describe the whole frame; a
         // mask carrying them would be applying a frame effect to part of a
         // frame.
@@ -658,7 +884,12 @@ pub(crate) fn render_file_with_capture(
         let adjusted = if local.is_neutral() {
             input.clone()
         } else {
-            engine.render_graded(input, &plan(working_color.clone(), local, None)?)?
+            let blurs = neighbourhood_for(&local.tone);
+            let mut local_plan = plan(working_color.clone(), local, None, None)?;
+            if let Some(blurs) = blurs {
+                local_plan.set_neighbourhood(blurs);
+            }
+            engine.render_graded(input, &local_plan)?
         };
         watch.lap("mask pass");
         for ((base, edited), alpha) in working
@@ -684,6 +915,7 @@ pub(crate) fn render_file_with_capture(
             ..Controls::default()
         },
         output_transform(state),
+        tone_mapper(edits),
     )?;
     final_plan.set_render_scale(scale);
     if let Some(look) = &look {
@@ -714,10 +946,7 @@ pub fn auto_controls(
     path: &str,
     edits: &Value,
 ) -> Result<Value> {
-    let mut neutral = edits.clone();
-    neutral["v3"] = serde_json::json!({});
-    neutral["masks"] = serde_json::json!([]);
-    neutral["lutPath"] = Value::Null;
+    let neutral = ungraded(edits);
     let frame = render_file_with_capture(context, state, path, &neutral, Some(512), true)?;
     let graded = frame.stages.context("Missing analysis stage")?.graded;
     let y = spaces::rgb_to_xyz(Primaries::DavinciWideGamut).row(1);
@@ -761,14 +990,12 @@ pub fn auto_controls(
         (0., 0.)
     };
 
-    // What clips or crushes once exposed.
+    // What clips or crushes once exposed. The shared EV shift slider is the
+    // previous engine's, which divides by 0.8.
+    let ev_shift = exposure * 0.8;
     let mut exposed = neutral.clone();
-    exposed["v3"] = serde_json::to_value(Controls {
-        exposure,
-        temperature,
-        tint,
-        ..Default::default()
-    })?;
+    exposed["exposure"] = serde_json::json!(ev_shift);
+    exposed["v3"] = serde_json::json!({"temperature": temperature, "tint": tint});
     let shown = render_file(context, state, path, &exposed, Some(512))?.encoded_srgb;
     let total = (shown.width() * shown.height()).max(1) as f32;
     let clipped = shown
@@ -787,12 +1014,15 @@ pub fn auto_controls(
         let k = 10f64.powi(places);
         (v as f64 * k).round() / k + 0.0
     };
+    // Shared controls at the top level, v3's own under `v3`, as saved.
     Ok(serde_json::json!({
-        "exposure": round(exposure, 2),
-        "temperature": round(temperature, 0),
-        "tint": round(tint, 0),
+        "exposure": round(ev_shift, 2),
         "highlights": round(highlights, 0),
         "shadows": round(shadows, 0),
+        "v3": {
+            "temperature": round(temperature, 0),
+            "tint": round(tint, 0),
+        },
     }))
 }
 

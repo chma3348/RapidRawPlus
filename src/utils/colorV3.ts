@@ -98,17 +98,12 @@ export const defaultV3Calibration = (): V3Calibration => ({
   blue_saturation: 0,
 });
 
+/** V3's own settings. The Basic panel's tone controls are the previous
+ *  engine's, saved at the top level alongside these. */
 export interface V3Controls {
   revision: number;
-  exposure: number;
   temperature: number;
   tint: number;
-  contrast: number;
-  pivot: number;
-  shadows: number;
-  highlights: number;
-  blacks: number;
-  whites: number;
   saturation: number;
   vibrance: number;
   hue: number;
@@ -125,15 +120,8 @@ export interface V3Controls {
 export function defaultV3Controls(): V3Controls {
   return {
     revision: 1,
-    exposure: 0,
     temperature: 0,
     tint: 0,
-    contrast: 0,
-    pivot: 0.18,
-    shadows: 0,
-    highlights: 0,
-    blacks: 0,
-    whites: 0,
     saturation: 0,
     vibrance: 0,
     hue: 0,

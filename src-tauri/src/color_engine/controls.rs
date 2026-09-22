@@ -145,21 +145,70 @@ impl Calibration {
     }
 }
 
-/// V3 controls have their own saved namespace. Legacy settings are never
-/// reinterpreted or overwritten when the user opts into this engine.
+/// The Basic panel's tone controls, read from the same saved settings the
+/// previous engine uses and scaled exactly as it scales them (its own parser
+/// does the reading), so each behaves as it did there: v3 runs the previous
+/// engine's functions for them, from `shaders/tone_v2.wgsl`.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Tone {
+    /// "EV shift": a linear gain of 2^exposure.
+    pub exposure: f32,
+    /// The slider labelled Exposure: the previous engine's filmic
+    /// brightness curve.
+    pub brightness: f32,
+    pub contrast: f32,
+    /// Absolute pivot, 0..1; 0.5 is the classic centre.
+    pub pivot: f32,
+    pub highlights: f32,
+    pub shadows: f32,
+    pub whites: f32,
+    pub blacks: f32,
+}
+
+impl Tone {
+    /// The neighbourhood-dependent controls, which need the blurs.
+    pub fn is_neutral(&self) -> bool {
+        self.brightness == 0.
+            && self.contrast == 0.
+            && self.highlights == 0.
+            && self.shadows == 0.
+            && self.whites == 0.
+            && self.blacks == 0.
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        let values = [
+            self.exposure,
+            self.brightness,
+            self.contrast,
+            self.pivot,
+            self.highlights,
+            self.shadows,
+            self.whites,
+            self.blacks,
+        ];
+        ensure!(
+            values.iter().all(|v| v.is_finite() && v.abs() <= 20.),
+            "Tone settings are out of range"
+        );
+        Ok(())
+    }
+}
+
+/// V3's own settings live in the `v3` namespace; the controls it shares with
+/// the previous engine (see `Tone`) are read from that engine's settings.
+/// Unknown fields are ignored: earlier trial versions of v3 kept their own
+/// exposure and tone sliders here, which the shared ones have replaced.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct Controls {
     pub revision: u32,
-    pub exposure: f32,
+    /// Filled from the shared settings, never from the `v3` namespace.
+    #[serde(skip_deserializing)]
+    pub tone: Tone,
     pub temperature: f32,
     pub tint: f32,
-    pub contrast: f32,
-    pub pivot: f32,
-    pub shadows: f32,
-    pub highlights: f32,
-    pub blacks: f32,
-    pub whites: f32,
     pub saturation: f32,
     pub vibrance: f32,
     pub hue: f32,
@@ -189,15 +238,12 @@ impl Default for Controls {
     fn default() -> Self {
         Self {
             revision: 1,
-            exposure: 0.,
+            tone: Tone {
+                pivot: 0.5,
+                ..Tone::default()
+            },
             temperature: 0.,
             tint: 0.,
-            contrast: 0.,
-            pivot: 0.18,
-            shadows: 0.,
-            highlights: 0.,
-            blacks: 0.,
-            whites: 0.,
             saturation: 0.,
             vibrance: 0.,
             hue: 0.,
@@ -216,21 +262,8 @@ impl Controls {
     pub fn validate(&self) -> Result<()> {
         ensure!(self.revision == 1, "Unsupported v3 control revision");
         let range = |v: f32, a: f32, b: f32| v.is_finite() && (a..=b).contains(&v);
-        ensure!(
-            range(self.exposure, -10., 10.) && range(self.pivot, 0.01, 1.),
-            "Invalid exposure or contrast pivot"
-        );
-        for v in [
-            self.temperature,
-            self.tint,
-            self.contrast,
-            self.shadows,
-            self.highlights,
-            self.blacks,
-            self.whites,
-            self.saturation,
-            self.vibrance,
-        ] {
+        ensure!(self.tone.validate().is_ok(), "Invalid tone settings");
+        for v in [self.temperature, self.tint, self.saturation, self.vibrance] {
             ensure!(
                 range(v, -100., 100.),
                 "V3 control must be finite and within -100..100"
@@ -290,17 +323,12 @@ impl Controls {
     }
     pub const IDENTITY_CURVE: [f32; 5] = [0., 0.25, 0.5, 0.75, 1.];
 
-    /// Does the luminance chain — contrast, the four zones, the curve — leave
-    /// luminance alone? When it does the shader skips it outright, so a stop
-    /// of exposure stays an exact doubling instead of picking up the rounding
-    /// of a divide the GPU is free to compute reciprocally.
+    /// Does the luminance curve leave luminance alone? When it does the
+    /// shader skips it outright, so a stop of exposure stays an exact
+    /// doubling instead of picking up the rounding of a divide the GPU is
+    /// free to compute reciprocally.
     pub fn tone_is_neutral(&self) -> bool {
-        self.contrast == 0.
-            && self.shadows == 0.
-            && self.highlights == 0.
-            && self.blacks == 0.
-            && self.whites == 0.
-            && self.curve == Self::IDENTITY_CURVE
+        self.curve == Self::IDENTITY_CURVE
     }
 
     pub fn channel_curves_are_neutral(&self) -> bool {
@@ -321,7 +349,10 @@ impl Controls {
         self.ranges.iter().all(|r| r.adjustment == [0.; 3])
             && self
                 == &Self {
-                    pivot: self.pivot,
+                    tone: Tone {
+                        pivot: self.tone.pivot,
+                        ..Tone::default()
+                    },
                     ranges: self.ranges.clone(),
                     detail: self.detail.clone(),
                     effects: self.effects.clone(),

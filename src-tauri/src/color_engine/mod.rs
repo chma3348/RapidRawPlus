@@ -20,6 +20,7 @@ pub use renderer::{ColorEngine, RenderedFrame, StageCapture};
 
 pub fn shader_source() -> String {
     [
+        include_str!("../shaders/tone_v2.wgsl"),
         include_str!("../shaders/color_v3/spaces.wgsl"),
         include_str!("../shaders/color_v3/output.wgsl"),
         include_str!("../shaders/color_v3/primary.wgsl"),

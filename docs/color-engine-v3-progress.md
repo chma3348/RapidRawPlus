@@ -41,6 +41,32 @@ prepared (`docs/resolve-controls.md`) and waits on fourteen captures.
 boundaries, preview/export agreement and the strip contract), frontend
 preset and history tests; `cargo fmt --check` and `clippy -D warnings` clean.
 
+## Direction: v3 is the previous engine's controls on v3's colour — September 21, 2026
+
+Decided with Chris after trying v3: every control from the previous engine
+carries into v3 with its name, range and behaviour, one slider per control
+(no duplicates), running on v3's colour pipeline. The previous engine stays
+only as the reference each control is checked against. Its tone mappers stay
+selectable beside Resolve's, and its saved settings are what v3 reads, so
+edits carry across. Work goes panel by panel: Basic, Curves, Color, Details,
+Effects, then masks.
+
+**Basic — done.** The previous engine's tone functions (EV shift, the
+Exposure/brightness curve, contrast and pivot, highlights, shadows, whites,
+blacks, and its measured Resolve shadow lift and highlight compression) now
+live in one file, `shaders/tone_v2.wgsl`, compiled into both engines, so they
+cannot drift apart; the previous engine's output is bit-identical to before
+(its render tests, run serially, print the same numbers). V3 reads the same
+saved settings through the previous engine's own parser, supplies the same
+neighbourhood blurs (3.5 and 40 px scaled by the short edge over 1080, its
+exact kernel for the small one), and runs them in the same order on linear
+sRGB. Its tone mappers (Basic, AgX, Filmic) moved to the same file and are
+selectable in v3 next to Resolve, which a photo switched to v3 starts on.
+`tests/basic_parity.rs` holds v3 to the previous engine on every Basic
+slider — under 0.3 of a level on average on real photographs
+(`examples/basic_parity.rs`) — and `examples/v3_sheet.rs` renders contact
+sheets through the app's own path with the Resolve transforms.
+
 ## The rest of the previous engine — September 21, 2026
 
 With this, everything the previous engine applies to a picture has a v3

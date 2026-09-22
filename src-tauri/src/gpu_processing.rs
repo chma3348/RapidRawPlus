@@ -28,8 +28,15 @@ pub struct RenderRequest<'a> {
     pub roi: Option<Roi>,
 }
 
+/// The previous engine's shader: the tone functions it shares with v3,
+/// then its own. See `shaders/tone_v2.wgsl`.
+pub const LEGACY_SHADER: &str = concat!(
+    include_str!("shaders/tone_v2.wgsl"),
+    include_str!("shaders/shader.wgsl")
+);
+
 fn output_shader_source(high_precision: bool) -> String {
-    let source = include_str!("shaders/shader.wgsl");
+    let source = LEGACY_SHADER;
     if !high_precision {
         return source.to_owned();
     }
@@ -2381,7 +2388,10 @@ mod shader_validation_tests {
     fn every_shader_parses_and_validates() {
         for name in ["shader.wgsl", "display.wgsl", "blur.wgsl", "flare.wgsl"] {
             let path = format!("src/shaders/{name}");
-            let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+            let mut src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+            if name == "shader.wgsl" {
+                src = super::LEGACY_SHADER.to_string();
+            }
             let module = naga::front::wgsl::parse_str(&src)
                 .unwrap_or_else(|e| panic!("{name} failed to parse:\n{}", e.emit_to_string(&src)));
             let mut validator = naga::valid::Validator::new(
@@ -2407,7 +2417,7 @@ mod shadow_lift_tests {
     /// arithmetic, so it checks the values that actually ship rather than a
     /// copy that can drift away from them. Retuning the curve by hand will
     /// fail here, which is the point.
-    const SRC: &str = include_str!("shaders/shader.wgsl");
+    const SRC: &str = super::LEGACY_SHADER;
 
     fn parse_stops() -> Vec<f32> {
         let start = SRC
@@ -2760,7 +2770,7 @@ mod blacks_adjustment_tests {
     //! important contract inherited from a scene-referred tone equalizer is
     //! that ordinary dark colours move by a single RGB gain, while only an
     //! almost-crushed pixel receives a small colour-stable floor.
-    const SRC: &str = include_str!("shaders/shader.wgsl");
+    const SRC: &str = super::LEGACY_SHADER;
     const LUMA: [f32; 3] = [0.2126, 0.7152, 0.0722];
 
     fn shader_constant(name: &str) -> f32 {
@@ -2943,7 +2953,7 @@ mod highlight_detail_tests {
     //! the pixel's local detail back undimmed. Its guide rejects blur across a
     //! hard edge, and the scene-linear variant never clips RAW headroom at 1.0.
     //! These mirror the shader arithmetic (parsing its curve constants).
-    const SRC: &str = include_str!("shaders/shader.wgsl");
+    const SRC: &str = super::LEGACY_SHADER;
 
     /// Parse `y - amt * A * y^E` constants out of `highlight_compressed_luma`.
     fn curve_constants() -> (f32, f32) {
