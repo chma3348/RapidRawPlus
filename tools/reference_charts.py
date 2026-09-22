@@ -152,3 +152,21 @@ if __name__ == "__main__":
     colour_checker()
     skin()
     edges_and_texture()
+    sheet()
+
+
+def sheet():
+    """All six charts on one image, 2 across by 3 down, with mid-grey
+    gutters, so one export covers everything. Controls that look at
+    neighbours only differ within a few pixels of a chart's edge, which the
+    gutter absorbs."""
+    names = ["chart-grey-ramps", "chart-hue-saturation", "chart-hue-lightness",
+             "chart-colour-checker", "chart-skin", "chart-edges-texture"]
+    g = 48
+    canvas = np.full((3 * N + 4 * g, 2 * N + 3 * g, 3), 0.45)
+    for k, name in enumerate(names):
+        im = cv2.imread(os.path.join(OUT, name + ".tif"), cv2.IMREAD_UNCHANGED)[..., ::-1] / 65535
+        r, c = divmod(k, 2)
+        y, x = g + r * (N + g), g + c * (N + g)
+        canvas[y : y + N, x : x + N] = im
+    save("chart-all", canvas)
