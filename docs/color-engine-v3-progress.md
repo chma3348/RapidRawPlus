@@ -67,6 +67,32 @@ slider — under 0.3 of a level on average on real photographs
 (`examples/basic_parity.rs`) — and `examples/v3_sheet.rs` renders contact
 sheets through the app's own path with the Resolve transforms.
 
+**Correction, same day.** That check ran v3 on the previous engine's Basic
+tone mapper without the Resolve transforms — not how the app renders. As the
+app renders (Resolve's rendering, a JPEG through Resolve's input transform),
+Exposure was badly off: the input transform puts bright sky past white, and
+the previous engine's brightness curve, which never saw such values from a
+rendered picture, broke them into bands and responded weakly. Fixed by
+running the shared controls where that engine ran them: for a rendered
+picture, on the display values Resolve's rendering gives back, returning
+through its input transform (skipped at neutral). As the app renders, every
+Basic slider now tracks the previous engine to about half a level on average
+on real photographs, beyond Resolve's own rendering difference at neutral.
+`tests/basic_parity.rs` now also runs through a stand-in transform pair with a
+Resolve-like shoulder, and fails without the fix (9.85 levels at EV +1).
+
+Two things found on the way. RAW files render about a stop darker than the
+previous engine at neutral — which is correct: Resolve's own export of the
+same RAW averages 24.2 against v3's 22 and the previous engine's 35. And the
+RAW decoder had no clipped-highlight handling, so a clipped sun rendered
+magenta (231/170/217 against Resolve's 245/242/245); where the sensor's green
+clips, the colour is now made neutral and bright (235/234/239).
+
+Known limit: the captured transforms are 64-point lattices stored as sRGB
+code values, which are steep near zero, so near-pure colours (a channel near
+zero) can miss by up to ~30 levels; photo-like colour averages 0.3. A finer
+capture would fix it.
+
 ## The rest of the previous engine — September 21, 2026
 
 With this, everything the previous engine applies to a picture has a v3

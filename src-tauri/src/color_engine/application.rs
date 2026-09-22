@@ -86,6 +86,7 @@ pub fn source(state: &AppState, path: &str) -> Result<Arc<DecodedFrame>> {
                     transfer: Transfer::Linear,
                     reference: ReferenceDomain::Scene,
                 };
+                frame.rendered_origin = true;
             }
             Err(error) => log::error!("Ignoring the captured input transform: {error}"),
         }
@@ -272,6 +273,24 @@ fn plan(
     })
 }
 
+/// The captured transforms, when a rendered picture needs its controls run
+/// on display values (see `RenderPlan::set_display_domain`).
+fn display_domain(
+    state: &AppState,
+    source: &DecodedFrame,
+) -> Result<Option<(super::cube::CubeLut, super::cube::CubeLut)>> {
+    if !source.rendered_origin {
+        return Ok(None);
+    }
+    match (input_transform(state), output_transform(state)) {
+        (Some(input), Some(output)) => Ok(Some((
+            super::cube::CubeLut::load(&input)?,
+            super::cube::CubeLut::load(&output)?,
+        ))),
+        _ => Ok(None),
+    }
+}
+
 /// The captured transform this session renders through, if any.
 pub fn output_transform(state: &AppState) -> Option<PathBuf> {
     state.output_transform.lock().unwrap().clone()
@@ -431,6 +450,7 @@ fn neighbourhood(
     source: &Arc<DecodedFrame>,
     image: &DynamicImage,
     key: u64,
+    display: Option<&super::cube::CubeLut>,
 ) -> Arc<Vec<[f32; 4]>> {
     if let Ok(cache) = state.v3_neighbourhood.lock()
         && let Some(c) = cache.as_ref()
@@ -455,6 +475,16 @@ fn neighbourhood(
     };
     let mut planes = vec![vec![0f32; w * h]; 3];
     for (i, p) in pixels.pixels().enumerate() {
+        // A rendered picture's controls see its display values: the code
+        // values Resolve's rendering gives the scene data, already encoded.
+        if let Some(output) = display {
+            let logged = [p[0], p[1], p[2]].map(|v| spaces::encode_intermediate(v as f64) as f32);
+            let shown = output.sample(logged);
+            for (c, plane) in planes.iter_mut().enumerate() {
+                plane[i] = shown[c].clamp(0., 1.);
+            }
+            continue;
+        }
         for (c, plane) in planes.iter_mut().enumerate() {
             let v = (m[c][0] * p[0] + m[c][1] * p[1] + m[c][2] * p[2]).clamp(0., 65504.);
             plane[i] = if scene { v } else { encode(v) };
@@ -724,8 +754,22 @@ pub(crate) fn render_file_with_capture(
         hasher.finish()
     };
     let unedited = image.clone();
+    let domain = display_domain(state, &source)?;
     let neighbourhood_for = |tone: &super::controls::Tone| {
-        (!tone.is_neutral()).then(|| neighbourhood(state, &source, &unedited, neighbourhood_key))
+        (!tone.is_neutral()).then(|| {
+            neighbourhood(
+                state,
+                &source,
+                &unedited,
+                neighbourhood_key,
+                domain.as_ref().map(|(_, output)| output),
+            )
+        })
+    };
+    let in_domain = |plan: &mut RenderPlan| {
+        if let Some((input, output)) = &domain {
+            plan.set_display_domain(input, output);
+        }
     };
     let image = if controls.detail.is_neutral() && super::optics::is_neutral(&controls.effects) {
         image
@@ -797,6 +841,7 @@ pub(crate) fn render_file_with_capture(
         tone_mapper(edits),
     )?;
     initial_plan.set_render_scale(scale);
+    in_domain(&mut initial_plan);
     if let Some(blurs) = initial_blurs {
         initial_plan.set_neighbourhood(blurs);
     }
@@ -886,6 +931,7 @@ pub(crate) fn render_file_with_capture(
         } else {
             let blurs = neighbourhood_for(&local.tone);
             let mut local_plan = plan(working_color.clone(), local, None, None)?;
+            in_domain(&mut local_plan);
             if let Some(blurs) = blurs {
                 local_plan.set_neighbourhood(blurs);
             }
@@ -918,6 +964,7 @@ pub(crate) fn render_file_with_capture(
         tone_mapper(edits),
     )?;
     final_plan.set_render_scale(scale);
+    in_domain(&mut final_plan);
     if let Some(look) = &look {
         final_plan.set_look(look)?;
     }

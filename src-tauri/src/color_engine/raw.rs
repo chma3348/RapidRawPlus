@@ -156,6 +156,7 @@ fn develop(
         "black_levels": black, "white_levels": white,
         "demosaic": if fast {"speed"} else {"quality"},
         "sensor_floor": "zero_after_black_subtraction", "upper_clamp": false,
+        "clipped_highlights": "neutral_where_green_clips_v1",
         "calibration_revision": "row_normalized_d65_green_normalized_wb_v1"
     });
     let mut samples = raw.data.as_f32().into_owned();
@@ -190,9 +191,40 @@ fn develop(
     let Intermediate::ThreeColor(camera) = intermediate else {
         anyhow::bail!("Demosaicing did not produce three camera channels");
     };
+    // Clipped highlights. Where the sensor's green saturated, the pixel's
+    // colour is gone: white balance then lifts red and blue past the clipped
+    // green, and a white sun or window renders magenta (measured on a Sony
+    // file: 231/170/217 where Resolve renders 245/242/245). There the colour
+    // is made neutral and bright, easing in over the last 5% below
+    // saturation. A pixel where only red or blue
+    // clipped keeps its colour, so a red light stays red.
+    let gains = DVec3::new(
+        raw.wb_coeffs[0] as f64,
+        raw.wb_coeffs[1] as f64,
+        raw.wb_coeffs[2] as f64,
+    ) / raw.wb_coeffs[1] as f64;
+    let unbalance = transform * DMat3::from_diagonal(gains.recip());
+    let smoothstep = |a: f64, b: f64, x: f64| {
+        let t = ((x - a) / (b - a)).clamp(0., 1.);
+        t * t * (3. - 2. * t)
+    };
     let mut output = Vec::with_capacity(camera.data.len() * 4);
     for p in &camera.data {
-        let rgb = transform * DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64);
+        let sensor = DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64);
+        let balanced = sensor * gains;
+        let clipped = smoothstep(0.95, 1.0, sensor.y);
+        let balanced = if clipped > 0. {
+            // A clipped sensor says only "at least this bright"; like
+            // Resolve, read a fully clipped core as brighter than its
+            // brightest channel, here up to twice.
+            balanced.lerp(
+                DVec3::splat(balanced.max_element() * (1. + clipped)),
+                clipped,
+            )
+        } else {
+            balanced
+        };
+        let rgb = unbalance * balanced;
         let pixel = [rgb.x as f32, rgb.y as f32, rgb.z as f32, 1.0];
         ensure!(
             pixel.iter().all(|v| v.is_finite()),
@@ -207,10 +239,10 @@ fn develop(
         crate::image_processing::apply_orientation(DynamicImage::ImageRgba32F(image), orientation)
             .into_rgba32f();
     check_cancel()?;
-    Ok(DecodedFrame { pixels, color: SourceColor {primaries: Primaries::Srgb,transfer: Transfer::Linear,reference: ReferenceDomain::Scene}, source_profile: None, provenance: InputProvenance {
+    Ok(DecodedFrame { pixels, color: SourceColor {primaries: Primaries::Srgb,transfer: Transfer::Linear,reference: ReferenceDomain::Scene}, source_profile: None, rendered_origin: false, provenance: InputProvenance {
         decoder_revision: "v3-bayer-input-1-rawler-424cc109", interpretation: "calibrated_scene_linear_srgb".into(),
         profile_hash: None, calibration: Some(record),
-        warnings: vec!["Experimental Bayer calibration; no clipped-sensor highlight reconstruction or dual-illuminant interpolation yet.".into()],
+        warnings: vec!["Experimental Bayer calibration; clipped highlights are neutralised rather than reconstructed; no dual-illuminant interpolation yet.".into()],
     }})
 }
 

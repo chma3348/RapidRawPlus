@@ -27,6 +27,7 @@ struct Parameters {
     basic_flags: vec4<u32>,
     agx_to: mat3x3<f32>,
     agx_from: mat3x3<f32>,
+    domain: vec4<u32>,
 }
 @group(0) @binding(0) var<storage, read> source: array<vec4<f32>>;
 @group(0) @binding(1) var<storage, read_write> results: array<vec4<f32>>;
@@ -39,6 +40,40 @@ struct Parameters {
 @group(0) @binding(5) var<storage, read> neighbourhood: array<vec4<f32>>;
 // The previous engine's measured Resolve shadow correction, 33^3, red fastest.
 @group(0) @binding(6) var<storage, read> shadow_correction_table: array<f32>;
+
+// The captured input transform (sRGB code values to Intermediate) and output
+// transform (the reverse), for the display domain. Dummies when unused.
+@group(0) @binding(7) var<storage, read> domain_in: array<vec4<f32>>;
+@group(0) @binding(8) var<storage, read> domain_out: array<vec4<f32>>;
+
+fn domain_in_at(c: vec3<u32>) -> vec3<f32> {
+    let size = parameters.domain.y;
+    return domain_in[c.x + (c.y + c.z * size) * size].rgb;
+}
+fn domain_out_at(c: vec3<u32>) -> vec3<f32> {
+    let size = parameters.domain.z;
+    return domain_out[c.x + (c.y + c.z * size) * size].rgb;
+}
+
+/// Working scene values to the linear display values Resolve's rendering
+/// gives them.
+fn to_display_domain(working: vec3<f32>) -> vec3<f32> {
+    let logged = vec3<f32>(encode_intermediate(working.r), encode_intermediate(working.g),
+        encode_intermediate(working.b));
+    let t = tetra(logged, parameters.domain.z);
+    let encoded = domain_out_at(t.corners[0]) * t.weights.x + domain_out_at(t.corners[1]) * t.weights.y
+        + domain_out_at(t.corners[2]) * t.weights.z + domain_out_at(t.corners[3]) * t.weights.w;
+    return srgb_to_linear(clamp(encoded, vec3<f32>(0.0), vec3<f32>(1.0)));
+}
+
+/// And back, through Resolve's input transform, as the picture came in.
+fn from_display_domain(display: vec3<f32>) -> vec3<f32> {
+    let t = tetra(linear_to_srgb(display), parameters.domain.y);
+    let logged = domain_in_at(t.corners[0]) * t.weights.x + domain_in_at(t.corners[1]) * t.weights.y
+        + domain_in_at(t.corners[2]) * t.weights.z + domain_in_at(t.corners[3]) * t.weights.w;
+    return vec3<f32>(decode_component(logged.r, 2u), decode_component(logged.g, 2u),
+        decode_component(logged.b, 2u));
+}
 
 // Same table and interpolation as the previous engine's, which samples it
 // from a texture; tone_v2.wgsl calls this.
@@ -83,7 +118,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         tonal = neighbourhood[id.x * 2u].rgb;
         structure = neighbourhood[id.x * 2u + 1u].rgb;
     } else {
-        let own = max(parameters.work_to_output * working, vec3<f32>(0.0));
+        var own = max(parameters.work_to_output * working, vec3<f32>(0.0));
+        if parameters.domain.x == 1u { own = to_display_domain(working); }
         tonal = select(linear_to_srgb_extended(own), own, parameters.basic_flags.y == 1u);
         structure = tonal;
     }
@@ -95,7 +131,11 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     if parameters.modes.y == 6u {
         encoded = render_captured(scene);
     } else if parameters.modes.y >= 7u {
-        encoded = render_previous(parameters.work_to_output * scene, parameters.modes.y);
+        // The previous engine rendered a rendered picture from its display
+        // values, so it is handed those here too.
+        var linear = parameters.work_to_output * scene;
+        if parameters.domain.x == 1u { linear = to_display_domain(scene); }
+        encoded = render_previous(linear, parameters.modes.y);
     } else {
         let display = render_output(parameters.work_to_output * scene, parameters.modes.y);
         encoded = vec3<f32>(encode_srgb(display.r), encode_srgb(display.g), encode_srgb(display.b));

@@ -28,6 +28,10 @@ pub struct DecodedFrame {
     /// the file's own code values, and need this same profile to land in
     /// the same place as the photograph under them.
     pub source_profile: Option<Vec<u8>>,
+    /// A rendered picture (JPEG, HEIC…) that an installed input transform
+    /// turned into scene data. The previous engine's controls, which v3 now
+    /// carries, always saw such pictures as display values, and run there.
+    pub rendered_origin: bool,
 }
 
 /// Returns straight-alpha, linear sRGB coordinates of a display-referred
@@ -165,6 +169,7 @@ pub fn decode_profiled_photo(bytes: &[u8]) -> Result<DecodedFrame> {
             calibration: None,
         },
         source_profile: icc,
+        rendered_origin: false,
     })
 }
 

@@ -34,6 +34,21 @@ fn main() -> Result<()> {
         display: Arc::new(Mutex::new(None)),
     };
     let state = rapidraw_lib::AppState::default();
+    // As the app renders: the Resolve rendering and the installed transforms.
+    let as_app = std::env::var_os("AS_APP").is_some();
+    if as_app {
+        let support = std::path::PathBuf::from(std::env::var("HOME")?)
+            .join("Library/Application Support/io.github.CyberTimon.RapidRAW");
+        for (slot, name) in [
+            (&state.output_transform, "output-transform.cube"),
+            (&state.input_transform, "input-transform.cube"),
+        ] {
+            let path = support.join(name);
+            if path.exists() {
+                *slot.lock().unwrap() = Some(path);
+            }
+        }
+    }
 
     // The same pixels v3 prepares: its decode, its downscale.
     let bytes = std::fs::read(&path)?;
@@ -103,7 +118,18 @@ fn main() -> Result<()> {
     let blank = ImageBuffer::<Luma<u8>, Vec<u8>>::new(w, h);
     let masks = [blank.clone(), blank];
 
-    let settings: &[(&str, serde_json::Value)] = &[
+    let sweep = std::env::var_os("SWEEP").is_some();
+    let exposure_sweep: Vec<(String, serde_json::Value)> =
+        [-2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0]
+            .iter()
+            .flat_map(|v| {
+                [
+                    (format!("Exposure {v:+}"), json!({"brightness": v})),
+                    (format!("EV shift {v:+}"), json!({"exposure": v})),
+                ]
+            })
+            .collect();
+    let fixed: Vec<(String, serde_json::Value)> = [
         ("neutral", json!({})),
         ("EV shift +1", json!({"exposure": 1.0})),
         ("Exposure +1", json!({"brightness": 1.0})),
@@ -118,8 +144,15 @@ fn main() -> Result<()> {
         ("Whites -50", json!({"whites": -50})),
         ("Blacks +50", json!({"blacks": 50})),
         ("Blacks -50", json!({"blacks": -50})),
-    ];
-    println!("{:18} {:>8} {:>8} {:>8}", "setting", "mean", "p99", "max");
+    ]
+    .into_iter()
+    .map(|(n, v)| (n.to_string(), v))
+    .collect();
+    let settings = if sweep { &exposure_sweep } else { &fixed };
+    println!(
+        "{:18} {:>8} {:>8} {:>8} {:>9} {:>9}",
+        "setting", "mean", "p99", "max", "v2 luma", "v3 luma"
+    );
     let mut sheet_rows = Vec::new();
     for (name, extra) in settings {
         let mut edits = json!({"processVersion": 2, "toneMapper": "basic"});
@@ -144,6 +177,9 @@ fn main() -> Result<()> {
             .map_err(anyhow::Error::msg)?;
         let mut v3_edits = edits.clone();
         v3_edits["processVersion"] = json!(3);
+        if as_app {
+            v3_edits["toneMapper"] = json!("resolve");
+        }
         let v3 = render_file(&context, &state, &path, &v3_edits, Some(SIZE))?.preview_rgba8();
         assert_eq!(v3.dimensions(), (w, h), "the engines saw different sizes");
         let mut diffs: Vec<f32> = v2
@@ -153,8 +189,12 @@ fn main() -> Result<()> {
             .collect();
         diffs.sort_by(f32::total_cmp);
         let mean = diffs.iter().sum::<f32>() / diffs.len() as f32;
+        let luma = |p: &[u8]| 0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32;
+        let n = (w * h) as f32;
+        let v2_luma = v2.chunks(4).map(luma).sum::<f32>() / n;
+        let v3_luma = v3.pixels().map(|p| luma(&p.0)).sum::<f32>() / n;
         println!(
-            "{name:18} {mean:>8.2} {:>8.1} {:>8.1}",
+            "{name:18} {mean:>8.2} {:>8.1} {:>8.1} {v2_luma:>9.1} {v3_luma:>9.1}",
             diffs[diffs.len() * 99 / 100],
             diffs[diffs.len() - 1]
         );

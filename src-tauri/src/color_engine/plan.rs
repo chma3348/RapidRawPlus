@@ -60,6 +60,11 @@ pub(crate) struct GpuParameters {
     /// previous engine computes them.
     pub agx_to: [[f32; 4]; 3],
     pub agx_from: [[f32; 4]; 3],
+    /// [display domain active, input transform size, output transform size,
+    ///  0]: for a rendered picture, the previous engine's controls run on
+    /// the display values the captured output transform gives back, and
+    /// return through the captured input transform.
+    pub domain: [u32; 4],
 }
 
 /// What a creative LUT expects to be fed, and therefore where in the
@@ -103,6 +108,9 @@ pub struct Look {
     pub exposure: f32,
 }
 
+/// A cube's entries, padded to `vec4` for the GPU.
+pub(crate) type Lattice = Vec<[f32; 4]>;
+
 pub struct RenderPlan {
     config: PipelineConfig,
     pub(crate) parameters: GpuParameters,
@@ -112,6 +120,8 @@ pub struct RenderPlan {
     /// Per pixel, the previous engine's tonal (3.5 px) and structure (40 px)
     /// blurs of the unedited picture, which its local tone controls read.
     pub(crate) neighbourhood: Option<std::sync::Arc<Vec<[f32; 4]>>>,
+    /// The captured input and output transforms, for the display domain.
+    pub(crate) domain: Option<(Lattice, Lattice)>,
 }
 
 impl RenderPlan {
@@ -311,6 +321,7 @@ impl RenderPlan {
                     .1
                     .as_dmat3(),
             ),
+            domain: [0; 4],
             look: [0.; 4],
             look_flags: [0; 4],
             work_to_look: packed(
@@ -357,6 +368,7 @@ impl RenderPlan {
             cube,
             look: None,
             neighbourhood: None,
+            domain: None,
         })
     }
 
@@ -408,6 +420,19 @@ impl RenderPlan {
     pub fn set_neighbourhood(&mut self, blurs: std::sync::Arc<Vec<[f32; 4]>>) {
         self.neighbourhood = Some(blurs);
         self.parameters.basic_flags[2] = 1;
+    }
+
+    /// Run the shared controls on display values: `input` is the captured
+    /// input transform (sRGB code values to DaVinci Intermediate), `output`
+    /// the captured output transform (the reverse). For pictures that were
+    /// rendered before they reached v3, whose controls the previous engine
+    /// always applied to the picture as displayed.
+    pub fn set_display_domain(&mut self, input: &CubeLut, output: &CubeLut) {
+        self.parameters.domain = [1, input.size, output.size, 0];
+        // Those controls then see a display picture, so they take the
+        // previous engine's path for one, not its RAW path.
+        self.parameters.basic_flags[1] = 0;
+        self.domain = Some((input.entries.clone(), output.entries.clone()));
     }
 
     /// How much smaller than the full-resolution photograph the image being

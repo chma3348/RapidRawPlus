@@ -95,10 +95,27 @@ impl CubeLut {
         })
     }
 
+    /// Read and parse a cube, once per file version: a 64-point lattice is a
+    /// quarter of a million lines, and renders ask for the same one each time.
     pub fn load(path: &std::path::Path) -> Result<Self> {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex, OnceLock};
+        type Key = (std::path::PathBuf, u64, Option<std::time::SystemTime>);
+        static CACHE: OnceLock<Mutex<HashMap<Key, Arc<CubeLut>>>> = OnceLock::new();
+        let meta = std::fs::metadata(path)
+            .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
+        let key = (path.to_path_buf(), meta.len(), meta.modified().ok());
+        let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        if let Some(hit) = cache.lock().ok().and_then(|c| c.get(&key).cloned()) {
+            return Ok((*hit).clone());
+        }
         let text = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
-        Self::parse(&text)
+        let cube = Self::parse(&text)?;
+        if let Ok(mut c) = cache.lock() {
+            c.insert(key, Arc::new(cube.clone()));
+        }
+        Ok(cube)
     }
 
     /// Reference lookup for tests. The shader does this on the GPU, and

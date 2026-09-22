@@ -65,24 +65,40 @@ fn channel_curve(v: f32, channel: u32) -> f32 {
 }
 
 // The Basic panel, shared with the previous engine and run through its own
-// functions (tone_v2.wgsl) in its order — brightness, then contrast, shadows,
-// whites and blacks, then highlights — on linear sRGB, the space they were
-// written and tuned in.
+// functions (tone_v2.wgsl) in its order — EV shift, brightness, then
+// contrast, shadows, whites and blacks, then highlights — on linear sRGB, the
+// space they were written and tuned in. `rgb` arrives before the EV shift.
+//
+// Where they run depends on what the previous engine gave them. A RAW file's
+// scene values: here too. A rendered picture's display values: here, the
+// display values Resolve's rendering makes of the scene data, and back
+// through Resolve's input transform afterwards. Those controls were never
+// given values past white for such a picture — its brightness curve, handed
+// one, breaks into bands — and at neutral the round trip is skipped, so an
+// unedited picture is untouched.
 fn basic_v2(rgb: vec3<f32>, tonal: vec3<f32>, structure: vec3<f32>) -> vec3<f32> {
-    if parameters.basic_flags.x == 0u { return rgb; }
+    let gain = parameters.tone.z;
+    let display = parameters.domain.x == 1u;
+    if parameters.basic_flags.x == 0u && (!display || gain == 1.0) { return rgb * gain; }
     let a = parameters.basic[0];
     let b = parameters.basic[1];
     let raw = parameters.basic_flags.y;
-    var c = parameters.work_to_output * rgb;
+    var c: vec3<f32>;
+    if display { c = to_display_domain(rgb) * gain; } else { c = parameters.work_to_output * (rgb * gain); }
     c = apply_filmic_exposure(c, a.x);
     c = apply_tonal_adjustments_v2(c, structure, raw, a.y, b.x, b.y, b.z, a.z);
     c = apply_highlights_adjustment_v2(c, tonal, structure, raw, a.w);
-    return parameters.srgb_to_work * c;
+    if display { return from_display_domain(c); }
+    // The previous engine's next stage, its HSL panel, runs on every pixel
+    // whatever its settings and starts by clipping negative channels, so a
+    // colour these controls push out of gamut arrives clipped. Do the same.
+    // (In the display domain the return trip clips already.)
+    return parameters.srgb_to_work * max(c, vec3<f32>(0.0));
 }
 
 fn grade(input:vec3<f32>, tonal:vec3<f32>, structure:vec3<f32>) -> vec3<f32> {
     if parameters.flags.x == 0u {return input;}
-    var rgb=basic_v2(parameters.white_balance*input*parameters.tone.z, tonal, structure);
+    var rgb=basic_v2(parameters.white_balance*input, tonal, structure);
     let y=dot(rgb,vec3<f32>(0.27411851,0.87363190,-0.14775041));
     // DWG's blue coefficient is negative, so a non-physical pixel can land at
     // or below zero luminance. Fade the curve out across the bottom of the

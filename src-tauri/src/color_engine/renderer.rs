@@ -299,6 +299,23 @@ impl ColorEngine {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let dummy = [[0.0f32; 4]];
+        let (idt, odt) = plan
+            .domain
+            .as_ref()
+            .map_or((&dummy[..], &dummy[..]), |(i, o)| {
+                (i.as_slice(), o.as_slice())
+            });
+        let idt = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("V3 input transform"),
+            contents: bytemuck::cast_slice(idt),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let odt = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("V3 display domain output transform"),
+            contents: bytemuck::cast_slice(odt),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
         let parameters = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("V3 parameters"),
             contents: bytemuck::bytes_of(&plan.parameters),
@@ -335,6 +352,14 @@ impl ColorEngine {
                 wgpu::BindGroupEntry {
                     binding: 6,
                     resource: self.shadow_correction.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: idt.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: odt.as_entire_binding(),
                 },
             ],
         });
