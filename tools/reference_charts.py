@@ -143,18 +143,6 @@ def edges_and_texture():
     save("chart-edges-texture", img)
 
 
-if __name__ == "__main__":
-    OUT = sys.argv[1] if len(sys.argv) > 1 else "."
-    os.makedirs(OUT, exist_ok=True)
-    grey_ramps()
-    hue_chroma()
-    hue_lightness()
-    colour_checker()
-    skin()
-    edges_and_texture()
-    sheet()
-
-
 def sheet():
     """All six charts on one image, 2 across by 3 down, with mid-grey
     gutters, so one export covers everything. Controls that look at
@@ -170,3 +158,15 @@ def sheet():
         y, x = g + r * (N + g), g + c * (N + g)
         canvas[y : y + N, x : x + N] = im
     save("chart-all", canvas)
+
+
+if __name__ == "__main__":
+    OUT = sys.argv[1] if len(sys.argv) > 1 else "."
+    os.makedirs(OUT, exist_ok=True)
+    grey_ramps()
+    hue_chroma()
+    hue_lightness()
+    colour_checker()
+    skin()
+    edges_and_texture()
+    sheet()
