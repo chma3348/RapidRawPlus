@@ -2225,6 +2225,7 @@ pub fn run() {
                 // said out loud: what renders the picture should never be a
                 // silent consequence of a file existing.
                 if let Ok(data_dir) = app.path().app_data_dir() {
+                    *app.state::<AppState>().v3_asset_dir.lock().unwrap() = Some(data_dir.join("color-v3-assets"));
                     for (name, slot) in [
                         ("output-transform.cube", 0usize),
                         ("input-transform.cube", 1usize),
@@ -2380,6 +2381,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             color_engine::application::auto_color_v3,
             color_engine::application::prepare_color_v3,
+            color_engine::application::pin_color_v3,
             color_engine::selection::inspect_color_v3,
             apply_adjustments,
             generate_preview_for_path,

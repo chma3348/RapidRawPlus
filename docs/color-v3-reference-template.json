@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "domain": "display_rgb",
+  "resolve": {
+    "version": "REPLACE_WITH_ACTUAL_VERSION",
+    "page_and_tool": "REPLACE_WITH_PAGE_AND_CONTROL_PANEL",
+    "input_color_space": "REPLACE_WITH_ACTUAL_INPUT_SETTING",
+    "timeline_color_space": "REPLACE_WITH_ACTUAL_TIMELINE_SETTING",
+    "output_color_space": "sRGB",
+    "data_levels": "full",
+    "export_bit_depth": 16,
+    "notes": "Record tone mapping, gamut mapping, automatic adjustments, RAW development, node state and export options. Use a separate package if these differ."
+  },
+  "pipeline": {
+    "schema": 1,
+    "engine": "v3-stable-input-2",
+    "input_policy": "profiled-display-cube-or-wide-gamut-bypass-1",
+    "raw_development": "bayer-d65-green-clipped-neutral-1",
+    "input_transform": {"blake3": "REPLACE_WITH_PIN_COMMAND_OUTPUT"},
+    "output_transform": {"blake3": "REPLACE_WITH_PIN_COMMAND_OUTPUT"}
+  },
+  "asset_directory": "assets",
+  "required_samples": {"shadows": [-100, -50, 50, 100]},
+  "sources": [
+    {"id": "photo01", "file": {"path": "source/photo01.tif", "blake3": "REPLACE_WITH_SOURCE_HASH"}}
+  ],
+  "cases": [
+    {
+      "id": "photo01-neutral",
+      "source": "photo01",
+      "reference": {"path": "resolve/photo01-neutral.tif", "blake3": "REPLACE_WITH_REFERENCE_HASH"},
+      "untagged_srgb": false,
+      "control": "neutral",
+      "resolve_value": 0,
+      "edits": {"processVersion": 3, "toneMapper": "resolve", "v3RawRecovery": "neutral_green_v1", "v3": {}}
+    },
+    {
+      "id": "photo01-shadows-plus50",
+      "source": "photo01",
+      "reference": {"path": "resolve/photo01-shadows-plus50.tif", "blake3": "REPLACE_WITH_REFERENCE_HASH"},
+      "untagged_srgb": false,
+      "control": "shadows",
+      "resolve_value": 50,
+      "edits": {"processVersion": 3, "toneMapper": "resolve", "v3RawRecovery": "neutral_green_v1", "shadows": 50, "v3": {}}
+    }
+  ]
+}

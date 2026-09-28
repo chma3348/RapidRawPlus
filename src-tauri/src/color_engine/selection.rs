@@ -78,6 +78,10 @@ pub fn inspect(
     primary.bands = [[0.; 3]; 8];
     primary.grading = [[0.; 3]; 4];
     primary.ranges.clear();
+    // These run after selective colour in the shader. Leaving them enabled
+    // makes the picker measure a different colour than the ranges select.
+    primary.effects.vignette_amount = 0.;
+    primary.effects.film_saturation = 0.;
     let mut sampling = edits.clone();
     sampling["v3"] = serde_json::to_value(primary)?;
     // Global color ranges precede every local adjustment.

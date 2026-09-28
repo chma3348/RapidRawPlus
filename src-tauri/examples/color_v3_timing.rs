@@ -26,7 +26,7 @@ fn main() -> Result<()> {
     let mask = |target: f64| {
         json!([{
             "id":"m","name":"m","visible":true,"invert":false,"opacity":100,
-            "adjustments":{"v3":{"exposure":0.5}},
+            "adjustments":{"exposure":0.4},
             "subMasks":[{"id":"c","type":"color","visible":true,"mode":"additive",
                 "parameters":{"targetX": target, "targetY": 800, "tolerance": 40}}]
         }])
@@ -48,7 +48,7 @@ fn main() -> Result<()> {
     )?;
     time(
         "preview, warm",
-        json!({"processVersion":3,"v3":{"exposure":0.3},"masks":[]}),
+        json!({"processVersion":3,"exposure":0.24,"v3":{},"masks":[]}),
         preview,
     )?;
     time(
@@ -58,7 +58,7 @@ fn main() -> Result<()> {
     )?;
     time(
         "move a slider with the mask (warm)",
-        json!({"processVersion":3,"v3":{"exposure":0.4},"masks":mask(1200.0)}),
+        json!({"processVersion":3,"exposure":0.32,"v3":{},"masks":mask(1200.0)}),
         preview,
     )?;
     time(
@@ -73,7 +73,7 @@ fn main() -> Result<()> {
     )?;
     let linear = json!([{
         "id":"l","name":"l","visible":true,"invert":false,"opacity":100,
-        "adjustments":{"v3":{"exposure":0.5}},
+        "adjustments":{"exposure":0.4},
         "subMasks":[{"id":"g","type":"linear","visible":true,"mode":"additive",
             "parameters":{"startX":0,"startY":0,"endX":6000,"endY":4000,"range":1000}}]
     }]);
@@ -84,7 +84,7 @@ fn main() -> Result<()> {
     )?;
     time(
         "gradient mask, slider moved",
-        json!({"processVersion":3,"v3":{"exposure":0.2},"rotation":1.0,"masks":linear}),
+        json!({"processVersion":3,"exposure":0.16,"v3":{},"rotation":1.0,"masks":linear}),
         preview,
     )?;
     time(

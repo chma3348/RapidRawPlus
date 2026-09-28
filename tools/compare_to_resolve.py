@@ -49,7 +49,14 @@ def main() -> None:
     parser.add_argument("--ours", required=True)
     parser.add_argument("--resolve", required=True)
     parser.add_argument("--report", help="write a side-by-side and a difference map here")
+    parser.add_argument("--legacy-unmanaged", action="store_true",
+                        help="explicitly allow the old profile-unmanaged comparison; not a calibration gate")
     args = parser.parse_args()
+    if not args.legacy_unmanaged:
+        parser.error("Use the profile-aware color_v3_reference example for calibration packages "
+                     "(docs/color-v3-calibration-intake.md). This legacy tool ignores ICC profiles; "
+                     "--legacy-unmanaged is for historical diagnostics only.")
+    print("WARNING: unmanaged diagnostic only. Profiles, range and capture settings are not validated.")
 
     ours, theirs = load(args.ours), load(args.resolve)
     if ours.shape != theirs.shape:

@@ -450,7 +450,7 @@ impl RenderPlan {
     /// must be added to this key before introducing a render cache.
     pub fn fingerprint(&self, source_revision: &str) -> String {
         let mut hash = blake3::Hasher::new();
-        hash.update(b"rapidraw-color-v3-controls-1\0");
+        hash.update(b"rapidraw-color-v3-audit-2026-09-22\0");
         hash.update(&serde_json::to_vec(&self.config).expect("validated finite config"));
         // The cube's contents, not the path it was read from.
         if let Some(cube) = &self.cube {
@@ -460,6 +460,15 @@ impl RenderPlan {
             hash.update(bytemuck::cast_slice(look));
             hash.update(bytemuck::bytes_of(&self.parameters.look));
             hash.update(bytemuck::bytes_of(&self.parameters.look_flags));
+        }
+        hash.update(bytemuck::bytes_of(&self.parameters.effects));
+        hash.update(bytemuck::bytes_of(&self.parameters.domain));
+        if let Some((input, output)) = &self.domain {
+            hash.update(bytemuck::cast_slice(input));
+            hash.update(bytemuck::cast_slice(output));
+        }
+        if let Some(neighbourhood) = &self.neighbourhood {
+            hash.update(bytemuck::cast_slice(neighbourhood.as_slice()));
         }
         hash.update(source_revision.as_bytes());
         hash.finalize().to_hex().to_string()

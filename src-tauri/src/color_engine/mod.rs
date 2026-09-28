@@ -3,14 +3,17 @@
 //! Application defaults and legacy edit rendering remain unchanged.
 pub mod application;
 pub mod config;
+pub mod contract;
 pub mod controls;
 pub mod cube;
 pub mod detail;
+pub mod identity;
 pub mod input;
 pub mod optics;
 pub mod patches;
 pub mod plan;
 pub mod raw;
+pub mod reference;
 mod renderer;
 pub mod selection;
 pub mod spaces;

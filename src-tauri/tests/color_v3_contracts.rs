@@ -136,6 +136,8 @@ fn creative_controls_are_strict_and_part_of_saved_identity() {
         assert!(controls(&json!({"v3":invalid})).is_err());
     }
     let mut edited = config();
+    edited.controls.tone.exposure = 0.75;
+    edited.controls.tone.contrast = 0.2;
     edited.controls.bands[0] = [30., -20., 10.];
     edited.controls.grading[2] = [240., 25., 0.];
     let serialized = serde_json::to_string(&edited).unwrap();
@@ -148,6 +150,25 @@ fn creative_controls_are_strict_and_part_of_saved_identity() {
     let mut c = config();
     c.controls.hue = f32::NAN;
     assert!(RenderPlan::build(c).is_err());
+}
+
+#[test]
+fn render_fingerprint_includes_bound_data_and_scale() {
+    use rapidraw_lib::color_engine::cube::CubeLut;
+    let mut plan = RenderPlan::build(config()).unwrap();
+    let bare = plan.fingerprint("source");
+    plan.set_render_scale(0.5);
+    let scaled = plan.fingerprint("source");
+    assert_ne!(bare, scaled);
+    let cube = CubeLut::parse(&format!("LUT_3D_SIZE 2\n{}", "0 0 0\n".repeat(8))).unwrap();
+    plan.set_display_domain(&cube, &cube);
+    let domain = plan.fingerprint("source");
+    assert_ne!(scaled, domain);
+    plan.set_neighbourhood(Arc::new(vec![[0.1; 4]; 2]));
+    let blurred = plan.fingerprint("source");
+    assert_ne!(domain, blurred);
+    plan.set_neighbourhood(Arc::new(vec![[0.2; 4]; 2]));
+    assert_ne!(blurred, plan.fingerprint("source"));
 }
 
 #[test]
@@ -593,6 +614,21 @@ fn detail_contracts(context: &GpuContext) {
             "parameters":{"startX":0,"startY":1000,"endX":100,"endY":1000,"range":1}}]
     }]});
     let local = render_file(context, &state, path, &masked, None).unwrap();
+    let captured = rapidraw_lib::color_engine::application::render_file_with_capture(
+        context, &state, path, &masked, None, true,
+    )
+    .unwrap();
+    assert!(
+        captured.encoded_srgb == local.encoded_srgb,
+        "capture changed masked rendering"
+    );
+    let stages = captured
+        .stages
+        .expect("capture must include stages with active masks");
+    assert_ne!(
+        stages.working.get_pixel(0, 0),
+        stages.graded.get_pixel(0, 0)
+    );
     let gap = mean_gap(&local.encoded_srgb, &full.encoded_srgb);
     assert!(
         gap < 1e-3,
@@ -640,6 +676,8 @@ fn detail_contracts(context: &GpuContext) {
 }
 
 fn application_contracts(context: &GpuContext) {
+    pinned_pipeline_contracts(context);
+    stabilization_contracts(context);
     use rapidraw_lib::color_engine::application::render_file;
     use serde_json::json;
     let directory = tempfile::tempdir().unwrap();
@@ -768,6 +806,71 @@ fn application_contracts(context: &GpuContext) {
     );
     assert!(inspect(context, &state, path, &selecting, 9, None).is_err());
     assert!(inspect(context, &state, path, &selecting, 0, Some([-0.1, 0.5])).is_err());
+    // Vignette and film saturation run after ranges; they must not move the
+    // colour a range picker targets. Exercise the corner, not the vignette's
+    // neutral centre.
+    let corner = inspect(context, &state, path, &selecting, 0, Some([0.05, 0.05]))
+        .unwrap()
+        .center;
+    selecting["v3"]["effects"] = json!({"vignette_amount":-80,"film_saturation":100});
+    assert_eq!(
+        inspect(context, &state, path, &selecting, 0, Some([0.05, 0.05]))
+            .unwrap()
+            .center,
+        corner
+    );
+    selecting["v3"]["effects"] = json!({});
+
+    // Replacing a source under the same name must invalidate both the
+    // sampled picture and its cached image-dependent mask. Keep dimensions
+    // the same, but change both its colours and file length.
+    let replacement = directory.path().join("replace.png");
+    ImageBuffer::from_pixel(64, 32, Rgba([200u8, 30, 30, 255]))
+        .save(&replacement)
+        .unwrap();
+    let replacement = replacement.to_str().unwrap();
+    let mut range_edit = masked.clone();
+    range_edit["masks"][0]["subMasks"][0]["parameters"] =
+        json!({"targetX":16,"targetY":16,"tolerance":5});
+    render_file(context, &state, replacement, &range_edit, None).unwrap();
+    ImageBuffer::from_fn(64, 32, |x, _| {
+        if x < 32 {
+            Rgba([200u8, 30, 30, 255])
+        } else {
+            Rgba([30u8, 30, 200, 255])
+        }
+    })
+    .save(replacement)
+    .unwrap();
+    let warm = render_file(context, &state, replacement, &range_edit, None).unwrap();
+    let cold = render_file(
+        context,
+        &rapidraw_lib::AppState::default(),
+        replacement,
+        &range_edit,
+        None,
+    )
+    .unwrap();
+    assert!(
+        warm.encoded_srgb == cold.encoded_srgb,
+        "replaced source reused stale range mask"
+    );
+
+    // A tone mapper is part of the ungraded sampling render too.
+    range_edit["toneMapper"] = json!("filmic");
+    let warm = render_file(context, &state, replacement, &range_edit, None).unwrap();
+    let cold = render_file(
+        context,
+        &rapidraw_lib::AppState::default(),
+        replacement,
+        &range_edit,
+        None,
+    )
+    .unwrap();
+    assert!(
+        warm.encoded_srgb == cold.encoded_srgb,
+        "tone mapper reused stale range mask"
+    );
     let divided = directory.path().join("divided.png");
     ImageBuffer::from_fn(64, 32, |x, _| {
         if x < 32 {
@@ -789,6 +892,173 @@ fn application_contracts(context: &GpuContext) {
             .center,
         blue,
         "crop misregistered sampled color"
+    );
+}
+
+fn stabilization_contracts(context: &GpuContext) {
+    use rapidraw_lib::color_engine::{
+        application::{input_report, render_file},
+        reference,
+    };
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("gradient.png");
+    let ramp = ImageBuffer::from_fn(256, 128, |x, y| {
+        let v = (x as f32 / 255. * 60000.) as u16;
+        Rgba([v, (v as f32 * (0.8 + y as f32 / 640.)) as u16, v / 2, 65535])
+    });
+    ramp.save(&path).unwrap();
+    let path_str = path.to_str().unwrap();
+    let state = rapidraw_lib::AppState::default();
+    let edits = json!({"processVersion":3,"toneMapper":"resolve","exposure":0.2,"shadows":25,"highlights":-30,
+        "v3":{"detail":{"clarity":12,"texture":8}}});
+    let first = render_file(context, &state, path_str, &edits, None).unwrap();
+    let cached = render_file(context, &state, path_str, &edits, None).unwrap();
+    let reopened: serde_json::Value = serde_json::from_str(&edits.to_string()).unwrap();
+    let fresh = render_file(
+        context,
+        &rapidraw_lib::AppState::default(),
+        path_str,
+        &reopened,
+        None,
+    )
+    .unwrap();
+    assert_eq!(first.encoded_srgb, cached.encoded_srgb);
+    assert_eq!(first.encoded_srgb, fresh.encoded_srgb);
+    let preview = render_file(context, &state, path_str, &edits, Some(128)).unwrap();
+    let down = rapidraw_lib::image_processing::downscale_f32_image(
+        &image::DynamicImage::ImageRgba32F(first.encoded_srgb.clone()),
+        128,
+        128,
+    )
+    .to_rgba32f();
+    let delta = reference::difference(&preview.encoded_srgb, &down).unwrap();
+    assert!(
+        delta.mean_linear_rgb < 0.01,
+        "smooth spatial preview/export regression: {delta:?}"
+    );
+    // The 16-bit path must preserve more than an 8-bit staircase.
+    let quantized = first.export_rgba16().to_rgba16();
+    let levels: std::collections::HashSet<_> = quantized.pixels().map(|p| p[0]).collect();
+    assert!(
+        levels.len() > 256,
+        "16-bit export was quantized to eight bits"
+    );
+    let before = input_report(&state, path_str, &edits).unwrap();
+    let sidecar = dir.path().join("source.rrdata");
+    let mut saved_edits = edits.clone();
+    saved_edits["v3Input"] = before.clone();
+    saved_edits["v3RawRecovery"] = json!("off");
+    let metadata = rapidraw_lib::image_processing::ImageMetadata {
+        adjustments: saved_edits.clone(),
+        ..Default::default()
+    };
+    std::fs::write(&sidecar, serde_json::to_vec_pretty(&metadata).unwrap()).unwrap();
+    let reopened: rapidraw_lib::image_processing::ImageMetadata =
+        serde_json::from_slice(&std::fs::read(&sidecar).unwrap()).unwrap();
+    assert_eq!(reopened.adjustments, saved_edits);
+    let original_time = std::fs::metadata(&path).unwrap().modified().unwrap();
+    let changed = ImageBuffer::from_fn(256, 128, |x, y| *ramp.get_pixel(255 - x, y));
+    changed.save(&path).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(original_time))
+        .unwrap();
+    let after = input_report(&state, path_str, &edits).unwrap();
+    assert_ne!(
+        before["provenance"]["source_hash"],
+        after["provenance"]["source_hash"]
+    );
+    let replaced = render_file(context, &state, path_str, &edits, None).unwrap();
+    let replaced_fresh = render_file(
+        context,
+        &rapidraw_lib::AppState::default(),
+        path_str,
+        &edits,
+        None,
+    )
+    .unwrap();
+    assert_ne!(first.encoded_srgb, replaced.encoded_srgb);
+    assert_eq!(replaced.encoded_srgb, replaced_fresh.encoded_srgb);
+    assert!(
+        render_file(
+            context,
+            &state,
+            path_str,
+            &json!({"processVersion":3,"v3RawRecovery":"unknown"}),
+            None
+        )
+        .is_err()
+    );
+    assert_eq!(before["stage_revision"], "v3-application-stages-1");
+}
+
+fn pinned_pipeline_contracts(context: &GpuContext) {
+    use rapidraw_lib::color_engine::{application::render_file, identity};
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    let photo = dir.path().join("photo.png");
+    ImageBuffer::from_pixel(32, 32, Rgba([80u8, 100, 120, 255]))
+        .save(&photo)
+        .unwrap();
+    let cube = |v: f32| format!("LUT_3D_SIZE 2\n{}", format!("{v} {v} {v}\n").repeat(8));
+    let input = dir.path().join("installed-input.cube");
+    let output = dir.path().join("installed-output.cube");
+    std::fs::write(&input, cube(0.3)).unwrap();
+    std::fs::write(&output, cube(0.4)).unwrap();
+    let state = rapidraw_lib::AppState::default();
+    *state.v3_asset_dir.lock().unwrap() = Some(dir.path().join("assets"));
+    *state.input_transform.lock().unwrap() = Some(input.clone());
+    *state.output_transform.lock().unwrap() = Some(output.clone());
+    let mut edits = json!({"processVersion":3,"exposure":0.3,"v3":{},"masks":[]});
+    let path = photo.to_str().unwrap();
+    let before = render_file(context, &state, path, &edits, None).unwrap();
+    edits["v3Pipeline"] = serde_json::to_value(identity::pin(&state, &edits).unwrap()).unwrap();
+    let pinned = render_file(context, &state, path, &edits, None).unwrap();
+    assert!(
+        before.encoded_srgb == pinned.encoded_srgb,
+        "pinning changed pixels"
+    );
+    let saved = dir.path().join("edit.json");
+    std::fs::write(&saved, serde_json::to_vec(&edits).unwrap()).unwrap();
+    std::fs::remove_file(input).unwrap();
+    std::fs::remove_file(output).unwrap();
+    let reopened: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(saved).unwrap()).unwrap();
+    let fresh = rapidraw_lib::AppState::default();
+    *fresh.v3_asset_dir.lock().unwrap() = Some(dir.path().join("assets"));
+    let after = render_file(context, &fresh, path, &reopened, None).unwrap();
+    assert!(
+        pinned.encoded_srgb == after.encoded_srgb,
+        "reopening changed pixels"
+    );
+    assert_eq!(
+        pinned.export_rgba16().to_rgba16(),
+        after.export_rgba16().to_rgba16()
+    );
+    let preview = render_file(context, &fresh, path, &reopened, Some(16)).unwrap();
+    assert_eq!(
+        after.encoded_srgb.get_pixel(0, 0),
+        preview.encoded_srgb.get_pixel(0, 0)
+    );
+    let mut masked = reopened.clone();
+    masked["masks"] = json!([{"id":"m","name":"full","visible":true,"invert":false,"opacity":100,
+        "adjustments":{"exposure":0.4},"subMasks":[{"id":"g","type":"linear","visible":true,
+        "mode":"additive","parameters":{"startX":0,"startY":1000,"endX":100,"endY":1000,"range":1}}]}]);
+    assert!(
+        render_file(context, &fresh, path, &masked, None).is_ok(),
+        "masked path used deleted installed transforms"
+    );
+    let asset = identity::resolve(&fresh, &reopened)
+        .unwrap()
+        .output
+        .unwrap();
+    std::fs::remove_file(asset).unwrap();
+    assert!(
+        render_file(context, &fresh, path, &reopened, None).is_err(),
+        "missing asset silently substituted"
     );
 }
 
@@ -1066,10 +1336,10 @@ fn captured_transform_contracts(engine: &ColorEngine) {
             std::array::from_fn(|i| spaces::encode_intermediate(working[i] as f64) as f32);
         let want = cube.sample(logged);
         for c in 0..3 {
-            // Tetrahedral on the GPU against trilinear here: they agree
-            // exactly on the lattice and differ only inside a cell.
+            // CPU input conversion and GPU display conversion must use the
+            // same tetrahedra, including inside a cell.
             assert!(
-                (out[c] - want[c]).abs() < 4e-3,
+                (out[c] - want[c]).abs() < 2e-6,
                 "captured transform not applied as captured: {out:?} vs {want:?}"
             );
         }
@@ -1084,7 +1354,7 @@ fn captured_transform_contracts(engine: &ColorEngine) {
     let logged = spaces::encode_intermediate(0.18) as f32;
     let want = cube.sample([logged; 3]);
     assert!(
-        (out.encoded_srgb.get_pixel(0, 0)[0] - want[0]).abs() < 4e-3,
+        (out.encoded_srgb.get_pixel(0, 0)[0] - want[0]).abs() < 2e-6,
         "a second encode ran after the captured transform: {:?} vs {want:?}",
         out.encoded_srgb.get_pixel(0, 0)
     );

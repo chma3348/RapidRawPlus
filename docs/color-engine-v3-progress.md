@@ -1,5 +1,28 @@
 # Color Engine v3 — implementation and verification
 
+## Calibration intake ready — September 27, 2026
+
+The pre-calibration engine changes and reference intake/measurement runner are
+implemented. No slider fitting has been performed. See the
+[stabilization log and limits](color-v3-stabilization.md) and
+[calibration intake guide](color-v3-calibration-intake.md). The September 24
+status below is historical.
+
+## Pre-calibration stabilization — September 24, 2026
+
+The first milestone adds explicit saved rendering identity and pinned captured
+transforms, without changing slider behavior. See the
+[stabilization change log and remaining build sequence](color-v3-stabilization.md).
+The full stabilization build is not complete; calibration remains deferred.
+
+## Audit — September 22, 2026
+
+See [the audit and change log](color-v3-audit-2026-09-22.md) for consistency
+fixes, verification results, visible rendering changes and remaining risks.
+The September 21 status below is historical: in particular, old-v3 saved
+settings and transform portability still need a versioned compatibility
+policy, and the baseline runner now measures the actual application path.
+
 ## Where v3 stands — September 21, 2026
 
 **Colour chain.** Linear DaVinci Wide Gamut working space. Resolve's own input

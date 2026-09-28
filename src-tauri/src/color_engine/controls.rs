@@ -204,8 +204,9 @@ impl Tone {
 #[serde(default)]
 pub struct Controls {
     pub revision: u32,
-    /// Filled from the shared settings, never from the `v3` namespace.
-    #[serde(skip_deserializing)]
+    /// Application edits overwrite this from the shared settings, never
+    /// from the `v3` namespace. Explicit PipelineConfig serialization must
+    /// still round-trip it for reproducible developer renders.
     pub tone: Tone,
     pub temperature: f32,
     pub tint: f32,

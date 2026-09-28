@@ -11,6 +11,8 @@ use std::io::Cursor;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct InputProvenance {
+    pub source_hash: String,
+    pub transform_decision: String,
     pub decoder_revision: &'static str,
     pub interpretation: String,
     pub profile_hash: Option<String>,
@@ -21,6 +23,8 @@ pub struct InputProvenance {
 
 pub struct DecodedFrame {
     pub pixels: Rgba32FImage,
+    /// Unrecovered developed RAW, retained before the optional highlight stage.
+    pub unrecovered: Option<Rgba32FImage>,
     pub color: SourceColor,
     pub provenance: InputProvenance,
     /// The ICC profile a display-referred source was interpreted with, when
@@ -45,6 +49,7 @@ pub fn decode_profiled_photo(bytes: &[u8]) -> Result<DecodedFrame> {
     if let Some(extension) = crate::image_loader::system_codec_format(bytes) {
         let png = crate::image_loader::system_codec_png(bytes, extension)?;
         let mut frame = decode_profiled_photo(&png)?;
+        frame.provenance.source_hash = blake3::hash(bytes).to_hex().to_string();
         if let Some(orientation) = exif_orientation(bytes) {
             let mut image = DynamicImage::ImageRgba32F(frame.pixels);
             image.apply_orientation(orientation);
@@ -156,12 +161,15 @@ pub fn decode_profiled_photo(bytes: &[u8]) -> Result<DecodedFrame> {
     let pixels = convert_rgb_profile(&image.to_rgba32f(), &profile)?;
     Ok(DecodedFrame {
         pixels,
+        unrecovered: None,
         color: SourceColor {
             primaries: Primaries::Srgb,
             transfer: Transfer::Linear,
             reference: ReferenceDomain::Display,
         },
         provenance: InputProvenance {
+            source_hash: blake3::hash(bytes).to_hex().to_string(),
+            transform_decision: "profile_to_linear_srgb_display".into(),
             decoder_revision: "v3-photo-input-1-image-0.25.10-moxcms-0.8.1",
             interpretation: interpretation.into(),
             profile_hash: icc.as_ref().map(|p| blake3::hash(p).to_hex().to_string()),

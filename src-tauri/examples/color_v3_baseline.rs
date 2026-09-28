@@ -20,10 +20,7 @@
 //! (named v3 control settings). Every fixture is rendered through every case.
 
 use anyhow::{Context, Result, ensure};
-use rapidraw_lib::color_engine::{
-    ColorEngine, config::*, controls::Controls, input::decode_profiled_photo, plan::RenderPlan,
-    spaces,
-};
+use rapidraw_lib::color_engine::{application, config::*, input::decode_profiled_photo, spaces};
 use rapidraw_lib::image_processing::GpuContext;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -63,10 +60,12 @@ struct Fixture {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Case {
     name: String,
-    #[serde(default)]
-    controls: Controls,
+    /// Exact app edits, not a partial GPU-only configuration. Older manifests
+    /// fail explicitly rather than silently discarding their tone controls.
+    edits: serde_json::Value,
 }
 
 #[derive(Serialize)]
@@ -144,11 +143,8 @@ fn measure(
         // bits a barely-coloured pixel can swing its hue angle a long way on
         // one level of rounding, so the floor is set well above that.
         if c0 > 0.05 && c1 > 0.05 {
-            let turn = (after.z.atan2(after.y) - before.z.atan2(before.y))
-                .sin()
-                .asin()
-                .to_degrees()
-                .abs();
+            let delta = after.z.atan2(after.y) - before.z.atan2(before.y);
+            let turn = delta.sin().atan2(delta.cos()).to_degrees().abs();
             hue_sum += turn * c0;
             hue_weight += c0;
         }
@@ -186,35 +182,22 @@ fn measure(
     }
 }
 
-fn load(
-    path: &Path,
-    max_dimension: u32,
-    input_transform: Option<&rapidraw_lib::color_engine::cube::CubeLut>,
-) -> Result<(image::Rgba32FImage, SourceColor)> {
+fn load(path: &Path, max_dimension: u32) -> Result<(image::Rgba32FImage, SourceColor)> {
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     let decoded = decode_profiled_photo(&bytes)
         .with_context(|| format!("interpreting {}", path.display()))?;
     let (w, h) = decoded.pixels.dimensions();
     let pixels = if w.max(h) > max_dimension {
-        image::DynamicImage::ImageRgba32F(decoded.pixels)
-            .resize(max_dimension, max_dimension, image::imageops::CatmullRom)
-            .to_rgba32f()
+        rapidraw_lib::image_processing::downscale_f32_image(
+            &image::DynamicImage::ImageRgba32F(decoded.pixels),
+            max_dimension,
+            max_dimension,
+        )
+        .to_rgba32f()
     } else {
         decoded.pixels
     };
-    let mut pixels = pixels;
-    let mut color = decoded.color;
-    if let Some(cube) = input_transform
-        && color.reference == ReferenceDomain::Display
-    {
-        rapidraw_lib::color_engine::cube::apply_input_transform(cube, &mut pixels);
-        color = SourceColor {
-            primaries: Primaries::DavinciWideGamut,
-            transfer: Transfer::Linear,
-            reference: ReferenceDomain::Scene,
-        };
-    }
-    Ok((pixels, color))
+    Ok((pixels, decoded.color))
 }
 
 fn main() -> Result<()> {
@@ -238,45 +221,39 @@ fn main() -> Result<()> {
         required_limits: limits.clone(),
         ..Default::default()
     }))?;
-    let engine = ColorEngine::new(GpuContext {
+    let context = GpuContext {
         device: Arc::new(device),
         queue: Arc::new(queue),
         limits,
         display: Arc::new(Mutex::new(None)),
-    })?;
-
-    let input_transform = manifest
-        .input_transform
-        .as_ref()
-        .map(|p| rapidraw_lib::color_engine::cube::CubeLut::load(p))
-        .transpose()?;
+    };
+    let state = rapidraw_lib::AppState::default();
+    *state.input_transform.lock().unwrap() = manifest.input_transform.clone();
+    *state.output_transform.lock().unwrap() = manifest.output_transform.clone();
     let mut measurements = Vec::new();
     for fixture in &manifest.fixtures {
-        let (pixels, color) = load(
-            &fixture.path,
-            manifest.max_dimension,
-            input_transform.as_ref(),
-        )?;
-        let rendering = match (&manifest.output_transform, color.reference) {
-            (Some(_), _) => OutputRendering::ResolveCubeV1,
-            (None, ReferenceDomain::Scene) => OutputRendering::SceneLuminanceV2,
-            (None, ReferenceDomain::Display) => OutputRendering::DisplayGamutV2,
-        };
+        let (pixels, _) = load(&fixture.path, manifest.max_dimension)?;
         for case in &manifest.cases {
-            let plan = RenderPlan::build(PipelineConfig {
-                process_version: 3,
-                source: color.clone(),
-                working_space: Primaries::DavinciWideGamut,
-                output_lut: manifest.output_transform.clone(),
-                output_rendering: rendering,
-                controls: case.controls.clone(),
-            })?;
+            ensure!(
+                application::enabled(&case.edits),
+                "Baseline cases require processVersion 3"
+            );
             let start = std::time::Instant::now();
-            let frame = engine.render(&pixels, &plan, false)?;
+            let frame = application::render_file(
+                &context,
+                &state,
+                fixture.path.to_str().context("Non-UTF8 fixture path")?,
+                &case.edits,
+                Some(manifest.max_dimension),
+            )?;
             let render_ms = start.elapsed().as_secs_f64() * 1000.0;
             // Measured undithered: the dither is a display choice, and the
             // metrics are here to describe the engine.
             let encoded = frame.preview_rgba8();
+            ensure!(
+                pixels.dimensions() == encoded.dimensions(),
+                "Baseline colour measurements require unchanged geometry"
+            );
             let directory = output.join(&case.name);
             std::fs::create_dir_all(&directory)?;
             frame.write_display_png(std::fs::File::create(
@@ -297,4 +274,32 @@ fn main() -> Result<()> {
         output.display()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn fixtures_exercise_the_app_tone_controls() {
+        let manifest: Manifest =
+            serde_json::from_str(include_str!("../../docs/color-v3-fixtures.json")).unwrap();
+        let get = |name| {
+            application::controls(
+                &manifest
+                    .cases
+                    .iter()
+                    .find(|c| c.name == name)
+                    .unwrap()
+                    .edits,
+            )
+            .unwrap()
+        };
+        assert_eq!(get("neutral").tone.exposure, 0.);
+        assert_eq!(get("exposure-plus-1").tone.exposure, 1.);
+        assert!(get("contrast-40").tone.contrast > 0.);
+        assert!(get("shadows-up-highlights-down").tone.highlights < 0.);
+        assert!(
+            serde_json::from_str::<Case>(r#"{"name":"old","controls":{"exposure":1}}"#).is_err()
+        );
+    }
 }

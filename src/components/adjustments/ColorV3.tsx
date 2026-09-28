@@ -20,6 +20,7 @@ import {
   V3Effects,
   V3Calibration,
   defaultV3Calibration,
+  V3PipelineIdentity,
 } from '../../utils/colorV3';
 
 export function ColorV3Switch({
@@ -34,6 +35,20 @@ export function ColorV3Switch({
   const [pending, setPending] = useState(false);
   const [error, setError] = useState('');
   const active = adjustments.processVersion === 3;
+  useEffect(() => { setError(''); }, [selectedImage?.path]);
+  const pinCurrent = async () => {
+    if (!selectedImage || pending) return;
+    const path = selectedImage.path;
+    setError('');
+    setPending(true);
+    try {
+      const result = await invoke<{ pipeline: V3PipelineIdentity }>('pin_color_v3', { path, edits: adjustments });
+      if (useEditorStore.getState().selectedImage?.path !== path) return;
+      setAdjustments((prev: any) => ({ ...prev, v3Pipeline: result.pipeline }));
+    } catch (e) {
+      if (useEditorStore.getState().selectedImage?.path === path) setError(String(e));
+    } finally { setPending(false); }
+  };
   const change = async () => {
     setError('');
     if (active) {
@@ -49,7 +64,7 @@ export function ColorV3Switch({
     const path = selectedImage.path;
     setPending(true);
     try {
-      await invoke('prepare_color_v3', { path });
+      const result = await invoke<{ pipeline: V3PipelineIdentity }>('pin_color_v3', { path, edits: adjustments });
       if (useEditorStore.getState().selectedImage?.path !== path) return;
       setAdjustments((prev: any) => ({
         ...prev,
@@ -60,12 +75,31 @@ export function ColorV3Switch({
         v3PreviousToneMapper: prev.toneMapper ?? 'agx',
         toneMapper: 'resolve',
         v3: prev.v3 ?? defaultV3Controls(),
+        v3Pipeline: result.pipeline,
       }));
     } catch (e) {
-      setError(String(e));
+      if (useEditorStore.getState().selectedImage?.path === path) setError(String(e));
     } finally {
       setPending(false);
     }
+  };
+  const changeRecovery = async (enabled: boolean) => {
+    if (!selectedImage || pending) return;
+    const path = selectedImage.path;
+    setError('');
+    setPending(true);
+    try {
+      const result = await invoke<{ pipeline: V3PipelineIdentity }>('pin_color_v3', { path, edits: adjustments });
+      if (useEditorStore.getState().selectedImage?.path !== path) return;
+      // Revision 2 adds the recovery choice; older builds must refuse it,
+      // not silently ignore "off" and render the old highlight treatment.
+      setAdjustments((prev: any) => ({ ...prev,
+        v3Pipeline: result.pipeline,
+        v3RawRecovery: enabled ? 'neutral_green_v1' : 'off',
+      }));
+    } catch (e) {
+      if (useEditorStore.getState().selectedImage?.path === path) setError(String(e));
+    } finally { setPending(false); }
   };
   return (
     <div className="mb-3 border border-surface rounded-md p-3 text-sm text-text-primary">
@@ -91,10 +125,41 @@ export function ColorV3Switch({
             'V3 uses separate color settings. Your previous color edits are preserved when you switch back. Crop and mask shapes are shared.',
         })}
       </p>
+      {active && (
+        <div className="mt-2 leading-relaxed" aria-live="polite">
+          {adjustments.v3Pipeline ? (
+            <p>{t('colorV3.pipelinePinned', { defaultValue: 'Core rendering version and input/output transforms are locked. Creative LUT files are managed separately.' })}</p>
+          ) : (
+            <>
+              <p>{t('colorV3.pipelineUnpinned', { defaultValue: 'This older edit uses the installed rendering transforms. Locking adopts its current rendering, not an earlier historical appearance.' })}</p>
+              <button type="button" disabled={pending || !selectedImage} onClick={pinCurrent}
+                className="mt-2 rounded-md px-2 py-1 bg-surface hover:bg-card-active focus-visible:outline-2 focus-visible:outline-accent disabled:opacity-50">
+                {pending ? t('colorV3.locking', { defaultValue: 'Locking rendering…' }) : t('colorV3.lockPipeline', { defaultValue: 'Lock current pipeline' })}
+              </button>
+            </>
+          )}
+        </div>
+      )}
       {error && (
         <p role="alert" className="mt-2">
           {error}
         </p>
+      )}
+      {active && (
+        <details className="mt-3">
+          <summary className="cursor-pointer focus-visible:outline-2 focus-visible:outline-accent">
+            {t('colorV3.sourceOptions', { defaultValue: 'RAW source options' })}
+          </summary>
+          <label className="mt-2 flex items-start gap-2">
+            <input type="checkbox" className="mt-1 accent-accent" disabled={pending || !selectedImage}
+              checked={(adjustments.v3RawRecovery ?? 'neutral_green_v1') === 'neutral_green_v1'}
+              onChange={(event) => { void changeRecovery(event.target.checked); }} />
+            <span>{t('colorV3.rawRecovery', { defaultValue: 'Neutralize clipped RAW highlights' })}</span>
+          </label>
+          <p className="mt-2 leading-relaxed">
+            {t('colorV3.rawRecoveryHelp', { defaultValue: 'RAW only. Preserves the existing highlight treatment by default. Turn off to use the unrecovered sensor colors; clipped detail is not restored. This does not change the Highlights slider.' })}
+          </p>
+        </details>
       )}
     </div>
   );

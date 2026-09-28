@@ -3,6 +3,16 @@ export interface V3ColorRange {
   width: number[];
   adjustment: number[];
 }
+
+/** Discrete rendering identity: never interpolate these fields in presets. */
+export interface V3PipelineIdentity {
+  schema: number;
+  engine: string;
+  input_policy: string;
+  raw_development: string;
+  input_transform: { blake3: string } | null;
+  output_transform: { blake3: string } | null;
+}
 export const defaultV3Range = (): V3ColorRange => ({
   center: [30, 0.12, 0.65],
   width: [45, 0.2, 0.5],

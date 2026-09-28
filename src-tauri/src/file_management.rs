@@ -2178,6 +2178,11 @@ pub fn save_metadata_and_update_thumbnail(
         );
     }
 
+    if crate::color_engine::application::enabled(&final_adjustments) {
+        final_adjustments["v3Input"] =
+            crate::color_engine::application::input_report(&state, &path, &final_adjustments)
+                .map_err(|e| format!("Cannot save an unverifiable v3 interpretation: {e:#}"))?;
+    }
     metadata.adjustments = final_adjustments;
 
     let json_string = serde_json::to_string_pretty(&metadata).map_err(|e| e.to_string())?;

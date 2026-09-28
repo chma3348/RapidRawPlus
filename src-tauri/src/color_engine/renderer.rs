@@ -231,6 +231,21 @@ impl ColorEngine {
         let device = &self.context.device;
         let queue = &self.context.queue;
         let limits = device.limits();
+        // Lattices are not chunked. Refuse an oversized LUT before wgpu
+        // creates an invalid binding (a 256^3 vec4 lattice is 256 MiB).
+        let lattice_limit = limits
+            .max_storage_buffer_binding_size
+            .min(limits.max_buffer_size);
+        let fits = |len: usize| (len as u64).saturating_mul(16) <= lattice_limit;
+        ensure!(
+            plan.cube.as_ref().is_none_or(|c| fits(c.entries.len()))
+                && plan.look.as_ref().is_none_or(|c| fits(c.len()))
+                && plan
+                    .domain
+                    .as_ref()
+                    .is_none_or(|(i, o)| fits(i.len()) && fits(o.len())),
+            "This LUT exceeds the GPU's storage limit; use a smaller lattice"
+        );
         let stride = if capture { 48 } else { 16 };
         // Every chunk is a full CPU/GPU round trip, so chunk size decides the
         // interactive cost: at 65,536 pixels a preview pass made 26 of them

@@ -13,7 +13,7 @@
 //! 100 in linear light. Its output is already display-encoded, so the ordinary
 //! sRGB encode must not run after it.
 
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CubeLut {
@@ -34,7 +34,7 @@ impl CubeLut {
         let mut size = None;
         let mut entries = Vec::new();
         for line in text.lines() {
-            let line = line.trim();
+            let line = line.split('#').next().unwrap_or_default().trim();
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
@@ -42,7 +42,12 @@ impl CubeLut {
             let Some(head) = parts.next() else { continue };
             match head {
                 "LUT_3D_SIZE" => {
+                    ensure!(
+                        size.is_none() && entries.is_empty(),
+                        "Duplicate or misplaced LUT_3D_SIZE"
+                    );
                     let value: u32 = parts.next().unwrap_or_default().parse()?;
+                    ensure!(parts.next().is_none(), "LUT_3D_SIZE needs exactly one size");
                     ensure!(
                         (2..=128).contains(&value),
                         "A 3D LUT of size {value} is outside the supported 2..=128"
@@ -53,7 +58,9 @@ impl CubeLut {
                 "TITLE" => {}
                 "DOMAIN_MIN" | "DOMAIN_MAX" => {
                     let expected = if head == "DOMAIN_MIN" { 0.0 } else { 1.0 };
-                    for axis in parts.take(3) {
+                    let axes: Vec<_> = parts.collect();
+                    ensure!(axes.len() == 3, "{head} needs exactly three values");
+                    for axis in axes {
                         let value: f32 = axis.parse()?;
                         ensure!(
                             (value - expected).abs() < 1e-6,
@@ -62,9 +69,18 @@ impl CubeLut {
                     }
                 }
                 _ => {
+                    let declared = size.context("Cube data precedes LUT_3D_SIZE")?;
+                    ensure!(
+                        entries.len() < (declared as usize).pow(3),
+                        "Too many cube entries"
+                    );
+                    let channels: Vec<_> = std::iter::once(head).chain(parts).collect();
+                    ensure!(
+                        channels.len() == 3,
+                        "A cube entry needs exactly three values"
+                    );
                     let mut channel = [0.0f32; 4];
-                    channel[0] = head.parse()?;
-                    for (slot, text) in channel[1..3].iter_mut().zip(parts) {
+                    for (slot, text) in channel[..3].iter_mut().zip(channels) {
                         *slot = text.parse()?;
                     }
                     ensure!(
@@ -113,13 +129,18 @@ impl CubeLut {
             .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
         let cube = Self::parse(&text)?;
         if let Ok(mut c) = cache.lock() {
+            // Replacing files must not retain every historical lattice forever.
+            c.retain(|(p, _, _), _| p != path);
+            if c.len() >= 8 {
+                c.clear();
+            }
             c.insert(key, Arc::new(cube.clone()));
         }
         Ok(cube)
     }
 
-    /// Reference lookup for tests. The shader does this on the GPU, and
-    /// `cube_matches_the_reference_lookup` keeps the two honest.
+    /// The same tetrahedral lookup as output.wgsl. Also used by input
+    /// conversion and the shared tone controls' neighbourhood on the CPU.
     pub fn sample(&self, rgb: [f32; 3]) -> [f32; 3] {
         let last = (self.size - 1) as f32;
         let at =
@@ -128,17 +149,21 @@ impl CubeLut {
         let base = scaled.map(|v| v.floor().min(last - 1.0));
         let frac: [f32; 3] = std::array::from_fn(|i| scaled[i] - base[i]);
         let index = base.map(|v| v as u32);
-        std::array::from_fn(|c| {
-            let corner = |r: u32, g: u32, b: u32| at(index[0] + r, index[1] + g, index[2] + b)[c];
-            // Trilinear, which is what the shader's tetrahedral lookup must
-            // agree with to within the difference between the two schemes.
-            let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
-            let x00 = lerp(corner(0, 0, 0), corner(1, 0, 0), frac[0]);
-            let x10 = lerp(corner(0, 1, 0), corner(1, 1, 0), frac[0]);
-            let x01 = lerp(corner(0, 0, 1), corner(1, 0, 1), frac[0]);
-            let x11 = lerp(corner(0, 1, 1), corner(1, 1, 1), frac[0]);
-            lerp(lerp(x00, x10, frac[1]), lerp(x01, x11, frac[1]), frac[2])
-        })
+        let mut axes = [0usize, 1, 2];
+        axes.sort_by(|&a, &b| frac[b].total_cmp(&frac[a]));
+        let mut first = index;
+        first[axes[0]] += 1;
+        let mut second = first;
+        second[axes[1]] += 1;
+        let corners = [
+            at(index[0], index[1], index[2]),
+            at(first[0], first[1], first[2]),
+            at(second[0], second[1], second[2]),
+            at(index[0] + 1, index[1] + 1, index[2] + 1),
+        ];
+        let [a, b, c] = axes.map(|i| frac[i]);
+        let weights = [1. - a, a - b, b - c, c];
+        std::array::from_fn(|c| (0..4).map(|i| corners[i][c] * weights[i]).sum())
     }
 }
 
@@ -185,6 +210,41 @@ mod tests {
         assert!(CubeLut::parse("0 0 0\n").is_err(), "no declared size");
         let shifted = tiny().replace("DOMAIN_MAX 1 1 1", "DOMAIN_MAX 2 2 2");
         assert!(CubeLut::parse(&shifted).is_err(), "domain must be honoured");
+        for bad in [
+            tiny().replace("DOMAIN_MIN 0 0 0", "DOMAIN_MIN 0 0"),
+            tiny().replace("0.5 0 0", "0.5 0"),
+            tiny().replace("0.5 0 0", "0.5 0 0 7"),
+            tiny().replace("LUT_3D_SIZE 2", "LUT_3D_SIZE 2\nLUT_3D_SIZE 2"),
+        ] {
+            assert!(CubeLut::parse(&bad).is_err(), "malformed cube was accepted");
+        }
+    }
+
+    #[test]
+    fn cpu_lookup_uses_the_gpu_tetrahedra() {
+        // Only the white corner is lit: tetrahedral interpolation returns
+        // min(r,g,b); trilinear returns r*g*b and fails this decisively.
+        let cube = CubeLut::parse(
+            "LUT_3D_SIZE 2\n0 0 0\n0 0 0\n0 0 0\n0 0 0\n0 0 0\n0 0 0\n0 0 0\n1 1 1\n",
+        )
+        .unwrap();
+        for rgb in [
+            [0.8, 0.5, 0.2],
+            [0.8, 0.2, 0.5],
+            [0.5, 0.2, 0.8],
+            [0.2, 0.5, 0.8],
+            [0.2, 0.8, 0.5],
+            [0.5, 0.8, 0.2],
+            [0.5; 3],
+        ] {
+            let expected = rgb.into_iter().fold(f32::INFINITY, f32::min);
+            for got in cube.sample(rgb) {
+                assert!(
+                    (got - expected).abs() < 1e-6,
+                    "{rgb:?}: {got} != {expected}"
+                );
+            }
+        }
     }
 
     #[test]

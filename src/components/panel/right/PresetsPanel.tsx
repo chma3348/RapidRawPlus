@@ -129,11 +129,17 @@ const evaluateCurveY = (curve: Array<{ x: number; y: number }>, targetX: number)
 const mixAdjustments = (presetObj: any, intensity: number, initialObj: any = INITIAL_ADJUSTMENTS): any => {
   const fraction = intensity / 100;
 
-  if (fraction === 1) return { ...presetObj };
+  if (fraction === 1) {
+    const result = { ...presetObj };
+    delete result.v3Input;
+    return result;
+  }
   if (fraction === 0) return {
     ...initialObj,
     ...(presetObj.processVersion !== undefined ? {processVersion: presetObj.processVersion} : {}),
     ...(presetObj.v3 ? {v3: mixV3Controls(presetObj.v3, 0)} : {}),
+    ...(presetObj.v3Pipeline ? {v3Pipeline: presetObj.v3Pipeline} : {}),
+    ...(presetObj.v3RawRecovery ? {v3RawRecovery: presetObj.v3RawRecovery} : {}),
   };
 
   const result: any = {};
@@ -144,7 +150,9 @@ const mixAdjustments = (presetObj: any, intensity: number, initialObj: any = INI
     const presetVal = presetObj[key];
     const initialVal = initialObj[key] !== undefined ? initialObj[key] : (INITIAL_ADJUSTMENTS as any)[key];
 
-    if (key === 'processVersion' || key === 'v3PreviousVersion' || key === 'revision') {
+    if (key === 'v3Input') {
+      continue; // Photo-specific audit data is refreshed at save, never a look.
+    } else if (key === 'processVersion' || key === 'v3PreviousVersion' || key === 'revision' || key === 'v3Pipeline' || key === 'v3RawRecovery') {
       result[key] = presetVal;
     } else if (key === 'v3') {
       result[key] = mixV3Controls(presetVal, intensity);

@@ -35,7 +35,49 @@ pub fn decode_raw(
         .orientation
         .map(Orientation::from_u16)
         .unwrap_or(raw.orientation);
-    develop(raw, orientation, fast, check_cancel)
+    let mut frame = develop(raw, orientation, fast, check_cancel)?;
+    frame.provenance.source_hash = blake3::hash(bytes).to_hex().to_string();
+    Ok(frame)
+}
+
+/// Discrete source-stage choice; the default preserves historical pixels.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Recovery {
+    Off,
+    #[default]
+    NeutralGreenV1,
+}
+
+impl Recovery {
+    pub fn from_edits(edits: &serde_json::Value) -> Result<Self> {
+        match edits.get("v3RawRecovery").filter(|v| !v.is_null()) {
+            Some(v) => {
+                serde_json::from_value(v.clone()).context("Unsupported v3 RAW recovery mode")
+            }
+            None => Ok(Self::default()),
+        }
+    }
+    /// Select once on a newly decoded frame. The source cache includes the
+    /// mode; switching back develops from the unchanged source, not this output.
+    pub(crate) fn apply(self, frame: &mut DecodedFrame) {
+        if let Some(original) = &frame.unrecovered {
+            if self == Self::Off {
+                frame.pixels = original.clone();
+                frame
+                    .provenance
+                    .warnings
+                    .retain(|w| !w.contains("clipped highlights are neutralised"));
+                frame.provenance.warnings.push("RAW highlight recovery disabled; clipped sensor channels are not reconstructed.".into());
+            }
+            if let Some(calibration) = frame.provenance.calibration.as_mut() {
+                calibration["recovery_mode"] = serde_json::to_value(self).unwrap();
+                if self == Self::Off {
+                    calibration["clipped_highlights"] = serde_json::json!("preserved_unrecovered");
+                }
+            }
+        }
+    }
 }
 
 fn calibration(matrix: &[f32], wb: &[f32; 4]) -> Result<DMat3> {
@@ -209,9 +251,20 @@ fn develop(
         t * t * (3. - 2. * t)
     };
     let mut output = Vec::with_capacity(camera.data.len() * 4);
+    let mut unrecovered = Vec::with_capacity(camera.data.len() * 4);
     for p in &camera.data {
         let sensor = DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64);
         let balanced = sensor * gains;
+        // Use exactly the same matrix path as the historical recovery stage.
+        // Keep this independent buffer so disabling recovery never attempts
+        // to invert the destructive neutralisation operation.
+        let original = unbalance * balanced;
+        let original = [original.x as f32, original.y as f32, original.z as f32, 1.0];
+        ensure!(
+            original.iter().all(|v| v.is_finite()),
+            "Non-finite unrecovered RAW pixel"
+        );
+        unrecovered.extend_from_slice(&original);
         let clipped = smoothstep(0.95, 1.0, sensor.y);
         let balanced = if clipped > 0. {
             // A clipped sensor says only "at least this bright"; like
@@ -238,8 +291,20 @@ fn develop(
     let pixels =
         crate::image_processing::apply_orientation(DynamicImage::ImageRgba32F(image), orientation)
             .into_rgba32f();
+    let unrecovered = ImageBuffer::<Rgba<f32>, Vec<f32>>::from_raw(
+        camera.width as u32,
+        camera.height as u32,
+        unrecovered,
+    )
+    .context("Invalid unrecovered dimensions")?;
+    let unrecovered = crate::image_processing::apply_orientation(
+        DynamicImage::ImageRgba32F(unrecovered),
+        orientation,
+    )
+    .into_rgba32f();
     check_cancel()?;
-    Ok(DecodedFrame { pixels, color: SourceColor {primaries: Primaries::Srgb,transfer: Transfer::Linear,reference: ReferenceDomain::Scene}, source_profile: None, rendered_origin: false, provenance: InputProvenance {
+    Ok(DecodedFrame { pixels, unrecovered: Some(unrecovered), color: SourceColor {primaries: Primaries::Srgb,transfer: Transfer::Linear,reference: ReferenceDomain::Scene}, source_profile: None, rendered_origin: false, provenance: InputProvenance {
+        source_hash: String::new(), transform_decision: "camera_calibration_to_linear_srgb_scene".into(),
         decoder_revision: "v3-bayer-input-1-rawler-424cc109", interpretation: "calibrated_scene_linear_srgb".into(),
         profile_hash: None, calibration: Some(record),
         warnings: vec!["Experimental Bayer calibration; clipped highlights are neutralised rather than reconstructed; no dual-illuminant interpolation yet.".into()],
@@ -249,6 +314,28 @@ fn develop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn recovery_is_explicit_and_original_pixels_are_retained() {
+        let mut frame = develop(fixture(), Orientation::Normal, false, || Ok(())).unwrap();
+        let historical = frame.pixels.clone();
+        let original = frame.unrecovered.as_ref().unwrap().clone();
+        assert_ne!(historical, original);
+        Recovery::NeutralGreenV1.apply(&mut frame);
+        assert_eq!(frame.pixels, historical);
+        Recovery::Off.apply(&mut frame);
+        assert_eq!(frame.pixels, original);
+        assert_eq!(frame.unrecovered.as_ref().unwrap(), &original);
+        let reopened: serde_json::Value =
+            serde_json::from_str(r#"{"v3RawRecovery":"off"}"#).unwrap();
+        assert_eq!(Recovery::from_edits(&reopened).unwrap(), Recovery::Off);
+        assert!(Recovery::from_edits(&serde_json::json!({"v3RawRecovery":"future"})).is_err());
+        assert_eq!(
+            Recovery::from_edits(&serde_json::json!({})).unwrap(),
+            Recovery::NeutralGreenV1
+        );
+        let again = develop(fixture(), Orientation::Normal, false, || Ok(())).unwrap();
+        assert_eq!(again.pixels, historical);
+    }
     fn fixture() -> RawImage {
         use rawler::{
             cfa::{CFA, PlaneColor},
@@ -380,6 +467,21 @@ mod tests {
             writer.build(directory).unwrap();
         }
         let frame = decode_raw(bytes.get_ref(), false, || Ok(())).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.dng");
+        std::fs::write(&path, bytes.get_ref()).unwrap();
+        let state = crate::AppState::default();
+        let get = |edits| {
+            super::super::application::source_with_edits(&state, path.to_str().unwrap(), &edits)
+                .unwrap()
+        };
+        let on = get(serde_json::json!({}));
+        let pipeline = super::super::identity::pin(&state, &serde_json::json!({})).unwrap();
+        let off = get(serde_json::json!({"v3Pipeline":pipeline,"v3RawRecovery":"off"}));
+        let restored = get(serde_json::json!({"v3RawRecovery":"neutral_green_v1"}));
+        assert_eq!(off.pixels, *frame.unrecovered.as_ref().unwrap());
+        assert_ne!(off.pixels, on.pixels);
+        assert_eq!(restored.pixels, on.pixels);
         let expected = develop(fixture(), Orientation::Normal, false, || Ok(())).unwrap();
         assert_eq!(frame.pixels.dimensions(), expected.pixels.dimensions());
         for (a, b) in frame.pixels.as_raw().iter().zip(expected.pixels.as_raw()) {
