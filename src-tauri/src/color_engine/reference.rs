@@ -239,11 +239,22 @@ impl Package {
                 &edits,
             )?;
             let reference = reference_pixels(case, root)?;
+            // Resolve's photo export scales to a chosen long edge (2160 here),
+            // so references may be smaller than the source; the aspect must
+            // still match, or the export was cropped or rotated differently.
+            let (rw, rh) = (reference.width() as f64, reference.height() as f64);
+            let (sw, sh) = (
+                input["width"].as_f64().unwrap_or(0.),
+                input["height"].as_f64().unwrap_or(0.),
+            );
             ensure!(
-                Some(reference.width() as u64) == input["width"].as_u64()
-                    && Some(reference.height() as u64) == input["height"].as_u64(),
-                "Case {} dimensions differ: export native size without crop/resize",
-                case.id
+                rw <= sw && rh <= sh && ((rw / rh) - (sw / sh)).abs() < 0.01,
+                "Case {} was exported at a different shape ({}x{} vs source {}x{}): export without crop or rotation",
+                case.id,
+                rw,
+                rh,
+                sw,
+                sh
             );
             reports.push(serde_json::json!({"case":case.id,"input":input,"reference_hash":case.reference.blake3}));
         }
@@ -262,6 +273,22 @@ pub struct Difference {
     pub mean_oklab_distance: f64,
     pub channel_bias_linear: [f64; 3],
 }
+/// Bring a full-resolution render to a smaller reference's size by area
+/// averaging, the way an export scaler does. Resampling differences show at
+/// edges, so per-pixel maxima are less telling on scaled references than the
+/// mean and the 99th percentile; the chart's flat patches are unaffected.
+pub fn match_size(render: &Rgba32FImage, reference: &Rgba32FImage) -> Rgba32FImage {
+    if render.dimensions() == reference.dimensions() {
+        return render.clone();
+    }
+    crate::image_processing::downscale_f32_image(
+        &image::DynamicImage::ImageRgba32F(render.clone()),
+        reference.width(),
+        reference.height(),
+    )
+    .to_rgba32f()
+}
+
 /// Both inputs are linear sRGB coordinates (not necessarily sRGB gamut).
 pub fn difference(a: &Rgba32FImage, b: &Rgba32FImage) -> Result<Difference> {
     ensure!(

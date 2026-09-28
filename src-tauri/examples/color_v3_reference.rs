@@ -105,8 +105,8 @@ fn run(args: Vec<String>) -> Result<()> {
             None,
         )?;
         let theirs = reference::reference_pixels(case, root)?;
-        let delta =
-            reference::difference(&reference::decode_output(&rendered.encoded_srgb), &theirs)?;
+        let ours = reference::match_size(&rendered.encoded_srgb, &theirs);
+        let delta = reference::difference(&reference::decode_output(&ours), &theirs)?;
         let filename = format!("{index:04}.png");
         rendered.write_srgb_png(std::fs::File::create(output.join(&filename))?, true)?;
         results.push(serde_json::json!({"case":case.id,"control":case.control,"resolve_value":case.resolve_value,
