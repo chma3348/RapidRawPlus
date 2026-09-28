@@ -1,14 +1,16 @@
-//! Opt-in, versioned color pipeline shared by application previews and exports.
+//! The application's sole color pipeline, shared by previews and exports.
 //! Explicit source interpretation, float DWG controls and fixed SDR sRGB output.
-//! Application defaults and legacy edit rendering remain unchanged.
+//! Development-era edits adopt this engine; shared tone math is retained.
 pub mod application;
 pub mod config;
 pub mod contract;
 pub mod controls;
 pub mod cube;
 pub mod detail;
+mod file_version;
 pub mod identity;
 pub mod input;
+pub mod migration;
 pub mod optics;
 pub mod patches;
 pub mod plan;

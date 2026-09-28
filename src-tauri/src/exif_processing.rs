@@ -66,6 +66,12 @@ pub fn load_sidecar(sidecar_path: &Path) -> ImageMetadata {
         );
     }
 
+    // Adopt development-era settings in memory. Disk persistence remains tied
+    // to an ordinary save; opening a library does not rewrite every sidecar.
+    match crate::color_engine::migration::normalize(&meta.adjustments) {
+        Ok(edits) => meta.adjustments = edits.into_owned(),
+        Err(error) => log::warn!("Cannot migrate sidecar {}: {error}", sidecar_path.display()),
+    }
     meta
 }
 

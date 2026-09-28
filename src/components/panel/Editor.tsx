@@ -78,8 +78,10 @@ interface EditorProps {
 
 export default function Editor({ onBackToLibrary, onContextMenu, transformWrapperRef }: EditorProps) {
   const storedAppSettings = useSettingsStore((s) => s.appSettings);
-  const useV3 = useEditorStore((s) => s.adjustments.processVersion === 3);
-  const appSettings = useMemo(() => useV3 && storedAppSettings ? {...storedAppSettings, useWgpuRenderer: false} : storedAppSettings, [storedAppSettings,useV3]);
+  const appSettings = useMemo(
+    () => (storedAppSettings ? { ...storedAppSettings, useWgpuRenderer: false } : storedAppSettings),
+    [storedAppSettings],
+  );
   const osPlatform = useSettingsStore((s) => s.osPlatform);
   const isFullScreen = useUIStore((s) => s.isFullScreen);
   const activeRightPanel = useUIStore((s) => s.activeRightPanel);
@@ -1380,9 +1382,7 @@ export default function Editor({ onBackToLibrary, onContextMenu, transformWrappe
       // without firing mouse-leave) must never hijack the overlay while
       // a selection is being built — that reads as dead eyedropper clicks.
       const overlayPatchId = activeAiSubMaskId ? activeAiPatchContainerId : hoveredAiPatchId;
-      const activePatch = overlayPatchId
-        ? adjustments.aiPatches?.find((p: AiPatch) => p.id === overlayPatchId)
-        : null;
+      const activePatch = overlayPatchId ? adjustments.aiPatches?.find((p: AiPatch) => p.id === overlayPatchId) : null;
       if (activePatch) {
         maskDefForOverlay = {
           ...activePatch,
@@ -2025,63 +2025,63 @@ export default function Editor({ onBackToLibrary, onContextMenu, transformWrappe
         {selectedImage?.isVideo && <VideoViewer path={selectedImage.path} />}
 
         {!selectedImage?.isVideo && (
-        <div
-          ref={contentRef}
-          className="w-full h-full flex items-center justify-center origin-top-left"
-          style={{
-            transform: `translate(${transformState.positionX}px, ${transformState.positionY}px) scale(${transformState.scale})`,
-          }}
-        >
-          <ImageCanvas
-            appSettings={appSettings}
-            activeAiPatchContainerId={activeAiPatchContainerId}
-            activeAiSubMaskId={activeAiSubMaskId}
-            activeMaskContainerId={activeMaskContainerId}
-            activeMaskId={activeMaskId}
-            adjustments={adjustments}
-            brushSettings={brushSettings}
-            crop={crop}
-            finalPreviewUrl={finalPreviewUrl}
-            handleCropComplete={handleCropComplete}
-            imageRenderSize={imageRenderSize}
-            interactivePatch={interactivePatch}
-            isAiEditing={isAiEditing}
-            isCropping={isCropping}
-            isMaskControlHovered={isMaskControlHovered}
-            isMasking={isMasking}
-            isStraightenActive={isStraightenActive}
-            isRotationActive={isRotationActive}
-            isSliderDragging={isSliderDragging}
-            maskOverlayUrl={maskOverlayUrl}
-            onGenerateAiMask={handleGenerateAiMask}
-            onGenerateAiPaintMask={handleGenerateAiPaintMask}
-            onLiveMaskPreview={handleLiveMaskPreview}
-            onQuickErase={handleQuickErase}
-            onSelectAiSubMask={(id) => setEditor({ activeAiSubMaskId: id })}
-            onSelectMask={(id) => setEditor({ activeMaskId: id })}
-            onStraighten={handleStraighten}
-            selectedImage={selectedImage}
-            setCrop={handleCropChange}
-            setIsMaskHovered={setIsMaskHovered}
-            setIsMaskTouchInteracting={setIsMaskTouchInteracting}
-            showOriginal={showOriginal}
-            transformedOriginalUrl={transformedOriginalUrl}
-            uncroppedAdjustedPreviewUrl={uncroppedAdjustedPreviewUrl}
-            updateSubMask={updateSubMaskLocal}
-            isWbPickerActive={isWbPickerActive}
-            onWbPicked={handleWbPicked}
-            isMixerPickerActive={isMixerPickerActive}
-            onMixerBandPicked={handleMixerColorPicked}
-            setAdjustments={setAdjustments}
-            overlayRotation={overlayRotation}
-            overlayMode={overlayMode}
-            cursorStyle={cursorStyle}
-            isMaxZoom={isMaxZoom}
-            liveRotation={liveRotation}
-            transformState={transformState}
-            hasRenderedFirstFrame={hasRenderedFirstFrame}
-          />
-        </div>
+          <div
+            ref={contentRef}
+            className="w-full h-full flex items-center justify-center origin-top-left"
+            style={{
+              transform: `translate(${transformState.positionX}px, ${transformState.positionY}px) scale(${transformState.scale})`,
+            }}
+          >
+            <ImageCanvas
+              appSettings={appSettings}
+              activeAiPatchContainerId={activeAiPatchContainerId}
+              activeAiSubMaskId={activeAiSubMaskId}
+              activeMaskContainerId={activeMaskContainerId}
+              activeMaskId={activeMaskId}
+              adjustments={adjustments}
+              brushSettings={brushSettings}
+              crop={crop}
+              finalPreviewUrl={finalPreviewUrl}
+              handleCropComplete={handleCropComplete}
+              imageRenderSize={imageRenderSize}
+              interactivePatch={interactivePatch}
+              isAiEditing={isAiEditing}
+              isCropping={isCropping}
+              isMaskControlHovered={isMaskControlHovered}
+              isMasking={isMasking}
+              isStraightenActive={isStraightenActive}
+              isRotationActive={isRotationActive}
+              isSliderDragging={isSliderDragging}
+              maskOverlayUrl={maskOverlayUrl}
+              onGenerateAiMask={handleGenerateAiMask}
+              onGenerateAiPaintMask={handleGenerateAiPaintMask}
+              onLiveMaskPreview={handleLiveMaskPreview}
+              onQuickErase={handleQuickErase}
+              onSelectAiSubMask={(id) => setEditor({ activeAiSubMaskId: id })}
+              onSelectMask={(id) => setEditor({ activeMaskId: id })}
+              onStraighten={handleStraighten}
+              selectedImage={selectedImage}
+              setCrop={handleCropChange}
+              setIsMaskHovered={setIsMaskHovered}
+              setIsMaskTouchInteracting={setIsMaskTouchInteracting}
+              showOriginal={showOriginal}
+              transformedOriginalUrl={transformedOriginalUrl}
+              uncroppedAdjustedPreviewUrl={uncroppedAdjustedPreviewUrl}
+              updateSubMask={updateSubMaskLocal}
+              isWbPickerActive={isWbPickerActive}
+              onWbPicked={handleWbPicked}
+              isMixerPickerActive={isMixerPickerActive}
+              onMixerBandPicked={handleMixerColorPicked}
+              setAdjustments={setAdjustments}
+              overlayRotation={overlayRotation}
+              overlayMode={overlayMode}
+              cursorStyle={cursorStyle}
+              isMaxZoom={isMaxZoom}
+              liveRotation={liveRotation}
+              transformState={transformState}
+              hasRenderedFirstFrame={hasRenderedFirstFrame}
+            />
+          </div>
         )}
       </div>
     </div>

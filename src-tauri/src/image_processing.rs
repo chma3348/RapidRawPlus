@@ -13,9 +13,10 @@ use std::borrow::Cow;
 use std::f32::consts::PI;
 use std::sync::Arc;
 
+pub use crate::gpu_processing::get_or_init_gpu_context;
+#[cfg(any(test, feature = "legacy-reference"))]
 pub use crate::gpu_processing::{
-    RenderRequest, get_or_init_gpu_context, process_and_get_dynamic_image,
-    process_and_get_dynamic_image_with_analytics,
+    RenderRequest, process_and_get_dynamic_image, process_and_get_dynamic_image_with_analytics,
 };
 use crate::{AppState, mask_generation::MaskDefinition};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
@@ -1859,8 +1860,8 @@ pub fn apply_cpu_agx_tonemap(image: &mut DynamicImage) {
 
 pub fn default_render_adjustments_json() -> serde_json::Value {
     serde_json::json!({
-        "toneMapper": "basic",
-        "processVersion": 2
+        "toneMapper": "resolve",
+        "processVersion": 3
     })
 }
 
@@ -3630,8 +3631,8 @@ mod pro_color_tests {
     fn empty_adjustments_are_current_neutral_render() {
         for adj in [serde_json::Value::Null, json!({})] {
             let render = render_adjustments_for_empty(&adj);
-            assert_eq!(render["toneMapper"], "basic");
-            assert_eq!(render["processVersion"], 2);
+            assert_eq!(render["toneMapper"], "resolve");
+            assert_eq!(render["processVersion"], 3);
             assert!(!is_image_edited(&adj, true, None));
         }
 

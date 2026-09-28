@@ -1,5 +1,22 @@
 # Color Engine v3 — implementation and verification
 
+## V3-only application — September 28, 2026
+
+V3 is the sole application renderer. Development edits adopt the current policy;
+the older renderer is retained only for explicitly enabled reference tests.
+Shared highlights/shadows math is unchanged. See the
+[retirement and migration log](color-v3-only-2026-09-28.md) for behavior, export
+limits, verification, and launch instructions. This resolves the compatibility
+decision noted in the efficiency audit below.
+
+## Efficiency and follow-up audit — September 28, 2026
+
+Removed redundant image/lattice copies and repeated file hashing, strengthened
+cache invalidation, and closed preset/paste interpretation-transfer gaps. Eight
+real-photo before/after render comparisons matched exactly. See the
+[audit, timings, validation, and unresolved input-policy compatibility issue](color-v3-efficiency-audit-2026-09-28.md).
+No color calibration or slider tuning was performed.
+
 ## Calibration intake ready — September 27, 2026
 
 The pre-calibration engine changes and reference intake/measurement runner are

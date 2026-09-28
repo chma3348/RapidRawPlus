@@ -38,8 +38,8 @@ impl Unrecovered {
         }
     }
 
-    /// Re-index from the sensor frame to the oriented frame: an index plane
-    /// goes through the same orientation as the picture.
+    /// Re-index only retained pixels, with the exact mapping used by
+    /// apply_orientation. Memory and work scale with changed pixels, not area.
     pub(crate) fn oriented(
         self,
         width: u32,
@@ -49,35 +49,23 @@ impl Unrecovered {
         if self.pixels.is_empty() {
             return self;
         }
-        // `apply_orientation` works on DynamicImage, which has no 32-bit
-        // grey variant, so the index goes through as two 16-bit halves.
-        let index = |x: u32, y: u32| y * width + x;
-        let lo =
-            image::ImageBuffer::<image::Luma<u16>, Vec<u16>>::from_fn(width, height, |x, y| {
-                image::Luma([(index(x, y) & 0xFFFF) as u16])
-            });
-        let hi =
-            image::ImageBuffer::<image::Luma<u16>, Vec<u16>>::from_fn(width, height, |x, y| {
-                image::Luma([(index(x, y) >> 16) as u16])
-            });
-        let lo =
-            crate::image_processing::apply_orientation(DynamicImage::ImageLuma16(lo), orientation)
-                .into_luma16();
-        let hi =
-            crate::image_processing::apply_orientation(DynamicImage::ImageLuma16(hi), orientation)
-                .into_luma16();
-        let mut map = vec![u32::MAX; (width * height) as usize];
-        for (i, (l, h)) in lo.pixels().zip(hi.pixels()).enumerate() {
-            let original = (h[0] as u32) << 16 | l[0] as u32;
-            map[original as usize] = i as u32;
+        use rawler::decoders::Orientation::*;
+        let mut result = self;
+        for (index, _) in &mut result.pixels {
+            let (x, y) = (*index % width, *index / width);
+            let (x, y, w) = match orientation {
+                Normal | Unknown => (x, y, width),
+                HorizontalFlip => (width - 1 - x, y, width),
+                VerticalFlip => (x, height - 1 - y, width),
+                Rotate180 => (width - 1 - x, height - 1 - y, width),
+                Rotate90 => (height - 1 - y, x, height),
+                Rotate270 => (y, width - 1 - x, height),
+                Transpose => (height - 1 - y, width - 1 - x, height),
+                Transverse => (y, x, height),
+            };
+            *index = y * w + x;
         }
-        Self {
-            pixels: self
-                .pixels
-                .into_iter()
-                .map(|(index, rgb)| (map[index as usize], rgb))
-                .collect(),
-        }
+        result
     }
 }
 
@@ -353,6 +341,48 @@ pub(crate) fn convert_rgb_profile(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sparse_orientation_matches_full_frame_for_every_orientation() {
+        use rawler::decoders::Orientation::*;
+        let (width, height) = (337, 211);
+        let original = image::Rgba32FImage::from_fn(width, height, |x, y| {
+            image::Rgba([x as f32, y as f32, (y * width + x) as f32, 0.5])
+        });
+        let sparse = super::Unrecovered {
+            pixels: original
+                .pixels()
+                .enumerate()
+                .filter(|(i, _)| i % 17 == 0 || *i == 71106)
+                .map(|(i, p)| (i as u32, [p[0], p[1], p[2]]))
+                .collect(),
+        };
+        for orientation in [
+            Normal,
+            Unknown,
+            HorizontalFlip,
+            VerticalFlip,
+            Rotate180,
+            Rotate90,
+            Rotate270,
+            Transpose,
+            Transverse,
+        ] {
+            let expected = crate::image_processing::apply_orientation(
+                image::DynamicImage::ImageRgba32F(original.clone()),
+                orientation,
+            )
+            .into_rgba32f();
+            let mapped = sparse.clone().oriented(width, height, orientation);
+            for (index, rgb) in mapped.pixels {
+                assert_eq!(
+                    &expected
+                        .get_pixel(index % expected.width(), index / expected.width())
+                        .0[..3],
+                    &rgb
+                );
+            }
+        }
+    }
     use super::*;
     use image::{ImageBuffer, ImageEncoder, Rgba};
 

@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { currentColorEngine } from '../utils/currentColorEngine';
 import { Adjustments, INITIAL_ADJUSTMENTS, MaskContainer, AiPatch } from '../utils/adjustments';
 import { SelectedImage, WaveformData, BrushSettings } from '../components/ui/AppProperties';
 import { ChannelConfig } from '../components/adjustments/Curves';
@@ -145,12 +146,20 @@ export const useEditorStore = create<EditorState>((set) => ({
   hasRenderedFirstFrame: false,
   patchesSentToBackend: new Set<string>(),
 
-  setEditor: (updater) => set((state) => (typeof updater === 'function' ? updater(state) : updater)),
+  setEditor: (updater) =>
+    set((state) => {
+      const update = typeof updater === 'function' ? updater(state) : updater;
+      return {
+        ...update,
+        ...(update.adjustments ? { adjustments: currentColorEngine(update.adjustments) } : {}),
+        ...(update.previewOverride ? { previewOverride: currentColorEngine(update.previewOverride) } : {}),
+      };
+    }),
 
   pushHistory: (newAdj) =>
     set((state) => {
       const newHistory = state.history.slice(0, state.historyIndex + 1);
-      newHistory.push(newAdj);
+      newHistory.push(currentColorEngine(newAdj));
       if (newHistory.length > 50) newHistory.shift();
       return { history: newHistory, historyIndex: newHistory.length - 1 };
     }),
@@ -159,7 +168,7 @@ export const useEditorStore = create<EditorState>((set) => ({
     set((state) => {
       if (state.historyIndex > 0) {
         const newIndex = state.historyIndex - 1;
-        return { historyIndex: newIndex, adjustments: state.history[newIndex] };
+        return { historyIndex: newIndex, adjustments: currentColorEngine(state.history[newIndex]) };
       }
       return state;
     }),
@@ -168,22 +177,22 @@ export const useEditorStore = create<EditorState>((set) => ({
     set((state) => {
       if (state.historyIndex < state.history.length - 1) {
         const newIndex = state.historyIndex + 1;
-        return { historyIndex: newIndex, adjustments: state.history[newIndex] };
+        return { historyIndex: newIndex, adjustments: currentColorEngine(state.history[newIndex]) };
       }
       return state;
     }),
 
   resetHistory: (initialState) =>
     set({
-      history: [initialState],
+      history: [currentColorEngine(initialState)],
       historyIndex: 0,
-      adjustments: initialState,
+      adjustments: currentColorEngine(initialState),
     }),
 
   goToHistoryIndex: (index) =>
     set((state) => {
       if (index >= 0 && index < state.history.length) {
-        return { historyIndex: index, adjustments: state.history[index] };
+        return { historyIndex: index, adjustments: currentColorEngine(state.history[index]) };
       }
       return state;
     }),

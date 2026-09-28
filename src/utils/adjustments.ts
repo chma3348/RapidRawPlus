@@ -1,4 +1,5 @@
 import { Crop } from 'react-image-crop';
+import { currentColorEngine } from './currentColorEngine';
 import type { V3Controls } from './colorV3';
 import { v4 as uuidv4 } from 'uuid';
 import { SubMask, SubMaskMode } from '../components/panel/right/Masks';
@@ -178,7 +179,15 @@ export interface Adjustments {
   grainSize: number;
   halationAmount: number;
   filmSaturation: number;
-  pointColors: Array<{ hue: number; sat: number; val: number; range: number; hueShift: number; satShift: number; lumShift: number }>;
+  pointColors: Array<{
+    hue: number;
+    sat: number;
+    val: number;
+    range: number;
+    hueShift: number;
+    satShift: number;
+    lumShift: number;
+  }>;
   highlights: number;
   hsl: Hsl;
   hue: number;
@@ -231,7 +240,6 @@ export interface Adjustments {
   v3RawRecovery?: 'off' | 'neutral_green_v1';
   /** Diagnostic source snapshot refreshed by the backend when saving. */
   v3Input?: Record<string, unknown>;
-  v3PreviousVersion?: number;
   transformDistortion: number;
   transformVertical: number;
   transformHorizontal: number;
@@ -361,7 +369,15 @@ export interface MaskAdjustments {
   glowAmount: number;
   halationAmount: number;
   filmSaturation: number;
-  pointColors: Array<{ hue: number; sat: number; val: number; range: number; hueShift: number; satShift: number; lumShift: number }>;
+  pointColors: Array<{
+    hue: number;
+    sat: number;
+    val: number;
+    range: number;
+    hueShift: number;
+    satShift: number;
+    lumShift: number;
+  }>;
   highlights: number;
   hsl: Hsl;
   hue: number;
@@ -608,7 +624,7 @@ export const INITIAL_ADJUSTMENTS: Adjustments = {
   lutSize: 0,
   masks: [],
   orientationSteps: 0,
-  processVersion: 2,
+  processVersion: 3,
   rotation: 0,
   saturation: 0,
   sectionVisibility: {
@@ -626,7 +642,7 @@ export const INITIAL_ADJUSTMENTS: Adjustments = {
   temperature: 0,
   texture: 0,
   tint: 0,
-  toneMapper: 'basic',
+  toneMapper: 'resolve',
   transformDistortion: 0,
   transformVertical: 0,
   transformHorizontal: 0,
@@ -673,6 +689,7 @@ export const normalizeLoadedAdjustments = (loadedAdjustments: Adjustments): any 
   if (!loadedAdjustments) {
     return INITIAL_ADJUSTMENTS;
   }
+  loadedAdjustments = currentColorEngine(loadedAdjustments);
 
   const normalizeSubMasks = (subMasks: any[]) => {
     return (subMasks || []).map((subMask: Partial<SubMask>) => ({
@@ -768,9 +785,8 @@ export const normalizeLoadedAdjustments = (loadedAdjustments: Adjustments): any 
     },
     sharpnessThreshold: loadedAdjustments.sharpnessThreshold ?? INITIAL_ADJUSTMENTS.sharpnessThreshold,
     contrastPivot: loadedAdjustments.contrastPivot ?? INITIAL_ADJUSTMENTS.contrastPivot,
-    // Old sidecars predate the v2 engine: keep them on classic rendering
-    // so their appearance never silently changes.
-    processVersion: loadedAdjustments.processVersion ?? 1,
+    // Development-era sidecars adopt the only active renderer.
+    processVersion: loadedAdjustments.processVersion ?? 3,
     texture: loadedAdjustments.texture ?? INITIAL_ADJUSTMENTS.texture,
     colorWheels: loadedAdjustments.colorWheels ?? INITIAL_ADJUSTMENTS.colorWheels,
     hueCurves: { ...INITIAL_ADJUSTMENTS.hueCurves, ...(loadedAdjustments.hueCurves ?? {}) },
@@ -786,7 +802,7 @@ export const ADJUSTMENT_GROUPS: Record<string, AdjustmentGroup[]> = {
   basic: [
     {
       label: 'modals.copyPaste.groups.exposureToneMapper',
-      keys: [BasicAdjustment.Exposure, 'toneMapper', 'processVersion', 'v3', 'v3PreviousVersion'],
+      keys: [BasicAdjustment.Exposure, 'toneMapper', 'v3'],
     },
     {
       label: 'modals.copyPaste.groups.tone',
@@ -910,7 +926,6 @@ export const ADJUSTMENT_SECTIONS: Sections = {
     'contrastPivot',
     'processVersion',
     'v3',
-    'v3PreviousVersion',
   ],
   curves: ['curves', 'pointCurves', 'parametricCurve', 'curveMode'],
   color: [

@@ -248,29 +248,6 @@ fn develop_internal(
     Ok((dynamic_image, orientation))
 }
 
-pub fn get_fast_demosaic_scale_factor(
-    file_bytes: &[u8],
-    decoded_width: u32,
-    decoded_height: u32,
-) -> f32 {
-    let source = RawSource::new_from_slice(file_bytes);
-    if let Ok(decoder) = rawler::get_decoder(&source)
-        && let Ok(raw_img) = decoder.raw_image(&source, &RawDecodeParams::default(), true)
-    {
-        let max_orig = (raw_img.width as f32).max(raw_img.height as f32);
-        let max_comp = (decoded_width as f32).max(decoded_height as f32);
-        if max_orig > 0.0 {
-            let ratio = max_comp / max_orig;
-            if ratio > 0.1 && ratio < 0.35 {
-                return 0.25;
-            } else if (0.35..0.75).contains(&ratio) {
-                return 0.5;
-            }
-        }
-    }
-    1.0
-}
-
 #[cfg(test)]
 mod decode_probe {
     /// Ad-hoc probe: decode a RAW at several Highlight Recovery settings and

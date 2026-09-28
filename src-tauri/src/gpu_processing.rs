@@ -1,19 +1,31 @@
 use std::sync::Arc;
+#[cfg(any(test, feature = "legacy-reference"))]
 use std::time::Instant;
 
+#[cfg(any(test, feature = "legacy-reference"))]
 use half::f16;
+#[cfg(any(test, feature = "legacy-reference"))]
 use image::{DynamicImage, GenericImageView, ImageBuffer, Luma, Rgba};
 use std::num::NonZero;
 
 #[cfg(not(any(target_os = "android", target_os = "linux")))]
 use tauri::Manager;
-use wgpu::util::{DeviceExt, TextureDataOrder};
+#[cfg(any(test, feature = "legacy-reference"))]
+use wgpu::util::DeviceExt;
+#[cfg(any(test, feature = "legacy-reference"))]
+use wgpu::util::TextureDataOrder;
 
-use crate::image_processing::{AllAdjustments, GpuContext, MAX_MASKS};
-use crate::lut_processing::Lut;
-use crate::{AppState, GpuImageCache};
+use crate::AppState;
+use crate::image_processing::GpuContext;
+#[cfg(any(test, feature = "legacy-reference"))]
+use crate::{
+    GpuImageCache,
+    image_processing::{AllAdjustments, MAX_MASKS},
+    lut_processing::Lut,
+};
 
 #[derive(Clone, Copy, Debug)]
+#[cfg(any(test, feature = "legacy-reference"))]
 pub struct Roi {
     pub x: u32,
     pub y: u32,
@@ -21,6 +33,7 @@ pub struct Roi {
     pub height: u32,
 }
 
+#[cfg(any(test, feature = "legacy-reference"))]
 pub struct RenderRequest<'a> {
     pub adjustments: AllAdjustments,
     pub mask_bitmaps: &'a [ImageBuffer<Luma<u8>, Vec<u8>>],
@@ -30,11 +43,13 @@ pub struct RenderRequest<'a> {
 
 /// The previous engine's shader: the tone functions it shares with v3,
 /// then its own. See `shaders/tone_v2.wgsl`.
+#[cfg(any(test, feature = "legacy-reference"))]
 pub const LEGACY_SHADER: &str = concat!(
-    include_str!("shaders/tone_v2.wgsl"),
+    include_str!("../tests/fixtures/legacy-tone-v2.wgsl"),
     include_str!("shaders/shader.wgsl")
 );
 
+#[cfg(any(test, feature = "legacy-reference"))]
 fn output_shader_source(high_precision: bool) -> String {
     let source = LEGACY_SHADER;
     if !high_precision {
@@ -52,6 +67,7 @@ fn output_shader_source(high_precision: bool) -> String {
         .replace(store, "textureStore(output_texture, id.xy, vec4<u32>(round(clamp(vec4<f32>(final_rgb, original_alpha), vec4<f32>(0.0), vec4<f32>(1.0)) * 65535.0)));" )
 }
 
+#[cfg(any(test, feature = "legacy-reference"))]
 fn rgba16_from_gpu(width: u32, height: u32, bytes: &[u8]) -> Result<DynamicImage, String> {
     if bytes.len() != width as usize * height as usize * 8 {
         return Err("Invalid 16-bit GPU output length".into());
@@ -205,7 +221,8 @@ pub fn get_or_init_gpu_context(
     #[cfg(not(any(target_os = "android", target_os = "linux")))]
     let surface_opt = {
         let settings = crate::app_settings::load_settings(app_handle.clone()).unwrap_or_default();
-        let use_wgpu_renderer = settings.use_wgpu_renderer.unwrap_or(true);
+        let use_wgpu_renderer = cfg!(any(test, feature = "legacy-reference"))
+            && settings.use_wgpu_renderer.unwrap_or(true);
 
         if use_wgpu_renderer {
             if let Some(window) = app_handle.get_webview_window("main") {
@@ -448,6 +465,7 @@ pub fn get_or_init_gpu_context(
     Ok(new_context)
 }
 
+#[cfg(any(test, feature = "legacy-reference"))]
 fn read_texture_data_roi(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -523,6 +541,7 @@ fn read_texture_data_roi(
     }
 }
 
+#[cfg(any(test, feature = "legacy-reference"))]
 fn to_rgba_f16(img: &DynamicImage) -> Vec<f16> {
     let rgba_f32 = img.to_rgba32f();
     rgba_f32.into_raw().into_iter().map(f16::from_f32).collect()
@@ -530,6 +549,7 @@ fn to_rgba_f16(img: &DynamicImage) -> Vec<f16> {
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+#[cfg(any(test, feature = "legacy-reference"))]
 struct BlurParams {
     radius: u32,
     tile_offset_x: u32,
@@ -543,6 +563,7 @@ struct BlurParams {
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+#[cfg(any(test, feature = "legacy-reference"))]
 struct FlareParams {
     amount: f32,
     is_raw: u32,
@@ -554,6 +575,7 @@ struct FlareParams {
     _pad: f32,
 }
 
+#[cfg(any(test, feature = "legacy-reference"))]
 pub struct GpuProcessor {
     context: GpuContext,
     blur_bgl: wgpu::BindGroupLayout,
@@ -592,8 +614,10 @@ pub struct GpuProcessor {
     pub output_texture_view: wgpu::TextureView,
 }
 
+#[cfg(any(test, feature = "legacy-reference"))]
 const FLARE_MAP_SIZE: u32 = 512;
 
+#[cfg(any(test, feature = "legacy-reference"))]
 impl GpuProcessor {
     pub fn new(context: GpuContext, max_width: u32, max_height: u32) -> Result<Self, String> {
         Self::new_with_precision(context, max_width, max_height, false)
@@ -1220,6 +1244,7 @@ impl GpuProcessor {
         })
     }
 
+    #[cfg(any(test, feature = "legacy-reference"))]
     pub fn run(
         &self,
         input_texture_view: &wgpu::TextureView,
@@ -1229,13 +1254,10 @@ impl GpuProcessor {
         skip_cpu_readback: bool,
         output_to_display: bool,
     ) -> Result<(Vec<u8>, u32, u32, u32, u32), String> {
-        if crate::color_engine::config::engine_for_version(
-            request.adjustments.global.process_version,
-        )
-        .map_err(|e| e.to_string())?
-            == crate::color_engine::config::EngineVersion::ExperimentalV3
-        {
-            return Err("Color Engine v3 is experimental and must use its explicit render plan; existing edits cannot be silently rendered with unsupported controls.".into());
+        if request.adjustments.global.process_version > 2 {
+            return Err(
+                "V3 edits require the v3 application pipeline, not the reference renderer.".into(),
+            );
         }
         let device = &self.context.device;
         let queue = &self.context.queue;
@@ -1747,6 +1769,7 @@ impl GpuProcessor {
     }
 }
 
+#[cfg(any(test, feature = "legacy-reference"))]
 pub fn process_and_get_dynamic_image(
     context: &GpuContext,
     state: &AppState,
@@ -1769,6 +1792,7 @@ pub fn process_and_get_dynamic_image(
 }
 
 /// Full-precision encoded output for exports; no 8-bit image or dither stage.
+#[cfg(any(test, feature = "legacy-reference"))]
 pub fn process_and_get_dynamic_image_16(
     context: &GpuContext,
     state: &AppState,
@@ -1791,6 +1815,7 @@ pub fn process_and_get_dynamic_image_16(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(any(test, feature = "legacy-reference"))]
 pub fn process_and_get_dynamic_image_with_analytics(
     context: &GpuContext,
     state: &AppState,
@@ -1818,6 +1843,7 @@ pub fn process_and_get_dynamic_image_with_analytics(
 /// Takes `&AppState` rather than `tauri::State` so the render pipeline can be
 /// driven from a test. Everything it touches on the state is a cache or a
 /// handle, none of it Tauri-specific.
+#[cfg(any(test, feature = "legacy-reference"))]
 fn process_and_get_dynamic_image_inner(
     context: &GpuContext,
     state: &AppState,

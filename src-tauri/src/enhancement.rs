@@ -339,21 +339,8 @@ pub(crate) fn enhancement_input(
     };
     let _ = app_handle.emit("enhance-progress", "Rendering edited photo...");
     let context = crate::gpu_processing::get_or_init_gpu_context(state, app_handle)?;
-    let settings = load_settings(app_handle.clone()).unwrap_or_default();
-    let is_raw = is_raw_file(path_str);
-    let bytes = fs::read(Path::new(path_str)).map_err(|e| e.to_string())?;
-    let base =
-        crate::image_loader::load_and_composite(&bytes, path_str, adj, false, &settings, None)
-            .map_err(|e| format!("Failed to load image: {}", e))?;
     let rendered = crate::export_processing::process_image_for_export_pipeline(
-        path_str,
-        &base,
-        adj,
-        &context,
-        state,
-        is_raw,
-        "enhancement_render",
-        app_handle,
+        path_str, adj, &context, state,
     )?;
     Ok(rendered.to_rgb32f())
 }

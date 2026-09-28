@@ -117,21 +117,25 @@ impl CubeLut {
     pub fn load(path: &std::path::Path) -> Result<Arc<Self>> {
         use std::collections::HashMap;
         use std::sync::{Mutex, OnceLock};
-        type Key = (std::path::PathBuf, u64, Option<std::time::SystemTime>);
+        type Key = (std::path::PathBuf, super::file_version::Version);
         static CACHE: OnceLock<Mutex<HashMap<Key, Arc<CubeLut>>>> = OnceLock::new();
-        let meta = std::fs::metadata(path)
-            .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
-        let key = (path.to_path_buf(), meta.len(), meta.modified().ok());
+        let key = (path.to_path_buf(), super::file_version::version(path)?);
         let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-        if let Some(hit) = cache.lock().ok().and_then(|c| c.get(&key).cloned()) {
+        if cfg!(unix)
+            && let Some(hit) = cache.lock().ok().and_then(|c| c.get(&key).cloned())
+        {
             return Ok(hit);
         }
         let text = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
         let cube = Arc::new(Self::parse(&text)?);
+        ensure!(
+            key.1 == super::file_version::version(path)?,
+            "Cube changed while reading; retry"
+        );
         if let Ok(mut c) = cache.lock() {
             // Replacing files must not retain every historical lattice forever.
-            c.retain(|(p, _, _), _| p != path);
+            c.retain(|(p, _), _| p != path);
             if c.len() >= 8 {
                 c.clear();
             }
@@ -397,13 +401,11 @@ impl CapturedInput {
                 let p3 = self.p3.as_ref().expect("P3 domain without a P3 capture");
                 // Colours beyond even P3 (rare: profile rounding, Adobe RGB
                 // greens) are compressed into it the same way.
-                let mut wide = pixels.clone();
-                to_p3(&mut wide);
-                if exceeds_srgb(&wide) {
-                    compress_into_srgb(&mut wide);
+                to_p3(pixels);
+                if exceeds_srgb(pixels) {
+                    compress_into_srgb(pixels);
                 }
-                apply_input_transform(p3, &mut wide);
-                *pixels = wide;
+                apply_input_transform(p3, pixels);
             }
             InputDomain::SrgbCompressed => {
                 compress_into_srgb(pixels);
@@ -460,6 +462,33 @@ pub fn apply_input_transform(cube: &CubeLut, pixels: &mut image::Rgba32FImage) {
 #[cfg(test)]
 mod compression_tests {
     use super::*;
+
+    #[test]
+    fn in_place_p3_matches_the_previous_copying_path_exactly() {
+        let cube = std::sync::Arc::new(
+            CubeLut::parse(
+                "LUT_3D_SIZE 2\n0 0 0\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n1 1 1\n",
+            )
+            .unwrap(),
+        );
+        let capture = CapturedInput {
+            srgb: cube.clone(),
+            p3: Some(cube.clone()),
+        };
+        for scale in [0.5, 1.0, 3.0] {
+            let mut actual = image::Rgba32FImage::from_fn(128, 3, |x, y| {
+                image::Rgba([(x as f32 / 127.0 - 0.1) * scale, y as f32 * 0.3, 0.4, 0.7])
+            });
+            let mut expected = actual.clone();
+            to_p3(&mut expected);
+            if exceeds_srgb(&expected) {
+                compress_into_srgb(&mut expected);
+            }
+            apply_input_transform(&cube, &mut expected);
+            capture.apply_as(InputDomain::DisplayP3, &mut actual);
+            assert_eq!(actual.as_raw(), expected.as_raw());
+        }
+    }
 
     #[test]
     fn compression_leaves_ordinary_colour_alone_and_keeps_saturated_colour_ordered() {

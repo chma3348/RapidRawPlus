@@ -167,13 +167,6 @@ pub fn calculate_transform_hash(adjustments: &serde_json::Value) -> u64 {
     hasher.finish()
 }
 
-pub fn calculate_full_job_hash(path: &str, adjustments: &serde_json::Value) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    path.hash(&mut hasher);
-    adjustments.to_string().hash(&mut hasher);
-    hasher.finish()
-}
-
 pub struct DecodedImageCache {
     capacity: usize,
     items: Vec<(String, Arc<DynamicImage>, HashMap<String, String>)>,

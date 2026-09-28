@@ -16,15 +16,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use base64::{Engine as _, engine::general_purpose};
-use mozjpeg_rs::{Encoder, Preset};
 use tauri::{AppHandle, Manager, State};
 
 use crate::AppState;
-use crate::cache_utils::calculate_transform_hash;
-use crate::image_processing::{
-    RenderRequest, default_render_adjustments_json, get_all_adjustments_from_json,
-    process_and_get_dynamic_image, resolve_tonemapper_override_from_handle,
-};
 
 #[derive(Debug, Clone)]
 pub struct Lut {
@@ -489,36 +483,20 @@ pub fn remove_lut(app_handle: AppHandle, path: String) -> Result<Vec<LutEntry>, 
 fn render_lut_swatch(
     context: &crate::image_processing::GpuContext,
     state: &State<AppState>,
-    base_image: &DynamicImage,
-    transform_hash: u64,
-    adjustments: crate::image_processing::AllAdjustments,
+    photo_path: &str,
+    size: u32,
     lut_path: &str,
 ) -> Option<String> {
-    let lut = get_or_load_lut(state, lut_path).ok()?;
-    let processed = process_and_get_dynamic_image(
-        context,
-        state,
-        base_image,
-        transform_hash,
-        RenderRequest {
-            adjustments,
-            mask_bitmaps: &[],
-            lut: Some(lut),
-            roi: None,
-        },
-        "generate_lut_previews",
-    )
-    .ok()?;
-
-    let rgb = processed.to_rgb8();
-    let (width, height) = rgb.dimensions();
-    let bytes = Encoder::new(Preset::BaselineFastest)
-        .quality(80)
-        .encode_rgb(&rgb.into_vec(), width, height)
-        .ok()?;
+    let edits = serde_json::json!({
+        "processVersion": 3, "toneMapper": "resolve",
+        "lutPath": lut_path, "lutIntensity": 100
+    });
+    let bytes =
+        crate::color_engine::application::preview_bytes(context, state, photo_path, &edits, size)
+            .ok()?;
     Some(format!(
-        "data:image/jpeg;base64,{}",
-        general_purpose::STANDARD.encode(&bytes)
+        "data:image/png;base64,{}",
+        general_purpose::STANDARD.encode(bytes)
     ))
 }
 
@@ -536,34 +514,10 @@ pub fn generate_lut_previews(
         .unwrap()
         .clone()
         .ok_or("No original image loaded for LUT previews")?;
-    let is_raw = loaded_image.is_raw;
-
-    let base_json = default_render_adjustments_json();
-    let (base_image, _scale, _offset) =
-        crate::generate_transformed_preview(&state, &loaded_image, &base_json, size)?;
-
-    let tm_override = resolve_tonemapper_override_from_handle(&app_handle, is_raw);
-    let lut_json = serde_json::json!({
-        "toneMapper": "basic",
-        "processVersion": 2,
-        "lutPath": "preview",
-        "lutIntensity": 100,
-        "sectionVisibility": { "effects": true }
-    });
-    let adjustments = get_all_adjustments_from_json(&lut_json, is_raw, tm_override);
-    let transform_hash = calculate_transform_hash(&base_json);
-
     let previews = lut_paths
         .into_iter()
         .map(|path| {
-            let thumb = render_lut_swatch(
-                &context,
-                &state,
-                &base_image,
-                transform_hash,
-                adjustments,
-                &path,
-            );
+            let thumb = render_lut_swatch(&context, &state, &loaded_image.path, size, &path);
             LutPreview { path, thumb }
         })
         .collect();

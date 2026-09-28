@@ -45,6 +45,11 @@ import { Adjustments, INITIAL_ADJUSTMENTS, ADJUSTMENT_GROUPS } from '../../../ut
 import { mixV3Controls } from '../../../utils/colorV3';
 import { Invokes, OPTION_SEPARATOR, Panel, Preset, SelectedImage } from '../../ui/AppProperties';
 import { useEditorStore } from '../../../store/useEditorStore';
+import {
+  PHOTO_OWNED_ADJUSTMENTS,
+  photoOwnedAdjustments,
+  transferableAdjustments,
+} from '../../../utils/photoOwnedAdjustments';
 import { useUIStore } from '../../../store/useUIStore';
 import { useEditorActions } from '../../../hooks/useEditorActions';
 
@@ -133,16 +138,14 @@ const mixAdjustments = (presetObj: any, intensity: number, initialObj: any = INI
   // the pinned rendering identity (asset hashes that exist on this machine)
   // and the RAW source treatment. Copying them to another photo would pin it
   // to assets it may not have, or change how its sensor data is read.
-  const PHOTO_OWN = ['v3Input', 'v3Pipeline', 'v3RawRecovery'];
+  const PHOTO_OWN: readonly string[] = PHOTO_OWNED_ADJUSTMENTS;
   if (fraction === 1) {
-    const result = { ...presetObj };
-    for (const key of PHOTO_OWN) delete result[key];
-    return result;
+    return transferableAdjustments(presetObj);
   }
   if (fraction === 0)
     return {
       ...initialObj,
-      ...(presetObj.processVersion !== undefined ? { processVersion: presetObj.processVersion } : {}),
+      processVersion: 3,
       ...(presetObj.v3 ? { v3: mixV3Controls(presetObj.v3, 0) } : {}),
     };
 
@@ -154,9 +157,9 @@ const mixAdjustments = (presetObj: any, intensity: number, initialObj: any = INI
     const presetVal = presetObj[key];
     const initialVal = initialObj[key] !== undefined ? initialObj[key] : (INITIAL_ADJUSTMENTS as any)[key];
 
-    if (PHOTO_OWN.includes(key)) {
+    if (PHOTO_OWN.includes(key) || ['processVersion', 'v3PreviousVersion', 'v3PreviousToneMapper'].includes(key)) {
       continue;
-    } else if (key === 'processVersion' || key === 'v3PreviousVersion' || key === 'revision') {
+    } else if (key === 'revision') {
       result[key] = presetVal;
     } else if (key === 'v3') {
       result[key] = mixV3Controls(presetVal, intensity);
@@ -688,7 +691,11 @@ export default function PresetsPanel({ onNavigateToCommunity }: PresetsPanelProp
       }
 
       try {
-        const fullPresetAdjustments = { ...INITIAL_ADJUSTMENTS, ...preset.adjustments };
+        const fullPresetAdjustments = {
+          ...INITIAL_ADJUSTMENTS,
+          ...transferableAdjustments(preset.adjustments),
+          ...photoOwnedAdjustments(useEditorStore.getState().adjustments),
+        };
         const imageData: Uint8Array = await invoke(Invokes.GeneratePresetPreview, {
           jsAdjustments: fullPresetAdjustments,
         });
@@ -759,7 +766,11 @@ export default function PresetsPanel({ onNavigateToCommunity }: PresetsPanelProp
       const pathAtStart = currentImagePathRef.current;
 
       try {
-        const fullPresetAdjustments: any = { ...INITIAL_ADJUSTMENTS, ...preset.adjustments };
+        const fullPresetAdjustments: any = {
+          ...INITIAL_ADJUSTMENTS,
+          ...transferableAdjustments(preset.adjustments),
+          ...photoOwnedAdjustments(useEditorStore.getState().adjustments),
+        };
         const imageData: Uint8Array = await invoke(Invokes.GeneratePresetPreview, {
           jsAdjustments: fullPresetAdjustments,
         });
@@ -881,7 +892,7 @@ export default function PresetsPanel({ onNavigateToCommunity }: PresetsPanelProp
 
     setAdjustments((prevAdjustments: Adjustments) => ({
       ...prevAdjustments,
-      ...preset.adjustments,
+      ...transferableAdjustments(preset.adjustments),
     }));
   };
 

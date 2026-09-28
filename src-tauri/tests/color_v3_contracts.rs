@@ -21,12 +21,9 @@ fn config() -> PipelineConfig {
 #[test]
 fn configuration_is_explicit_and_versioned() {
     for v in 0..=2 {
-        assert_eq!(engine_for_version(v).unwrap(), EngineVersion::Legacy);
+        assert_eq!(engine_for_version(v).unwrap(), EngineVersion::V3);
     }
-    assert_eq!(
-        engine_for_version(3).unwrap(),
-        EngineVersion::ExperimentalV3
-    );
+    assert_eq!(engine_for_version(3).unwrap(), EngineVersion::V3);
     assert!(engine_for_version(4).is_err());
     let c = config();
     let mut json = serde_json::to_value(&c).unwrap();
@@ -164,6 +161,14 @@ fn render_fingerprint_includes_bound_data_and_scale() {
     plan.set_display_domain(&cube, &cube);
     let domain = plan.fingerprint("source");
     assert_ne!(scaled, domain);
+    let shared = Arc::new(cube);
+    plan.set_shared_display_domain(&shared, &shared);
+    assert_eq!(domain, plan.fingerprint("source"));
+    assert_eq!(
+        Arc::strong_count(&shared),
+        3,
+        "plan must retain shared lattices, not copy entries"
+    );
     plan.set_neighbourhood(Arc::new(vec![[0.1; 4]; 2]));
     let blurred = plan.fingerprint("source");
     assert_ne!(domain, blurred);
@@ -190,6 +195,41 @@ fn gpu_color_pipeline_contracts() {
         display: Arc::new(Mutex::new(None)),
     };
     let engine = ColorEngine::new(context.clone()).unwrap();
+    // Every development sidecar version must reach the same v3 application path.
+    let directory = tempfile::tempdir().unwrap();
+    let photo = directory.path().join("migration.png");
+    ImageBuffer::from_fn(32, 24, |x, y| Rgba([x as u8 * 7, y as u8 * 9, 80, 255]))
+        .save(&photo)
+        .unwrap();
+    let state = rapidraw_lib::AppState::default();
+    let path = photo.to_str().unwrap();
+    let reference_edits = serde_json::json!({"processVersion":3,"toneMapper":"resolve","highlights":-70,"shadows":80});
+    let reference = rapidraw_lib::color_engine::application::render_file(
+        &context,
+        &state,
+        path,
+        &reference_edits,
+        Some(32),
+    )
+    .unwrap();
+    for version in [
+        serde_json::Value::Null,
+        serde_json::json!(1),
+        serde_json::json!(2),
+    ] {
+        let mut old = reference_edits.clone();
+        old["processVersion"] = version;
+        old["toneMapper"] = serde_json::json!("basic");
+        let migrated = rapidraw_lib::color_engine::application::render_file(
+            &context,
+            &state,
+            path,
+            &old,
+            Some(32),
+        )
+        .unwrap();
+        assert_eq!(migrated.encoded_srgb, reference.encoded_srgb);
+    }
     let plan = RenderPlan::build(config()).unwrap();
     // Cross the 65536-pixel chunk boundary, with distinct RGB and straight alpha.
     let input = ImageBuffer::from_fn(257, 257, |x, y| {

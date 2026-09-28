@@ -243,7 +243,7 @@ impl ColorEngine {
                 && plan
                     .domain
                     .as_ref()
-                    .is_none_or(|(i, o)| fits(i.len()) && fits(o.len())),
+                    .is_none_or(|(i, o)| fits(i.entries.len()) && fits(o.entries.len())),
             "This LUT exceeds the GPU's storage limit; use a smaller lattice"
         );
         let stride = if capture { 48 } else { 16 };
@@ -319,7 +319,7 @@ impl ColorEngine {
             .domain
             .as_ref()
             .map_or((&dummy[..], &dummy[..]), |(i, o)| {
-                (i.as_slice(), o.as_slice())
+                (i.entries.as_slice(), o.entries.as_slice())
             });
         let idt = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("V3 input transform"),

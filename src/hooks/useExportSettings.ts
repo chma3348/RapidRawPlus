@@ -22,7 +22,7 @@ export function useExportSettings() {
   const [watermarkOpacity, setWatermarkOpacity] = useState(75);
 
   const handleApplyPreset = useCallback((preset: ExportPreset) => {
-    setFileFormat(preset.fileFormat);
+    setFileFormat(['jpeg', 'png', 'tiff'].includes(preset.fileFormat) ? preset.fileFormat : 'png');
     setJpegQuality(preset.jpegQuality);
     setEnableResize(preset.enableResize);
     setResizeMode(preset.resizeMode);
@@ -31,7 +31,7 @@ export function useExportSettings() {
     setKeepMetadata(preset.keepMetadata);
     setPreserveTimestamps(preset.preserveTimestamps ?? false);
     setStripGps(preset.stripGps);
-    setExportMasks(preset.exportMasks ?? false);
+    setExportMasks(false);
     setPreserveFolders(preset.preserveFolders ?? false);
     setFilenameTemplate(preset.filenameTemplate);
     setEnableWatermark(preset.enableWatermark);
@@ -82,7 +82,7 @@ export function useExportSettings() {
       watermarkScale,
       watermarkSpacing,
       watermarkOpacity,
-    ]
+    ],
   );
 
   return {

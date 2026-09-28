@@ -235,7 +235,7 @@ fn main() -> Result<()> {
         let (pixels, _) = load(&fixture.path, manifest.max_dimension)?;
         for case in &manifest.cases {
             ensure!(
-                application::enabled(&case.edits),
+                case.edits["processVersion"].as_u64() == Some(3),
                 "Baseline cases require processVersion 3"
             );
             let start = std::time::Instant::now();

@@ -203,7 +203,7 @@ impl Package {
                 .find(|s| s.id == case.source)
                 .context("Unknown case source")?;
             ensure!(
-                case.edits.is_object() && application::enabled(&case.edits),
+                case.edits.is_object() && case.edits["processVersion"].as_u64() == Some(3),
                 "Case {} needs exact processVersion 3 application edits",
                 case.id
             );

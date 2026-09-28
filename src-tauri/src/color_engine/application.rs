@@ -47,8 +47,11 @@ pub struct PreparedCache {
     scale: f32,
 }
 
-pub fn enabled(edits: &Value) -> bool {
-    edits["processVersion"].as_u64() == Some(3)
+fn float_pixels(image: &DynamicImage) -> std::borrow::Cow<'_, image::Rgba32FImage> {
+    match image.as_rgba32f() {
+        Some(pixels) => std::borrow::Cow::Borrowed(pixels),
+        None => std::borrow::Cow::Owned(image.to_rgba32f()),
+    }
 }
 
 pub fn source(state: &AppState, path: &str) -> Result<Arc<DecodedFrame>> {
@@ -76,36 +79,6 @@ fn captured_input(pair: &super::identity::Resolved) -> Result<Option<super::cube
     }))
 }
 
-/// The file's content hash, read once per file version: the cache is keyed
-/// by path, length and modification time, and only a change in those costs a
-/// read. Content, not just the timestamp, is what identifies a source for
-/// calibration; a replacement that preserved both length and timestamp is
-/// caught the next time either changes, or by the explicit `input_report`.
-fn source_digest(
-    path: &std::path::Path,
-    length: u64,
-    modified: SystemTime,
-) -> Result<(String, Option<Vec<u8>>)> {
-    use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock};
-    type Key = (std::path::PathBuf, u64, SystemTime);
-    static DIGESTS: OnceLock<Mutex<HashMap<Key, String>>> = OnceLock::new();
-    let digests = DIGESTS.get_or_init(|| Mutex::new(HashMap::new()));
-    let key = (path.to_path_buf(), length, modified);
-    if let Some(hit) = digests.lock().ok().and_then(|d| d.get(&key).cloned()) {
-        return Ok((hit, None));
-    }
-    let bytes = std::fs::read(path)?;
-    let digest = blake3::hash(&bytes).to_hex().to_string();
-    if let Ok(mut d) = digests.lock() {
-        if d.len() >= 64 {
-            d.clear();
-        }
-        d.insert(key, digest.clone());
-    }
-    Ok((digest, Some(bytes)))
-}
-
 fn source_for(
     state: &AppState,
     path: &str,
@@ -114,7 +87,7 @@ fn source_for(
     let (path, _) = crate::file_management::parse_virtual_path(path);
     let meta = std::fs::metadata(&path)?;
     let modified = meta.modified()?;
-    let (source_digest, bytes) = source_digest(&path, meta.len(), modified)?;
+    let (source_digest, bytes) = super::file_version::digest(&path, false)?;
     // Decode depends on the installed input transforms too, not just the
     // photo's filename. Do not silently keep old pixels after replacing one.
     let input = captured_input(pair)?;
@@ -218,7 +191,7 @@ const SHARED_CONTROLS: &[&str] = &[
     "blacks",
 ];
 
-fn ungraded(edits: &Value) -> Value {
+pub(crate) fn ungraded(edits: &Value) -> Value {
     let mut neutral = edits.clone();
     neutral["v3"] = serde_json::json!({});
     neutral["masks"] = serde_json::json!([]);
@@ -582,7 +555,7 @@ fn neighbourhood(
     {
         return c.blurs.clone();
     }
-    let pixels = image.to_rgba32f();
+    let pixels = float_pixels(image);
     let (w, h) = (pixels.width() as usize, pixels.height() as usize);
     let m = spaces::conversion(source.color.primaries, Primaries::Srgb)
         .transpose()
@@ -708,8 +681,8 @@ fn sampling_image(
     let meta = std::fs::metadata(&real_path)?;
     meta.len().hash(&mut hasher);
     meta.modified()?.hash(&mut hasher);
-    std::fs::read(&real_path)
-        .map(|bytes| blake3::hash(&bytes))?
+    super::file_version::digest(&real_path, false)?
+        .0
         .hash(&mut hasher);
     let neutral = ungraded(edits);
     neutral.to_string().hash(&mut hasher);
@@ -784,7 +757,8 @@ pub fn render_file_with_capture(
     max_dimension: Option<u32>,
     capture: bool,
 ) -> Result<RenderedFrame> {
-    ensure!(enabled(edits), "Expected v3 edits");
+    let normalized = super::migration::normalize(edits)?;
+    let edits = normalized.as_ref();
     validate_features(edits)?;
     let mut watch = Stopwatch::start();
     let controls = controls(edits)?;
@@ -918,7 +892,7 @@ pub fn render_file_with_capture(
     };
     let in_domain = |plan: &mut RenderPlan| {
         if let Some((input, output)) = &domain {
-            plan.set_display_domain(input, output);
+            plan.set_shared_display_domain(input, output);
         }
     };
     let image = if controls.detail.is_neutral() && super::optics::is_neutral(&controls.effects) {
@@ -999,20 +973,20 @@ pub fn render_file_with_capture(
         if let Some(look) = &look {
             initial_plan.set_look(look)?;
         }
-        return engine.render(&image.to_rgba32f(), &initial_plan, capture);
+        return engine.render(&float_pixels(&image), &initial_plan, capture);
     }
     // With masks, the first pass only feeds the local adjustments, which read
     // the graded stage alone.
     let mut original_working = None;
     let mut working = if capture {
         let stages = engine
-            .render(&image.to_rgba32f(), &initial_plan, true)?
+            .render(&float_pixels(&image), &initial_plan, true)?
             .stages
             .context("Missing local-adjustment stage")?;
         original_working = Some(stages.working);
         stages.graded
     } else {
-        engine.render_graded(&image.to_rgba32f(), &initial_plan)?
+        engine.render_graded(&float_pixels(&image), &initial_plan)?
     };
     watch.lap("first pass");
     let working_color = SourceColor {
@@ -1136,15 +1110,40 @@ pub fn render_file_with_capture(
 /// Machine-readable interpretation of this source with these exact edits.
 /// This is an audit snapshot, not a portable preset or a second color policy.
 pub fn input_report(state: &AppState, path: &str, edits: &Value) -> Result<Value> {
+    interpretation_report(state, path, edits, true)
+}
+
+/// Routine sidecar diagnostics validate file versions but reuse content hashes.
+/// Reference intake uses input_report instead, which explicitly rereads bytes.
+pub(crate) fn input_snapshot(state: &AppState, path: &str, edits: &Value) -> Result<Value> {
+    interpretation_report(state, path, edits, false)
+}
+
+fn interpretation_report(
+    state: &AppState,
+    path: &str,
+    edits: &Value,
+    fresh: bool,
+) -> Result<Value> {
+    let normalized = super::migration::normalize(edits)?;
+    let edits = normalized.as_ref();
+    if fresh {
+        let (real_path, _) = crate::file_management::parse_virtual_path(path);
+        // Recheck bytes before source_for, so a fresh hash cannot certify stale pixels.
+        super::file_version::digest(&real_path, true)?;
+    }
     let pair = super::identity::resolve(state, edits)?;
     let frame = source_for(state, path, &pair)?;
     let digest = |p: &Option<PathBuf>| -> Result<Option<String>> {
         p.as_ref()
-            .map(|p| Ok(blake3::hash(&std::fs::read(p)?).to_hex().to_string()))
+            .map(|p| Ok(super::file_version::digest(p, fresh)?.0))
             .transpose()
     };
     Ok(serde_json::json!({
         "schema": 1, "source": frame.color, "provenance": frame.provenance,
+        "effective_input_policy": super::identity::INPUT_POLICY,
+        "saved_input_policy": edits["v3Pipeline"]["input_policy"],
+        "input_policy_mismatch": edits["v3Pipeline"]["input_policy"].as_str().is_some_and(|p| p != super::identity::INPUT_POLICY),
         "width": frame.pixels.width(), "height": frame.pixels.height(),
         "input_transform_hash": digest(&pair.input)?,
         "input_transform_p3_hash": digest(&pair.input_p3)?,
@@ -1396,6 +1395,37 @@ mod audit_tests {
                 .iter()
                 .any(|w| w.contains("compressed into sRGB"))
         );
+    }
+
+    #[test]
+    fn reports_adopt_current_policy_without_changing_current_rendering() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo = p3_red(dir.path());
+        let lut = dir.path().join("input.cube");
+        std::fs::write(&lut, cube_text(0.2)).unwrap();
+        let state = AppState::default();
+        *state.input_transform.lock().unwrap() = Some(lut.clone());
+        *state.output_transform.lock().unwrap() = Some(lut);
+        *state.v3_asset_dir.lock().unwrap() = Some(dir.path().join("assets"));
+        let mut identity = super::super::identity::pin(&state, &serde_json::json!({})).unwrap();
+        let current = serde_json::json!({"processVersion":3,"v3Pipeline":identity});
+        let before = source_with_edits(&state, photo.to_str().unwrap(), &current).unwrap();
+        assert_eq!(
+            input_snapshot(&state, photo.to_str().unwrap(), &current).unwrap()["input_policy_mismatch"],
+            false
+        );
+        identity.input_policy = "profiled-display-cube-or-wide-gamut-bypass-1".into();
+        let legacy = serde_json::json!({"processVersion":3,"v3Pipeline":identity});
+        let snapshot = input_snapshot(&state, photo.to_str().unwrap(), &legacy).unwrap();
+        let audit = input_report(&state, photo.to_str().unwrap(), &legacy).unwrap();
+        assert_eq!(snapshot, audit);
+        assert_eq!(audit["input_policy_mismatch"], false);
+        assert_eq!(
+            audit["pipeline"]["input_policy"],
+            super::super::identity::INPUT_POLICY
+        );
+        let after = source_with_edits(&state, photo.to_str().unwrap(), &legacy).unwrap();
+        assert_eq!(before.pixels, after.pixels);
     }
 
     #[test]

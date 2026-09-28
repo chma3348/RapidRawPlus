@@ -108,9 +108,6 @@ pub struct Look {
     pub exposure: f32,
 }
 
-/// A cube's entries, padded to `vec4` for the GPU.
-pub(crate) type Lattice = Vec<[f32; 4]>;
-
 pub struct RenderPlan {
     config: PipelineConfig,
     pub(crate) parameters: GpuParameters,
@@ -121,7 +118,7 @@ pub struct RenderPlan {
     /// blurs of the unedited picture, which its local tone controls read.
     pub(crate) neighbourhood: Option<std::sync::Arc<Vec<[f32; 4]>>>,
     /// The captured input and output transforms, for the display domain.
-    pub(crate) domain: Option<(Lattice, Lattice)>,
+    pub(crate) domain: Option<(std::sync::Arc<CubeLut>, std::sync::Arc<CubeLut>)>,
 }
 
 impl RenderPlan {
@@ -428,11 +425,23 @@ impl RenderPlan {
     /// rendered before they reached v3, whose controls the previous engine
     /// always applied to the picture as displayed.
     pub fn set_display_domain(&mut self, input: &CubeLut, output: &CubeLut) {
+        self.set_shared_display_domain(
+            &std::sync::Arc::new(input.clone()),
+            &std::sync::Arc::new(output.clone()),
+        );
+    }
+
+    /// Reuse cached lattices; do not copy millions of entries per slider move.
+    pub fn set_shared_display_domain(
+        &mut self,
+        input: &std::sync::Arc<CubeLut>,
+        output: &std::sync::Arc<CubeLut>,
+    ) {
         self.parameters.domain = [1, input.size, output.size, 0];
         // Those controls then see a display picture, so they take the
         // previous engine's path for one, not its RAW path.
         self.parameters.basic_flags[1] = 0;
-        self.domain = Some((input.entries.clone(), output.entries.clone()));
+        self.domain = Some((input.clone(), output.clone()));
     }
 
     /// How much smaller than the full-resolution photograph the image being
@@ -464,8 +473,8 @@ impl RenderPlan {
         hash.update(bytemuck::bytes_of(&self.parameters.effects));
         hash.update(bytemuck::bytes_of(&self.parameters.domain));
         if let Some((input, output)) = &self.domain {
-            hash.update(bytemuck::cast_slice(input));
-            hash.update(bytemuck::cast_slice(output));
+            hash.update(bytemuck::cast_slice(&input.entries));
+            hash.update(bytemuck::cast_slice(&output.entries));
         }
         if let Some(neighbourhood) = &self.neighbourhood {
             hash.update(bytemuck::cast_slice(neighbourhood.as_slice()));

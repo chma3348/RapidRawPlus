@@ -77,15 +77,13 @@ pub struct PipelineConfig {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EngineVersion {
-    Legacy,
-    ExperimentalV3,
+    V3,
 }
 
 pub fn engine_for_version(version: u32) -> anyhow::Result<EngineVersion> {
-    // 0 is the existing zero-initialized legacy GPU parameter block.
+    // Development-era edit versions adopt the current engine.
     match version {
-        0..=2 => Ok(EngineVersion::Legacy),
-        3 => Ok(EngineVersion::ExperimentalV3),
+        0..=3 => Ok(EngineVersion::V3),
         _ => anyhow::bail!("Unsupported color engine version {version}"),
     }
 }

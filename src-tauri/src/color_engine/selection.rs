@@ -62,7 +62,8 @@ pub fn inspect(
     index: usize,
     point: Option<[f32; 2]>,
 ) -> Result<Inspection> {
-    ensure!(application::enabled(edits), "Range inspection requires v3");
+    let normalized = super::migration::normalize(edits)?;
+    let edits = normalized.as_ref();
     let original = application::controls(edits)?;
     ensure!(index < original.ranges.len(), "Select a color range first");
     if let Some(p) = point {

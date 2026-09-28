@@ -224,35 +224,6 @@ export default function BasicAdjustments({
             onEvShiftChange={(value) => handleAdjustmentChange(BasicAdjustment.Exposure, value)}
             onDragStateChange={onDragStateChange}
           />
-          {!engineV3 && (
-            <div className="flex items-center justify-between mt-2 mb-1 px-1">
-              <Text variant={TextVariants.small} className="opacity-80">
-                {t('adjustments.basic.renderingEngine')}
-              </Text>
-              <div className="flex gap-1">
-                <button
-                  onClick={() => setAdjustments((prev: any) => ({ ...prev, processVersion: 1 }))}
-                  className={`px-2 py-0.5 rounded text-xs transition-colors ${
-                    (adjustments.processVersion ?? 2) === 1
-                      ? 'bg-accent text-button-text'
-                      : 'bg-bg-primary text-text-secondary hover:bg-card-active'
-                  }`}
-                >
-                  {t('adjustments.basic.renderingClassic')}
-                </button>
-                <button
-                  onClick={() => setAdjustments((prev: any) => ({ ...prev, processVersion: 2 }))}
-                  className={`px-2 py-0.5 rounded text-xs transition-colors ${
-                    (adjustments.processVersion ?? 2) === 2
-                      ? 'bg-accent text-button-text'
-                      : 'bg-bg-primary text-text-secondary hover:bg-card-active'
-                  }`}
-                >
-                  {t('adjustments.basic.renderingRefined')}
-                </button>
-              </div>
-            </div>
-          )}
         </>
       )}
       <Slider

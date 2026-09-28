@@ -23,7 +23,8 @@ export function useImageLoader(cachedEditStateRef: React.RefObject<any>) {
   const setLibrary = useLibraryStore((s) => s.setLibrary);
   const appSettings = useSettingsStore((s) => s.appSettings);
 
-  const isWgpuActive = adjustments.processVersion !== 3 && appSettings?.useWgpuRenderer !== false && selectedImage?.isReady && hasRenderedFirstFrame;
+  // V3 delivers color-managed PNG previews; the retired renderer's surface is never used.
+  const isWgpuActive = false;
 
   useEffect(() => {
     if (selectedImage && !selectedImage.isReady && selectedImage.path) {

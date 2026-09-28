@@ -21,6 +21,26 @@ unexpected_cfgs = { level = "warn", check-cfg = [
 # a broken shader edit ships and only fails when the GPU path first runs.
 naga = { version = "29.0", features = ["wgsl-in"] }
 
+[features]
+# Historical comparisons only; never enabled by the shipping app.
+legacy-reference = []
+
+[[test]]
+name = "basic_parity"
+required-features = ["legacy-reference"]
+
+[[test]]
+name = "render_quality"
+required-features = ["legacy-reference"]
+
+[[test]]
+name = "shader_layout"
+required-features = ["legacy-reference"]
+
+[[example]]
+name = "basic_parity"
+required-features = ["legacy-reference"]
+
 [dependencies]
 tauri = { version = "2.11", features = [ "macos-private-api", "rustls-tls", "protocol-asset" ] }
 tauri-plugin-dialog = "2.7.1"

@@ -75,21 +75,14 @@ export function useEditorActions() {
     if (!selectedImage?.isReady) return;
     try {
       const current = useEditorStore.getState().adjustments;
-      if (current.processVersion === 3) {
-        // V3 measures on its own scene data. The Basic sliders it sets are
-        // the shared ones, at the top level; its own settings come under v3.
-        const { v3: own, ...shared }: any = await invoke('auto_color_v3', {
-          path: selectedImage.path,
-          edits: current,
-        });
-        setAdjustments((prev: Adjustments) => ({ ...prev, ...shared, v3: { ...(prev.v3 || {}), ...own } as any }));
-        return;
-      }
-      const autoAdjustments: Adjustments = await invoke(Invokes.CalculateAutoAdjustments);
+      const { v3: own, ...shared }: any = await invoke('auto_color_v3', {
+        path: selectedImage.path,
+        edits: current,
+      });
       setAdjustments((prev: Adjustments) => ({
         ...prev,
-        ...autoAdjustments,
-        sectionVisibility: { ...prev.sectionVisibility, ...autoAdjustments.sectionVisibility },
+        ...shared,
+        v3: { ...(prev.v3 || {}), ...own } as any,
       }));
     } catch (err) {
       toast.error(`Failed to apply auto adjustments: ${err}`);
@@ -209,12 +202,14 @@ export function useEditorActions() {
       const { appSettings } = useSettingsStore.getState();
       const { setProcess } = useProcessStore.getState();
 
-      if (!copiedAdjustments || !appSettings) return;
+      if (!copiedAdjustments || !appSettings?.copyPasteSettings) return;
 
       const { mode, includedAdjustments } = appSettings.copyPasteSettings;
       const adjustmentsToApply: Partial<Adjustments> = {};
 
       for (const key of includedAdjustments) {
+        // Persisted copy settings may predate the photo-owned field exclusion.
+        if (!COPYABLE_ADJUSTMENT_KEYS.includes(key)) continue;
         if (Object.prototype.hasOwnProperty.call(copiedAdjustments, key)) {
           const value = copiedAdjustments[key as keyof Adjustments];
           if (mode === PasteMode.Merge) {

@@ -12,6 +12,7 @@ use wgpu::{Texture, TextureView};
 
 use crate::ai_processing::AiState;
 use crate::cache_utils::DecodedImageCache;
+#[cfg(any(test, feature = "legacy-reference"))]
 use crate::gpu_processing::GpuProcessor;
 use crate::image_processing::GpuContext;
 use crate::lens_correction::LensDatabase;
@@ -54,6 +55,7 @@ pub struct GpuImageCache {
     pub transform_hash: u64,
 }
 
+#[cfg(any(test, feature = "legacy-reference"))]
 pub struct GpuProcessorState {
     pub processor: GpuProcessor,
     pub width: u32,
@@ -173,6 +175,7 @@ pub struct AppState {
     pub cached_preview: Mutex<Option<CachedPreview>>,
     pub gpu_context: Mutex<Option<GpuContext>>,
     pub gpu_image_cache: Mutex<Option<GpuImageCache>>,
+    #[cfg(any(test, feature = "legacy-reference"))]
     pub gpu_processor: Mutex<Option<GpuProcessorState>>,
     pub ai_state: Mutex<Option<AiState>>,
     pub ai_init_lock: TokioMutex<()>,
@@ -233,6 +236,7 @@ impl Default for AppState {
             cached_preview: Mutex::new(None),
             gpu_context: Mutex::new(None),
             gpu_image_cache: Mutex::new(None),
+            #[cfg(any(test, feature = "legacy-reference"))]
             gpu_processor: Mutex::new(None),
             ai_state: Mutex::new(None),
             ai_init_lock: TokioMutex::new(()),

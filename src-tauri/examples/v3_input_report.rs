@@ -9,6 +9,7 @@ fn main() -> Result<()> {
     for (slot, name) in [
         (&state.output_transform, "output-transform.cube"),
         (&state.input_transform, "input-transform.cube"),
+        (&state.input_transform_p3, "input-transform-p3.cube"),
     ] {
         let path = support.join(name);
         if path.exists() {

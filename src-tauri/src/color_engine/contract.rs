@@ -12,6 +12,8 @@ pub fn implementation_digest() -> &'static str {
         let mut hash = blake3::Hasher::new();
         for source in [
             include_str!("application.rs"),
+            include_str!("migration.rs"),
+            include_str!("identity.rs"),
             include_str!("input.rs"),
             include_str!("raw.rs"),
             include_str!("controls.rs"),

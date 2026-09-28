@@ -1,5 +1,5 @@
-//! Saved rendering identity. Resolution is read-only; pinning is an explicit
-//! operation and never rewrites the installed transform files or old edits.
+//! Saved rendering identity. Development labels migrate to the current policy;
+//! valid captured assets stay pinned. Resolution never rewrites installed cubes.
 use super::cube::CubeLut;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -11,9 +11,8 @@ use std::{
 
 pub const ENGINE_REVISION: &str = "v3-stable-input-2";
 pub const INPUT_POLICY: &str = "profiled-display-cube-p3-or-compress-1";
-/// Earlier policy strings this build still honours. The bypass policy
-/// rendered wide-gamut photos outside Resolve's transforms; those edits now
-/// take the P3 capture or compression like everything else.
+/// Accepted development labels are normalized by migration before use. The old
+/// bypass algorithm is not retained; all rendered inputs use the current policy.
 const ACCEPTED_INPUT_POLICIES: &[&str] =
     &[INPUT_POLICY, "profiled-display-cube-or-wide-gamut-bypass-1"];
 pub const RAW_REVISION: &str = "bayer-d65-green-clipped-neutral-1";
@@ -49,7 +48,7 @@ pub struct Resolved {
 }
 
 impl Identity {
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         ensure!(self.schema == 1, "Unsupported v3 rendering-identity schema");
         ensure!(
             self.engine == ENGINE_REVISION || self.engine == "v3-stable-input-1",
@@ -85,10 +84,10 @@ impl Identity {
 
 fn checked_path(root: &Path, asset: &Asset) -> Result<PathBuf> {
     let path = root.join(format!("{}.cube", asset.blake3));
-    let bytes = std::fs::read(&path).with_context(|| format!(
+    let (digest, _) = super::file_version::digest(&path, false).with_context(|| format!(
         "Missing pinned v3 transform {}. Restore this asset from your backup; installed transforms will not be substituted.", asset.blake3))?;
     ensure!(
-        blake3::hash(&bytes).to_hex().as_str() == asset.blake3,
+        digest == asset.blake3,
         "Pinned v3 transform {} has changed or is damaged. Restore the original asset.",
         asset.blake3
     );
@@ -96,6 +95,8 @@ fn checked_path(root: &Path, asset: &Asset) -> Result<PathBuf> {
 }
 
 pub fn resolve(state: &crate::AppState, edits: &Value) -> Result<Resolved> {
+    let normalized = super::migration::normalize(edits)?;
+    let edits = normalized.as_ref();
     let recovery = super::raw::Recovery::from_edits(edits)?;
     ensure!(
         recovery != super::raw::Recovery::Off
@@ -103,8 +104,8 @@ pub fn resolve(state: &crate::AppState, edits: &Value) -> Result<Resolved> {
         "Disabling RAW recovery requires the current pinned rendering revision. Use the RAW source option in the editor to adopt it safely."
     );
     let Some(value) = edits.get("v3Pipeline").filter(|v| !v.is_null()) else {
-        // Explicit compatibility path. Only the UI's pin action adopts the
-        // current renderer; loading an old sidecar does not migrate it.
+        // Unpinned edits use the current installed captures. Locking creates
+        // immutable asset references; the renderer itself is always current v3.
         return Ok(Resolved {
             input: super::application::input_transform(state),
             input_p3: state.input_transform_p3.lock().ok().and_then(|p| p.clone()),
@@ -167,6 +168,8 @@ fn store(root: &Path, source: &Path) -> Result<Asset> {
 }
 
 pub fn pin(state: &crate::AppState, edits: &Value) -> Result<Identity> {
+    let normalized = super::migration::normalize(edits)?;
+    let edits = normalized.as_ref();
     if let Some(value) = edits.get("v3Pipeline").filter(|v| !v.is_null()) {
         resolve(state, edits)?;
         return Ok(serde_json::from_value(value.clone())?);
@@ -205,7 +208,7 @@ mod tests {
     use super::*;
     use serde_json::json;
     #[test]
-    fn revision_one_keeps_its_default_but_cannot_silently_adopt_recovery_off() {
+    fn development_revision_one_adopts_current_recovery_support() {
         let state = crate::AppState::default();
         let mut identity = pin(&state, &json!({})).unwrap();
         identity.engine = "v3-stable-input-1".into();
@@ -215,7 +218,7 @@ mod tests {
                 &state,
                 &json!({"v3Pipeline":identity,"v3RawRecovery":"off"})
             )
-            .is_err()
+            .is_ok()
         );
         identity.engine = ENGINE_REVISION.into();
         assert!(
