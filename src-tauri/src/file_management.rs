@@ -2178,10 +2178,19 @@ pub fn save_metadata_and_update_thumbnail(
         );
     }
 
+    // The interpretation snapshot is diagnostic. A photo that cannot be
+    // interpreted right now (a pinned transform missing, a decode problem)
+    // still gets its edits saved; the snapshot records the error instead.
     if crate::color_engine::application::enabled(&final_adjustments) {
         final_adjustments["v3Input"] =
-            crate::color_engine::application::input_report(&state, &path, &final_adjustments)
-                .map_err(|e| format!("Cannot save an unverifiable v3 interpretation: {e:#}"))?;
+            match crate::color_engine::application::input_report(&state, &path, &final_adjustments)
+            {
+                Ok(report) => report,
+                Err(error) => {
+                    log::warn!("Saving edits without a v3 interpretation snapshot: {error:#}");
+                    serde_json::json!({"schema": 1, "error": format!("{error:#}")})
+                }
+            };
     }
     metadata.adjustments = final_adjustments;
 

@@ -129,18 +129,22 @@ const evaluateCurveY = (curve: Array<{ x: number; y: number }>, targetX: number)
 const mixAdjustments = (presetObj: any, intensity: number, initialObj: any = INITIAL_ADJUSTMENTS): any => {
   const fraction = intensity / 100;
 
+  // A photo's own record, never part of a look: the interpretation snapshot,
+  // the pinned rendering identity (asset hashes that exist on this machine)
+  // and the RAW source treatment. Copying them to another photo would pin it
+  // to assets it may not have, or change how its sensor data is read.
+  const PHOTO_OWN = ['v3Input', 'v3Pipeline', 'v3RawRecovery'];
   if (fraction === 1) {
     const result = { ...presetObj };
-    delete result.v3Input;
+    for (const key of PHOTO_OWN) delete result[key];
     return result;
   }
-  if (fraction === 0) return {
-    ...initialObj,
-    ...(presetObj.processVersion !== undefined ? {processVersion: presetObj.processVersion} : {}),
-    ...(presetObj.v3 ? {v3: mixV3Controls(presetObj.v3, 0)} : {}),
-    ...(presetObj.v3Pipeline ? {v3Pipeline: presetObj.v3Pipeline} : {}),
-    ...(presetObj.v3RawRecovery ? {v3RawRecovery: presetObj.v3RawRecovery} : {}),
-  };
+  if (fraction === 0)
+    return {
+      ...initialObj,
+      ...(presetObj.processVersion !== undefined ? { processVersion: presetObj.processVersion } : {}),
+      ...(presetObj.v3 ? { v3: mixV3Controls(presetObj.v3, 0) } : {}),
+    };
 
   const result: any = {};
   const keys = Object.keys(presetObj);
@@ -150,9 +154,9 @@ const mixAdjustments = (presetObj: any, intensity: number, initialObj: any = INI
     const presetVal = presetObj[key];
     const initialVal = initialObj[key] !== undefined ? initialObj[key] : (INITIAL_ADJUSTMENTS as any)[key];
 
-    if (key === 'v3Input') {
-      continue; // Photo-specific audit data is refreshed at save, never a look.
-    } else if (key === 'processVersion' || key === 'v3PreviousVersion' || key === 'revision' || key === 'v3Pipeline' || key === 'v3RawRecovery') {
+    if (PHOTO_OWN.includes(key)) {
+      continue;
+    } else if (key === 'processVersion' || key === 'v3PreviousVersion' || key === 'revision') {
       result[key] = presetVal;
     } else if (key === 'v3') {
       result[key] = mixV3Controls(presetVal, intensity);
@@ -694,7 +698,9 @@ export default function PresetsPanel({ onNavigateToCommunity }: PresetsPanelProp
           break;
         }
 
-        const blob = new Blob([Uint8Array.from(imageData)], { type: fullPresetAdjustments.processVersion === 3 ? 'image/png' : 'image/jpeg' });
+        const blob = new Blob([Uint8Array.from(imageData)], {
+          type: fullPresetAdjustments.processVersion === 3 ? 'image/png' : 'image/jpeg',
+        });
         const url = URL.createObjectURL(blob);
         setPreviews((prev: Record<string, string | null>) => {
           const oldUrl = prev[preset.id];
@@ -760,7 +766,9 @@ export default function PresetsPanel({ onNavigateToCommunity }: PresetsPanelProp
 
         if (pathAtStart !== currentImagePathRef.current) return;
 
-        const blob = new Blob([Uint8Array.from(imageData)], { type: fullPresetAdjustments.processVersion === 3 ? 'image/png' : 'image/jpeg' });
+        const blob = new Blob([Uint8Array.from(imageData)], {
+          type: fullPresetAdjustments.processVersion === 3 ? 'image/png' : 'image/jpeg',
+        });
         const url = URL.createObjectURL(blob);
 
         setPreviews((prev: Record<string, string | null>) => {
@@ -1245,9 +1253,7 @@ export default function PresetsPanel({ onNavigateToCommunity }: PresetsPanelProp
                         key={sim.path}
                         onClick={() => applyFilmSim(sim)}
                         className={`w-full text-left px-3 py-2 rounded-md text-sm transition-colors ${
-                          active
-                            ? 'bg-accent text-button-text'
-                            : 'bg-surface hover:bg-card-active text-text-primary'
+                          active ? 'bg-accent text-button-text' : 'bg-surface hover:bg-card-active text-text-primary'
                         }`}
                       >
                         {sim.name}

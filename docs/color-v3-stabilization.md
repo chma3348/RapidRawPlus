@@ -1,5 +1,44 @@
 # V3 pre-calibration stabilization
 
+## September 27, 2026 — audit follow-up (Claude)
+
+Fixes from a review of the stabilization work, before calibration.
+
+- **Wide-gamut photos stay on Resolve's path.** The wide-gamut bypass sent
+  every iPhone (Display P3) photo tested to the built-in rendering — one
+  saturated pixel was enough — so none of them rendered through Resolve and
+  none could be calibrated against it. Now: colours within sRGB take the
+  sRGB capture as before; beyond it, the photo takes a Display P3 capture
+  when one is installed (`input-transform-p3.cube`, checked against the sRGB
+  capture on greys at startup), and otherwise its colours are compressed
+  into sRGB first with the same u/(1+u) shape the output stage uses, so
+  saturated colour keeps its order. Patches follow the photo's choice.
+  Provenance says which (`transform_decision`), and the pinned identity
+  records the P3 asset. Input policy string:
+  `profiled-display-cube-p3-or-compress-1`; the bypass policy string is
+  still accepted and now renders this way.
+- **Saving never fails on the snapshot.** `v3Input` records an error object
+  instead of refusing to write the sidecar.
+- **Presets and copy/paste no longer carry** `v3Pipeline`, `v3RawRecovery`
+  or `v3Input`: they describe a photo and this machine, not a look.
+- **Per-render cost.** The source digest is computed once per file version
+  (path, length, mtime) instead of hashing the whole file on every render;
+  warm slider moves are back to 12–15 ms. `CubeLut::load` returns a shared
+  `Arc` instead of cloning the lattice per call.
+- **RAW memory.** `unrecovered` keeps only the pixels the recovery changed
+  (index and original RGB, re-indexed through the orientation) rather than a
+  second full frame.
+- The runtime stage state machine is gone; `contract::ORDER` and the
+  revision remain as documentation and for reports. An input capture
+  installed without its output capture (or a P3 capture without the sRGB
+  one) is reported once at startup and ignored, instead of failing every
+  render. `prepare_color_v3` was unused and is removed.
+
+Checks: 289 library tests, all v3 integration tests, Basic parity, clippy
+`-D warnings`, fmt; frontend controls/history tests. Real photos: the two
+Tahiti iPhone JPEGs now report `compressed_into_srgb_then_captured_input…`
+and render through the Resolve transforms; sRGB JPEG parity unchanged.
+
 ## September 27, 2026 — pre-calibration build implemented
 
 The remaining planned engine and reference-intake work is implemented. This

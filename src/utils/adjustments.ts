@@ -786,7 +786,7 @@ export const ADJUSTMENT_GROUPS: Record<string, AdjustmentGroup[]> = {
   basic: [
     {
       label: 'modals.copyPaste.groups.exposureToneMapper',
-      keys: [BasicAdjustment.Exposure, 'toneMapper', 'processVersion', 'v3', 'v3Pipeline', 'v3RawRecovery', 'v3PreviousVersion'],
+      keys: [BasicAdjustment.Exposure, 'toneMapper', 'processVersion', 'v3', 'v3PreviousVersion'],
     },
     {
       label: 'modals.copyPaste.groups.tone',
@@ -911,8 +911,6 @@ export const ADJUSTMENT_SECTIONS: Sections = {
     'processVersion',
     'v3',
     'v3PreviousVersion',
-    'v3Pipeline',
-    'v3RawRecovery',
   ],
   curves: ['curves', 'pointCurves', 'parametricCurve', 'curveMode'],
   color: [

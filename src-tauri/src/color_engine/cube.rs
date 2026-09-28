@@ -14,6 +14,7 @@
 //! sRGB encode must not run after it.
 
 use anyhow::{Context, Result, bail, ensure};
+use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CubeLut {
@@ -113,9 +114,9 @@ impl CubeLut {
 
     /// Read and parse a cube, once per file version: a 64-point lattice is a
     /// quarter of a million lines, and renders ask for the same one each time.
-    pub fn load(path: &std::path::Path) -> Result<Self> {
+    pub fn load(path: &std::path::Path) -> Result<Arc<Self>> {
         use std::collections::HashMap;
-        use std::sync::{Arc, Mutex, OnceLock};
+        use std::sync::{Mutex, OnceLock};
         type Key = (std::path::PathBuf, u64, Option<std::time::SystemTime>);
         static CACHE: OnceLock<Mutex<HashMap<Key, Arc<CubeLut>>>> = OnceLock::new();
         let meta = std::fs::metadata(path)
@@ -123,18 +124,18 @@ impl CubeLut {
         let key = (path.to_path_buf(), meta.len(), meta.modified().ok());
         let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
         if let Some(hit) = cache.lock().ok().and_then(|c| c.get(&key).cloned()) {
-            return Ok((*hit).clone());
+            return Ok(hit);
         }
         let text = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
-        let cube = Self::parse(&text)?;
+        let cube = Arc::new(Self::parse(&text)?);
         if let Ok(mut c) = cache.lock() {
             // Replacing files must not retain every historical lattice forever.
             c.retain(|(p, _, _), _| p != path);
             if c.len() >= 8 {
                 c.clear();
             }
-            c.insert(key, Arc::new(cube.clone()));
+            c.insert(key, cube.clone());
         }
         Ok(cube)
     }
@@ -270,6 +271,165 @@ mod tests {
 /// The cube's own domain is sRGB-encoded, so the linear pixels the input
 /// adapter produced are re-encoded on the way in — an exact inverse — and the
 /// Intermediate values it returns are decoded on the way out.
+/// Which captured input transform a photograph goes through, and what had to
+/// happen to its colours first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputDomain {
+    /// sRGB code values: the photo's colours all fit.
+    Srgb,
+    /// A capture made with the lattice tagged Display P3, for photos whose
+    /// colours exceed sRGB.
+    DisplayP3,
+    /// Only an sRGB capture is installed: colours beyond sRGB were compressed
+    /// into it first, the way the output stage compresses toward the display.
+    SrgbCompressed,
+}
+
+/// Linear sRGB primaries to linear Display P3 primaries (both D65).
+const SRGB_TO_P3: [[f32; 3]; 3] = [
+    [0.822_462_1, 0.177_538, 0.0],
+    [0.033_194_1, 0.966_805_9, 0.0],
+    [0.017_082_7, 0.072_397_4, 0.910_519_9],
+];
+
+/// Does any pixel lie outside sRGB's 0..1? A hair of tolerance for the
+/// rounding of the profile conversion.
+pub fn exceeds_srgb(pixels: &image::Rgba32FImage) -> bool {
+    pixels
+        .pixels()
+        .any(|p| p.0[..3].iter().any(|v| !(-2e-6..=1.000_002).contains(v)))
+}
+
+/// Pull colours that lie outside sRGB back inside it, hue-preservingly, in
+/// linear light: each pixel's chroma is scaled toward its luminance. Like the
+/// output stage's `gamut_compress`, chroma up to 85% of the way to the
+/// boundary is untouched and everything beyond is squeezed into the last 15%
+/// with u/(1+u), so saturated colours keep their order and separation
+/// instead of piling onto the boundary. Luminance above white is clipped.
+pub fn compress_into_srgb(pixels: &mut image::Rgba32FImage) {
+    use rayon::prelude::*;
+    const THRESHOLD: f32 = 0.85;
+    pixels.as_mut().par_chunks_mut(4).for_each(|p| {
+        let y = 0.212_639 * p[0] + 0.715_169 * p[1] + 0.072_192 * p[2];
+        if y <= 0. {
+            p[..3].copy_from_slice(&[0.; 3]);
+            return;
+        }
+        if y >= 1. {
+            p[..3].copy_from_slice(&[1.; 3]);
+            return;
+        }
+        // How far along the ray from luminance to this colour the gamut
+        // boundary sits, in units of the colour's own chroma: reach > 1 is
+        // inside, < 1 outside.
+        let mut reach = f32::INFINITY;
+        for v in &p[..3] {
+            let d = v - y;
+            if d > 0. {
+                reach = reach.min((1. - y) / d);
+            } else if d < 0. {
+                reach = reach.min(y / -d);
+            }
+        }
+        if !reach.is_finite() {
+            return;
+        }
+        let over = 1. / reach;
+        if over <= THRESHOLD {
+            return;
+        }
+        let u = (over - THRESHOLD) / (1. - THRESHOLD);
+        let mapped = THRESHOLD + (1. - THRESHOLD) * u / (1. + u);
+        let scale = mapped / over;
+        for v in &mut p[..3] {
+            *v = (y + (*v - y) * scale).clamp(0., 1.);
+        }
+    });
+}
+
+/// A Display P3 capture must agree with the sRGB capture on greys, where the
+/// two spaces coincide; if it does not, the lattice was tagged with a
+/// different transfer function than Display P3's and would shift every tone.
+pub fn p3_capture_matches(srgb: &CubeLut, p3: &CubeLut) -> Result<()> {
+    let mut worst = 0f32;
+    for i in 1..16 {
+        let g = i as f32 / 16.;
+        let a = srgb.sample([g; 3]);
+        let b = p3.sample([g; 3]);
+        for c in 0..3 {
+            worst = worst.max((a[c] - b[c]).abs());
+        }
+    }
+    ensure!(
+        worst < 0.004,
+        "The Display P3 input transform disagrees with the sRGB one on greys by {worst:.4} (Intermediate); it was probably captured with the lattice tagged as a different colour space (gamma 2.6 P3 rather than Display P3)"
+    );
+    Ok(())
+}
+
+/// The installed input captures, and the rule for choosing between them.
+pub struct CapturedInput {
+    pub srgb: Arc<CubeLut>,
+    pub p3: Option<Arc<CubeLut>>,
+}
+
+impl CapturedInput {
+    /// Which capture these pixels take. Colours within sRGB take the sRGB
+    /// capture; beyond it, the Display P3 capture when installed, otherwise
+    /// they are compressed into sRGB first. A photo never leaves Resolve's
+    /// path because of a few saturated pixels.
+    pub fn domain_for(&self, pixels: &image::Rgba32FImage) -> InputDomain {
+        if !exceeds_srgb(pixels) {
+            InputDomain::Srgb
+        } else if self.p3.is_some() {
+            InputDomain::DisplayP3
+        } else {
+            InputDomain::SrgbCompressed
+        }
+    }
+
+    /// Apply the capture `domain` names. Patches use this with the domain the
+    /// photograph itself took, so a heal lands in the same place.
+    pub fn apply_as(&self, domain: InputDomain, pixels: &mut image::Rgba32FImage) {
+        match domain {
+            InputDomain::Srgb => apply_input_transform(&self.srgb, pixels),
+            InputDomain::DisplayP3 => {
+                let p3 = self.p3.as_ref().expect("P3 domain without a P3 capture");
+                // Colours beyond even P3 (rare: profile rounding, Adobe RGB
+                // greens) are compressed into it the same way.
+                let mut wide = pixels.clone();
+                to_p3(&mut wide);
+                if exceeds_srgb(&wide) {
+                    compress_into_srgb(&mut wide);
+                }
+                apply_input_transform(p3, &mut wide);
+                *pixels = wide;
+            }
+            InputDomain::SrgbCompressed => {
+                compress_into_srgb(pixels);
+                apply_input_transform(&self.srgb, pixels);
+            }
+        }
+    }
+
+    pub fn digest(&self) -> String {
+        match &self.p3 {
+            Some(p3) => format!("{}+{}", self.srgb.digest, p3.digest),
+            None => self.srgb.digest.clone(),
+        }
+    }
+}
+
+fn to_p3(pixels: &mut image::Rgba32FImage) {
+    use rayon::prelude::*;
+    pixels.as_mut().par_chunks_mut(4).for_each(|p| {
+        let rgb = [p[0], p[1], p[2]];
+        for (c, row) in SRGB_TO_P3.iter().enumerate() {
+            p[c] = row[0] * rgb[0] + row[1] * rgb[1] + row[2] * rgb[2];
+        }
+    });
+}
+
 pub fn apply_input_transform(cube: &CubeLut, pixels: &mut image::Rgba32FImage) {
     let encode = |v: f32| {
         if v <= 0.0031308 {
@@ -295,6 +455,64 @@ pub fn apply_input_transform(cube: &CubeLut, pixels: &mut image::Rgba32FImage) {
             pixel[c] = decode_intermediate(logged[c]);
         }
     });
+}
+
+#[cfg(test)]
+mod compression_tests {
+    use super::*;
+
+    #[test]
+    fn compression_leaves_ordinary_colour_alone_and_keeps_saturated_colour_ordered() {
+        let mut image = image::Rgba32FImage::from_fn(4, 1, |x, _| match x {
+            0 => image::Rgba([0.5, 0.3, 0.2, 1.]),
+            1 => image::Rgba([1.0, -0.05, 0.1, 1.]),
+            2 => image::Rgba([1.2, -0.1, 0.1, 1.]),
+            _ => image::Rgba([0.9, 0.05, 0.05, 1.]),
+        });
+        let before = image.clone();
+        compress_into_srgb(&mut image);
+        assert_eq!(
+            image.get_pixel(0, 0),
+            before.get_pixel(0, 0),
+            "an in-gamut colour moved"
+        );
+        for x in 1..4 {
+            let p = image.get_pixel(x, 0);
+            assert!(
+                p.0[..3].iter().all(|v| (0.0..=1.0).contains(v)),
+                "{p:?} not in gamut"
+            );
+        }
+        // The two out-of-gamut reds stay distinct, the further one further.
+        let sat = |p: &image::Rgba<f32>| p[0] - p[1];
+        assert!(sat(image.get_pixel(2, 0)) > sat(image.get_pixel(1, 0)) + 1e-4);
+        // Luminance is preserved by the chroma scaling.
+        for x in 1..3 {
+            let (a, b) = (before.get_pixel(x, 0), image.get_pixel(x, 0));
+            let y = |p: &image::Rgba<f32>| 0.212_639 * p[0] + 0.715_169 * p[1] + 0.072_192 * p[2];
+            assert!((y(a) - y(b)).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn p3_capture_check_accepts_matching_greys_and_rejects_a_gamma_mismatch() {
+        let size = 9usize;
+        let mut same = format!("LUT_3D_SIZE {size}\n");
+        let mut gamma = same.clone();
+        for b in 0..size {
+            for g in 0..size {
+                for r in 0..size {
+                    let c = [r, g, b].map(|i| i as f32 / (size - 1) as f32);
+                    same.push_str(&format!("{} {} {}\n", c[0], c[1], c[2]));
+                    let d = c.map(|v| v.powf(1.2));
+                    gamma.push_str(&format!("{} {} {}\n", d[0], d[1], d[2]));
+                }
+            }
+        }
+        let a = CubeLut::parse(&same).unwrap();
+        assert!(p3_capture_matches(&a, &a).is_ok());
+        assert!(p3_capture_matches(&a, &CubeLut::parse(&gamma).unwrap()).is_err());
+    }
 }
 
 #[cfg(test)]

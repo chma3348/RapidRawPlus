@@ -63,7 +63,7 @@ impl Recovery {
     pub(crate) fn apply(self, frame: &mut DecodedFrame) {
         if let Some(original) = &frame.unrecovered {
             if self == Self::Off {
-                frame.pixels = original.clone();
+                original.restore(&mut frame.pixels);
                 frame
                     .provenance
                     .warnings
@@ -251,21 +251,25 @@ fn develop(
         t * t * (3. - 2. * t)
     };
     let mut output = Vec::with_capacity(camera.data.len() * 4);
-    let mut unrecovered = Vec::with_capacity(camera.data.len() * 4);
-    for p in &camera.data {
+    // Only pixels the recovery touches are kept: a full second frame would
+    // double a RAW's memory for the fraction of a percent that clips.
+    let mut unrecovered = super::input::Unrecovered::default();
+    for (index, p) in camera.data.iter().enumerate() {
         let sensor = DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64);
         let balanced = sensor * gains;
         // Use exactly the same matrix path as the historical recovery stage.
         // Keep this independent buffer so disabling recovery never attempts
         // to invert the destructive neutralisation operation.
-        let original = unbalance * balanced;
-        let original = [original.x as f32, original.y as f32, original.z as f32, 1.0];
-        ensure!(
-            original.iter().all(|v| v.is_finite()),
-            "Non-finite unrecovered RAW pixel"
-        );
-        unrecovered.extend_from_slice(&original);
         let clipped = smoothstep(0.95, 1.0, sensor.y);
+        if clipped > 0. {
+            let original = unbalance * balanced;
+            let original = [original.x as f32, original.y as f32, original.z as f32];
+            ensure!(
+                original.iter().all(|v| v.is_finite()),
+                "Non-finite unrecovered RAW pixel"
+            );
+            unrecovered.pixels.push((index as u32, original));
+        }
         let balanced = if clipped > 0. {
             // A clipped sensor says only "at least this bright"; like
             // Resolve, read a fully clipped core as brighter than its
@@ -291,19 +295,11 @@ fn develop(
     let pixels =
         crate::image_processing::apply_orientation(DynamicImage::ImageRgba32F(image), orientation)
             .into_rgba32f();
-    let unrecovered = ImageBuffer::<Rgba<f32>, Vec<f32>>::from_raw(
-        camera.width as u32,
-        camera.height as u32,
-        unrecovered,
-    )
-    .context("Invalid unrecovered dimensions")?;
-    let unrecovered = crate::image_processing::apply_orientation(
-        DynamicImage::ImageRgba32F(unrecovered),
-        orientation,
-    )
-    .into_rgba32f();
+    // Indices were taken before orientation; map them through the same
+    // orientation by carrying a marker plane along.
+    let unrecovered = unrecovered.oriented(camera.width as u32, camera.height as u32, orientation);
     check_cancel()?;
-    Ok(DecodedFrame { pixels, unrecovered: Some(unrecovered), color: SourceColor {primaries: Primaries::Srgb,transfer: Transfer::Linear,reference: ReferenceDomain::Scene}, source_profile: None, rendered_origin: false, provenance: InputProvenance {
+    Ok(DecodedFrame { pixels, unrecovered: Some(unrecovered), color: SourceColor {primaries: Primaries::Srgb,transfer: Transfer::Linear,reference: ReferenceDomain::Scene}, source_profile: None, rendered_origin: false, input_domain: None, provenance: InputProvenance {
         source_hash: String::new(), transform_decision: "camera_calibration_to_linear_srgb_scene".into(),
         decoder_revision: "v3-bayer-input-1-rawler-424cc109", interpretation: "calibrated_scene_linear_srgb".into(),
         profile_hash: None, calibration: Some(record),
@@ -318,13 +314,14 @@ mod tests {
     fn recovery_is_explicit_and_original_pixels_are_retained() {
         let mut frame = develop(fixture(), Orientation::Normal, false, || Ok(())).unwrap();
         let historical = frame.pixels.clone();
-        let original = frame.unrecovered.as_ref().unwrap().clone();
+        let mut original = historical.clone();
+        frame.unrecovered.as_ref().unwrap().restore(&mut original);
         assert_ne!(historical, original);
+        assert!(!frame.unrecovered.as_ref().unwrap().pixels.is_empty());
         Recovery::NeutralGreenV1.apply(&mut frame);
         assert_eq!(frame.pixels, historical);
         Recovery::Off.apply(&mut frame);
         assert_eq!(frame.pixels, original);
-        assert_eq!(frame.unrecovered.as_ref().unwrap(), &original);
         let reopened: serde_json::Value =
             serde_json::from_str(r#"{"v3RawRecovery":"off"}"#).unwrap();
         assert_eq!(Recovery::from_edits(&reopened).unwrap(), Recovery::Off);
@@ -336,6 +333,22 @@ mod tests {
         let again = develop(fixture(), Orientation::Normal, false, || Ok(())).unwrap();
         assert_eq!(again.pixels, historical);
     }
+    #[test]
+    fn unrecovered_pixels_follow_the_orientation() {
+        // Restoring the originals on a rotated frame must equal rotating the
+        // frame restored upright.
+        let mut upright = develop(fixture(), Orientation::Normal, false, || Ok(())).unwrap();
+        let mut rotated = develop(fixture(), Orientation::Rotate90, false, || Ok(())).unwrap();
+        Recovery::Off.apply(&mut upright);
+        Recovery::Off.apply(&mut rotated);
+        let expected = crate::image_processing::apply_orientation(
+            DynamicImage::ImageRgba32F(upright.pixels),
+            Orientation::Rotate90,
+        )
+        .into_rgba32f();
+        assert_eq!(rotated.pixels, expected);
+    }
+
     fn fixture() -> RawImage {
         use rawler::{
             cfa::{CFA, PlaneColor},
@@ -479,7 +492,13 @@ mod tests {
         let pipeline = super::super::identity::pin(&state, &serde_json::json!({})).unwrap();
         let off = get(serde_json::json!({"v3Pipeline":pipeline,"v3RawRecovery":"off"}));
         let restored = get(serde_json::json!({"v3RawRecovery":"neutral_green_v1"}));
-        assert_eq!(off.pixels, *frame.unrecovered.as_ref().unwrap());
+        let mut expected_off = frame.pixels.clone();
+        frame
+            .unrecovered
+            .as_ref()
+            .unwrap()
+            .restore(&mut expected_off);
+        assert_eq!(off.pixels, expected_off);
         assert_ne!(off.pixels, on.pixels);
         assert_eq!(restored.pixels, on.pixels);
         let expected = develop(fixture(), Orientation::Normal, false, || Ok(())).unwrap();

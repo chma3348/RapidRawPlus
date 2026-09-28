@@ -10,7 +10,12 @@ use std::{
 };
 
 pub const ENGINE_REVISION: &str = "v3-stable-input-2";
-pub const INPUT_POLICY: &str = "profiled-display-cube-or-wide-gamut-bypass-1";
+pub const INPUT_POLICY: &str = "profiled-display-cube-p3-or-compress-1";
+/// Earlier policy strings this build still honours. The bypass policy
+/// rendered wide-gamut photos outside Resolve's transforms; those edits now
+/// take the P3 capture or compression like everything else.
+const ACCEPTED_INPUT_POLICIES: &[&str] =
+    &[INPUT_POLICY, "profiled-display-cube-or-wide-gamut-bypass-1"];
 pub const RAW_REVISION: &str = "bayer-d65-green-clipped-neutral-1";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,12 +34,16 @@ pub struct Identity {
     pub raw_development: String,
     pub input_transform: Option<Asset>,
     pub output_transform: Option<Asset>,
+    /// The Display P3 capture, when one was installed at pinning time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_transform_p3: Option<Asset>,
 }
 
 /// Effective pair used for an entire application render. A saved `None`
 /// means no transform, not "use whatever is installed on this machine".
 pub struct Resolved {
     pub input: Option<PathBuf>,
+    pub input_p3: Option<PathBuf>,
     pub output: Option<PathBuf>,
     pub recovery: super::raw::Recovery,
 }
@@ -49,12 +58,17 @@ impl Identity {
             ENGINE_REVISION
         );
         ensure!(
-            self.input_policy == INPUT_POLICY && self.raw_development == RAW_REVISION,
+            ACCEPTED_INPUT_POLICIES.contains(&self.input_policy.as_str())
+                && self.raw_development == RAW_REVISION,
             "This edit needs an unsupported input or RAW-development revision"
         );
-        for asset in [&self.input_transform, &self.output_transform]
-            .into_iter()
-            .flatten()
+        for asset in [
+            &self.input_transform,
+            &self.output_transform,
+            &self.input_transform_p3,
+        ]
+        .into_iter()
+        .flatten()
         {
             ensure!(
                 asset.blake3.len() == 64
@@ -93,6 +107,7 @@ pub fn resolve(state: &crate::AppState, edits: &Value) -> Result<Resolved> {
         // current renderer; loading an old sidecar does not migrate it.
         return Ok(Resolved {
             input: super::application::input_transform(state),
+            input_p3: state.input_transform_p3.lock().ok().and_then(|p| p.clone()),
             output: super::application::output_transform(state),
             recovery,
         });
@@ -118,6 +133,7 @@ pub fn resolve(state: &crate::AppState, edits: &Value) -> Result<Resolved> {
     };
     Ok(Resolved {
         input: asset(&identity.input_transform)?,
+        input_p3: asset(&identity.input_transform_p3)?,
         output: asset(&identity.output_transform)?,
         recovery,
     })
@@ -178,6 +194,7 @@ pub fn pin(state: &crate::AppState, edits: &Value) -> Result<Identity> {
         raw_development: RAW_REVISION.into(),
         input_transform: capture(pair.input)?,
         output_transform: capture(pair.output)?,
+        input_transform_p3: capture(pair.input_p3)?,
     };
     identity.validate()?;
     Ok(identity)

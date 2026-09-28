@@ -21,10 +21,70 @@ pub struct InputProvenance {
     pub calibration: Option<serde_json::Value>,
 }
 
+/// The pixels a RAW's highlight recovery changed, as they were before it:
+/// pixel index in the oriented frame, and the original linear RGB.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Unrecovered {
+    pub pixels: Vec<(u32, [f32; 3])>,
+}
+
+impl Unrecovered {
+    /// Put the original values back into a recovered frame.
+    pub fn restore(&self, image: &mut Rgba32FImage) {
+        let w = image.width();
+        for (index, rgb) in &self.pixels {
+            let p = image.get_pixel_mut(index % w, index / w);
+            p.0[..3].copy_from_slice(rgb);
+        }
+    }
+
+    /// Re-index from the sensor frame to the oriented frame: an index plane
+    /// goes through the same orientation as the picture.
+    pub(crate) fn oriented(
+        self,
+        width: u32,
+        height: u32,
+        orientation: rawler::decoders::Orientation,
+    ) -> Self {
+        if self.pixels.is_empty() {
+            return self;
+        }
+        // `apply_orientation` works on DynamicImage, which has no 32-bit
+        // grey variant, so the index goes through as two 16-bit halves.
+        let index = |x: u32, y: u32| y * width + x;
+        let lo =
+            image::ImageBuffer::<image::Luma<u16>, Vec<u16>>::from_fn(width, height, |x, y| {
+                image::Luma([(index(x, y) & 0xFFFF) as u16])
+            });
+        let hi =
+            image::ImageBuffer::<image::Luma<u16>, Vec<u16>>::from_fn(width, height, |x, y| {
+                image::Luma([(index(x, y) >> 16) as u16])
+            });
+        let lo =
+            crate::image_processing::apply_orientation(DynamicImage::ImageLuma16(lo), orientation)
+                .into_luma16();
+        let hi =
+            crate::image_processing::apply_orientation(DynamicImage::ImageLuma16(hi), orientation)
+                .into_luma16();
+        let mut map = vec![u32::MAX; (width * height) as usize];
+        for (i, (l, h)) in lo.pixels().zip(hi.pixels()).enumerate() {
+            let original = (h[0] as u32) << 16 | l[0] as u32;
+            map[original as usize] = i as u32;
+        }
+        Self {
+            pixels: self
+                .pixels
+                .into_iter()
+                .map(|(index, rgb)| (map[index as usize], rgb))
+                .collect(),
+        }
+    }
+}
+
 pub struct DecodedFrame {
     pub pixels: Rgba32FImage,
-    /// Unrecovered developed RAW, retained before the optional highlight stage.
-    pub unrecovered: Option<Rgba32FImage>,
+    /// What a RAW's highlight recovery changed, so it can be undone.
+    pub unrecovered: Option<Unrecovered>,
     pub color: SourceColor,
     pub provenance: InputProvenance,
     /// The ICC profile a display-referred source was interpreted with, when
@@ -36,6 +96,8 @@ pub struct DecodedFrame {
     /// turned into scene data. The previous engine's controls, which v3 now
     /// carries, always saw such pictures as display values, and run there.
     pub rendered_origin: bool,
+    /// Which captured input transform a rendered picture went through.
+    pub input_domain: Option<super::cube::InputDomain>,
 }
 
 /// Returns straight-alpha, linear sRGB coordinates of a display-referred
@@ -178,6 +240,7 @@ pub fn decode_profiled_photo(bytes: &[u8]) -> Result<DecodedFrame> {
         },
         source_profile: icc,
         rendered_origin: false,
+        input_domain: None,
     })
 }
 

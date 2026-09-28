@@ -31,7 +31,7 @@ fn main() -> Result<()> {
     let input_cube = support.join("input-transform.cube");
     if frame.color.reference == ReferenceDomain::Display && input_cube.exists() {
         rapidraw_lib::color_engine::cube::apply_input_transform(
-            &CubeLut::load(&input_cube)?,
+            &CubeLut::load(&input_cube)?.clone(),
             &mut frame.pixels,
         );
         frame.color = SourceColor {

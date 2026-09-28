@@ -1,6 +1,6 @@
-//! Application-stage contract shared by previews, exports and diagnostics.
-//! Change the revision, compatibility dispatch and baselines before reordering.
-use anyhow::{Result, ensure};
+//! The application's stage order, named for diagnostics and calibration
+//! reports. Change the revision and baselines before reordering the stages in
+//! `application::render_file_with_capture`, which follows this order.
 use serde::Serialize;
 
 pub const REVISION: &str = "v3-application-stages-1";
@@ -54,39 +54,13 @@ pub const ORDER: [Stage; 6] = [
     Stage::CreativeLookOutputAndGrain,
 ];
 
-#[derive(Default)]
-pub struct Execution(usize);
-impl Execution {
-    pub fn enter(&mut self, stage: Stage) -> Result<()> {
-        ensure!(
-            ORDER.get(self.0) == Some(&stage),
-            "Invalid v3 stage order at {stage:?}"
-        );
-        self.0 += 1;
-        Ok(())
-    }
-    pub fn finish(self) -> Result<()> {
-        ensure!(self.0 == ORDER.len(), "Incomplete v3 render stage sequence");
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn rejects_skipped_repeated_and_incomplete_stages() {
-        assert!(
-            Execution::default()
-                .enter(Stage::CreativeLookOutputAndGrain)
-                .is_err()
-        );
-        assert!(Execution::default().finish().is_err());
-        let mut execution = Execution::default();
-        for stage in ORDER {
-            execution.enter(stage).unwrap();
-        }
-        assert!(execution.enter(Stage::CreativeLookOutputAndGrain).is_err());
-        execution.finish().unwrap();
+    fn order_is_the_documented_one() {
+        assert_eq!(ORDER[0], Stage::SourceInterpretationAndRecovery);
+        assert_eq!(ORDER[5], Stage::CreativeLookOutputAndGrain);
+        assert_eq!(implementation_digest().len(), 64);
     }
 }

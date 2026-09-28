@@ -22,7 +22,7 @@
 //! part of the frame that never had its rendering undone.
 
 use crate::color_engine::config::{Primaries, ReferenceDomain, SourceColor, Transfer};
-use crate::color_engine::cube::{CubeLut, apply_input_transform};
+use crate::color_engine::cube::{CapturedInput, InputDomain};
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose};
 use image::{DynamicImage, Rgba32FImage, imageops};
@@ -55,7 +55,7 @@ pub fn composite(
     edits: &Value,
     color: &SourceColor,
     source_profile: Option<&[u8]>,
-    input_transform: Option<&CubeLut>,
+    input_transform: Option<(&CapturedInput, InputDomain)>,
 ) -> Result<()> {
     let patches = visible(edits);
     if patches.is_empty() {
@@ -150,7 +150,7 @@ fn to_source_space(
     color: &SourceColor,
     source_profile: Option<&[u8]>,
     stored_gamma: bool,
-    input_transform: Option<&CubeLut>,
+    input_transform: Option<(&CapturedInput, InputDomain)>,
 ) -> Result<()> {
     if stored_gamma {
         // Linear already, once the storage curve is undone, in the primaries
@@ -190,7 +190,9 @@ fn to_source_space(
         // The source has been through the input transform, so the patch must
         // be too, or it keeps a rendering the rest of the frame has had
         // removed. `apply_input_transform` takes linear values, as here.
-        (ReferenceDomain::Scene, Some(cube)) => apply_input_transform(cube, &mut linear),
+        (ReferenceDomain::Scene, Some((captured, domain))) => {
+            captured.apply_as(domain, &mut linear)
+        }
         _ => {
             debug_assert_eq!(
                 color.transfer,

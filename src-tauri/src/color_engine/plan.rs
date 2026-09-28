@@ -114,7 +114,7 @@ pub(crate) type Lattice = Vec<[f32; 4]>;
 pub struct RenderPlan {
     config: PipelineConfig,
     pub(crate) parameters: GpuParameters,
-    pub(crate) cube: Option<CubeLut>,
+    pub(crate) cube: Option<std::sync::Arc<CubeLut>>,
     /// The creative LUT's lattice, padded to `vec4`, when one is set.
     pub(crate) look: Option<Vec<[f32; 4]>>,
     /// Per pixel, the previous engine's tonal (3.5 px) and structure (40 px)

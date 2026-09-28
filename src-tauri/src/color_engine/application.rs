@@ -59,6 +59,53 @@ pub fn source_with_edits(state: &AppState, path: &str, edits: &Value) -> Result<
     source_for(state, path, &super::identity::resolve(state, edits)?)
 }
 
+/// The installed input captures for this render, if any.
+fn captured_input(pair: &super::identity::Resolved) -> Result<Option<super::cube::CapturedInput>> {
+    let Some(srgb) = &pair.input else {
+        return Ok(None);
+    };
+    Ok(Some(super::cube::CapturedInput {
+        srgb: super::cube::CubeLut::load(srgb)
+            .context("Could not load the installed v3 input transform")?,
+        p3: pair
+            .input_p3
+            .as_ref()
+            .map(|p| super::cube::CubeLut::load(p))
+            .transpose()
+            .context("Could not load the installed v3 Display P3 input transform")?,
+    }))
+}
+
+/// The file's content hash, read once per file version: the cache is keyed
+/// by path, length and modification time, and only a change in those costs a
+/// read. Content, not just the timestamp, is what identifies a source for
+/// calibration; a replacement that preserved both length and timestamp is
+/// caught the next time either changes, or by the explicit `input_report`.
+fn source_digest(
+    path: &std::path::Path,
+    length: u64,
+    modified: SystemTime,
+) -> Result<(String, Option<Vec<u8>>)> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    type Key = (std::path::PathBuf, u64, SystemTime);
+    static DIGESTS: OnceLock<Mutex<HashMap<Key, String>>> = OnceLock::new();
+    let digests = DIGESTS.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = (path.to_path_buf(), length, modified);
+    if let Some(hit) = digests.lock().ok().and_then(|d| d.get(&key).cloned()) {
+        return Ok((hit, None));
+    }
+    let bytes = std::fs::read(path)?;
+    let digest = blake3::hash(&bytes).to_hex().to_string();
+    if let Ok(mut d) = digests.lock() {
+        if d.len() >= 64 {
+            d.clear();
+        }
+        d.insert(key, digest.clone());
+    }
+    Ok((digest, Some(bytes)))
+}
+
 fn source_for(
     state: &AppState,
     path: &str,
@@ -67,18 +114,11 @@ fn source_for(
     let (path, _) = crate::file_management::parse_virtual_path(path);
     let meta = std::fs::metadata(&path)?;
     let modified = meta.modified()?;
-    // Content, not just timestamp/length, is authoritative for calibration.
-    let bytes = std::fs::read(&path)?;
-    let source_digest = blake3::hash(&bytes).to_hex().to_string();
-    // Decode depends on the installed input transform too, not just the
-    // photo's filename. Do not silently keep old pixels after replacing it.
-    let input = pair
-        .input
-        .as_ref()
-        .map(|p| super::cube::CubeLut::load(p))
-        .transpose()
-        .context("Could not load the installed v3 input transform")?;
-    let input_digest = input.as_ref().map(|c| c.digest.clone());
+    let (source_digest, bytes) = source_digest(&path, meta.len(), modified)?;
+    // Decode depends on the installed input transforms too, not just the
+    // photo's filename. Do not silently keep old pixels after replacing one.
+    let input = captured_input(pair)?;
+    let input_digest = input.as_ref().map(|c| c.digest());
     let mut cache = state
         .v3_source
         .lock()
@@ -93,6 +133,10 @@ fn source_for(
     {
         return Ok(c.frame.clone());
     }
+    let bytes = match bytes {
+        Some(bytes) => bytes,
+        None => std::fs::read(&path)?,
+    };
     let mut frame = if crate::formats::is_raw_file(&path) {
         super::raw::decode_raw(&bytes, false, || Ok(()))?
     } else {
@@ -106,43 +150,47 @@ fn source_for(
     // already right for it. Done once here rather than per render: the
     // decoded source is cached.
     if frame.color.reference == ReferenceDomain::Display
-        && let Some(cube) = input
+        && let Some(captured) = &input
     {
-        // This captured cube covers sRGB 0..1 only. A profiled P3/Adobe RGB
-        // photo can legitimately lie outside it; clipping here permanently
-        // discards colours before the wide-gamut grade ever sees them.
-        if frame
-            .pixels
-            .pixels()
-            .any(|p| p.0[..3].iter().any(|v| !(-2e-6..=1.000002).contains(v)))
-        {
-            let warning = "Captured input transform bypassed: this photo contains colours outside its sRGB domain. Using the built-in display rendering to preserve wide-gamut input.";
+        ensure!(
+            pair.output.is_some(),
+            "A captured v3 input transform requires its matching output transform"
+        );
+        // The sRGB capture covers sRGB 0..1 only. A Display P3 photo can
+        // legitimately lie outside it: it takes the P3 capture when one is
+        // installed, and is otherwise compressed into sRGB first. Either
+        // way it stays on Resolve's path; before, one saturated pixel sent
+        // the whole photo to the built-in rendering instead.
+        let domain = captured.domain_for(&frame.pixels);
+        captured.apply_as(domain, &mut frame.pixels);
+        frame.color = SourceColor {
+            primaries: Primaries::DavinciWideGamut,
+            transfer: Transfer::Linear,
+            reference: ReferenceDomain::Scene,
+        };
+        frame.rendered_origin = true;
+        frame.input_domain = Some(domain);
+        frame.provenance.transform_decision = match domain {
+            super::cube::InputDomain::Srgb => "captured_input_to_linear_dwg_scene",
+            super::cube::InputDomain::DisplayP3 => "captured_p3_input_to_linear_dwg_scene",
+            super::cube::InputDomain::SrgbCompressed => {
+                "compressed_into_srgb_then_captured_input_to_linear_dwg_scene"
+            }
+        }
+        .into();
+        frame
+            .provenance
+            .interpretation
+            .push_str(" + captured_input_transform");
+        if domain == super::cube::InputDomain::SrgbCompressed {
+            let warning = "This photo has colours beyond sRGB and only an sRGB input transform is installed: its most saturated colours were compressed into sRGB before the transform. A Display P3 capture (input-transform-p3.cube) would keep them.";
             log::warn!("{warning}");
             frame.provenance.warnings.push(warning.into());
-            frame.provenance.transform_decision =
-                "captured_input_bypassed_outside_srgb_domain".into();
-        } else {
-            ensure!(
-                pair.output.is_some(),
-                "A captured v3 input transform requires its matching output transform"
-            );
-            super::cube::apply_input_transform(&cube, &mut frame.pixels);
-            frame.color = SourceColor {
-                primaries: Primaries::DavinciWideGamut,
-                transfer: Transfer::Linear,
-                reference: ReferenceDomain::Scene,
-            };
-            frame.rendered_origin = true;
-            frame.provenance.transform_decision = "captured_input_to_linear_dwg_scene".into();
-            frame
-                .provenance
-                .interpretation
-                .push_str(" + captured_input_transform");
-            frame
-                .provenance
-                .warnings
-                .push(format!("Captured input transform digest: {}", cube.digest));
         }
+        frame.provenance.warnings.push(format!(
+            "Captured input transform digest: {}",
+            captured.digest()
+        ));
     }
     let frame = Arc::new(frame);
     *cache = Some(SourceCache {
@@ -255,6 +303,7 @@ fn look(state: &AppState, edits: &Value) -> Result<Option<Look>> {
         .and_then(|c| c.get(path).cloned());
     let lut = if strict_cube {
         let cube = super::cube::CubeLut::load(std::path::Path::new(path))?;
+        // Converted once per cube version, not per render.
         Arc::new(crate::lut_processing::Lut {
             size: cube.size,
             data: cube
@@ -352,7 +401,7 @@ fn plan(
 fn display_domain(
     pair: &super::identity::Resolved,
     source: &DecodedFrame,
-) -> Result<Option<(super::cube::CubeLut, super::cube::CubeLut)>> {
+) -> Result<Option<(Arc<super::cube::CubeLut>, Arc<super::cube::CubeLut>)>> {
     if !source.rendered_origin {
         return Ok(None);
     }
@@ -665,9 +714,9 @@ fn sampling_image(
     let neutral = ungraded(edits);
     neutral.to_string().hash(&mut hasher);
     let pair = super::identity::resolve(state, edits)?;
-    for transform in [pair.input, pair.output] {
+    for transform in [pair.input, pair.input_p3, pair.output] {
         transform
-            .map(|p| super::cube::CubeLut::load(&p).map(|c| c.digest))
+            .map(|p| super::cube::CubeLut::load(&p).map(|c| c.digest.clone()))
             .transpose()?
             .hash(&mut hasher);
     }
@@ -736,16 +785,12 @@ pub fn render_file_with_capture(
     capture: bool,
 ) -> Result<RenderedFrame> {
     ensure!(enabled(edits), "Expected v3 edits");
-    use super::contract::{Execution, Stage};
-    let mut execution = Execution::default();
-    execution.enter(Stage::SourceInterpretationAndRecovery)?;
     validate_features(edits)?;
     let mut watch = Stopwatch::start();
     let controls = controls(edits)?;
     let pair = super::identity::resolve(state, edits)?;
     let source = source_for(state, path, &pair)?;
     watch.lap("source");
-    execution.enter(Stage::PatchesFlatFieldGeometryAndSampling)?;
     let transform = crate::cache_utils::calculate_transform_hash(edits);
     // Patches are part of what the prepared image *is*, so they belong in its
     // key. Without this, hiding a patch would leave the old composite on
@@ -777,19 +822,18 @@ pub fn render_file_with_capture(
             // Only rendered sources went through this transform. Native RAW
             // is scene-linear sRGB, not transformed DWG: do not reinterpret
             // a display-encoded patch as DWG and blend it into sRGB there.
-            let cube = source
-                .rendered_origin
-                .then(|| pair.input.clone())
-                .flatten()
-                .map(|p| super::cube::CubeLut::load(&p))
-                .transpose()?;
+            let captured = if source.rendered_origin {
+                captured_input(&pair)?
+            } else {
+                None
+            };
             let mut pixels = source.pixels.clone();
             super::patches::composite(
                 &mut pixels,
                 edits,
                 &source.color,
                 source.source_profile.as_deref(),
-                cube.as_ref(),
+                captured.as_ref().zip(source.input_domain),
             )?;
             pixels
         };
@@ -868,7 +912,7 @@ pub fn render_file_with_capture(
                 &source,
                 &unedited,
                 neighbourhood_key,
-                domain.as_ref().map(|(_, output)| output),
+                domain.as_ref().map(|(_, output)| output.as_ref()),
             )
         })
     };
@@ -877,7 +921,6 @@ pub fn render_file_with_capture(
             plan.set_display_domain(input, output);
         }
     };
-    execution.enter(Stage::GlobalSpatialProcessing)?;
     let image = if controls.detail.is_neutral() && super::optics::is_neutral(&controls.effects) {
         image
     } else {
@@ -940,7 +983,6 @@ pub fn render_file_with_capture(
         ..Default::default()
     };
     let look = look(state, edits)?;
-    execution.enter(Stage::WorkingConversionAndGlobalGrade)?;
     let initial_blurs = neighbourhood_for(&controls.tone);
     let mut initial_plan = plan(
         source.color.clone(),
@@ -954,9 +996,6 @@ pub fn render_file_with_capture(
         initial_plan.set_neighbourhood(blurs);
     }
     if active.is_empty() {
-        execution.enter(Stage::OrderedLocalGradesAndBlends)?;
-        execution.enter(Stage::CreativeLookOutputAndGrain)?;
-        execution.finish()?;
         if let Some(look) = &look {
             initial_plan.set_look(look)?;
         }
@@ -976,7 +1015,6 @@ pub fn render_file_with_capture(
         engine.render_graded(&image.to_rgba32f(), &initial_plan)?
     };
     watch.lap("first pass");
-    execution.enter(Stage::OrderedLocalGradesAndBlends)?;
     let working_color = SourceColor {
         primaries: Primaries::DavinciWideGamut,
         transfer: Transfer::Linear,
@@ -1069,7 +1107,6 @@ pub fn render_file_with_capture(
         }
     }
     watch.lap("mask blends");
-    execution.enter(Stage::CreativeLookOutputAndGrain)?;
     // Only this last pass produces output, so only it renders through the
     // captured transform.
     // The vignette is already in `working`; grain belongs on the finished
@@ -1093,7 +1130,6 @@ pub fn render_file_with_capture(
         stages.working = original;
     }
     watch.lap("final pass");
-    execution.finish()?;
     Ok(frame)
 }
 
@@ -1111,6 +1147,7 @@ pub fn input_report(state: &AppState, path: &str, edits: &Value) -> Result<Value
         "schema": 1, "source": frame.color, "provenance": frame.provenance,
         "width": frame.pixels.width(), "height": frame.pixels.height(),
         "input_transform_hash": digest(&pair.input)?,
+        "input_transform_p3_hash": digest(&pair.input_p3)?,
         "output_transform_hash": digest(&pair.output)?,
         "raw_recovery": pair.recovery,
         "stage_revision": super::contract::REVISION,
@@ -1238,14 +1275,6 @@ pub async fn auto_color_v3(
     .map_err(|e| e.to_string())?
 }
 
-#[tauri::command]
-pub async fn prepare_color_v3(path: String, app_handle: tauri::AppHandle) -> Result<Value, String> {
-    use tauri::Manager;
-    tauri::async_runtime::spawn_blocking(move || {
-        source(&app_handle.state::<AppState>(),&path).map(|f|serde_json::json!({"source":f.color,"provenance":f.provenance,"width":f.pixels.width(),"height":f.pixels.height()})).map_err(|e|e.to_string())
-    }).await.map_err(|e|e.to_string())?
-}
-
 /// Explicit adoption of this build, not an automatic migration on load/save.
 #[tauri::command]
 pub async fn pin_color_v3(
@@ -1322,35 +1351,81 @@ mod audit_tests {
         );
     }
 
-    #[test]
-    fn wide_gamut_source_is_not_clipped_into_the_captured_input_domain() {
+    fn p3_red(dir: &std::path::Path) -> std::path::PathBuf {
         use image::ImageEncoder;
-        let dir = tempfile::tempdir().unwrap();
-        let photo = dir.path().join("p3.png");
+        let photo = dir.join("p3.png");
         let mut encoder =
             image::codecs::png::PngEncoder::new(std::fs::File::create(&photo).unwrap());
         encoder
             .set_icc_profile(moxcms::ColorProfile::new_display_p3().encode().unwrap())
             .unwrap();
         encoder
-            .write_image(&[255, 0, 0, 255], 1, 1, image::ExtendedColorType::Rgba8)
+            .write_image(
+                &[255, 0, 0, 255, 128, 128, 128, 255],
+                2,
+                1,
+                image::ExtendedColorType::Rgba8,
+            )
             .unwrap();
+        photo
+    }
+
+    #[test]
+    fn wide_gamut_source_stays_on_the_captured_path_by_compression() {
+        // Only an sRGB capture installed: the P3 red is compressed into sRGB
+        // and still goes through the transform; the grey is untouched by the
+        // compression and lands exactly where an sRGB photo's grey would.
+        let dir = tempfile::tempdir().unwrap();
+        let photo = p3_red(dir.path());
         let lut = dir.path().join("input.cube");
         std::fs::write(&lut, cube_text(0.2)).unwrap();
         let state = AppState::default();
-        *state.input_transform.lock().unwrap() = Some(lut);
+        *state.input_transform.lock().unwrap() = Some(lut.clone());
+        *state.output_transform.lock().unwrap() = Some(lut);
         let decoded = source(&state, photo.to_str().unwrap()).unwrap();
-        assert!(!decoded.rendered_origin);
-        assert_eq!(decoded.color.reference, ReferenceDomain::Display);
-        assert!(decoded.pixels.get_pixel(0, 0)[0] > 1.);
-        assert!(decoded.pixels.get_pixel(0, 0)[1] < 0.);
+        assert!(decoded.rendered_origin);
+        assert_eq!(decoded.color.reference, ReferenceDomain::Scene);
+        assert_eq!(
+            decoded.input_domain,
+            Some(super::super::cube::InputDomain::SrgbCompressed)
+        );
         assert!(
             decoded
                 .provenance
                 .warnings
                 .iter()
-                .any(|w| w.contains("outside its sRGB domain"))
+                .any(|w| w.contains("compressed into sRGB"))
         );
+    }
+
+    #[test]
+    fn wide_gamut_source_takes_the_p3_capture_when_installed() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo = p3_red(dir.path());
+        let srgb = dir.path().join("input.cube");
+        let p3 = dir.path().join("input-p3.cube");
+        std::fs::write(&srgb, cube_text(0.2)).unwrap();
+        std::fs::write(&p3, cube_text(0.2)).unwrap();
+        let state = AppState::default();
+        *state.input_transform.lock().unwrap() = Some(srgb.clone());
+        *state.input_transform_p3.lock().unwrap() = Some(p3);
+        *state.output_transform.lock().unwrap() = Some(srgb);
+        let decoded = source(&state, photo.to_str().unwrap()).unwrap();
+        assert_eq!(
+            decoded.input_domain,
+            Some(super::super::cube::InputDomain::DisplayP3)
+        );
+        assert!(
+            !decoded
+                .provenance
+                .warnings
+                .iter()
+                .any(|w| w.contains("compressed"))
+        );
+        // And pinning records the P3 capture too.
+        *state.v3_asset_dir.lock().unwrap() = Some(dir.path().join("assets"));
+        let identity = super::super::identity::pin(&state, &serde_json::json!({})).unwrap();
+        assert!(identity.input_transform_p3.is_some());
     }
 
     #[test]

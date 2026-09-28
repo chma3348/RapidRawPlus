@@ -2229,6 +2229,7 @@ pub fn run() {
                     for (name, slot) in [
                         ("output-transform.cube", 0usize),
                         ("input-transform.cube", 1usize),
+                        ("input-transform-p3.cube", 2usize),
                     ] {
                         let cube = data_dir.join(name);
                         if !cube.is_file() {
@@ -2243,10 +2244,10 @@ pub fn run() {
                                     &lut.digest[..12]
                                 );
                                 let state = app.state::<AppState>();
-                                let mut held = if slot == 0 {
-                                    state.output_transform.lock().unwrap()
-                                } else {
-                                    state.input_transform.lock().unwrap()
+                                let mut held = match slot {
+                                    0 => state.output_transform.lock().unwrap(),
+                                    1 => state.input_transform.lock().unwrap(),
+                                    _ => state.input_transform_p3.lock().unwrap(),
                                 };
                                 *held = Some(cube);
                             }
@@ -2255,6 +2256,37 @@ pub fn run() {
                                 cube.display()
                             ),
                         }
+                    }
+                    // An input transform without its output transform cannot
+                    // be used: rendered photos would become scene data with
+                    // nothing to render them. Say so once, here, rather than
+                    // failing every render.
+                    let state = app.state::<AppState>();
+                    let has_output = state.output_transform.lock().unwrap().is_some();
+                    let mut input = state.input_transform.lock().unwrap();
+                    let mut input_p3 = state.input_transform_p3.lock().unwrap();
+                    if !has_output && (input.is_some() || input_p3.is_some()) {
+                        log::error!(
+                            "Color v3: input-transform.cube is installed without output-transform.cube; ignoring the input transform. Install the matching output capture."
+                        );
+                        *input = None;
+                        *input_p3 = None;
+                    }
+                    if input.is_none() && input_p3.is_some() {
+                        log::error!(
+                            "Color v3: input-transform-p3.cube needs input-transform.cube (the sRGB capture) alongside it; ignoring the P3 capture."
+                        );
+                        *input_p3 = None;
+                    }
+                    if let (Some(srgb), Some(p3)) = (input.as_ref(), input_p3.as_ref())
+                        && let (Ok(srgb), Ok(p3)) = (
+                            crate::color_engine::cube::CubeLut::load(srgb),
+                            crate::color_engine::cube::CubeLut::load(p3),
+                        )
+                        && let Err(error) = crate::color_engine::cube::p3_capture_matches(&srgb, &p3)
+                    {
+                        log::error!("Color v3: ignoring input-transform-p3.cube: {error}");
+                        *input_p3 = None;
                     }
                 }
 
@@ -2380,7 +2412,6 @@ pub fn run() {
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             color_engine::application::auto_color_v3,
-            color_engine::application::prepare_color_v3,
             color_engine::application::pin_color_v3,
             color_engine::selection::inspect_color_v3,
             apply_adjustments,

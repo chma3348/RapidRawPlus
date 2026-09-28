@@ -24,14 +24,20 @@ fn main() -> Result<()> {
         )?;
         println!(
             "{}: {} | {} | {}x{} | {:.0} ms",
-            std::path::Path::new(&path).file_name().unwrap().to_string_lossy(),
+            std::path::Path::new(&path)
+                .file_name()
+                .unwrap()
+                .to_string_lossy(),
             report["provenance"]["transform_decision"],
             report["provenance"]["interpretation"],
             report["width"],
             report["height"],
             start.elapsed().as_secs_f64() * 1000.
         );
-        for w in report["provenance"]["warnings"].as_array().unwrap_or(&vec![]) {
+        for w in report["provenance"]["warnings"]
+            .as_array()
+            .unwrap_or(&vec![])
+        {
             println!("    {}", w.as_str().unwrap_or(""));
         }
     }

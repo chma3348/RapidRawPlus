@@ -47,7 +47,8 @@ adjust, the white-balance picker and the clipping warning work in v3.
 masks; detail inside masks; heal, clone, generative and Sky Replace patches.
 
 **Files.** JPEG, PNG, TIFF, WebP, HEIC, AVIF, Photoshop (flattened) and RAW,
-each with its colour profile honoured. 16-bit export with profile tags.
+each with its colour profile honoured. Display P3 photos take a P3 input
+capture when installed, else are compressed into sRGB before the sRGB one. 16-bit export with profile tags.
 
 **Speed, 24–33 megapixels on this machine.** First preview about 0.3 s; a
 slider move about 11 ms, 28 ms with masks; export about 1 s plus detail.

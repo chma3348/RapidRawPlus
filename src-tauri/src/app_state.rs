@@ -152,6 +152,9 @@ pub struct AppState {
     /// The matching input transform, which undoes the rendering a photograph
     /// already carries. Without it, rendered sources keep the built-in path.
     pub input_transform: Mutex<Option<PathBuf>>,
+    /// A second input transform captured with the lattice tagged Display P3,
+    /// for photographs whose colours exceed sRGB (iPhone photos, mostly).
+    pub input_transform_p3: Mutex<Option<PathBuf>>,
     pub v3_asset_dir: Mutex<Option<PathBuf>>,
     pub v3_source: Mutex<Option<crate::color_engine::application::SourceCache>>,
     pub v3_engine: Mutex<Option<crate::color_engine::application::EngineCache>>,
@@ -266,6 +269,7 @@ impl Default for AppState {
             output_transform: Mutex::new(None),
             sky_session: Mutex::new(None),
             input_transform: Mutex::new(None),
+            input_transform_p3: Mutex::new(None),
             v3_asset_dir: Mutex::new(None),
             model_registry: Mutex::new(None),
             comfy_process: Mutex::new(None),
