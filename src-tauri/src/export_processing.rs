@@ -16,10 +16,9 @@ use tauri::Manager;
 use crate::AppState;
 use crate::exif_processing;
 use crate::file_management::{generate_filename_from_template, parse_virtual_path};
-use crate::formats::is_raw_file;
 use crate::image_processing::{GpuContext, get_or_init_gpu_context, render_adjustments_for_empty};
 
-use crate::{hydrate_adjustments, load_settings};
+use crate::hydrate_adjustments;
 
 #[cfg(test)]
 mod precision_tests {
@@ -617,8 +616,6 @@ pub async fn export_images(
     let task = tokio::spawn(async move {
         let output_folder_path = std::path::Path::new(&output_folder_or_file);
         let total_paths = paths.len();
-        let settings = load_settings(app_handle.clone()).unwrap_or_default();
-
         let mut base_path_counts: HashMap<String, usize> = HashMap::new();
         let mut export_items = Vec::with_capacity(total_paths);
 
@@ -665,7 +662,6 @@ pub async fn export_images(
             let output_format = output_format.clone();
             let current_edit_path = current_edit_path.clone();
             let current_edit_adjustments = current_edit_adjustments.clone();
-            let _settings = settings.clone();
 
             let handle = tokio::task::spawn_blocking(move || {
                 if app_handle_clone
@@ -692,7 +688,6 @@ pub async fn export_images(
                 };
 
                 hydrate_adjustments(&state, &mut js_adjustments);
-                let _is_raw = is_raw_file(&source_path_str);
                 let original_path = std::path::Path::new(&source_path_str);
                 let file_date = exif_processing::get_creation_date_from_path(original_path);
 
@@ -892,31 +887,36 @@ pub async fn estimate_export_sizes(
 
     let context = get_or_init_gpu_context(&state, &app_handle)?;
     let is_current_edit = Some(&source_path_str) == current_edit_path.as_ref();
-    let _is_raw = is_raw_file(&source_path_str);
-    let _settings = load_settings(app_handle.clone()).unwrap_or_default();
 
-    let candidate = if is_current_edit {
+    let mut candidate = if is_current_edit {
         current_edit_adjustments
-            .clone()
             .unwrap_or_else(|| crate::exif_processing::load_sidecar(&sidecar_path).adjustments)
     } else {
         crate::exif_processing::load_sidecar(&sidecar_path).adjustments
     };
-
-    let mut candidate = candidate;
     hydrate_adjustments(&state, &mut candidate);
-    let rendered = crate::color_engine::application::render_file(
+    // An estimate, so a preview-sized render scaled to the export's pixel
+    // count: a full-resolution render here took a second per change and
+    // evicted the editor's prepared picture. Rendered aside, so it touches
+    // no editor cache either.
+    const ESTIMATE_EDGE: u32 = 1024;
+    let frame = crate::color_engine::application::render_aside(
         &context,
         &state,
         &source_path_str,
         &candidate,
-        None,
+        Some(ESTIMATE_EDGE),
     )
-    .map_err(|e| e.to_string())?
-    .export_rgba16();
-    let rendered = apply_export_resize_and_watermark(rendered, &export_settings)?;
-    Ok(
-        encode_image_to_bytes(&rendered, &output_format, export_settings.jpeg_quality)?.len()
-            * paths.len(),
-    )
+    .map_err(|e| e.to_string())?;
+    let (full_w, full_h) = frame.full_size;
+    let (target_w, target_h) = match &export_settings.resize {
+        Some(resize) => calculate_resize_target(full_w, full_h, resize),
+        None => (full_w, full_h),
+    };
+    let reduced = frame.export_rgba16();
+    let (small_w, small_h) = reduced.dimensions();
+    let bytes =
+        encode_image_to_bytes(&reduced, &output_format, export_settings.jpeg_quality)?.len();
+    let scale = (target_w as f64 * target_h as f64) / (small_w as f64 * small_h as f64).max(1.);
+    Ok((bytes as f64 * scale) as usize * paths.len())
 }

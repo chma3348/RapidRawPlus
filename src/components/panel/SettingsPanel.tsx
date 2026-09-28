@@ -517,7 +517,6 @@ export default function SettingsPanel({
     title: '',
   });
   const [testStatus, setTestStatus] = useState<TestStatus>({ message: '', success: null, testing: false });
-  const [hasInteractedWithLivePreview, setHasInteractedWithLivePreview] = useState(false);
   const [recordingAction, setRecordingAction] = useState<string | null>(null);
 
   const [aiProvider, setAiProvider] = useState(appSettings?.aiProvider || 'cpu');
@@ -539,8 +538,6 @@ export default function SettingsPanel({
     linuxGpuOptimization: appSettings?.linuxGpuOptimization ?? false,
     highResZoomMultiplier: appSettings?.highResZoomMultiplier || 1.0,
     useFullDpiRendering: appSettings?.useFullDpiRendering ?? false,
-    useWgpuRenderer:
-      appSettings?.useWgpuRenderer ?? (osPlatform === 'linux' || osPlatform === 'android' ? false : true),
     thumbnailWorkerThreads: appSettings?.thumbnailWorkerThreads ?? 4,
     imageCacheSize: appSettings?.imageCacheSize ?? 5,
     rawPreprocessingColorNr: appSettings?.rawPreprocessingColorNr ?? 0.5,
@@ -559,15 +556,6 @@ export default function SettingsPanel({
       { id: 'general', label: t('settings.categories.general'), icon: SlidersHorizontal },
       { id: 'processing', label: t('settings.categories.processing'), icon: Cpu },
       { id: 'shortcuts', label: t('settings.categories.shortcuts'), icon: Keyboard },
-    ],
-    [t],
-  );
-
-  const livePreviewQualityOptions = useMemo<OptionItem<string>[]>(
-    () => [
-      { value: 'full', label: t('settings.processing.qualities.full') },
-      { value: 'high', label: t('settings.processing.qualities.high') },
-      { value: 'performance', label: t('settings.processing.qualities.performance') },
     ],
     [t],
   );
@@ -647,7 +635,6 @@ export default function SettingsPanel({
       linuxGpuOptimization: appSettings?.linuxGpuOptimization ?? false,
       highResZoomMultiplier: appSettings?.highResZoomMultiplier || 1.0,
       useFullDpiRendering: appSettings?.useFullDpiRendering ?? false,
-      useWgpuRenderer: appSettings?.useWgpuRenderer ?? true,
       thumbnailWorkerThreads: appSettings?.thumbnailWorkerThreads ?? 4,
       imageCacheSize: appSettings?.imageCacheSize ?? 5,
       rawPreprocessingColorNr: appSettings?.rawPreprocessingColorNr ?? 0.5,
@@ -679,12 +666,7 @@ export default function SettingsPanel({
   const handleProcessingSettingChange = async (key: string, value: any) => {
     setProcessingSettings((prev) => ({ ...prev, [key]: value }));
 
-    if (
-      key === 'processingBackend' ||
-      key === 'linuxGpuOptimization' ||
-      key === 'useWgpuRenderer' ||
-      key === 'thumbnailWorkerThreads'
-    ) {
+    if (key === 'processingBackend' || key === 'linuxGpuOptimization' || key === 'thumbnailWorkerThreads') {
       setRestartRequired(true);
     } else {
       await onSettingsChange({ ...appSettings, [key]: value });
@@ -1798,38 +1780,10 @@ export default function SettingsPanel({
                           id="live-previews-toggle"
                           label={t('settings.processing.enableLivePreviews')}
                           onChange={(checked) => {
-                            setHasInteractedWithLivePreview(true);
                             onSettingsChange({ ...appSettings, enableLivePreviews: checked });
                           }}
                         />
                       </SettingItem>
-
-                      <AnimatePresence>
-                        {(appSettings?.enableLivePreviews ?? true) && (
-                          <motion.div
-                            initial={hasInteractedWithLivePreview ? { height: 0, opacity: 0 } : false}
-                            animate={{ height: 'auto', opacity: 1 }}
-                            exit={{ height: 0, opacity: 0 }}
-                            transition={{ duration: 0.3, ease: 'easeInOut' }}
-                          >
-                            <div className="pl-4 border-l-2 border-border-color ml-1">
-                              <SettingItem
-                                label={t('settings.processing.livePreviewQuality')}
-                                description={t('settings.processing.livePreviewQualityDesc')}
-                              >
-                                <Dropdown
-                                  onChange={(value: any) =>
-                                    onSettingsChange({ ...appSettings, livePreviewQuality: value })
-                                  }
-                                  options={livePreviewQualityOptions}
-                                  value={appSettings?.livePreviewQuality || 'high'}
-                                  triggerClassName="bg-bg-primary"
-                                />
-                              </SettingItem>
-                            </div>
-                          </motion.div>
-                        )}
-                      </AnimatePresence>
                     </div>
 
                     <SettingItem
@@ -1875,25 +1829,6 @@ export default function SettingsPanel({
                         defaultValue={5}
                         onChange={(e: any) => handleProcessingSettingChange('imageCacheSize', parseInt(e.target.value))}
                         fillOrigin="min"
-                      />
-                    </SettingItem>
-
-                    <SettingItem
-                      label={t('settings.processing.wgpu')}
-                      description={
-                        osPlatform === 'linux'
-                          ? t('settings.processing.wgpuDescLinux')
-                          : osPlatform === 'android'
-                            ? t('settings.processing.wgpuDescAndroid')
-                            : t('settings.processing.wgpuDescRecommended')
-                      }
-                    >
-                      <Switch
-                        checked={processingSettings.useWgpuRenderer}
-                        disabled={osPlatform === 'linux' || osPlatform === 'android'}
-                        id="wgpu-renderer-toggle"
-                        label={t('settings.processing.wgpuLabel')}
-                        onChange={(checked) => handleProcessingSettingChange('useWgpuRenderer', checked)}
                       />
                     </SettingItem>
 

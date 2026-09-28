@@ -17,6 +17,9 @@ export const FILE_FORMATS: Array<FileFormat> = [
   { id: FileFormats.Jpeg, name: 'JPEG', extensions: ['jpg', 'jpeg'] },
   { id: FileFormats.Png, name: 'PNG', extensions: ['png'] },
   { id: FileFormats.Tiff, name: 'TIFF', extensions: ['tiff'] },
+  { id: FileFormats.Webp, name: 'WebP', extensions: ['webp'] },
+  { id: FileFormats.Jxl, name: 'JPEG XL', extensions: ['jxl'] },
+  { id: FileFormats.Avif, name: 'AVIF', extensions: ['avif'] },
 ];
 
 export const FILENAME_VARIABLES: Array<string> = [

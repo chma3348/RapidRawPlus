@@ -15,6 +15,9 @@ pub struct RenderedFrame {
     /// Encoded sRGB/D65, bounded to [0,1], straight alpha. Not monitor-converted.
     pub encoded_srgb: Rgba32FImage,
     pub stages: Option<StageCapture>,
+    /// The full-resolution size this render stands for; equal to the image's
+    /// own size unless a preview was rendered from a downscaled picture.
+    pub full_size: (u32, u32),
 }
 
 impl RenderedFrame {
@@ -201,6 +204,7 @@ impl ColorEngine {
     ) -> Result<RenderedFrame> {
         let (output, stages) = self.run(input, plan, if capture { 1 } else { 0 })?;
         Ok(RenderedFrame {
+            full_size: output.dimensions(),
             encoded_srgb: output,
             stages,
         })

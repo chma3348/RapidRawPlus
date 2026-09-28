@@ -46,19 +46,6 @@ pub struct PatchMaskInfo {
     pub sub_masks: Vec<SubMask>,
 }
 
-pub fn load_and_composite(
-    base_image: &[u8],
-    path: &str,
-    adjustments: &Value,
-    use_fast_raw_dev: bool,
-    settings: &AppSettings,
-    cancel_token: Option<(Arc<AtomicUsize>, usize)>,
-) -> Result<DynamicImage> {
-    let base_image =
-        load_base_image_from_bytes(base_image, path, use_fast_raw_dev, settings, cancel_token)?;
-    composite_patches_on_image(&base_image, adjustments)
-}
-
 pub fn load_base_image_from_bytes(
     bytes: &[u8],
     path_for_ext_check: &str,
@@ -620,14 +607,10 @@ pub async fn load_image(
 
     {
         *state.original_image.lock().unwrap() = None;
-        *state.v3_source.lock().unwrap() = None;
-        *state.v3_prepared.lock().unwrap() = None;
-        *state.cached_preview.lock().unwrap() = None;
-        *state.gpu_image_cache.lock().unwrap() = None;
+        state.v3.clear();
         *state.full_warped_cache.lock().unwrap() = None;
         *state.full_transformed_cache.lock().unwrap() = None;
 
-        state.mask_cache.lock().unwrap().clear();
         state.patch_cache.lock().unwrap().clear();
         state.geometry_cache.lock().unwrap().clear();
 

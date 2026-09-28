@@ -25,9 +25,7 @@ use crate::AppState;
 use crate::android_integration::*;
 use crate::app_settings::*;
 use crate::exif_processing;
-use crate::formats::{
-    is_raw_file, is_supported_image_file, is_supported_media_file, is_video_file,
-};
+use crate::formats::{is_supported_image_file, is_supported_media_file, is_video_file};
 use crate::gpu_processing;
 use crate::image_loader;
 use crate::image_processing::GpuContext;
@@ -1063,7 +1061,6 @@ pub fn read_file_mapped(path: &Path) -> Result<Mmap, ReadFileError> {
 pub fn generate_thumbnail_data(
     path_str: &str,
     gpu_context: Option<&GpuContext>,
-    _preloaded_image: Option<&DynamicImage>,
     app_handle: &AppHandle,
 ) -> anyhow::Result<DynamicImage> {
     let (source_path, sidecar_path) = parse_virtual_path(path_str);
@@ -1072,9 +1069,6 @@ pub fn generate_thumbnail_data(
     if is_video_file(&source_path) {
         return crate::video::poster_frame(&source_path);
     }
-    let source_path_str = source_path.to_string_lossy().to_string();
-    let _is_raw = is_raw_file(&source_path_str);
-
     let metadata: Option<ImageMetadata> = fs::read_to_string(sidecar_path)
         .ok()
         .and_then(|content| serde_json::from_str(&content).ok());
@@ -1084,17 +1078,20 @@ pub fn generate_thumbnail_data(
         .map_or(serde_json::Value::Null, |m| m.adjustments.clone());
 
     let state = app_handle.state::<AppState>();
-    let context = gpu_context.ok_or_else(|| anyhow::anyhow!("V3 thumbnail needs GPU rendering"))?;
+    let context = gpu_context
+        .ok_or_else(|| anyhow::anyhow!("Thumbnails need the GPU, which failed to initialize"))?;
     let dimension = load_settings(app_handle.clone())
         .unwrap_or_default()
         .thumbnail_resolution
         .unwrap_or(720);
-    crate::color_engine::application::render_file(
+    // Its own caches and a speed demosaic: a thumbnail is small and must
+    // never evict the photo the editor is working on.
+    crate::color_engine::application::render_thumbnail(
         context,
         &state,
         path_str,
         &adjustments,
-        Some(dimension),
+        dimension,
     )
     .map(|f| DynamicImage::ImageRgba8(f.preview_rgba8()))
 }
@@ -1111,7 +1108,6 @@ fn generate_single_thumbnail_and_cache(
     path_str: &str,
     thumb_cache_dir: &Path,
     gpu_context: Option<&GpuContext>,
-    preloaded_image: Option<&DynamicImage>,
     force_regenerate: bool,
     app_handle: &AppHandle,
     settings: &AppSettings,
@@ -1155,8 +1151,7 @@ fn generate_single_thumbnail_and_cache(
 
     let target_width = settings.thumbnail_resolution.unwrap_or(720);
 
-    if let Ok(thumb_image) =
-        generate_thumbnail_data(path_str, gpu_context, preloaded_image, app_handle)
+    if let Ok(thumb_image) = generate_thumbnail_data(path_str, gpu_context, app_handle)
         && let Ok(thumb_data) = encode_thumbnail(&thumb_image, target_width)
     {
         let _ = fs::write(&cache_path, &thumb_data);
@@ -1209,7 +1204,6 @@ pub fn start_thumbnail_workers(app_handle: tauri::AppHandle) {
                         &path_to_process,
                         &cache_dir,
                         gpu_context.as_ref(),
-                        None,
                         false,
                         &app_clone,
                         &worker_settings,
@@ -1871,18 +1865,6 @@ pub fn save_metadata_and_update_thumbnail(
         sync_metadata_to_xmp(&source_path, &metadata, create_if_missing);
     }
 
-    let loaded_image_lock = state.original_image.lock().unwrap();
-    let preloaded_image_option = if let Some(loaded_image) = loaded_image_lock.as_ref() {
-        if loaded_image.path == path {
-            Some(loaded_image.image.clone())
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-    drop(loaded_image_lock);
-
     let gpu_context = gpu_processing::get_or_init_gpu_context(&state, &app_handle).ok();
     let app_handle_clone = app_handle.clone();
     let path_clone = path.clone();
@@ -1911,7 +1893,6 @@ pub fn save_metadata_and_update_thumbnail(
             &path_clone,
             &thumb_cache_dir,
             gpu_context.as_ref(),
-            preloaded_image_option.as_deref(),
             true,
             &app_handle_clone,
             &settings,
@@ -2009,8 +1990,7 @@ pub async fn apply_adjustments_to_paths(
                 path_str,
                 &thumb_cache_dir,
                 gpu_context.as_ref(),
-                None,
-                true,
+                                true,
                 &app_handle,
                 &settings,
             );
@@ -2081,8 +2061,7 @@ pub async fn reset_adjustments_for_paths(
                 path_str,
                 &thumb_cache_dir,
                 gpu_context.as_ref(),
-                None,
-                true,
+                                true,
                 &app_handle,
                 &settings,
             );
@@ -2132,7 +2111,9 @@ pub async fn apply_auto_adjustments_to_paths(
         let gpu_context = gpu_processing::get_or_init_gpu_context(&state, &app_handle).ok();
 
         paths.par_iter().for_each(|path| {
-            let loaded_image: Option<DynamicImage> = (|| -> Result<DynamicImage, String> {
+            // Writes the auto adjustments into the sidecar; the picture it
+            // decoded on the way is not needed again.
+            let _: Option<DynamicImage> = (|| -> Result<DynamicImage, String> {
                 let (source_path, sidecar_path) = parse_virtual_path(path);
                 let source_path_str = source_path.to_string_lossy().to_string();
 
@@ -2194,8 +2175,7 @@ pub async fn apply_auto_adjustments_to_paths(
                 path,
                 &thumb_cache_dir,
                 gpu_context.as_ref(),
-                loaded_image.as_ref(),
-                true,
+                                true,
                 &app_handle,
                 &settings,
             );
@@ -2843,13 +2823,13 @@ pub fn get_cached_or_generate_thumbnail_image(
             );
         }
 
-        let thumb_image = generate_thumbnail_data(path_str, gpu_context, None, app_handle)?;
+        let thumb_image = generate_thumbnail_data(path_str, gpu_context, app_handle)?;
         let thumb_data = encode_thumbnail(&thumb_image, target_width)?;
         fs::write(&cache_path, &thumb_data)?;
 
         Ok(thumb_image)
     } else {
-        generate_thumbnail_data(path_str, gpu_context, None, app_handle)
+        generate_thumbnail_data(path_str, gpu_context, app_handle)
     }
 }
 

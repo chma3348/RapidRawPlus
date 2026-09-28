@@ -22,7 +22,8 @@ export function useExportSettings() {
   const [watermarkOpacity, setWatermarkOpacity] = useState(75);
 
   const handleApplyPreset = useCallback((preset: ExportPreset) => {
-    setFileFormat(['jpeg', 'png', 'tiff'].includes(preset.fileFormat) ? preset.fileFormat : 'png');
+    // CUBE export belonged to the retired engine; every picture format still exports.
+    setFileFormat(preset.fileFormat === 'cube' ? 'png' : preset.fileFormat);
     setJpegQuality(preset.jpegQuality);
     setEnableResize(preset.enableResize);
     setResizeMode(preset.resizeMode);

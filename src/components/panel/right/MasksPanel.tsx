@@ -47,12 +47,7 @@ import CollapsibleSection from '../../ui/CollapsibleSection';
 import Switch from '../../ui/Switch';
 import Slider from '../../ui/Slider';
 import SubjectSelectionControls from './SubjectSelectionControls';
-import BasicAdjustments from '../../adjustments/Basic';
 import ColorV3Controls from '../../adjustments/ColorV3';
-import CurveGraph from '../../adjustments/Curves';
-import ColorPanel from '../../adjustments/Color';
-import DetailsPanel from '../../adjustments/Details';
-import EffectsPanel from '../../adjustments/Effects';
 import Waveform from '../editor/Waveform';
 import Resizer from '../../ui/Resizer';
 
@@ -74,7 +69,6 @@ import {
   INITIAL_MASK_ADJUSTMENTS,
   INITIAL_MASK_CONTAINER,
   MaskContainer,
-  ADJUSTMENT_SECTIONS,
 } from '../../../utils/adjustments';
 import { useContextMenu } from '../../../context/ContextMenuContext';
 import { OPTION_SEPARATOR, Orientation } from '../../ui/AppProperties';
@@ -583,7 +577,13 @@ function DepthRangePicker({
 export default function MasksPanel() {
   const { t } = useTranslation();
   const { setAdjustments } = useEditorActions();
-  const { handleGenerateAiDepthMask, handleGenerateAiForegroundMask, handleGenerateAiSkyMask, handleGenerateAiAutoSubjectMask, handleAdjustFillArea } = useAiMasking();
+  const {
+    handleGenerateAiDepthMask,
+    handleGenerateAiForegroundMask,
+    handleGenerateAiSkyMask,
+    handleGenerateAiAutoSubjectMask,
+    handleAdjustFillArea,
+  } = useAiMasking();
   const setCustomEscapeHandler = useUIStore((s) => s.setCustomEscapeHandler);
   const { appSettings } = useSettingsStore(
     useShallow((state) => ({
@@ -1375,21 +1375,35 @@ export default function MasksPanel() {
                 Select a fill to adjust its color and tone with the controls below. No regeneration.
               </p>
               <div className="space-y-1">
-                {(adjustments.aiPatches || []).filter((patch) => patch.patchData?.mask).map((patch) => {
-                  const linked = adjustments.masks.find((mask) => mask.sourceAiPatchId === patch.id);
-                  return (
-                    <button key={patch.id} type="button"
-                      aria-pressed={!!linked && activeMaskContainerId === linked.id}
-                      className={`w-full text-left rounded-md px-2 py-2 text-sm text-text-primary hover:bg-card-active focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent ${linked && activeMaskContainerId === linked.id ? 'bg-card-active' : 'bg-bg-primary'}`}
-                      onClick={() => {
-                        const id = handleAdjustFillArea(patch.id);
-                        if (id) { onSelectContainer(id); onSelectMask(null); }
-                      }}>
-                      <span className="block truncate">{patch.name || 'AI fill'}</span>
-                      <span className="block text-xs">{patch.visible === false ? 'Fill hidden · adjustments retained' : linked ? 'Edit color & tone' : 'Add color & tone adjustments'}</span>
-                    </button>
-                  );
-                })}
+                {(adjustments.aiPatches || [])
+                  .filter((patch) => patch.patchData?.mask)
+                  .map((patch) => {
+                    const linked = adjustments.masks.find((mask) => mask.sourceAiPatchId === patch.id);
+                    return (
+                      <button
+                        key={patch.id}
+                        type="button"
+                        aria-pressed={!!linked && activeMaskContainerId === linked.id}
+                        className={`w-full text-left rounded-md px-2 py-2 text-sm text-text-primary hover:bg-card-active focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent ${linked && activeMaskContainerId === linked.id ? 'bg-card-active' : 'bg-bg-primary'}`}
+                        onClick={() => {
+                          const id = handleAdjustFillArea(patch.id);
+                          if (id) {
+                            onSelectContainer(id);
+                            onSelectMask(null);
+                          }
+                        }}
+                      >
+                        <span className="block truncate">{patch.name || 'AI fill'}</span>
+                        <span className="block text-xs">
+                          {patch.visible === false
+                            ? 'Fill hidden · adjustments retained'
+                            : linked
+                              ? 'Edit color & tone'
+                              : 'Add color & tone adjustments'}
+                        </span>
+                      </button>
+                    );
+                  })}
               </div>
             </details>
           )}
@@ -2255,13 +2269,6 @@ function SettingsPanel({
   handleGenerateAiDepthMask,
   handleGenerateAiAutoSubjectMask,
 }: any) {
-  // The photo's process version, not the mask's: masks carry no
-  // processVersion of their own, and the bare `adjustments` this used to
-  // read does not exist in this scope — referencing it threw a
-  // ReferenceError and took the whole panel down as soon as a mask was
-  // selected.
-  const photoProcessVersion = useEditorStore((s: any) => s.adjustments?.processVersion);
-
   const { t } = useTranslation();
   const { showContextMenu } = useContextMenu();
   const isActive = !!container;
@@ -2355,105 +2362,6 @@ function SettingsPanel({
     const newAdjustments = typeof updater === 'function' ? updater(currentAdjustments) : updater;
     updateContainer(container.id, { adjustments: newAdjustments });
   };
-
-  const handleToggleSection = (section: string) => {
-    setCollapsibleState((prev: any) => {
-      const isOpening = !prev[section];
-      if (appSettings?.enableFocusMode && isOpening) {
-        setSettingsSectionOpen(false);
-        const newState = { ...prev };
-        Object.keys(newState).forEach((key) => {
-          newState[key] = false;
-        });
-        newState[section] = true;
-        return newState;
-      }
-      return { ...prev, [section]: !prev[section] };
-    });
-  };
-
-  const handleToggleVisibility = (sectionName: string) => {
-    if (!isActive) return;
-    const cur = container.adjustments;
-    const vis = cur.sectionVisibility || INITIAL_MASK_ADJUSTMENTS.sectionVisibility;
-    updateContainer(container.id, {
-      adjustments: { ...cur, sectionVisibility: { ...vis, [sectionName]: !vis[sectionName] } },
-    });
-  };
-
-  const handleSectionContextMenu = (event: any, sectionName: string) => {
-    if (!isActive) return;
-    event.preventDefault();
-    event.stopPropagation();
-
-    const sectionKeys = ADJUSTMENT_SECTIONS[sectionName];
-    if (!sectionKeys) return;
-
-    const handleCopy = () => {
-      const adjustmentsToCopy: Record<string, any> = {};
-      for (const key of sectionKeys) {
-        if (container.adjustments && container.adjustments[key] !== undefined) {
-          adjustmentsToCopy[key] = JSON.parse(JSON.stringify(container.adjustments[key]));
-        }
-      }
-      setCopiedSectionAdjustments({ section: sectionName, values: adjustmentsToCopy });
-    };
-
-    const handlePaste = () => {
-      if (!copiedSectionAdjustments || copiedSectionAdjustments.section !== sectionName) return;
-
-      setMaskContainerAdjustments((prev: any) => ({
-        ...prev,
-        ...copiedSectionAdjustments.values,
-        sectionVisibility: {
-          ...(prev.sectionVisibility || INITIAL_MASK_ADJUSTMENTS.sectionVisibility),
-          [sectionName]: true,
-        },
-      }));
-    };
-
-    const handleReset = () => {
-      const resetValues: any = {};
-      for (const key of sectionKeys) {
-        if (INITIAL_MASK_ADJUSTMENTS[key] !== undefined) {
-          resetValues[key] = JSON.parse(JSON.stringify(INITIAL_MASK_ADJUSTMENTS[key]));
-        }
-      }
-      setMaskContainerAdjustments((prev: any) => ({
-        ...prev,
-        ...resetValues,
-        sectionVisibility: {
-          ...(prev.sectionVisibility || INITIAL_MASK_ADJUSTMENTS.sectionVisibility),
-          [sectionName]: true,
-        },
-      }));
-    };
-
-    const isPasteAllowed = copiedSectionAdjustments && copiedSectionAdjustments.section === sectionName;
-    const sectionTitle = sectionName.charAt(0).toUpperCase() + sectionName.slice(1);
-
-    const pasteLabel = copiedSectionAdjustments
-      ? t('editor.masks.settings.pasteSectionSettings', { section: sectionTitle })
-      : t('editor.masks.settings.pasteSettings');
-
-    showContextMenu(event.clientX, event.clientY, [
-      {
-        icon: Copy,
-        label: t('editor.masks.settings.copySectionSettings', { section: sectionTitle }),
-        onClick: handleCopy,
-      },
-      { label: pasteLabel, icon: ClipboardPaste, onClick: handlePaste, disabled: !isPasteAllowed },
-      { type: OPTION_SEPARATOR },
-      {
-        icon: RotateCcw,
-        label: t('editor.masks.settings.resetSectionSettings', { section: sectionTitle }),
-        onClick: handleReset,
-      },
-    ]);
-  };
-
-  const sectionVisibility =
-    displayContainer.adjustments.sectionVisibility || INITIAL_MASK_ADJUSTMENTS.sectionVisibility;
 
   return (
     <div
@@ -2550,9 +2458,16 @@ function SettingsPanel({
           {isComponentMode && (
             <>
               {(activeSubMask.type === Mask.AiSubject || activeSubMask.type === Mask.AiPaint) && (
-                <SubjectSelectionControls parameters={activeSubMask.parameters} paint={activeSubMask.type === Mask.AiPaint}
+                <SubjectSelectionControls
+                  parameters={activeSubMask.parameters}
+                  paint={activeSubMask.type === Mask.AiPaint}
                   onChange={(parameters) => updateSubMask(activeSubMask.id, { parameters })}
-                  onAutoSelect={activeSubMask.type === Mask.AiSubject ? () => handleGenerateAiAutoSubjectMask(activeSubMask.id) : undefined} />
+                  onAutoSelect={
+                    activeSubMask.type === Mask.AiSubject
+                      ? () => handleGenerateAiAutoSubjectMask(activeSubMask.id)
+                      : undefined
+                  }
+                />
               )}
               {isAiMask && aiModelDownloadStatus && (
                 <Text
@@ -2586,27 +2501,24 @@ function SettingsPanel({
                   <Text variant={TextVariants.small} className="opacity-70">
                     {t('editor.masks.colorSelect.hint')}
                   </Text>
-                  {Array.isArray(activeSubMask.parameters?.samples) &&
-                    activeSubMask.parameters.samples.length > 0 && (
-                      <div className="flex flex-wrap gap-1">
-                        {activeSubMask.parameters.samples.map((_sp: any, i: number) => (
-                          <button
-                            key={i}
-                            onClick={() =>
-                              handleSubMaskParametersChange({
-                                samples: activeSubMask.parameters.samples.filter(
-                                  (_: any, j: number) => j !== i,
-                                ),
-                              } as any)
-                            }
-                            className="px-2 py-0.5 rounded text-xs bg-card-active text-text-primary hover:bg-red-500/40 transition-colors"
-                            data-tooltip={t('editor.masks.colorSelect.removeSample')}
-                          >
-                            {t('editor.masks.colorSelect.sample')} {i + 1} ×
-                          </button>
-                        ))}
-                      </div>
-                    )}
+                  {Array.isArray(activeSubMask.parameters?.samples) && activeSubMask.parameters.samples.length > 0 && (
+                    <div className="flex flex-wrap gap-1">
+                      {activeSubMask.parameters.samples.map((_sp: any, i: number) => (
+                        <button
+                          key={i}
+                          onClick={() =>
+                            handleSubMaskParametersChange({
+                              samples: activeSubMask.parameters.samples.filter((_: any, j: number) => j !== i),
+                            } as any)
+                          }
+                          className="px-2 py-0.5 rounded text-xs bg-card-active text-text-primary hover:bg-red-500/40 transition-colors"
+                          data-tooltip={t('editor.masks.colorSelect.removeSample')}
+                        >
+                          {t('editor.masks.colorSelect.sample')} {i + 1} ×
+                        </button>
+                      ))}
+                    </div>
+                  )}
                   <div className="flex items-center gap-1">
                     {[
                       { hue: 358, width: 35, c: '#f87171' },
@@ -2628,9 +2540,7 @@ function SettingsPanel({
                           } as any)
                         }
                         className={`w-5 h-5 rounded-full border-2 transition-transform hover:scale-110 ${
-                          activeSubMask.parameters?.swatchHue === sw.hue
-                            ? 'border-white'
-                            : 'border-transparent'
+                          activeSubMask.parameters?.swatchHue === sw.hue ? 'border-white' : 'border-transparent'
                         }`}
                         style={{ backgroundColor: sw.c }}
                         data-tooltip={t('editor.masks.colorSelect.swatchTooltip')}
@@ -2693,36 +2603,12 @@ function SettingsPanel({
         onMouseLeave={() => setIsMaskControlHovered(false)}
         className="flex flex-col gap-2"
       >
-        {photoProcessVersion === 3 ? <ColorV3Controls adjustments={displayContainer.adjustments} setAdjustments={setMaskContainerAdjustments} onDragStateChange={onDragStateChange} showEffects={false}/> : Object.keys(ADJUSTMENT_SECTIONS).map((sectionName) => {
-          const SectionComponent: any = {
-            basic: BasicAdjustments,
-            curves: CurveGraph,
-            color: ColorPanel,
-            details: DetailsPanel,
-            effects: EffectsPanel,
-          }[sectionName];
-          const title = sectionName.charAt(0).toUpperCase() + sectionName.slice(1);
-          return (
-            <CollapsibleSection
-              key={sectionName}
-              title={title}
-              isOpen={collapsibleState[sectionName]}
-              isContentVisible={sectionVisibility[sectionName]}
-              onToggle={() => handleToggleSection(sectionName)}
-              onToggleVisibility={() => handleToggleVisibility(sectionName)}
-              onContextMenu={(e: any) => handleSectionContextMenu(e, sectionName)}
-            >
-              <SectionComponent
-                adjustments={displayContainer.adjustments}
-                setAdjustments={setMaskContainerAdjustments}
-                histogram={histogram}
-                isForMask={true}
-                appSettings={appSettings}
-                onDragStateChange={onDragStateChange}
-              />
-            </CollapsibleSection>
-          );
-        })}
+        <ColorV3Controls
+          adjustments={displayContainer.adjustments}
+          setAdjustments={setMaskContainerAdjustments}
+          onDragStateChange={onDragStateChange}
+          showEffects={false}
+        />
       </div>
     </div>
   );

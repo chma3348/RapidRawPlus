@@ -80,16 +80,14 @@ use serde_json::Value;
 use tauri::{Emitter, Manager, ipc::Response};
 use tempfile::NamedTempFile;
 
-use crate::cache_utils::{
-    GEOMETRY_KEYS, calculate_geometry_hash, calculate_transform_hash, calculate_visual_hash,
-};
+use crate::cache_utils::{GEOMETRY_KEYS, calculate_geometry_hash, calculate_visual_hash};
 use crate::exif_processing::{read_exposure_time_secs, read_iso};
 use crate::file_management::parse_virtual_path;
-use crate::image_loader::{composite_patches_on_image, load_base_image_from_bytes};
+use crate::image_loader::load_base_image_from_bytes;
 use crate::image_processing::{
     GeometryParams, apply_coarse_rotation, apply_cpu_default_raw_processing, apply_flip,
-    apply_geometry_warp, apply_linear_to_srgb, apply_srgb_to_linear, downscale_f32_image,
-    get_or_init_gpu_context, render_adjustments_for_empty, warp_image_geometry,
+    apply_geometry_warp, apply_linear_to_srgb, apply_srgb_to_linear, get_or_init_gpu_context,
+    render_adjustments_for_empty, warp_image_geometry,
 };
 use crate::mask_generation::resolve_warped_image_for_masks;
 use crate::window_customizer::PinchZoomDisablePlugin;
@@ -149,69 +147,6 @@ pub struct WgpuTransformPayload {
     pub bg_primary: [f32; 4],
     pub bg_secondary: [f32; 4],
     pub pixelated: bool,
-}
-
-pub fn generate_transformed_preview(
-    state: &tauri::State<AppState>,
-    loaded_image: &LoadedImage,
-    adjustments: &serde_json::Value,
-    preview_dim: u32,
-) -> Result<(DynamicImage, f32, (f32, f32)), String> {
-    let transform_hash = calculate_transform_hash(adjustments);
-
-    let (transformed_full_res, unscaled_crop_offset) = {
-        let mut cache_lock = state.full_transformed_cache.lock().unwrap();
-        if let Some((hash, img, offset)) = cache_lock.as_ref() {
-            if *hash == transform_hash {
-                (Arc::clone(img), *offset)
-            } else {
-                let (arc_img, offset) = compute_full_transformed_res(loaded_image, adjustments)?;
-                *cache_lock = Some((transform_hash, Arc::clone(&arc_img), offset));
-                (arc_img, offset)
-            }
-        } else {
-            let (arc_img, offset) = compute_full_transformed_res(loaded_image, adjustments)?;
-            *cache_lock = Some((transform_hash, Arc::clone(&arc_img), offset));
-            (arc_img, offset)
-        }
-    };
-
-    let (full_res_w, full_res_h) = transformed_full_res.dimensions();
-
-    let final_preview_base = if full_res_w > preview_dim || full_res_h > preview_dim {
-        downscale_f32_image(&transformed_full_res, preview_dim, preview_dim)
-    } else {
-        (*transformed_full_res).clone()
-    };
-
-    let scale_for_gpu = if full_res_w > 0 {
-        final_preview_base.width() as f32 / full_res_w as f32
-    } else {
-        1.0
-    };
-
-    Ok((final_preview_base, scale_for_gpu, unscaled_crop_offset))
-}
-
-fn compute_full_transformed_res(
-    loaded_image: &LoadedImage,
-    adjustments: &serde_json::Value,
-) -> Result<(Arc<DynamicImage>, (f32, f32)), String> {
-    let has_patches = adjustments
-        .get("aiPatches")
-        .and_then(|v| v.as_array())
-        .is_some_and(|a| !a.is_empty());
-    let patched_original_image = if has_patches {
-        Cow::Owned(
-            composite_patches_on_image(&loaded_image.image, adjustments)
-                .map_err(|e| format!("Failed to composite AI patches: {}", e))?,
-        )
-    } else {
-        Cow::Borrowed(loaded_image.image.as_ref())
-    };
-
-    let (transformed_img, offset) = apply_all_transformations(patched_original_image, adjustments);
-    Ok((Arc::new(transformed_img.into_owned()), offset))
 }
 
 #[tauri::command]

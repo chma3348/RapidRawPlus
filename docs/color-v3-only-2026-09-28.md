@@ -1,5 +1,37 @@
 # V3-only application — September 28, 2026
 
+## Audit follow-up, same day (Claude)
+
+- **Side jobs no longer touch the editor's caches.** The render caches are
+  one `V3Caches` set per consumer: the editor's in `AppState`, a fresh set
+  for each thumbnail and for export-size estimates. Browsing the library
+  while a photo is open no longer evicts its decoded source; measured, a
+  slider move stays warm after a run of thumbnails.
+- **Decoding no longer holds the source-cache lock.** The lock is taken to
+  look and to store, not for the hundreds of milliseconds of a decode, so a
+  thumbnail can't stall the editor's next render and thumbnail threads
+  don't serialize on it.
+- **Thumbnails use the speed demosaic** (`Quality::Thumbnail`); a RAW
+  thumbnail is roughly twice as fast. They still need the GPU; if it fails
+  to initialize the error says so.
+- **Export-size estimate** renders aside at 1024 px and scales the encoded
+  size to the export's pixel count, instead of a full-resolution render
+  that took about a second and evicted the editor's prepared picture.
+- **WebP, JPEG XL and AVIF exports are back in the format list.** The
+  backend never lost them (with dithering from deeper renders); only the
+  UI had dropped them. CUBE export stays gone.
+- **Removed dead code** from the v2 retirement: `CachedPreview`,
+  `mask_cache`, `generate_transformed_preview`, `compute_full_transformed_res`,
+  `load_and_composite`, `resolve_tonemapper_override_from_handle`, the unused
+  `preloaded_image` thumbnail plumbing, two unused `load_settings` calls in
+  exports, the v2 branch and section context menu in the mask panel, and the
+  wgpu-renderer and live-preview-quality settings that no longer did
+  anything. `GpuImageCache` is compiled only with `legacy-reference`.
+- `RenderedFrame.full_size` records the full-resolution size a preview
+  stands for. `examples/thumbnail_timing.rs` measures thumbnails and checks
+  the editor's cache survives them.
+
+
 ## Decision implemented
 
 Development edits do not need historical appearance compatibility. V3 is now

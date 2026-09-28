@@ -9,10 +9,13 @@ use super::{
 };
 use crate::{AppState, image_processing::GpuContext};
 use anyhow::{Context, Result, ensure};
-use image::DynamicImage;
+use image::{DynamicImage, GenericImageView};
 use serde_json::Value;
 use std::path::PathBuf;
-use std::{sync::Arc, time::SystemTime};
+use std::{
+    sync::{Arc, Mutex},
+    time::SystemTime,
+};
 
 pub struct SourceCache {
     path: std::path::PathBuf,
@@ -21,7 +24,56 @@ pub struct SourceCache {
     input_digest: Option<String>,
     source_digest: String,
     recovery: super::raw::Recovery,
+    quality: Quality,
     pub frame: Arc<DecodedFrame>,
+}
+
+/// How much of the source to develop. Thumbnails never share a cache with
+/// the editor, so this cannot leak a fast demosaic into an edit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Quality {
+    /// Full demosaic; what the editor and exports use.
+    Full,
+    /// Speed demosaic for RAW, for pictures that will be shown small.
+    Thumbnail,
+}
+
+/// Everything a render remembers between calls, for one consumer. The
+/// editor's set lives in `AppState`; thumbnails, size estimates and other
+/// side jobs get a fresh set, so browsing the library cannot evict the
+/// decoded photo the editor is working on.
+#[derive(Default)]
+pub struct V3Caches {
+    pub source: Mutex<Option<SourceCache>>,
+    pub prepared: Mutex<Option<PreparedCache>>,
+    pub detail: Mutex<Option<DetailCache>>,
+    pub neighbourhood: Mutex<Option<NeighbourhoodCache>>,
+    pub sampling: Mutex<Option<(u64, Arc<DynamicImage>)>>,
+    pub masks: Mutex<std::collections::HashMap<u64, Arc<image::GrayImage>>>,
+}
+
+impl V3Caches {
+    /// Forget everything: a different photo is being opened.
+    pub fn clear(&self) {
+        if let Ok(mut c) = self.source.lock() {
+            *c = None;
+        }
+        if let Ok(mut c) = self.prepared.lock() {
+            *c = None;
+        }
+        if let Ok(mut c) = self.detail.lock() {
+            *c = None;
+        }
+        if let Ok(mut c) = self.neighbourhood.lock() {
+            *c = None;
+        }
+        if let Ok(mut c) = self.sampling.lock() {
+            *c = None;
+        }
+        if let Ok(mut c) = self.masks.lock() {
+            c.clear();
+        }
+    }
 }
 pub struct EngineCache {
     device: Arc<wgpu::Device>,
@@ -38,6 +90,8 @@ pub struct NeighbourhoodCache {
     blurs: Arc<Vec<[f32; 4]>>,
 }
 pub struct PreparedCache {
+    /// The photograph's size after geometry, before any preview downscale.
+    full: (u32, u32),
     source: Arc<DecodedFrame>,
     transform: u64,
     patches: u64,
@@ -59,7 +113,12 @@ pub fn source(state: &AppState, path: &str) -> Result<Arc<DecodedFrame>> {
 }
 
 pub fn source_with_edits(state: &AppState, path: &str, edits: &Value) -> Result<Arc<DecodedFrame>> {
-    source_for(state, path, &super::identity::resolve(state, edits)?)
+    source_for(
+        &state.v3,
+        path,
+        &super::identity::resolve(state, edits)?,
+        Quality::Full,
+    )
 }
 
 /// The installed input captures for this render, if any.
@@ -80,9 +139,10 @@ fn captured_input(pair: &super::identity::Resolved) -> Result<Option<super::cube
 }
 
 fn source_for(
-    state: &AppState,
+    caches: &V3Caches,
     path: &str,
     pair: &super::identity::Resolved,
+    quality: Quality,
 ) -> Result<Arc<DecodedFrame>> {
     let (path, _) = crate::file_management::parse_virtual_path(path);
     let meta = std::fs::metadata(&path)?;
@@ -92,26 +152,31 @@ fn source_for(
     // photo's filename. Do not silently keep old pixels after replacing one.
     let input = captured_input(pair)?;
     let input_digest = input.as_ref().map(|c| c.digest());
-    let mut cache = state
-        .v3_source
+    let hit = |c: &SourceCache| {
+        c.path == path
+            && c.length == meta.len()
+            && c.modified == modified
+            && c.input_digest == input_digest
+            && c.source_digest == source_digest
+            && c.recovery == pair.recovery
+            && c.quality == quality
+    };
+    // The lock is held only to look, never while decoding: a decode takes
+    // hundreds of milliseconds and must not block another render.
+    if let Some(frame) = caches
+        .source
         .lock()
-        .map_err(|_| anyhow::anyhow!("V3 source cache unavailable"))?;
-    if let Some(c) = &*cache
-        && c.path == path
-        && c.length == meta.len()
-        && c.modified == modified
-        && c.input_digest == input_digest
-        && c.source_digest == source_digest
-        && c.recovery == pair.recovery
+        .ok()
+        .and_then(|c| c.as_ref().filter(|c| hit(c)).map(|c| c.frame.clone()))
     {
-        return Ok(c.frame.clone());
+        return Ok(frame);
     }
     let bytes = match bytes {
         Some(bytes) => bytes,
         None => std::fs::read(&path)?,
     };
     let mut frame = if crate::formats::is_raw_file(&path) {
-        super::raw::decode_raw(&bytes, false, || Ok(()))?
+        super::raw::decode_raw(&bytes, quality == Quality::Thumbnail, || Ok(()))?
     } else {
         super::input::decode_profiled_photo(&bytes)?
     };
@@ -166,15 +231,18 @@ fn source_for(
         ));
     }
     let frame = Arc::new(frame);
-    *cache = Some(SourceCache {
-        path,
-        length: meta.len(),
-        modified,
-        input_digest,
-        source_digest,
-        recovery: pair.recovery,
-        frame: frame.clone(),
-    });
+    if let Ok(mut cache) = caches.source.lock() {
+        *cache = Some(SourceCache {
+            path,
+            length: meta.len(),
+            modified,
+            input_digest,
+            source_digest,
+            recovery: pair.recovery,
+            quality,
+            frame: frame.clone(),
+        });
+    }
     Ok(frame)
 }
 
@@ -402,7 +470,7 @@ pub fn input_transform(state: &AppState) -> Option<PathBuf> {
 /// output size and framing, and the picture a range mask samples.
 #[allow(clippy::too_many_arguments)]
 fn mask_bitmap(
-    state: &AppState,
+    caches: &V3Caches,
     mask: &crate::mask_generation::MaskDefinition,
     width: u32,
     height: u32,
@@ -429,12 +497,7 @@ fn mask_bitmap(
         picture.hash(&mut hasher);
     }
     let key = hasher.finish();
-    if let Some(hit) = state
-        .v3_masks
-        .lock()
-        .ok()
-        .and_then(|c| c.get(&key).cloned())
-    {
+    if let Some(hit) = caches.masks.lock().ok().and_then(|c| c.get(&key).cloned()) {
         return Ok(hit);
     }
     let bitmap = Arc::new(
@@ -448,7 +511,7 @@ fn mask_bitmap(
         )
         .context("Could not generate v3 mask")?,
     );
-    if let Ok(mut cache) = state.v3_masks.lock() {
+    if let Ok(mut cache) = caches.masks.lock() {
         // A handful of masks at one or two preview sizes is all an edit uses;
         // anything beyond that is stale.
         if cache.len() >= 24 {
@@ -465,7 +528,7 @@ fn mask_bitmap(
 /// not redo a spatial pass.
 #[allow(clippy::too_many_arguments)]
 fn spatial(
-    state: &AppState,
+    caches: &V3Caches,
     source: &Arc<DecodedFrame>,
     image: Arc<DynamicImage>,
     controls: &Controls,
@@ -498,7 +561,7 @@ fn spatial(
     dimension.hash(&mut hasher);
     scale.to_bits().hash(&mut hasher);
     let key = hasher.finish();
-    if let Ok(cache) = state.v3_detail.lock()
+    if let Ok(cache) = caches.detail.lock()
         && let Some(c) = cache.as_ref()
         && Arc::ptr_eq(&c.source, source)
         && c.key == key
@@ -524,7 +587,7 @@ fn spatial(
         source.color.primaries,
     );
     let result = Arc::new(DynamicImage::ImageRgba32F(pixels));
-    if let Ok(mut cache) = state.v3_detail.lock() {
+    if let Ok(mut cache) = caches.detail.lock() {
         *cache = Some(DetailCache {
             source: source.clone(),
             key,
@@ -542,13 +605,13 @@ fn spatial(
 /// for display-referred pictures. Values are in linear sRGB primaries, where
 /// those functions work. Two entries per pixel, tonal then structure.
 fn neighbourhood(
-    state: &AppState,
+    caches: &V3Caches,
     source: &Arc<DecodedFrame>,
     image: &DynamicImage,
     key: u64,
     display: Option<&super::cube::CubeLut>,
 ) -> Arc<Vec<[f32; 4]>> {
-    if let Ok(cache) = state.v3_neighbourhood.lock()
+    if let Ok(cache) = caches.neighbourhood.lock()
         && let Some(c) = cache.as_ref()
         && Arc::ptr_eq(&c.source, source)
         && c.key == key
@@ -613,7 +676,7 @@ fn neighbourhood(
         blurs.push([structure[0][i], structure[1][i], structure[2][i], 0.]);
     }
     let blurs = Arc::new(blurs);
-    if let Ok(mut cache) = state.v3_neighbourhood.lock() {
+    if let Ok(mut cache) = caches.neighbourhood.lock() {
         *cache = Some(NeighbourhoodCache {
             source: source.clone(),
             key,
@@ -664,9 +727,12 @@ fn exact_gaussian(plane: &[f32], w: usize, h: usize, radius: usize) -> Vec<f32> 
 
 /// What a colour or luminance range mask samples: the picture as it stands
 /// before grading, at full resolution.
+#[allow(clippy::too_many_arguments)]
 fn sampling_image(
     context: &GpuContext,
     state: &AppState,
+    caches: &V3Caches,
+    quality: Quality,
     path: &str,
     edits: &Value,
     transform: u64,
@@ -694,7 +760,7 @@ fn sampling_image(
             .hash(&mut hasher);
     }
     let key = hasher.finish();
-    if let Ok(cache) = state.v3_sampling.lock()
+    if let Ok(cache) = caches.sampling.lock()
         && let Some((cached, image)) = cache.as_ref()
         && *cached == key
     {
@@ -704,13 +770,13 @@ fn sampling_image(
     // The sampling render goes through the same prepared-image cache as the
     // preview. Put the preview's entry back afterwards, or the next slider
     // move pays to rebuild it from the full-resolution source.
-    let preview = state.v3_prepared.lock().ok().and_then(|mut c| c.take());
-    let frame = render_file(context, state, path, &neutral, None);
-    if let (Some(entry), Ok(mut cache)) = (preview, state.v3_prepared.lock()) {
+    let preview = caches.prepared.lock().ok().and_then(|mut c| c.take());
+    let frame = render(context, state, caches, quality, path, &neutral, None, false);
+    if let (Some(entry), Ok(mut cache)) = (preview, caches.prepared.lock()) {
         *cache = Some(entry);
     }
     let image = Arc::new(DynamicImage::ImageRgba8(frame?.preview_rgba8()));
-    if let Ok(mut cache) = state.v3_sampling.lock() {
+    if let Ok(mut cache) = caches.sampling.lock() {
         *cache = Some((key, image.clone()));
     }
     Ok((key, image))
@@ -725,7 +791,60 @@ pub fn render_file(
     edits: &Value,
     max_dimension: Option<u32>,
 ) -> Result<RenderedFrame> {
-    render_file_with_capture(context, state, path, edits, max_dimension, false)
+    render(
+        context,
+        state,
+        &state.v3,
+        Quality::Full,
+        path,
+        edits,
+        max_dimension,
+        false,
+    )
+}
+
+/// A library thumbnail: speed demosaic, and a cache set of its own so it
+/// never evicts what the editor is working on.
+pub fn render_thumbnail(
+    context: &GpuContext,
+    state: &AppState,
+    path: &str,
+    edits: &Value,
+    max_dimension: u32,
+) -> Result<RenderedFrame> {
+    let caches = V3Caches::default();
+    render(
+        context,
+        state,
+        &caches,
+        Quality::Thumbnail,
+        path,
+        edits,
+        Some(max_dimension),
+        false,
+    )
+}
+
+/// A render that must not disturb the editor's caches (size estimates,
+/// previews of other photos), at full quality.
+pub fn render_aside(
+    context: &GpuContext,
+    state: &AppState,
+    path: &str,
+    edits: &Value,
+    max_dimension: Option<u32>,
+) -> Result<RenderedFrame> {
+    let caches = V3Caches::default();
+    render(
+        context,
+        state,
+        &caches,
+        Quality::Full,
+        path,
+        edits,
+        max_dimension,
+        false,
+    )
 }
 
 /// Stage timings on stderr when `RAPIDRAW_V3_PROFILE` is set. Costs nothing
@@ -757,13 +876,36 @@ pub fn render_file_with_capture(
     max_dimension: Option<u32>,
     capture: bool,
 ) -> Result<RenderedFrame> {
+    render(
+        context,
+        state,
+        &state.v3,
+        Quality::Full,
+        path,
+        edits,
+        max_dimension,
+        capture,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render(
+    context: &GpuContext,
+    state: &AppState,
+    caches: &V3Caches,
+    quality: Quality,
+    path: &str,
+    edits: &Value,
+    max_dimension: Option<u32>,
+    capture: bool,
+) -> Result<RenderedFrame> {
     let normalized = super::migration::normalize(edits)?;
     let edits = normalized.as_ref();
     validate_features(edits)?;
     let mut watch = Stopwatch::start();
     let controls = controls(edits)?;
     let pair = super::identity::resolve(state, edits)?;
-    let source = source_for(state, path, &pair)?;
+    let source = source_for(caches, path, &pair, quality)?;
     watch.lap("source");
     let transform = crate::cache_utils::calculate_transform_hash(edits);
     // Patches are part of what the prepared image *is*, so they belong in its
@@ -777,8 +919,8 @@ pub fn render_file_with_capture(
         }
         hasher.finish()
     };
-    let mut prepared = state
-        .v3_prepared
+    let mut prepared = caches
+        .prepared
         .lock()
         .map_err(|_| anyhow::anyhow!("V3 preview cache unavailable"))?;
     let hit = prepared.as_ref().is_some_and(|p| {
@@ -838,7 +980,8 @@ pub fn render_file_with_capture(
         };
         let base = DynamicImage::ImageRgba32F(patched);
         let (transformed, offset) = crate::apply_all_transformations(&base, geometry_edits);
-        let full_width = transformed.width();
+        let full = transformed.dimensions();
+        let full_width = full.0;
         let image = if let Some(dim) = max_dimension {
             ensure!((16..=16384).contains(&dim), "Invalid v3 preview dimensions");
             crate::image_processing::downscale_f32_image(&transformed, dim, dim)
@@ -847,6 +990,7 @@ pub fn render_file_with_capture(
         };
         let scale = image.width() as f32 / full_width as f32;
         *prepared = Some(PreparedCache {
+            full,
             source: source.clone(),
             transform,
             patches,
@@ -857,7 +1001,7 @@ pub fn render_file_with_capture(
         });
     }
     let p = prepared.as_ref().unwrap();
-    let (image, offset, scale) = (p.image.clone(), p.offset, p.scale);
+    let (image, offset, scale, full) = (p.image.clone(), p.offset, p.scale, p.full);
     drop(prepared);
     // Built lazily: only a pass whose tone controls move needs it.
     let domain = display_domain(&pair, &source)?;
@@ -882,7 +1026,7 @@ pub fn render_file_with_capture(
     let neighbourhood_for = |tone: &super::controls::Tone| {
         (!tone.is_neutral()).then(|| {
             neighbourhood(
-                state,
+                caches,
                 &source,
                 &unedited,
                 neighbourhood_key,
@@ -899,7 +1043,7 @@ pub fn render_file_with_capture(
         image
     } else {
         spatial(
-            state,
+            caches,
             &source,
             image,
             &controls,
@@ -930,7 +1074,7 @@ pub fn render_file_with_capture(
     // per geometry or patch change rather than per render.
     let sampled = if active.iter().any(|m| m.requires_warped_image()) {
         Some(sampling_image(
-            context, state, path, edits, transform, patches,
+            context, state, caches, quality, path, edits, transform, patches,
         )?)
     } else {
         None
@@ -973,7 +1117,9 @@ pub fn render_file_with_capture(
         if let Some(look) = &look {
             initial_plan.set_look(look)?;
         }
-        return engine.render(&float_pixels(&image), &initial_plan, capture);
+        let mut frame = engine.render(&float_pixels(&image), &initial_plan, capture)?;
+        frame.full_size = full;
+        return Ok(frame);
     }
     // With masks, the first pass only feeds the local adjustments, which read
     // the graded stage alone.
@@ -1026,7 +1172,7 @@ pub fn render_file_with_capture(
             continue;
         }
         let bitmap = mask_bitmap(
-            state,
+            caches,
             mask,
             image.width(),
             image.height(),
@@ -1100,6 +1246,7 @@ pub fn render_file_with_capture(
         final_plan.set_look(look)?;
     }
     let mut frame = engine.render(&working, &final_plan, capture)?;
+    frame.full_size = full;
     if let (Some(stages), Some(original)) = (&mut frame.stages, original_working) {
         stages.working = original;
     }
@@ -1133,7 +1280,7 @@ fn interpretation_report(
         super::file_version::digest(&real_path, true)?;
     }
     let pair = super::identity::resolve(state, edits)?;
-    let frame = source_for(state, path, &pair)?;
+    let frame = source_for(&state.v3, path, &pair, Quality::Full)?;
     let digest = |p: &Option<PathBuf>| -> Result<Option<String>> {
         p.as_ref()
             .map(|p| Ok(super::file_version::digest(p, fresh)?.0))
@@ -1292,7 +1439,7 @@ pub async fn pin_color_v3(
         pipeline.engine = super::identity::ENGINE_REVISION.into();
         let pinned = serde_json::json!({"v3Pipeline":pipeline});
         let pair = super::identity::resolve(&state, &pinned).map_err(|e| format!("{e:#}"))?;
-        let frame = source_for(&state, &path, &pair).map_err(|e| format!("{e:#}"))?;
+        let frame = source_for(&state.v3, &path, &pair, Quality::Full).map_err(|e| format!("{e:#}"))?;
         Ok(serde_json::json!({"pipeline":pipeline,"source":frame.color,"provenance":frame.provenance}))
     }).await.map_err(|e| e.to_string())?
 }
@@ -1490,9 +1637,10 @@ mod audit_tests {
             let mut controls = Controls::default();
             controls.detail.texture = 10.; // spatial stage stays active at Centre=0
             controls.effects.centre = amount;
-            let cached = spatial(&warm, &source, image.clone(), &controls, 0, 0, None, 1.).unwrap();
+            let cached =
+                spatial(&warm.v3, &source, image.clone(), &controls, 0, 0, None, 1.).unwrap();
             let fresh = spatial(
-                &AppState::default(),
+                &V3Caches::default(),
                 &source,
                 image.clone(),
                 &controls,

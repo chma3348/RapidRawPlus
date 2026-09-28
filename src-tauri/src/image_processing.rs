@@ -1739,14 +1739,6 @@ pub fn resolve_tonemapper_override(settings: &crate::AppSettings, is_raw: bool) 
     Some(if tm == "agx" { 1 } else { 0 })
 }
 
-pub fn resolve_tonemapper_override_from_handle(
-    app_handle: &tauri::AppHandle,
-    is_raw: bool,
-) -> Option<u32> {
-    let settings = crate::app_settings::load_settings(app_handle.clone()).unwrap_or_default();
-    resolve_tonemapper_override(&settings, is_raw)
-}
-
 pub fn apply_cpu_agx_tonemap(image: &mut DynamicImage) {
     const AGX_EPSILON: f32 = 1.0e-6;
     const AGX_MIN_EV: f32 = -15.2;

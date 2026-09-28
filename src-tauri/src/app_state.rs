@@ -4,10 +4,11 @@ use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, Mutex};
 
-use image::{DynamicImage, GrayImage, RgbaImage};
+use image::{DynamicImage, RgbaImage};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as TokioMutex;
 use tokio::task::JoinHandle;
+#[cfg(any(test, feature = "legacy-reference"))]
 use wgpu::{Texture, TextureView};
 
 use crate::ai_processing::AiState;
@@ -36,17 +37,7 @@ pub struct LoadedImage {
     pub is_raw: bool,
 }
 
-#[derive(Clone)]
-pub struct CachedPreview {
-    pub image: Arc<DynamicImage>,
-    pub small_image: Arc<DynamicImage>,
-    pub transform_hash: u64,
-    pub scale: f32,
-    pub unscaled_crop_offset: (f32, f32),
-    pub preview_dim: u32,
-    pub interactive_divisor: f32,
-}
-
+#[cfg(any(test, feature = "legacy-reference"))]
 pub struct GpuImageCache {
     pub texture: Texture,
     pub texture_view: TextureView,
@@ -158,22 +149,15 @@ pub struct AppState {
     /// for photographs whose colours exceed sRGB (iPhone photos, mostly).
     pub input_transform_p3: Mutex<Option<PathBuf>>,
     pub v3_asset_dir: Mutex<Option<PathBuf>>,
-    pub v3_source: Mutex<Option<crate::color_engine::application::SourceCache>>,
+    /// The geometry-warped full picture the AI tools (masks, patches, sky)
+    /// read, keyed by the geometry hash.
+    pub full_warped_cache: Mutex<Option<(u64, Arc<DynamicImage>)>>,
+    /// The editor's render caches. Side jobs (thumbnails, size estimates)
+    /// use their own set, so they never evict the photo being edited.
+    pub v3: crate::color_engine::application::V3Caches,
     pub v3_engine: Mutex<Option<crate::color_engine::application::EngineCache>>,
-    pub v3_prepared: Mutex<Option<crate::color_engine::application::PreparedCache>>,
-    /// Full-resolution neutral render of the v3 source, which colour and
-    /// luminance range masks sample. Keyed by source, geometry and patches:
-    /// everything that changes what the picture is before it is graded.
-    pub v3_sampling: Mutex<Option<(u64, std::sync::Arc<image::DynamicImage>)>>,
-    /// The prepared image with detail applied. Detail is spatial and the
-    /// slowest v3 stage, so moving any other slider must not redo it.
-    pub v3_detail: Mutex<Option<crate::color_engine::application::DetailCache>>,
-    pub v3_neighbourhood: Mutex<Option<crate::color_engine::application::NeighbourhoodCache>>,
-    /// Rendered v3 mask bitmaps, keyed by everything that shapes them. Moving
-    /// a global slider does not move a mask, so it must not rebuild one.
-    pub v3_masks: Mutex<std::collections::HashMap<u64, std::sync::Arc<image::GrayImage>>>,
-    pub cached_preview: Mutex<Option<CachedPreview>>,
     pub gpu_context: Mutex<Option<GpuContext>>,
+    #[cfg(any(test, feature = "legacy-reference"))]
     pub gpu_image_cache: Mutex<Option<GpuImageCache>>,
     #[cfg(any(test, feature = "legacy-reference"))]
     pub gpu_processor: Mutex<Option<GpuProcessorState>>,
@@ -203,13 +187,11 @@ pub struct AppState {
     pub thumbnail_progress: Mutex<ThumbnailProgressTracker>,
     pub preview_worker_tx: Mutex<Option<Sender<PreviewJob>>>,
     pub analytics_worker_tx: Mutex<Option<Sender<AnalyticsJob>>>,
-    pub mask_cache: Mutex<HashMap<u64, GrayImage>>,
     pub patch_cache: Mutex<HashMap<String, serde_json::Value>>,
     pub geometry_cache: Mutex<HashMap<u64, DynamicImage>>,
     pub thumbnail_geometry_cache: Mutex<HashMap<String, (u64, DynamicImage, f32)>>,
     pub lens_db: Mutex<Option<Arc<LensDatabase>>>,
     pub load_image_generation: Arc<AtomicUsize>,
-    pub full_warped_cache: Mutex<Option<(u64, Arc<DynamicImage>)>>,
     pub full_transformed_cache: Mutex<Option<TransformedImageCache>>,
     pub decoded_image_cache: Mutex<DecodedImageCache>,
     pub thumbnail_manager: Arc<ThumbnailManager>,
@@ -226,15 +208,10 @@ impl Default for AppState {
             window_setup_complete: AtomicBool::new(false),
             gpu_crash_flag_path: Mutex::new(None),
             original_image: Mutex::new(None),
-            v3_source: Mutex::new(None),
+            v3: Default::default(),
             v3_engine: Mutex::new(None),
-            v3_prepared: Mutex::new(None),
-            v3_sampling: Mutex::new(None),
-            v3_detail: Mutex::new(None),
-            v3_neighbourhood: Mutex::new(None),
-            v3_masks: Mutex::new(std::collections::HashMap::new()),
-            cached_preview: Mutex::new(None),
             gpu_context: Mutex::new(None),
+            #[cfg(any(test, feature = "legacy-reference"))]
             gpu_image_cache: Mutex::new(None),
             #[cfg(any(test, feature = "legacy-reference"))]
             gpu_processor: Mutex::new(None),
@@ -260,13 +237,11 @@ impl Default for AppState {
             }),
             preview_worker_tx: Mutex::new(None),
             analytics_worker_tx: Mutex::new(None),
-            mask_cache: Mutex::new(HashMap::new()),
             patch_cache: Mutex::new(HashMap::new()),
             geometry_cache: Mutex::new(HashMap::new()),
             thumbnail_geometry_cache: Mutex::new(HashMap::new()),
             lens_db: Mutex::new(None),
             load_image_generation: Arc::new(AtomicUsize::new(0)),
-            full_warped_cache: Mutex::new(None),
             full_transformed_cache: Mutex::new(None),
             decoded_image_cache: Mutex::new(DecodedImageCache::new(5)),
             thumbnail_manager: ThumbnailManager::new(),
@@ -275,6 +250,7 @@ impl Default for AppState {
             input_transform: Mutex::new(None),
             input_transform_p3: Mutex::new(None),
             v3_asset_dir: Mutex::new(None),
+            full_warped_cache: Mutex::new(None),
             model_registry: Mutex::new(None),
             comfy_process: Mutex::new(None),
         }
