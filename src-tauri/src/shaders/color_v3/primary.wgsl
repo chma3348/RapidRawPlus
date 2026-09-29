@@ -118,6 +118,23 @@ fn highlight_stops(key: f32) -> f32 {
     let i = min(u32(floor(x)), 63u);
     return row_stops(mix(parameters.highlight_curve[i], parameters.highlight_curve[i + 1u], x - f32(i)), slider);
 }
+// Resolve's Saturation, measured: a mix toward Rec.709 luma of the DaVinci
+// Intermediate log values, by exactly 1 + slider/100 (fitted 0.005, 0.503,
+// 1.499, 1.995 at -100, -50, +50, +100 on the chart; 0.3 level residual).
+// Greys are untouched; the log-domain mix is why saturated brights darken
+// a little as they saturate, as they do in Resolve.
+fn resolve_saturation(rgb: vec3<f32>) -> vec3<f32> {
+    let s = parameters.color.x;
+    if s == 1.0 { return rgb; }
+    let logged = vec3<f32>(channel_key(rgb.r), channel_key(rgb.g), channel_key(rgb.b));
+    let y = dot(logged, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let mixed = y + (logged - vec3<f32>(y)) * s;
+    return max(vec3<f32>(decode_intermediate_soft(mixed.r), decode_intermediate_soft(mixed.g), decode_intermediate_soft(mixed.b)), vec3<f32>(0.0));
+}
+fn decode_intermediate_soft(v: f32) -> f32 {
+    if v <= 0.02740668 { return v / 10.44426855; }
+    return exp2(v / 0.07329248 - 7.0) - 0.0075;
+}
 fn channel_key(v: f32) -> f32 {
     let y = max(v, 0.0);
     if y <= 0.00262409 { return y * 10.44426855; }
@@ -193,6 +210,7 @@ fn grade(input:vec3<f32>, tonal:vec3<f32>, structure:vec3<f32>, key_wide:f32, ke
         // curves, which move luminance too.
         graded_y = dot(rgb, vec3<f32>(0.27411851, 0.87363190, -0.14775041));
     }
+    rgb=resolve_saturation(rgb);
     if parameters.flags.z == 0u { return rgb; }
     var lab=to_lab_work(rgb);
     let chroma=length(lab.yz);
@@ -222,7 +240,8 @@ fn grade(input:vec3<f32>, tonal:vec3<f32>, structure:vec3<f32>, key_wide:f32, ke
     delta+=custom/max(1.0,coverage)*protect;
     let h=angle+parameters.color.z*protect+delta.x;
     let vibrance=exp2(parameters.color.y*(1.0-smoothstep(0.0,0.4,chroma/max(abs(lab.x),0.01))));
-    let c=chroma*parameters.color.x*vibrance*exp2(delta.y);
+    // Saturation itself is Resolve's now (resolve_saturation, above).
+    let c=chroma*vibrance*exp2(delta.y);
     lab=vec3<f32>(lab.x*exp2(delta.z*0.5),cos(h)*c,sin(h)*c);
     // Wheels key off the tone-mapped luminance, the same image the custom
     // ranges select from and the one on screen: set exposure and contrast

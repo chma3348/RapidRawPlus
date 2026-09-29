@@ -1038,7 +1038,7 @@ fn stabilization_contracts(context: &GpuContext) {
         )
         .is_err()
     );
-    assert_eq!(before["stage_revision"], "v3-application-stages-3");
+    assert_eq!(before["stage_revision"], "v3-application-stages-4");
 }
 
 fn pinned_pipeline_contracts(context: &GpuContext) {
@@ -1872,6 +1872,50 @@ fn a_patch_of_the_photo_itself_is_invisible_on_a_p3_file() {
 fn tone_sliders_are_resolves_measured_gains() {
     shadows_is_resolves_measured_gain();
     highlights_is_resolves_measured_gain();
+    saturation_is_resolves_log_mix();
+}
+
+/// Saturation mixes the Intermediate log values toward their Rec.709 luma by
+/// 1 + slider/100: greys stay put, colour follows the formula.
+fn saturation_is_resolves_log_mix() {
+    let engine = ColorEngine::new(gpu()).unwrap();
+    let colour = ImageBuffer::from_fn(96, 1, |x, _| {
+        let v = 0.005 + x as f32 * 0.01;
+        if x % 3 == 0 {
+            Rgba([v, v, v, 1.0])
+        } else {
+            Rgba([v * 2.5, v, v * 0.3, 1.0])
+        }
+    });
+    let enc = |v: f32| spaces::encode_intermediate(v.max(0.0) as f64);
+    let dec = |v: f64| spaces::decode(v, Transfer::DavinciIntermediate) as f32;
+    for slider in [-100.0f32, -50.0, 0.0, 30.0, 100.0] {
+        let mut c = config();
+        c.source = SourceColor {
+            primaries: Primaries::DavinciWideGamut,
+            transfer: Transfer::Linear,
+            reference: ReferenceDomain::Scene,
+        };
+        c.output_rendering = OutputRendering::SceneLuminanceV1;
+        c.controls.saturation = slider;
+        let plan = RenderPlan::build(c).unwrap();
+        let stages = engine.render(&colour, &plan, true).unwrap().stages.unwrap();
+        for (before, after) in stages.working.pixels().zip(stages.graded.pixels()) {
+            let logged = [enc(before[0]), enc(before[1]), enc(before[2])];
+            let y = 0.2126 * logged[0] + 0.7152 * logged[1] + 0.0722 * logged[2];
+            let s = 1.0 + slider as f64 / 100.0;
+            for ch in 0..3 {
+                let want = dec(y + (logged[ch] - y) * s).max(0.0);
+                let tolerance = 1e-3 * want.max(0.01);
+                assert!(
+                    (after[ch] - want).abs() < tolerance,
+                    "saturation {slider}: {:?} -> {:?}, channel {ch} wanted {want}",
+                    before,
+                    after
+                );
+            }
+        }
+    }
 }
 
 fn gpu() -> GpuContext {

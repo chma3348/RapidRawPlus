@@ -3,7 +3,7 @@
 //! `application::render_file_with_capture`, which follows this order.
 use serde::Serialize;
 
-pub const REVISION: &str = "v3-application-stages-3";
+pub const REVISION: &str = "v3-application-stages-4";
 /// Diagnostic fingerprint in calibration reports. This is not a substitute
 /// for renderer-version compatibility, nor a claim to hash the entire binary.
 pub fn implementation_digest() -> &'static str {
