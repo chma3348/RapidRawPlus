@@ -43,7 +43,7 @@ bright come only from RAW highlights, which are not part of this fit.
 
 `resolve_shadows` in the v3 shader: the slider picks a gain in stops from a
 65-knot table (`src-tauri/src/color_engine/resolve_shadows_table.rs`, written
-by `tools/fit_resolve_shadows.py`), linear between the measured stops and
+by `tools/fit_resolve_tone.py shadows`), linear between the measured stops and
 zero at 0, using the neighbourhood buffer's blurred Intermediate luminance as
 the key (the pixel's own when no neighbourhood is bound). It runs in the
 working space before the previous engine's remaining Basic controls, whose

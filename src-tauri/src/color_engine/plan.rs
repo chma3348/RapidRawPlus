@@ -68,6 +68,8 @@ pub(crate) struct GpuParameters {
     /// Resolve's measured Shadows response: per key knot, the gain in stops
     /// at slider -100, -50, +50, +100 (see `resolve_shadows_table`).
     pub shadow_curve: [[f32; 4]; super::resolve_shadows_table::KNOTS],
+    /// Resolve's measured Highlights response, laid out the same way.
+    pub highlight_curve: [[f32; 4]; super::resolve_highlights_table::KNOTS],
 }
 
 /// What a creative LUT expects to be fed, and therefore where in the
@@ -323,6 +325,7 @@ impl RenderPlan {
             ),
             domain: [0; 4],
             shadow_curve: super::resolve_shadows_table::GAIN_STOPS,
+            highlight_curve: super::resolve_highlights_table::GAIN_STOPS,
             look: [0.; 4],
             look_flags: [0; 4],
             work_to_look: packed(

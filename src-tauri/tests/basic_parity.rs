@@ -144,10 +144,8 @@ fn basic_sliders_match_the_previous_engine() {
             json!({"brightness": -2.0}),
             json!({"contrast": 60, "contrastPivot": 35}),
             json!({"contrast": -60}),
-            json!({"highlights": -80}),
-            json!({"highlights": 70}),
-            // Shadows is not compared: v3's follows Resolve's measured
-            // response (resolve_shadows_table), not the previous engine's.
+            // Shadows and Highlights are not compared: v3's follow Resolve's
+            // measured responses (resolve_*_table), not the previous engine's.
             json!({"whites": 60}),
             json!({"whites": -60}),
             json!({"blacks": 70}),

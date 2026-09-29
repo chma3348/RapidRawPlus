@@ -88,6 +88,15 @@ fn shadow_key(working: vec3<f32>) -> f32 {
     if y <= 0.00262409 { return y * 10.44426855; }
     return (log2(y + 0.0075) + 7.0) * 0.07329248;
 }
+// A table row holds the gain at slider -100, -50, +50, +100; zero at 0 and
+// linear between.
+fn row_stops(row: vec4<f32>, slider: f32) -> f32 {
+    let a = abs(slider);
+    if slider > 0.0 {
+        return select(row.z * (a / 50.0), mix(row.z, row.w, (a - 50.0) / 50.0), a > 50.0);
+    }
+    return select(row.y * (a / 50.0), mix(row.y, row.x, (a - 50.0) / 50.0), a > 50.0);
+}
 fn shadow_stops(key: f32) -> f32 {
     // The shared parser hands the slider over divided by 120.
     let slider = clamp(parameters.basic[1].x * 120.0, -100.0, 100.0);
@@ -95,15 +104,24 @@ fn shadow_stops(key: f32) -> f32 {
     let x = clamp(key, 0.0, 1.0) * 64.0;
     // At the top knot i stays 63 and the fraction reaches one.
     let i = min(u32(floor(x)), 63u);
-    let row = mix(parameters.shadow_curve[i], parameters.shadow_curve[i + 1u], x - f32(i));
-    let a = abs(slider);
-    var stops: f32;
-    if slider > 0.0 {
-        stops = select(row.z * (a / 50.0), mix(row.z, row.w, (a - 50.0) / 50.0), a > 50.0);
-    } else {
-        stops = select(row.y * (a / 50.0), mix(row.y, row.x, (a - 50.0) / 50.0), a > 50.0);
-    }
-    return stops;
+    return row_stops(mix(parameters.shadow_curve[i], parameters.shadow_curve[i + 1u], x - f32(i)), slider);
+}
+// Resolve's Highlights, measured the same way (resolve_highlights_table.rs).
+// Pulling highlights is one gain on all channels keyed on a finely blurred
+// luminance; lifting them acts on each channel by its own value, which is
+// what the chart's colours and the photographs both said (a colour's
+// brighter channels run into white first, as they do in Resolve).
+fn highlight_stops(key: f32) -> f32 {
+    let slider = clamp(parameters.basic[0].w * 120.0, -100.0, 100.0);
+    if slider == 0.0 { return 0.0; }
+    let x = clamp(key, 0.0, 1.0) * 64.0;
+    let i = min(u32(floor(x)), 63u);
+    return row_stops(mix(parameters.highlight_curve[i], parameters.highlight_curve[i + 1u], x - f32(i)), slider);
+}
+fn channel_key(v: f32) -> f32 {
+    let y = max(v, 0.0);
+    if y <= 0.00262409 { return y * 10.44426855; }
+    return (log2(y + 0.0075) + 7.0) * 0.07329248;
 }
 // The previous engine's controls key off their neighbourhood, and expect it
 // to be the picture they are grading. That picture is now the lifted one,
@@ -129,7 +147,8 @@ fn basic_v2(rgb: vec3<f32>, tonal: vec3<f32>, structure: vec3<f32>) -> vec3<f32>
     c = apply_filmic_exposure(c, a.x);
     // Shadows is Resolve's now (shadow_stops); the previous engine's is off.
     c = apply_tonal_adjustments_v2(c, structure, raw, a.y, 0.0, b.y, b.z, a.z);
-    c = apply_highlights_adjustment_v2(c, tonal, structure, raw, a.w);
+    // Highlights is Resolve's now too (highlight_stops).
+    c = apply_highlights_adjustment_v2(c, tonal, structure, raw, 0.0);
     if display { return from_display_domain(c); }
     // The previous engine's next stage, its HSL panel, runs on every pixel
     // whatever its settings and starts by clipping negative channels, so a
@@ -138,10 +157,18 @@ fn basic_v2(rgb: vec3<f32>, tonal: vec3<f32>, structure: vec3<f32>) -> vec3<f32>
     return parameters.srgb_to_work * max(c, vec3<f32>(0.0));
 }
 
-fn grade(input:vec3<f32>, tonal:vec3<f32>, structure:vec3<f32>, key:f32) -> vec3<f32> {
+fn grade(input:vec3<f32>, tonal:vec3<f32>, structure:vec3<f32>, key_wide:f32, key_fine:f32) -> vec3<f32> {
     if parameters.flags.x == 0u {return input;}
-    let stops=shadow_stops(key);
-    var rgb=basic_v2(parameters.white_balance*input*exp2(stops), lifted_neighbourhood(tonal, stops), lifted_neighbourhood(structure, stops));
+    let balanced=parameters.white_balance*input;
+    // Both keys come from the unedited picture, so the two gains commute.
+    let lift=shadow_stops(key_wide);
+    var pull=vec3<f32>(highlight_stops(key_fine));
+    if parameters.basic[0].w > 0.0 {
+        pull=vec3<f32>(highlight_stops(channel_key(balanced.r)), highlight_stops(channel_key(balanced.g)), highlight_stops(channel_key(balanced.b)));
+    }
+    // The previous engine's controls see the picture as these two left it.
+    let seen=lift+highlight_stops(key_fine);
+    var rgb=basic_v2(balanced*exp2(vec3<f32>(lift)+pull), lifted_neighbourhood(tonal, seen), lifted_neighbourhood(structure, seen));
     let y=dot(rgb,vec3<f32>(0.27411851,0.87363190,-0.14775041));
     // DWG's blue coefficient is negative, so a non-physical pixel can land at
     // or below zero luminance. Fade the curve out across the bottom of the

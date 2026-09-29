@@ -1038,7 +1038,7 @@ fn stabilization_contracts(context: &GpuContext) {
         )
         .is_err()
     );
-    assert_eq!(before["stage_revision"], "v3-application-stages-2");
+    assert_eq!(before["stage_revision"], "v3-application-stages-3");
 }
 
 fn pinned_pipeline_contracts(context: &GpuContext) {
@@ -1862,12 +1862,122 @@ fn a_patch_of_the_photo_itself_is_invisible_on_a_p3_file() {
     }
 }
 
-/// Shadows follows Resolve's measured response: a gain in linear light on
-/// all channels, read off the table by the slider and by the key. Without a
-/// neighbourhood the key is the pixel's own luminance, so a grey ramp reads
-/// the table back directly; colour must keep its channel ratios; slider 0
-/// must be the identity.
+/// Shadows and Highlights follow Resolve's measured responses: gains in
+/// linear light read off their tables by the slider and by the key. Without
+/// a neighbourhood the key is the pixel's own luminance, so a grey ramp reads
+/// each table back directly; slider 0 must be the identity. Shadows and a
+/// Highlights pull keep a colour's channel ratios; a Highlights lift acts on
+/// each channel by its own value.
 #[test]
+fn tone_sliders_are_resolves_measured_gains() {
+    shadows_is_resolves_measured_gain();
+    highlights_is_resolves_measured_gain();
+}
+
+fn gpu() -> GpuContext {
+    let instance = wgpu::Instance::default();
+    let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
+    let limits = adapter.limits();
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        required_limits: limits.clone(),
+        ..Default::default()
+    }))
+    .unwrap();
+    GpuContext {
+        device: Arc::new(device),
+        queue: Arc::new(queue),
+        limits,
+        display: Arc::new(Mutex::new(None)),
+    }
+}
+
+fn table_stops(table: &[[f32; 4]], key: f32, slider: f32) -> f32 {
+    let n = table.len();
+    let x = key.clamp(0.0, 1.0) * (n - 1) as f32;
+    let i = (x.floor() as usize).min(n - 2);
+    let f = x - i as f32;
+    let row: Vec<f32> = (0..4)
+        .map(|c| table[i][c] * (1.0 - f) + table[i + 1][c] * f)
+        .collect();
+    let a = slider.abs();
+    let (half, full) = if slider > 0.0 {
+        (row[2], row[3])
+    } else {
+        (row[1], row[0])
+    };
+    if a <= 50.0 {
+        half * a / 50.0
+    } else {
+        half + (full - half) * (a - 50.0) / 50.0
+    }
+}
+
+fn highlights_is_resolves_measured_gain() {
+    use rapidraw_lib::color_engine::resolve_highlights_table::GAIN_STOPS;
+    let engine = ColorEngine::new(gpu()).unwrap();
+    let grey = ImageBuffer::from_fn(2048, 1, |x, _| {
+        let v = spaces::decode(x as f64 / 2047.0, Transfer::DavinciIntermediate) as f32;
+        Rgba([v, v, v, 1.0])
+    });
+    let colour = ImageBuffer::from_fn(64, 1, |x, _| {
+        let v = 0.02 + x as f32 * 0.01;
+        Rgba([v * 3.0, v, v * 0.4, 1.0])
+    });
+    let key_of = |v: f32| spaces::encode_intermediate(v.max(0.0) as f64) as f32;
+    for slider in [-100.0f32, -50.0, -20.0, 0.0, 35.0, 50.0, 100.0] {
+        let mut c = config();
+        c.source = SourceColor {
+            primaries: Primaries::DavinciWideGamut,
+            transfer: Transfer::Linear,
+            reference: ReferenceDomain::Scene,
+        };
+        c.output_rendering = OutputRendering::SceneLuminanceV1;
+        c.controls.tone.highlights = slider / 120.0;
+        let plan = RenderPlan::build(c).unwrap();
+        let stages = engine.render(&grey, &plan, true).unwrap().stages.unwrap();
+        for (i, (before, after)) in stages
+            .working
+            .pixels()
+            .zip(stages.graded.pixels())
+            .enumerate()
+        {
+            if before[1] < 1e-4 {
+                continue;
+            }
+            let key = i as f32 / 2047.0;
+            let stops = (after[1] / before[1]).log2();
+            let want = table_stops(&GAIN_STOPS, key, slider);
+            assert!(
+                (stops - want).abs() < 0.02,
+                "highlights {slider} key {key:.3}: {stops:.3} stops, table says {want:.3}"
+            );
+            if slider == 0.0 {
+                assert_eq!(before, after, "slider 0 must be the identity");
+            }
+        }
+        let stages = engine.render(&colour, &plan, true).unwrap().stages.unwrap();
+        for (before, after) in stages.working.pixels().zip(stages.graded.pixels()) {
+            let luminance =
+                0.274_118_5 * before[0] + 0.873_631_9 * before[1] - 0.147_750_4 * before[2];
+            for ch in 0..3 {
+                let stops = (after[ch] / before[ch]).log2();
+                // A pull is one gain by the luminance key; a lift is per channel.
+                let key = if slider > 0.0 {
+                    key_of(before[ch])
+                } else {
+                    key_of(luminance)
+                };
+                let want = table_stops(&GAIN_STOPS, key, slider);
+                assert!(
+                    (stops - want).abs() < 0.02,
+                    "highlights {slider} channel {ch}: {stops:.3} stops, table says {want:.3} ({:?})",
+                    before
+                );
+            }
+        }
+    }
+}
+
 fn shadows_is_resolves_measured_gain() {
     use rapidraw_lib::color_engine::resolve_shadows_table::{GAIN_STOPS, KNOTS};
     let instance = wgpu::Instance::default();

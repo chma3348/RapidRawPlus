@@ -1,30 +1,36 @@
 #!/usr/bin/env python3
-"""Measure Resolve's Photo-page Shadows slider from the chart exports and write
-v3's response table.
+"""Measure a Resolve Photo-page tone slider (Shadows or Highlights) from the
+chart exports and write v3's response table.
 
-Resolve's Shadows, read off `chart-all` at -100, -50, +50 and +100 against the
-neutral export, behaves as one gain in linear light applied to all three
-channels, keyed on a blurred luminance: flat interiors are pointwise (the same
-grey lands on the same value everywhere within a level), edges show halos
-about 40 px wide at a 1450 px short edge, and dark channels of saturated
-colours stay dark (a log-domain lift would raise them through the
-Intermediate toe; Resolve does not). This script fits the gain in stops as a
-function of the key's DaVinci Intermediate value on the chart's flat greys,
-where key and pixel coincide, and writes 65 knots per slider stop.
+Both sliders, read off `chart-all` at -100, -50, +50 and +100 against the
+neutral export, behave as one gain in linear light applied to all three
+channels, keyed on a blurred luminance: flat interiors are pointwise (the
+same grey lands on the same value everywhere within a level), and dark
+channels of saturated colours stay dark (a log-domain lift would raise them
+through the Intermediate toe; Resolve does not). Shadows' key blur is about
+40 px wide at a 1450 px short edge; Highlights' is a few pixels. This script
+fits the gain in stops as a function of the key's DaVinci Intermediate value
+on the chart's flat greys, where key and pixel coincide, and writes 65 knots
+per slider stop.
 
-    <python with numpy, cv2, scipy> tools/fit_resolve_shadows.py ~/Desktop/"Davinci Test"
+    <python with numpy, cv2, scipy> tools/fit_resolve_tone.py shadows|highlights [~/Desktop/"Davinci Test"]
 
-Reads Originals/chart-all.tif, "No edits/chart-all plain.tif" and
-Shadows/chart-all (shadows ±50|±100).tif, plus the installed captured
-transforms. Writes src-tauri/src/color_engine/resolve_shadows_table.rs.
+Reads Originals/chart-all.tif, "No edits/chart-all plain.tif" and the
+control's folder (Shadows or Hilights, files `chart-all (<control> <value>)`,
+spelling as typed), plus the installed captured transforms. Writes
+src-tauri/src/color_engine/resolve_<control>_table.rs.
 """
 import glob, os, sys
 import numpy as np, cv2
 from scipy.interpolate import UnivariateSpline
 
-ROOT = sys.argv[1] if len(sys.argv) > 1 else os.path.expanduser("~/Desktop/Davinci Test")
+CONTROL = sys.argv[1] if len(sys.argv) > 1 else "shadows"
+assert CONTROL in ("shadows", "highlights"), "shadows or highlights"
+FOLDER = {"shadows": "Shadows", "highlights": "Hilights"}[CONTROL]
+ROOT = sys.argv[2] if len(sys.argv) > 2 else os.path.expanduser("~/Desktop/Davinci Test")
 SUP = os.path.expanduser("~/Library/Application Support/io.github.CyberTimon.RapidRAW")
-OUT = os.path.join(os.path.dirname(__file__), "..", "src-tauri/src/color_engine/resolve_shadows_table.rs")
+OUT = os.path.join(os.path.dirname(__file__), "..",
+                   "src-tauri/src/color_engine/resolve_%s_table.rs" % CONTROL)
 KNOTS = 65
 STOPS = [-100, -50, 50, 100]
 
@@ -73,12 +79,14 @@ def load16(p):
     return im[..., :3][..., ::-1].astype(np.float64) / scale
 
 
-def export(folder, tag):
+def export(folder, value):
+    """The chart export at this slider value: the value is the last word of
+    the name, the control's spelling before it is whatever was typed."""
     def stem(p):
         return os.path.splitext(os.path.basename(p))[0].rstrip(")").strip()
     c = [p for p in glob.glob(os.path.join(ROOT, folder, "*.tif"))
-         if stem(p).startswith("chart-all ") and stem(p).endswith(tag)]
-    assert len(c) == 1, (folder, tag, c)
+         if stem(p).startswith("chart-all ") and stem(p).split()[-1] == value]
+    assert len(c) == 1, (folder, value, c)
     return load16(c[0])
 
 
@@ -107,12 +115,16 @@ lin_in = np.maximum(di_dec(k), 1e-6)
 knots = np.linspace(0, 1, KNOTS)
 table = {}
 for s in STOPS:
-    r = export("Shadows", "shadows %d" % s)
+    r = export(FOLDER, "%d" % s)
     shown = r.mean(-1)[mask]
     out_log = inv(shown)
     stops = np.log2(np.maximum(di_dec(out_log), 1e-6) / lin_in)
-    # Outputs on the floor or at white say nothing about the gain.
+    # Outputs on the floor or at white say nothing about the gain, nor does
+    # the output transform's toe (keys below 0.08 for Highlights, whose
+    # effect there is within the toe's resolution).
     keep = (out_log > 0.02) & (shown < 0.995) & (shown > 0.006)
+    if CONTROL == "highlights":
+        keep &= (k > 0.08) & (shown < 0.985)
     bins = np.linspace(0, 0.95, 96)
     idx = np.clip(np.digitize(k[keep], bins) - 1, 0, 94)
     n = np.bincount(idx, minlength=95)
@@ -122,15 +134,29 @@ for s in STOPS:
     spline = UnivariateSpline(x, y, w=wgt / wgt.max(), k=3, s=len(x) * 4e-4)
     f = spline(knots)
     lo, hi = x.min(), x.max()
-    # Below the darkest measured key the gain holds: the step chart's near
-    # black steps lift by the same stops as the darkest flat greys.
-    f[knots < lo] = spline(lo)
-    # Above the brightest measured key the curve carries on at its last slope
-    # toward zero rather than lifting whites for ever (unmeasured: the chart
-    # has no scene values above display white).
-    slope = (spline(hi) - spline(hi - 0.1)) / 0.1
-    tail = knots > hi
-    f[tail] = spline(hi) + slope * (knots[tail] - hi)
+    if CONTROL == "shadows":
+        # Below the darkest measured key the gain holds: the step chart's
+        # near-black steps lift by the same stops as the darkest flat greys.
+        f[knots < lo] = spline(lo)
+        # Above the brightest measured key the curve carries on at its last
+        # slope toward zero rather than lifting whites for ever (unmeasured:
+        # the chart has no scene values above display white).
+        slope = (spline(hi) - spline(hi - 0.1)) / 0.1
+        tail = knots > hi
+        f[tail] = spline(hi) + slope * (knots[tail] - hi)
+    else:
+        # Highlights leaves black alone: the gain runs to zero at key 0.
+        f[knots < lo] = spline(lo) * knots[knots < lo] / lo
+        tail = knots > hi
+        if s > 0:
+            # A positive lift saturates the export to white above this key,
+            # so nothing more can be measured; the gain holds.
+            f[tail] = spline(hi)
+        else:
+            # Pulling highlights continues into scene values above display
+            # white, the slider's reason to exist on RAW: carry the last slope.
+            slope = (spline(hi) - spline(hi - 0.1)) / 0.1
+            f[tail] = spline(hi) + slope * (knots[tail] - hi)
     f = np.maximum(f, 0) if s > 0 else np.minimum(f, 0)
     table[s] = f
     resid = stops[keep] - spline(k[keep])
@@ -138,8 +164,8 @@ for s in STOPS:
           % (s, lo, hi, good.sum(), resid.std(),
              " ".join("%+.2f" % v for v in np.interp([0, .2, .4, .6, .8, 1.0], knots, f))))
 
-lines = ["//! Resolve's Photo-page Shadows slider, measured. Generated by",
-         "//! tools/fit_resolve_shadows.py from the chart exports; do not edit.",
+lines = ["//! Resolve's Photo-page %s slider, measured. Generated by" % CONTROL.capitalize(),
+         "//! tools/fit_resolve_tone.py from the chart exports; do not edit.",
          "//!",
          "//! Gain in stops applied to all channels in linear light, indexed by the",
          "//! blurred key's DaVinci Intermediate value (65 knots over 0..1), at",
