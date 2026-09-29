@@ -169,10 +169,16 @@ pub struct Tone {
 impl Tone {
     /// The neighbourhood-dependent controls, which need the blurs.
     pub fn is_neutral(&self) -> bool {
+        self.previous_engine_neutral() && self.shadows == 0.
+    }
+
+    /// The controls still run through the previous engine's functions:
+    /// everything but Shadows, which follows Resolve's measured response
+    /// (see `resolve_shadows` in the shader).
+    pub fn previous_engine_neutral(&self) -> bool {
         self.brightness == 0.
             && self.contrast == 0.
             && self.highlights == 0.
-            && self.shadows == 0.
             && self.whites == 0.
             && self.blacks == 0.
     }

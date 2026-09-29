@@ -76,6 +76,47 @@ fn channel_curve(v: f32, channel: u32) -> f32 {
 // given values past white for such a picture — its brightness curve, handed
 // one, breaks into bands — and at neutral the round trip is skipped, so an
 // unedited picture is untouched.
+// Resolve's Photo-page Shadows, measured (resolve_shadows_table.rs): one gain
+// in linear light on all three channels, in stops read off the table by the
+// slider and by a blurred luminance key in DaVinci Intermediate. Flat regions
+// behave pointwise, edges carry Resolve's soft halo, and the dark channels of
+// a saturated colour stay dark, which a lift in log would not do. Zero at
+// slider 0, linear between the measured stops. Runs in the working space
+// before the previous engine's remaining Basic controls.
+fn shadow_key(working: vec3<f32>) -> f32 {
+    let y = max(dot(working, vec3<f32>(0.27411851, 0.87363190, -0.14775041)), 0.0);
+    if y <= 0.00262409 { return y * 10.44426855; }
+    return (log2(y + 0.0075) + 7.0) * 0.07329248;
+}
+fn shadow_stops(key: f32) -> f32 {
+    // The shared parser hands the slider over divided by 120.
+    let slider = clamp(parameters.basic[1].x * 120.0, -100.0, 100.0);
+    if slider == 0.0 { return 0.0; }
+    let x = clamp(key, 0.0, 1.0) * 64.0;
+    // At the top knot i stays 63 and the fraction reaches one.
+    let i = min(u32(floor(x)), 63u);
+    let row = mix(parameters.shadow_curve[i], parameters.shadow_curve[i + 1u], x - f32(i));
+    let a = abs(slider);
+    var stops: f32;
+    if slider > 0.0 {
+        stops = select(row.z * (a / 50.0), mix(row.z, row.w, (a - 50.0) / 50.0), a > 50.0);
+    } else {
+        stops = select(row.y * (a / 50.0), mix(row.y, row.x, (a - 50.0) / 50.0), a > 50.0);
+    }
+    return stops;
+}
+// The previous engine's controls key off their neighbourhood, and expect it
+// to be the picture they are grading. That picture is now the lifted one,
+// so its neighbourhood is lifted by the same gain: scene values directly,
+// display values through their encoding. Without this, Highlights pulled
+// down a lifted pixel by an unlifted key, and the tone response reversed.
+fn lifted_neighbourhood(n: vec3<f32>, stops: f32) -> vec3<f32> {
+    if stops == 0.0 { return n; }
+    let g = exp2(stops);
+    if parameters.basic_flags.y == 1u { return n * g; }
+    return linear_to_srgb_extended(srgb_to_linear(n) * g);
+}
+
 fn basic_v2(rgb: vec3<f32>, tonal: vec3<f32>, structure: vec3<f32>) -> vec3<f32> {
     let gain = parameters.tone.z;
     let display = parameters.domain.x == 1u;
@@ -86,7 +127,8 @@ fn basic_v2(rgb: vec3<f32>, tonal: vec3<f32>, structure: vec3<f32>) -> vec3<f32>
     var c: vec3<f32>;
     if display { c = to_display_domain(rgb) * gain; } else { c = parameters.work_to_output * (rgb * gain); }
     c = apply_filmic_exposure(c, a.x);
-    c = apply_tonal_adjustments_v2(c, structure, raw, a.y, b.x, b.y, b.z, a.z);
+    // Shadows is Resolve's now (shadow_stops); the previous engine's is off.
+    c = apply_tonal_adjustments_v2(c, structure, raw, a.y, 0.0, b.y, b.z, a.z);
     c = apply_highlights_adjustment_v2(c, tonal, structure, raw, a.w);
     if display { return from_display_domain(c); }
     // The previous engine's next stage, its HSL panel, runs on every pixel
@@ -96,9 +138,10 @@ fn basic_v2(rgb: vec3<f32>, tonal: vec3<f32>, structure: vec3<f32>) -> vec3<f32>
     return parameters.srgb_to_work * max(c, vec3<f32>(0.0));
 }
 
-fn grade(input:vec3<f32>, tonal:vec3<f32>, structure:vec3<f32>) -> vec3<f32> {
+fn grade(input:vec3<f32>, tonal:vec3<f32>, structure:vec3<f32>, key:f32) -> vec3<f32> {
     if parameters.flags.x == 0u {return input;}
-    var rgb=basic_v2(parameters.white_balance*input, tonal, structure);
+    let stops=shadow_stops(key);
+    var rgb=basic_v2(parameters.white_balance*input*exp2(stops), lifted_neighbourhood(tonal, stops), lifted_neighbourhood(structure, stops));
     let y=dot(rgb,vec3<f32>(0.27411851,0.87363190,-0.14775041));
     // DWG's blue coefficient is negative, so a non-physical pixel can land at
     // or below zero luminance. Fade the curve out across the bottom of the

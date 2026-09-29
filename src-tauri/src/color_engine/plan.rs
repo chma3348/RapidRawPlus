@@ -65,6 +65,9 @@ pub(crate) struct GpuParameters {
     /// the display values the captured output transform gives back, and
     /// return through the captured input transform.
     pub domain: [u32; 4],
+    /// Resolve's measured Shadows response: per key knot, the gain in stops
+    /// at slider -100, -50, +50, +100 (see `resolve_shadows_table`).
+    pub shadow_curve: [[f32; 4]; super::resolve_shadows_table::KNOTS],
 }
 
 /// What a creative LUT expects to be fed, and therefore where in the
@@ -237,7 +240,7 @@ impl RenderPlan {
                 [c.tone.shadows, c.tone.whites, c.tone.blacks, 0.],
             ],
             basic_flags: [
-                u32::from(!c.tone.is_neutral()),
+                u32::from(!c.tone.previous_engine_neutral()),
                 u32::from(config.source.reference == ReferenceDomain::Scene),
                 0,
                 0,
@@ -319,6 +322,7 @@ impl RenderPlan {
                     .as_dmat3(),
             ),
             domain: [0; 4],
+            shadow_curve: super::resolve_shadows_table::GAIN_STOPS,
             look: [0.; 4],
             look_flags: [0; 4],
             work_to_look: packed(

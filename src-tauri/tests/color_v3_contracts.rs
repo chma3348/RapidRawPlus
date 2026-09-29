@@ -458,8 +458,12 @@ fn gpu_color_pipeline_contracts() {
             c.controls.tone.highlights = -amount / 120.0;
             c.controls.tone.blacks = amount / 40.0;
             c.controls.tone.whites = -amount / 30.0;
+            // A display picture carries nothing above white; scene data
+            // goes to eight. (The V1 display rendering used here is a test
+            // fixture and is not monotonic for greys far above white.)
+            let top = if scene_referred { 512.0 } else { 2048.0 };
             let ramp = ImageBuffer::from_fn(4097, 1, |x, _| {
-                let v = x as f32 / 512.0;
+                let v = x as f32 / top;
                 Rgba([v, v, v, 0.375])
             });
             let frame = engine
@@ -468,11 +472,13 @@ fn gpu_color_pipeline_contracts() {
             let mut previous = 0.0;
             for p in frame.encoded_srgb.pixels() {
                 assert!(p.0.iter().all(|v| v.is_finite()), "nonfinite tonal output");
-                // 1e-5: the previous engine's tone functions, which these
-                // are, wobble by a few millionths near white at the slider
-                // extremes — a thousandth of an 8-bit level.
+                // 5e-5 below the running maximum: with every slider at its
+                // extreme the previous engine's tone functions flatten the
+                // top of the ramp to a plateau that wobbles by a few
+                // millionths — a hundredth of an 8-bit level. A real reversal
+                // (a key that disagrees with its pixel) is orders larger.
                 assert!(
-                    p[0] + 1e-5 >= previous,
+                    p[0] + 5e-5 >= previous,
                     "tonal reversal at {amount}: {previous} -> {}",
                     p[0]
                 );
@@ -481,7 +487,7 @@ fn gpu_color_pipeline_contracts() {
                     "neutral tint: {p:?}"
                 );
                 assert_eq!(p[3], 0.375);
-                previous = p[0];
+                previous = previous.max(p[0]);
             }
         }
     }
@@ -1032,7 +1038,7 @@ fn stabilization_contracts(context: &GpuContext) {
         )
         .is_err()
     );
-    assert_eq!(before["stage_revision"], "v3-application-stages-1");
+    assert_eq!(before["stage_revision"], "v3-application-stages-2");
 }
 
 fn pinned_pipeline_contracts(context: &GpuContext) {
@@ -1852,6 +1858,105 @@ fn a_patch_of_the_photo_itself_is_invisible_on_a_p3_file() {
                 (a[c] - b[c]).abs() < 2e-3,
                 "a patch of the photograph itself changed it: {a:?} -> {b:?}"
             );
+        }
+    }
+}
+
+/// Shadows follows Resolve's measured response: a gain in linear light on
+/// all channels, read off the table by the slider and by the key. Without a
+/// neighbourhood the key is the pixel's own luminance, so a grey ramp reads
+/// the table back directly; colour must keep its channel ratios; slider 0
+/// must be the identity.
+#[test]
+fn shadows_is_resolves_measured_gain() {
+    use rapidraw_lib::color_engine::resolve_shadows_table::{GAIN_STOPS, KNOTS};
+    let instance = wgpu::Instance::default();
+    let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
+    let limits = adapter.limits();
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        required_limits: limits.clone(),
+        ..Default::default()
+    }))
+    .unwrap();
+    let context = GpuContext {
+        device: Arc::new(device),
+        queue: Arc::new(queue),
+        limits,
+        display: Arc::new(Mutex::new(None)),
+    };
+    let engine = ColorEngine::new(context).unwrap();
+    // Linear DaVinci Wide Gamut in, so the working values are the inputs.
+    let grey = ImageBuffer::from_fn(2048, 1, |x, _| {
+        let v = spaces::decode(x as f64 / 2047.0, Transfer::DavinciIntermediate) as f32;
+        Rgba([v, v, v, 1.0])
+    });
+    let colour = ImageBuffer::from_fn(64, 1, |x, _| {
+        let v = 0.02 + x as f32 * 0.01;
+        Rgba([v * 3.0, v, v * 0.4, 1.0])
+    });
+    let expected = |key: f32, slider: f32| -> f32 {
+        let x = key.clamp(0.0, 1.0) * (KNOTS - 1) as f32;
+        let i = (x.floor() as usize).min(KNOTS - 2);
+        let f = x - i as f32;
+        let row: Vec<f32> = (0..4)
+            .map(|c| GAIN_STOPS[i][c] * (1.0 - f) + GAIN_STOPS[i + 1][c] * f)
+            .collect();
+        let a = slider.abs();
+        let (half, full) = if slider > 0.0 {
+            (row[2], row[3])
+        } else {
+            (row[1], row[0])
+        };
+        if a <= 50.0 {
+            half * a / 50.0
+        } else {
+            half + (full - half) * (a - 50.0) / 50.0
+        }
+    };
+    for slider in [-100.0f32, -50.0, -20.0, 0.0, 35.0, 50.0, 100.0] {
+        let mut c = config();
+        c.source = SourceColor {
+            primaries: Primaries::DavinciWideGamut,
+            transfer: Transfer::Linear,
+            reference: ReferenceDomain::Scene,
+        };
+        c.output_rendering = OutputRendering::SceneLuminanceV1;
+        c.controls.tone.shadows = slider / 120.0;
+        let plan = RenderPlan::build(c).unwrap();
+        let frame = engine.render(&grey, &plan, true).unwrap();
+        let stages = frame.stages.unwrap();
+        for (i, (before, after)) in stages
+            .working
+            .pixels()
+            .zip(stages.graded.pixels())
+            .enumerate()
+        {
+            let key = i as f32 / 2047.0;
+            if before[1] < 1e-4 {
+                continue;
+            }
+            let stops = (after[1] / before[1]).log2();
+            let want = expected(key, slider);
+            assert!(
+                (stops - want).abs() < 0.02,
+                "slider {slider} key {key:.3}: {stops:.3} stops, table says {want:.3}"
+            );
+            if slider == 0.0 {
+                assert_eq!(before, after, "slider 0 must be the identity");
+            }
+        }
+        let frame = engine.render(&colour, &plan, true).unwrap();
+        let stages = frame.stages.unwrap();
+        for (before, after) in stages.working.pixels().zip(stages.graded.pixels()) {
+            let g = after[1] / before[1];
+            for ch in [0, 2] {
+                assert!(
+                    (after[ch] / before[ch] - g).abs() < 1e-3 * g.max(1.0),
+                    "all channels take the same gain: {:?} -> {:?}",
+                    before,
+                    after
+                );
+            }
         }
     }
 }

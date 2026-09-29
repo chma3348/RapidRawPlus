@@ -632,19 +632,35 @@ fn neighbourhood(
             1.055 * v.powf(1. / 2.4) - 0.055
         }
     };
-    let mut planes = vec![vec![0f32; w * h]; 3];
+    // The fourth plane is Resolve's Shadows key: the working-space
+    // luminance in DaVinci Intermediate, whatever the previous engine's
+    // planes are encoded as.
+    let to_working = spaces::conversion(source.color.primaries, Primaries::DavinciWideGamut)
+        .transpose()
+        .to_cols_array_2d()
+        .map(|r| r.map(|v| v as f32));
+    let luminance = [0.274_118_5f32, 0.873_631_9, -0.147_750_4];
+    let mut planes = vec![vec![0f32; w * h]; 4];
     for (i, p) in pixels.pixels().enumerate() {
+        let y: f32 = (0..3)
+            .map(|c| {
+                luminance[c]
+                    * (to_working[c][0] * p[0] + to_working[c][1] * p[1] + to_working[c][2] * p[2])
+            })
+            .sum::<f32>()
+            .max(0.);
+        planes[3][i] = spaces::encode_intermediate(y as f64) as f32;
         // A rendered picture's controls see its display values: the code
         // values Resolve's rendering gives the scene data, already encoded.
         if let Some(output) = display {
             let logged = [p[0], p[1], p[2]].map(|v| spaces::encode_intermediate(v as f64) as f32);
             let shown = output.sample(logged);
-            for (c, plane) in planes.iter_mut().enumerate() {
+            for (c, plane) in planes.iter_mut().take(3).enumerate() {
                 plane[i] = shown[c].clamp(0., 1.);
             }
             continue;
         }
-        for (c, plane) in planes.iter_mut().enumerate() {
+        for (c, plane) in planes.iter_mut().take(3).enumerate() {
             let v = (m[c][0] * p[0] + m[c][1] * p[1] + m[c][2] * p[2]).clamp(0., 65504.);
             plane[i] = if scene { v } else { encode(v) };
         }
@@ -672,8 +688,13 @@ fn neighbourhood(
     let (tonal, structure) = (blurred(3.5), blurred(40.));
     let mut blurs = Vec::with_capacity(w * h * 2);
     for i in 0..w * h {
-        blurs.push([tonal[0][i], tonal[1][i], tonal[2][i], 0.]);
-        blurs.push([structure[0][i], structure[1][i], structure[2][i], 0.]);
+        blurs.push([tonal[0][i], tonal[1][i], tonal[2][i], tonal[3][i]]);
+        blurs.push([
+            structure[0][i],
+            structure[1][i],
+            structure[2][i],
+            structure[3][i],
+        ]);
     }
     let blurs = Arc::new(blurs);
     if let Ok(mut cache) = caches.neighbourhood.lock() {

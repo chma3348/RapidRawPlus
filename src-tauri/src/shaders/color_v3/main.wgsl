@@ -28,6 +28,7 @@ struct Parameters {
     agx_to: mat3x3<f32>,
     agx_from: mat3x3<f32>,
     domain: vec4<u32>,
+    shadow_curve: array<vec4<f32>,65>,
 }
 @group(0) @binding(0) var<storage, read> source: array<vec4<f32>>;
 @group(0) @binding(1) var<storage, read_write> results: array<vec4<f32>>;
@@ -114,16 +115,21 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     // bound they see the pixel itself, in the encoding they expect.
     var tonal: vec3<f32>;
     var structure: vec3<f32>;
+    // Resolve's Shadows reads a blurred luminance key (the structure entry's
+    // fourth component); without a neighbourhood, the pixel's own.
+    var key: f32;
     if parameters.basic_flags.z == 1u {
         tonal = neighbourhood[id.x * 2u].rgb;
         structure = neighbourhood[id.x * 2u + 1u].rgb;
+        key = neighbourhood[id.x * 2u + 1u].w;
     } else {
         var own = max(parameters.work_to_output * working, vec3<f32>(0.0));
         if parameters.domain.x == 1u { own = to_display_domain(working); }
         tonal = select(linear_to_srgb_extended(own), own, parameters.basic_flags.y == 1u);
         structure = tonal;
+        key = shadow_key(working);
     }
-    let graded = film_saturation(vignette(grade(centre(calibrate(working), position, dims), tonal, structure), position, dims));
+    let graded = film_saturation(vignette(grade(centre(calibrate(working), position, dims), tonal, structure, key), position, dims));
     // A captured transform replaces the whole rendering step, encode included,
     // and reads working values directly: its domain is the working space.
     let scene = look_scene(graded);
