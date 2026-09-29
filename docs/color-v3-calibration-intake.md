@@ -23,7 +23,57 @@ merely because they use a different valid RGB ICC profile—we convert tagged
 files into common linear sRGB coordinates before measurement. Untagged non-sRGB,
 8-bit, HDR, resized or ambiguously tagged files need review before intake.
 
-## Preparing a package
+## From a folder of Resolve exports (the usual way)
+
+Chris's exports live in one folder with `Originals/` and one sub-folder per
+control (`No edits`, `Hilights`, `Shadows`, `Saturation`), each file named
+`<source> (<control> <value>)` or `<source> <value>` as typed. `build` reads
+that layout, hashes every file, pins the installed transforms into
+`assets/`, classes each source by how the app decodes it and writes
+`package.json` beside the folders:
+
+```sh
+cargo run --release --manifest-path src-tauri/Cargo.toml --example color_v3_reference -- build ~/Desktop/"Davinci Test"
+```
+
+Every source is measured; the class decides whether its references take
+part in a slider fit (`fit`), because a slider is the same code for every
+class and only the classes that already agree at neutral can say anything
+about it:
+
+| class | fit | why |
+|---|---|---|
+| `srgb_jpeg` | yes | neutral agrees with Resolve within a level |
+| `chart` | yes | flat patches, no resampling error; the primary fitting target |
+| `iphone_p3` | no | Display P3 photo Resolve read as sRGB in this batch; re-tag in Resolve, install the P3 capture, re-export |
+| `raw` | no | Resolve's Camera RAW development differs from ours by 0.3–4.6 stops per file; a fit would absorb that |
+
+`render … fit` measures only the fitting sources; without `fit` it measures
+everything and, for RAW neutrals, prints the development offset in stops by
+shadow, midtone and highlight band (uniform means an exposure difference,
+band-dependent means a different rendering). `sweep` asks, for every export
+of one control, which app value would have matched it best, searching
+−100…100 on the mean 8-bit difference, and prints that next to the residual
+at the equal value and at neutral:
+
+```sh
+cargo run --release --manifest-path src-tauri/Cargo.toml --example color_v3_reference -- render ~/Desktop/"Davinci Test"/package.json /path/to/new-results fit
+cargo run --release --manifest-path src-tauri/Cargo.toml --example color_v3_reference -- sweep ~/Desktop/"Davinci Test"/package.json /path/to/sweeps highlights
+cargo run --release --manifest-path src-tauri/Cargo.toml --example color_v3_reference -- sweep ~/Desktop/"Davinci Test"/package.json /path/to/sweeps saturation chart-all
+```
+
+If the best value is a constant multiple of Resolve's across sources the
+control is a scale away; if the residual at the best value stays high the
+control's shape differs and the formula is what changes. The sweep renders
+at the reference's size (the app's preview policy) for speed; the
+full-resolution `render` is the authority once a change is applied.
+
+Measurements are reported in linear RGB and in encoded 8-bit levels
+(`mean_levels`, `p99_levels`, `bias_levels`): the levels are what a
+difference looks like on screen. Renders are brought to a scaled
+reference's size by exact area averaging.
+
+## Preparing a package by hand
 
 Copy `color-v3-reference-template.json` alongside `source/`, `resolve/` and
 `assets/`. Replace the placeholders, add all cases, and list planned strengths
