@@ -148,6 +148,13 @@ pub struct AppState {
     /// A second input transform captured with the lattice tagged Display P3,
     /// for photographs whose colours exceed sRGB (iPhone photos, mostly).
     pub input_transform_p3: Mutex<Option<PathBuf>>,
+    /// Resolve's output transform captured with the output set to Display
+    /// P3: renders straight into P3 when that is the chosen output space.
+    pub output_transform_p3: Mutex<Option<PathBuf>>,
+    /// The colour space of the editor preview and exports. sRGB until the
+    /// app reads its settings (Display P3 by default there), so tools and
+    /// tests that build their own state keep rendering sRGB.
+    pub output_space: Mutex<crate::color_engine::config::OutputSpace>,
     pub v3_asset_dir: Mutex<Option<PathBuf>>,
     /// The geometry-warped full picture the AI tools (masks, patches, sky)
     /// read, keyed by the geometry hash.
@@ -249,6 +256,8 @@ impl Default for AppState {
             sky_session: Mutex::new(None),
             input_transform: Mutex::new(None),
             input_transform_p3: Mutex::new(None),
+            output_transform_p3: Mutex::new(None),
+            output_space: Mutex::new(Default::default()),
             v3_asset_dir: Mutex::new(None),
             full_warped_cache: Mutex::new(None),
             model_registry: Mutex::new(None),

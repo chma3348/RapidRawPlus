@@ -827,7 +827,18 @@ fn sampling_image(
     // preview. Put the preview's entry back afterwards, or the next slider
     // move pays to rebuild it from the full-resolution source.
     let preview = caches.prepared.lock().ok().and_then(|mut c| c.take());
-    let frame = render(context, state, caches, quality, path, &neutral, None, false);
+    // Masks sample colours in sRGB, whatever the output space.
+    let frame = render(
+        context,
+        state,
+        caches,
+        quality,
+        path,
+        &neutral,
+        None,
+        false,
+        OutputSpace::Srgb,
+    );
     if let (Some(entry), Ok(mut cache)) = (preview, caches.prepared.lock()) {
         *cache = Some(entry);
     }
@@ -856,6 +867,7 @@ pub fn render_file(
         edits,
         max_dimension,
         false,
+        OutputSpace::Srgb,
     )
 }
 
@@ -878,6 +890,7 @@ pub fn render_thumbnail(
         edits,
         Some(max_dimension),
         false,
+        OutputSpace::Srgb,
     )
 }
 
@@ -900,6 +913,7 @@ pub fn render_aside(
         edits,
         max_dimension,
         false,
+        OutputSpace::Srgb,
     )
 }
 
@@ -924,6 +938,42 @@ impl Stopwatch {
 
 /// Diagnostic variant of the shared render path. With capture enabled,
 /// `working` is the initial working-space image and `graded` includes masks.
+/// A frame rendered through the sRGB path, stored in Display P3 when that is
+/// the requested space; a frame rendered through the P3 capture is P3 already.
+fn finish_space(frame: &mut RenderedFrame, space: OutputSpace, native: bool) {
+    if space == OutputSpace::DisplayP3 && !native {
+        super::cube::srgb_encoded_to_p3(&mut frame.encoded_srgb);
+    }
+    frame.space = space;
+}
+
+/// The colour space the editor preview and exports use (the app setting).
+pub fn output_space(state: &AppState) -> OutputSpace {
+    state.output_space.lock().map(|s| *s).unwrap_or_default()
+}
+
+/// As `render_file`, in the chosen output space: for what a person looks at
+/// in the editor and for exported files, which must always agree.
+pub fn render_for_output(
+    context: &GpuContext,
+    state: &AppState,
+    path: &str,
+    edits: &Value,
+    max_dimension: Option<u32>,
+) -> Result<RenderedFrame> {
+    render(
+        context,
+        state,
+        &state.v3,
+        Quality::Full,
+        path,
+        edits,
+        max_dimension,
+        false,
+        output_space(state),
+    )
+}
+
 pub fn render_file_with_capture(
     context: &GpuContext,
     state: &AppState,
@@ -941,6 +991,7 @@ pub fn render_file_with_capture(
         edits,
         max_dimension,
         capture,
+        OutputSpace::Srgb,
     )
 }
 
@@ -954,6 +1005,7 @@ fn render(
     edits: &Value,
     max_dimension: Option<u32>,
     capture: bool,
+    space: OutputSpace,
 ) -> Result<RenderedFrame> {
     let normalized = super::migration::normalize(edits)?;
     let edits = normalized.as_ref();
@@ -1157,11 +1209,28 @@ fn render(
         ..Default::default()
     };
     let look = look(state, edits)?;
+    // Display P3 straight from Resolve's P3 output capture when the picture
+    // ends in that capture: not through the previous engine's tone mappers,
+    // and not into a creative LUT made for display sRGB. Otherwise the sRGB
+    // rendering is stored as P3 at the end (`finish_space`), which looks the
+    // same and keeps every other path exactly as it was.
+    let native_p3 = space == OutputSpace::DisplayP3
+        && pair.output_p3.is_some()
+        && tone_mapper(edits).is_none()
+        && !look
+            .as_ref()
+            .is_some_and(|l| l.space == super::plan::LookSpace::Display);
+    let output = if native_p3 {
+        pair.output_p3.clone()
+    } else {
+        pair.output.clone()
+    };
     let initial_blurs = neighbourhood_for(&controls.tone);
+    let initial_native = native_p3 && source.color.reference == ReferenceDomain::Scene;
     let mut initial_plan = plan(
         source.color.clone(),
         controls,
-        pair.output.clone(),
+        output.clone(),
         tone_mapper(edits),
     )?;
     initial_plan.set_render_scale(scale);
@@ -1175,6 +1244,7 @@ fn render(
         }
         let mut frame = engine.render(&float_pixels(&image), &initial_plan, capture)?;
         frame.full_size = full;
+        finish_space(&mut frame, space, initial_native);
         return Ok(frame);
     }
     // With masks, the first pass only feeds the local adjustments, which read
@@ -1287,13 +1357,14 @@ fn render(
     // captured transform.
     // The vignette is already in `working`; grain belongs on the finished
     // image, which is this pass's, so it carries the grain settings.
+    let final_native = native_p3 && working_color.reference == ReferenceDomain::Scene;
     let mut final_plan = plan(
         working_color,
         Controls {
             effects: grain,
             ..Controls::default()
         },
-        pair.output.clone(),
+        output.clone(),
         tone_mapper(edits),
     )?;
     final_plan.set_render_scale(scale);
@@ -1303,6 +1374,7 @@ fn render(
     }
     let mut frame = engine.render(&working, &final_plan, capture)?;
     frame.full_size = full;
+    finish_space(&mut frame, space, final_native);
     if let (Some(stages), Some(original)) = (&mut frame.stages, original_working) {
         stages.working = original;
     }
@@ -1507,8 +1579,8 @@ pub fn preview_bytes(
     edits: &Value,
     dimension: u32,
 ) -> Result<Vec<u8>, String> {
-    let frame =
-        render_file(context, state, path, edits, Some(dimension)).map_err(|e| e.to_string())?;
+    let frame = render_for_output(context, state, path, edits, Some(dimension))
+        .map_err(|e| e.to_string())?;
     let mut bytes = Vec::new();
     frame
         .write_srgb_png(&mut bytes, false)

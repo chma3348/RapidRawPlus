@@ -546,6 +546,16 @@ export default function ExportPanel({
 
   const canExport = numImages > 0;
   const isLut = fileFormat === FileFormats.Cube;
+  // One setting for the preview and the export, so the editor always shows
+  // what the file will hold. Display P3 unless sRGB is chosen.
+  const outputColorSpace: 'displayP3' | 'srgb' = appSettings?.outputColorSpace === 'srgb' ? 'srgb' : 'displayP3';
+  const handleColorSpaceChange = async (space: 'displayP3' | 'srgb') => {
+    if (!appSettings || space === outputColorSpace) return;
+    // Switch the backend first, so the preview re-render that follows the
+    // settings change is already in the new space.
+    await invoke('set_output_color_space', { space });
+    onSettingsChange({ ...appSettings, outputColorSpace: space });
+  };
   const itemLabel = isLut ? t('export.labels.lut') : t('export.labels.image');
   const itemLabelPlural = isLut ? t('export.labels.lut_plural') : t('export.labels.image_plural');
 
@@ -603,6 +613,39 @@ export default function ExportPanel({
                     value={jpegQuality}
                     fillOrigin="min"
                   />
+                </div>
+              )}
+              {!isLut && (
+                <div className={isExporting ? 'opacity-50 pointer-events-none' : ''}>
+                  <Text variant={TextVariants.label} className="mb-1 block">
+                    {t('export.file.colorSpace', { defaultValue: 'Colour space' })}
+                  </Text>
+                  <div className="grid grid-cols-2 gap-2">
+                    {(
+                      [
+                        ['displayP3', t('export.file.colorSpaceP3', { defaultValue: 'Display P3' })],
+                        ['srgb', t('export.file.colorSpaceSrgb', { defaultValue: 'sRGB' })],
+                      ] as const
+                    ).map(([id, label]) => (
+                      <button
+                        className={`px-2 py-1.5 rounded-md transition-colors ${outputColorSpace === id ? 'bg-accent' : 'bg-surface hover:bg-card-active'} disabled:opacity-50`}
+                        disabled={isExporting}
+                        key={id}
+                        onClick={() => handleColorSpaceChange(id)}
+                      >
+                        <Text color={outputColorSpace === id ? TextColors.button : TextColors.secondary}>{label}</Text>
+                      </button>
+                    ))}
+                  </div>
+                  <Text variant={TextVariants.small} color={TextColors.secondary} className="mt-1 block">
+                    {outputColorSpace === 'srgb'
+                      ? t('export.file.colorSpaceSrgbHint', {
+                          defaultValue: 'Safest for Windows, printing and sites that strip colour profiles.',
+                        })
+                      : t('export.file.colorSpaceP3Hint', {
+                          defaultValue: 'Richer colour on Apple devices, modern phones and browsers.',
+                        })}
+                  </Text>
                 </div>
               )}
             </Section>

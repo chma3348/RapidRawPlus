@@ -277,7 +277,8 @@ fn process_preview_job(
     } else {
         dimension
     };
-    let frame = color_engine::application::render_file(
+    // In the output space exports use, so the editor shows what the file holds.
+    let frame = color_engine::application::render_for_output(
         &context,
         &state,
         &loaded_image.path,
@@ -1458,6 +1459,7 @@ pub fn run() {
                         ("output-transform.cube", 0usize),
                         ("input-transform.cube", 1usize),
                         ("input-transform-p3.cube", 2usize),
+                        ("output-transform-p3.cube", 3usize),
                     ] {
                         let cube = data_dir.join(name);
                         if !cube.is_file() {
@@ -1475,7 +1477,8 @@ pub fn run() {
                                 let mut held = match slot {
                                     0 => state.output_transform.lock().unwrap(),
                                     1 => state.input_transform.lock().unwrap(),
-                                    _ => state.input_transform_p3.lock().unwrap(),
+                                    2 => state.input_transform_p3.lock().unwrap(),
+                                    _ => state.output_transform_p3.lock().unwrap(),
                                 };
                                 *held = Some(cube);
                             }
@@ -1516,6 +1519,44 @@ pub fn run() {
                         log::error!("Color v3: ignoring input-transform-p3.cube: {error}");
                         *input_p3 = None;
                     }
+                    // The P3 output capture renders the same greys as the sRGB
+                    // one, or it was captured with the wrong output settings.
+                    let output = state.output_transform.lock().unwrap().clone();
+                    let mut output_p3 = state.output_transform_p3.lock().unwrap();
+                    if output_p3.is_some() {
+                        let checked = output.as_ref().ok_or_else(|| anyhow::anyhow!(
+                            "it needs output-transform.cube (the sRGB capture) alongside it"
+                        )).and_then(|srgb| {
+                            let srgb = crate::color_engine::cube::CubeLut::load(srgb)?;
+                            let p3 = crate::color_engine::cube::CubeLut::load(output_p3.as_ref().unwrap())?;
+                            crate::color_engine::cube::p3_output_matches(&srgb, &p3)
+                        });
+                        if let Err(error) = checked {
+                            log::error!("Color v3: ignoring output-transform-p3.cube: {error}");
+                            *output_p3 = None;
+                        }
+                    }
+                    drop(output_p3);
+                    // The editor preview and exports: Display P3 unless the
+                    // settings choose sRGB.
+                    let space = crate::color_engine::config::OutputSpace::from_setting(
+                        crate::app_settings::load_settings(app.handle().clone())
+                            .ok()
+                            .and_then(|s| s.output_color_space)
+                            .as_deref(),
+                    );
+                    *state.output_space.lock().unwrap() = space;
+                    log::info!(
+                        "Color v3 output colour space: {:?}{}",
+                        space,
+                        if space == crate::color_engine::config::OutputSpace::DisplayP3
+                            && state.output_transform_p3.lock().unwrap().is_none()
+                        {
+                            " (no Display P3 output capture installed: sRGB colours stored as P3)"
+                        } else {
+                            ""
+                        }
+                    );
                 }
 
                 if let Ok(config_dir) = app.path().app_config_dir() {
@@ -1670,6 +1711,7 @@ pub fn run() {
             cache_utils::clear_image_caches,
             app_settings::load_settings,
             app_settings::save_settings,
+            app_settings::set_output_color_space,
             ai_commands::generate_ai_subject_mask,
             ai_commands::generate_ai_auto_subject_mask,
             ai_commands::generate_ai_paint_mask,

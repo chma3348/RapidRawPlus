@@ -1,5 +1,48 @@
 use serde::{Deserialize, Serialize};
 
+/// The colour space finished pictures are encoded in: previews in the
+/// editor and exported files, always together, so what the editor shows is
+/// what the file holds. Display P3 keeps colours sRGB cannot (richer greens,
+/// reds and cyans) when a Resolve P3 output capture is installed; without
+/// one, a P3 picture is the sRGB rendering stored as P3, identical to look at.
+/// Everything else (thumbnails, AI inputs, calibration) stays sRGB.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputSpace {
+    #[default]
+    Srgb,
+    DisplayP3,
+}
+
+impl OutputSpace {
+    /// The app setting: "srgb" chooses sRGB; anything else, including no
+    /// setting at all, is the default Display P3.
+    pub fn from_setting(value: Option<&str>) -> Self {
+        match value {
+            Some("srgb") => Self::Srgb,
+            _ => Self::DisplayP3,
+        }
+    }
+
+    /// The ICC profile a file in this space carries.
+    pub fn icc_profile(self) -> anyhow::Result<Vec<u8>> {
+        let profile = match self {
+            Self::Srgb => moxcms::ColorProfile::new_srgb(),
+            Self::DisplayP3 => moxcms::ColorProfile::new_display_p3(),
+        };
+        Ok(profile.encode()?)
+    }
+
+    /// EXIF's ColorSpace tag: 1 is sRGB; anything else is "uncalibrated",
+    /// meaning the embedded profile decides (what Apple writes for P3).
+    pub fn exif_color_space(self) -> u16 {
+        match self {
+            Self::Srgb => 1,
+            Self::DisplayP3 => 0xFFFF,
+        }
+    }
+}
+
 /// All supported primaries use D65. Other white points/ICC profiles must be
 /// resolved by an input adapter before using this experimental pipeline.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]

@@ -205,6 +205,8 @@ export interface AppSettings {
   useFullDpiRendering?: boolean;
   highResZoomMultiplier?: number;
   enableLivePreviews?: boolean;
+  /** Colour space of the editor preview and exported files; Display P3 when unset. */
+  outputColorSpace?: 'displayP3' | 'srgb';
   livePreviewQuality?: string;
   enableAiTagging?: boolean;
   filterCriteria?: FilterCriteria;

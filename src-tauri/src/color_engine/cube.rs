@@ -371,6 +371,53 @@ pub fn p3_capture_matches(srgb: &CubeLut, p3: &CubeLut) -> Result<()> {
     Ok(())
 }
 
+/// A Display P3 output capture must render greys exactly as the sRGB one
+/// does: same white, same sRGB transfer curve. A different result means it
+/// was captured with another output gamma (P3-D65's 2.6, say) or white.
+pub fn p3_output_matches(srgb: &CubeLut, p3: &CubeLut) -> Result<()> {
+    let mut worst = 0f32;
+    for i in 1..16 {
+        let g = i as f32 / 16.;
+        let a = srgb.sample([g; 3]);
+        let b = p3.sample([g; 3]);
+        for c in 0..3 {
+            worst = worst.max((a[c] - b[c]).abs());
+        }
+    }
+    ensure!(
+        worst < 0.004,
+        "The Display P3 output transform disagrees with the sRGB one on greys by {worst:.4}; it was probably captured with a different output gamma or white point (P3-D65 at gamma 2.6 rather than Display P3)"
+    );
+    Ok(())
+}
+
+/// Encoded sRGB to encoded Display P3, in place: the same colours, stored
+/// in the wider space. Both use the sRGB transfer curve and D65.
+pub fn srgb_encoded_to_p3(pixels: &mut image::Rgba32FImage) {
+    use rayon::prelude::*;
+    let decode = |v: f32| {
+        if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let encode = |v: f32| {
+        if v <= 0.0031308 {
+            12.92 * v
+        } else {
+            1.055 * v.powf(1.0 / 2.4) - 0.055
+        }
+    };
+    pixels.as_mut().par_chunks_mut(4).for_each(|p| {
+        let linear = [decode(p[0]), decode(p[1]), decode(p[2])];
+        for (c, row) in SRGB_TO_P3.iter().enumerate() {
+            let v = row[0] * linear[0] + row[1] * linear[1] + row[2] * linear[2];
+            p[c] = encode(v.clamp(0.0, 1.0));
+        }
+    });
+}
+
 /// The installed input captures, and the rule for choosing between them.
 pub struct CapturedInput {
     pub srgb: Arc<CubeLut>,

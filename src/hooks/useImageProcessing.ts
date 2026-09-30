@@ -416,6 +416,22 @@ export function useImageProcessing(
     originalSize,
   ]);
 
+  // The output colour space changed (Export panel): render the preview and
+  // the before/after image again, now in the space the export will use.
+  const outputColorSpace = appSettings?.outputColorSpace;
+  const lastOutputColorSpace = useRef(outputColorSpace);
+  useEffect(() => {
+    if (lastOutputColorSpace.current === outputColorSpace) return;
+    lastOutputColorSpace.current = outputColorSpace;
+    if (!selectedImage?.isReady) return;
+    currentOriginalResRef.current = 0;
+    setEditor({ transformedOriginalUrl: null });
+    const targetRes = calculateTargetRes();
+    currentResRef.current = targetRes;
+    applyAdjustments(previewOverride ?? adjustments, false, targetRes);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [outputColorSpace]);
+
   useEffect(() => {
     if (!selectedImage?.isReady) return;
 

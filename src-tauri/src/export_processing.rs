@@ -9,6 +9,8 @@ use image::codecs::jpeg::JpegEncoder;
 use image::{DynamicImage, GenericImageView, ImageBuffer, ImageEncoder, imageops};
 use jxl_encoder::{LosslessConfig, LossyConfig, PixelLayout};
 use serde::{Deserialize, Serialize};
+
+use crate::color_engine::config::OutputSpace;
 use serde_json::Value;
 use tauri::Emitter;
 use tauri::Manager;
@@ -75,15 +77,18 @@ mod precision_tests {
     use image::Rgba;
 
     #[test]
-    fn supported_color_exports_embed_srgb_profiles() {
+    fn supported_color_exports_embed_the_output_profile() {
         use image::ImageDecoder;
         let image = DynamicImage::ImageRgba16(ImageBuffer::from_pixel(
             2,
             2,
             Rgba([30001, 31002, 32003, 65535]),
         ));
-        for format in ["png", "jpg", "tiff"] {
-            let bytes = encode_image_to_bytes(&image, format, 95).unwrap();
+        for (format, space) in ["png", "jpg", "tiff"]
+            .into_iter()
+            .flat_map(|f| [(f, OutputSpace::Srgb), (f, OutputSpace::DisplayP3)])
+        {
+            let bytes = encode_image_to_bytes(&image, format, 95, space).unwrap();
             // The generic reader derives TIFF allocation limits from pixel
             // size; on tiny fixtures this can be smaller than an ICC profile.
             // Read metadata directly with the TIFF decoder's normal limits.
@@ -103,11 +108,11 @@ mod precision_tests {
             }
             .unwrap_or_else(|| panic!("missing {format} export profile"));
             let mut profile = profile;
-            let mut expected = moxcms::ColorProfile::new_srgb().encode().unwrap();
+            let mut expected = space.icc_profile().unwrap();
             // ICC creation timestamps may differ across a second boundary.
             profile[24..36].fill(0);
             expected[24..36].fill(0);
-            assert_eq!(profile, expected, "{format} profile changed");
+            assert_eq!(profile, expected, "{format} {space:?} profile changed");
         }
     }
 
@@ -117,7 +122,7 @@ mod precision_tests {
             Rgba([30000 + x as u16, 31001, 32002, 65535])
         }));
         for format in ["png", "tiff", "tif"] {
-            let bytes = encode_image_to_bytes(&image, format, 95).unwrap();
+            let bytes = encode_image_to_bytes(&image, format, 95, OutputSpace::Srgb).unwrap();
             let decoded = image::load_from_memory(&bytes).unwrap();
             assert!(matches!(
                 decoded.color(),
@@ -131,7 +136,7 @@ mod precision_tests {
         }
         for format in ["jpg", "webp", "avif", "jxl"] {
             assert!(
-                !encode_image_to_bytes(&image, format, 95)
+                !encode_image_to_bytes(&image, format, 95, OutputSpace::Srgb)
                     .unwrap()
                     .is_empty(),
                 "{format}"
@@ -377,6 +382,7 @@ fn save_image_with_metadata(
     output_path: &std::path::Path,
     source_path_str: &str,
     export_settings: &ExportSettings,
+    space: OutputSpace,
 ) -> Result<(), String> {
     let extension = output_path
         .extension()
@@ -384,7 +390,8 @@ fn save_image_with_metadata(
         .unwrap_or("")
         .to_lowercase();
 
-    let mut image_bytes = encode_image_to_bytes(image, &extension, export_settings.jpeg_quality)?;
+    let mut image_bytes =
+        encode_image_to_bytes(image, &extension, export_settings.jpeg_quality, space)?;
 
     exif_processing::write_image_with_metadata(
         &mut image_bytes,
@@ -392,6 +399,7 @@ fn save_image_with_metadata(
         &extension,
         export_settings.keep_metadata,
         export_settings.strip_gps,
+        space,
     )?;
 
     #[cfg(target_os = "android")]
@@ -458,11 +466,15 @@ fn to_rgb8_dithered(image: &DynamicImage) -> image::RgbImage {
     DynamicImage::ImageRgba8(to_rgba8_dithered(image)).to_rgb8()
 }
 
+/// `space` is the colour space the pixels are in; the formats that carry a
+/// profile embed the matching one.
 fn encode_image_to_bytes(
     image: &DynamicImage,
     output_format: &str,
     jpeg_quality: u8,
+    space: OutputSpace,
 ) -> Result<Vec<u8>, String> {
+    let profile = || space.icc_profile().map_err(|e| e.to_string());
     let mut image_bytes = Vec::new();
     let mut cursor = Cursor::new(&mut image_bytes);
 
@@ -513,11 +525,7 @@ fn encode_image_to_bytes(
             let rgb_image = to_rgb8_dithered(image);
             let mut encoder = JpegEncoder::new_with_quality(&mut cursor, jpeg_quality);
             encoder
-                .set_icc_profile(
-                    moxcms::ColorProfile::new_srgb()
-                        .encode()
-                        .map_err(|e| e.to_string())?,
-                )
+                .set_icc_profile(profile()?)
                 .map_err(|e| e.to_string())?;
             rgb_image
                 .write_with_encoder(encoder)
@@ -532,11 +540,7 @@ fn encode_image_to_bytes(
 
             let mut encoder = image::codecs::png::PngEncoder::new(&mut cursor);
             encoder
-                .set_icc_profile(
-                    moxcms::ColorProfile::new_srgb()
-                        .encode()
-                        .map_err(|e| e.to_string())?,
-                )
+                .set_icc_profile(profile()?)
                 .map_err(|e| e.to_string())?;
             image_to_encode
                 .write_with_encoder(encoder)
@@ -545,11 +549,7 @@ fn encode_image_to_bytes(
         "tif" | "tiff" => {
             let mut encoder = image::codecs::tiff::TiffEncoder::new(&mut cursor);
             encoder
-                .set_icc_profile(
-                    moxcms::ColorProfile::new_srgb()
-                        .encode()
-                        .map_err(|e| e.to_string())?,
-                )
+                .set_icc_profile(profile()?)
                 .map_err(|e| e.to_string())?;
             DynamicImage::ImageRgb16(image.to_rgb16())
                 .write_with_encoder(encoder)
@@ -762,15 +762,18 @@ pub async fn export_images(
                         }
                     }
 
-                    let rendered = crate::color_engine::application::render_file(
+                    // The output space the editor previews in, so the file
+                    // holds exactly what was on screen.
+                    let frame = crate::color_engine::application::render_for_output(
                         &context_clone,
                         &state,
                         &image_path_str,
                         &js_adjustments,
                         None,
                     )
-                    .map_err(|e| e.to_string())?
-                    .export_rgba16();
+                    .map_err(|e| e.to_string())?;
+                    let space = frame.space;
+                    let rendered = frame.export_rgba16();
                     let final_image =
                         apply_export_resize_and_watermark(rendered, &export_settings)?;
                     save_image_with_metadata(
@@ -778,6 +781,7 @@ pub async fn export_images(
                         &output_path,
                         &source_path_str,
                         &export_settings,
+                        space,
                     )?;
 
                     if export_settings.preserve_timestamps {
@@ -915,8 +919,13 @@ pub async fn estimate_export_sizes(
     };
     let reduced = frame.export_rgba16();
     let (small_w, small_h) = reduced.dimensions();
-    let bytes =
-        encode_image_to_bytes(&reduced, &output_format, export_settings.jpeg_quality)?.len();
+    let bytes = encode_image_to_bytes(
+        &reduced,
+        &output_format,
+        export_settings.jpeg_quality,
+        frame.space,
+    )?
+    .len();
     let scale = (target_w as f64 * target_h as f64) / (small_w as f64 * small_h as f64).max(1.);
     Ok((bytes as f64 * scale) as usize * paths.len())
 }

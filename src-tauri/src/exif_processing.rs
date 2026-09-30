@@ -678,6 +678,7 @@ pub fn write_image_with_metadata(
     output_format: &str,
     keep_metadata: bool,
     strip_gps: bool,
+    space: crate::color_engine::config::OutputSpace,
 ) -> Result<(), String> {
     // FIXME: temporary solution until I find a way to write metadata to TIFF
     if !keep_metadata || output_format.to_lowercase() == "tiff" {
@@ -1068,7 +1069,9 @@ pub fn write_image_with_metadata(
 
     metadata.set_tag(ExifTag::Software("RapidRAW".to_string()));
     metadata.set_tag(ExifTag::Orientation(vec![1u16]));
-    metadata.set_tag(ExifTag::ColorSpace(vec![1u16]));
+    // sRGB, or "uncalibrated" for Display P3 so viewers follow the embedded
+    // profile rather than a camera's copied sRGB tag.
+    metadata.set_tag(ExifTag::ColorSpace(vec![space.exif_color_space()]));
 
     if let Err(e) = metadata.write_to_vec(image_bytes, file_type) {
         log::warn!("Failed to write metadata: {}", e);

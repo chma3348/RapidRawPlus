@@ -835,7 +835,12 @@
     },
     "file": {
       "quality": "Quality",
-      "qualityLossless": "Quality (Lossless)"
+      "qualityLossless": "Quality (Lossless)",
+      "colorSpace": "Colour space",
+      "colorSpaceP3": "Display P3",
+      "colorSpaceSrgb": "sRGB",
+      "colorSpaceP3Hint": "Richer greens, reds and cyans on Apple devices, modern phones and browsers. The editor previews in the same space.",
+      "colorSpaceSrgbHint": "Safest for Windows, printing and sites that strip colour profiles. The editor previews in the same space."
     },
     "labels": {
       "image": "Image",

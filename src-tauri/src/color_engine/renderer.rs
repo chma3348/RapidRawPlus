@@ -12,8 +12,12 @@ pub struct StageCapture {
 }
 
 pub struct RenderedFrame {
-    /// Encoded sRGB/D65, bounded to [0,1], straight alpha. Not monitor-converted.
+    /// Encoded values in `space` (sRGB unless a render asked for Display P3;
+    /// both use the sRGB transfer curve and D65), bounded to [0,1], straight
+    /// alpha. Not monitor-converted.
     pub encoded_srgb: Rgba32FImage,
+    /// The colour space `encoded_srgb` is in, and the profile files carry.
+    pub space: super::config::OutputSpace,
     pub stages: Option<StageCapture>,
     /// The full-resolution size this render stands for; equal to the image's
     /// own size unless a preview was rendered from a downscaled picture.
@@ -33,8 +37,8 @@ impl RenderedFrame {
         }
     }
 
-    /// Embed the output profile, so supporting viewers interpret these values
-    /// as sRGB rather than the monitor's native gamut.
+    /// Embed the output profile (sRGB or Display P3, per `space`), so viewers
+    /// interpret these values correctly rather than as the monitor's gamut.
     pub fn write_srgb_png(&self, writer: impl std::io::Write, sixteen_bit: bool) -> Result<()> {
         let image = if sixteen_bit {
             self.export_rgba16()
@@ -51,7 +55,7 @@ impl RenderedFrame {
 
     fn encode_png(&self, writer: impl std::io::Write, image: DynamicImage) -> Result<()> {
         let mut encoder = image::codecs::png::PngEncoder::new(writer);
-        encoder.set_icc_profile(moxcms::ColorProfile::new_srgb().encode()?)?;
+        encoder.set_icc_profile(self.space.icc_profile()?)?;
         image.write_with_encoder(encoder)?;
         Ok(())
     }
@@ -206,6 +210,7 @@ impl ColorEngine {
         Ok(RenderedFrame {
             full_size: output.dimensions(),
             encoded_srgb: output,
+            space: super::config::OutputSpace::Srgb,
             stages,
         })
     }

@@ -2162,3 +2162,142 @@ fn shadows_is_resolves_measured_gain() {
         }
     }
 }
+
+/// The chosen output space reaches the finished picture: Display P3 renders
+/// through Resolve's P3 output capture where the picture ends in Resolve's
+/// transform, otherwise the sRGB rendering is stored as P3 (the same colours),
+/// and sRGB renders are untouched. Pinning carries the P3 capture too.
+#[test]
+fn output_space_contracts() {
+    use rapidraw_lib::color_engine::{
+        application::{render_file, render_for_output},
+        config::OutputSpace,
+        cube::{CubeLut, p3_output_matches, srgb_encoded_to_p3},
+        identity,
+    };
+    use serde_json::json;
+    let context = gpu();
+    let dir = tempfile::tempdir().unwrap();
+    let photo = dir.path().join("photo.png");
+    ImageBuffer::from_fn(24, 16, |x, y| {
+        Rgba([40 + x as u8 * 8, 90 + y as u8 * 6, 140, 255])
+    })
+    .save(&photo)
+    .unwrap();
+    let path = photo.to_str().unwrap();
+    let cube = |v: f32| format!("LUT_3D_SIZE 2\n{}", format!("{v} {v} {v}\n").repeat(8));
+    let (input, output, output_p3) = (
+        dir.path().join("input.cube"),
+        dir.path().join("output.cube"),
+        dir.path().join("output-p3.cube"),
+    );
+    std::fs::write(&input, cube(0.3)).unwrap();
+    std::fs::write(&output, cube(0.25)).unwrap();
+    std::fs::write(&output_p3, cube(0.75)).unwrap();
+    let edits = json!({"processVersion":3,"toneMapper":"resolve","v3":{}});
+
+    // Without a P3 capture: the sRGB rendering, stored as P3.
+    let state = rapidraw_lib::AppState::default();
+    *state.v3_asset_dir.lock().unwrap() = Some(dir.path().join("assets"));
+    let srgb = render_file(&context, &state, path, &edits, None).unwrap();
+    assert_eq!(srgb.space, OutputSpace::Srgb);
+    assert_eq!(
+        render_for_output(&context, &state, path, &edits, None)
+            .unwrap()
+            .encoded_srgb,
+        srgb.encoded_srgb,
+        "sRGB is the state's default: tools and tests render sRGB"
+    );
+    *state.output_space.lock().unwrap() = OutputSpace::DisplayP3;
+    let stored = render_for_output(&context, &state, path, &edits, None).unwrap();
+    assert_eq!(stored.space, OutputSpace::DisplayP3);
+    let mut converted = srgb.encoded_srgb.clone();
+    srgb_encoded_to_p3(&mut converted);
+    assert_eq!(
+        stored.encoded_srgb, converted,
+        "P3 without a capture is sRGB stored as P3"
+    );
+    // Thumbnails and other side renders stay sRGB whatever the setting.
+    assert_eq!(
+        render_file(&context, &state, path, &edits, None)
+            .unwrap()
+            .space,
+        OutputSpace::Srgb
+    );
+
+    // With the captures installed, P3 renders through the P3 capture.
+    *state.input_transform.lock().unwrap() = Some(input.clone());
+    *state.output_transform.lock().unwrap() = Some(output.clone());
+    *state.output_transform_p3.lock().unwrap() = Some(output_p3.clone());
+    let native = render_for_output(&context, &state, path, &edits, None).unwrap();
+    assert!(
+        native
+            .encoded_srgb
+            .pixels()
+            .all(|p| (p[1] - 0.75).abs() < 1e-4),
+        "the P3 capture renders the picture: {:?}",
+        native.encoded_srgb.get_pixel(0, 0)
+    );
+    *state.output_space.lock().unwrap() = OutputSpace::Srgb;
+    let through_srgb = render_for_output(&context, &state, path, &edits, None).unwrap();
+    assert!(
+        through_srgb
+            .encoded_srgb
+            .pixels()
+            .all(|p| (p[1] - 0.25).abs() < 1e-4)
+    );
+    *state.output_space.lock().unwrap() = OutputSpace::DisplayP3;
+
+    // The previous engine's tone mappers render sRGB, stored as P3.
+    let mut basic = edits.clone();
+    basic["toneMapper"] = json!("basic");
+    *state.output_space.lock().unwrap() = OutputSpace::Srgb;
+    let mut expected = render_for_output(&context, &state, path, &basic, None)
+        .unwrap()
+        .encoded_srgb;
+    srgb_encoded_to_p3(&mut expected);
+    *state.output_space.lock().unwrap() = OutputSpace::DisplayP3;
+    assert_eq!(
+        render_for_output(&context, &state, path, &basic, None)
+            .unwrap()
+            .encoded_srgb,
+        expected
+    );
+
+    // Pinning keeps the P3 capture: removing the installed files changes nothing.
+    let mut pinned_edits = edits.clone();
+    pinned_edits["v3Pipeline"] =
+        serde_json::to_value(identity::pin(&state, &edits).unwrap()).unwrap();
+    assert!(pinned_edits["v3Pipeline"]["output_transform_p3"]["blake3"].is_string());
+    let fresh = rapidraw_lib::AppState::default();
+    *fresh.v3_asset_dir.lock().unwrap() = Some(dir.path().join("assets"));
+    *fresh.output_space.lock().unwrap() = OutputSpace::DisplayP3;
+    assert_eq!(
+        render_for_output(&context, &fresh, path, &pinned_edits, None)
+            .unwrap()
+            .encoded_srgb,
+        native.encoded_srgb,
+        "a pinned edit renders through its pinned P3 capture"
+    );
+
+    // A P3 output capture must render greys as the sRGB one does.
+    let srgb_cube = CubeLut::parse(&cube(0.25)).unwrap();
+    assert!(p3_output_matches(&srgb_cube, &CubeLut::parse(&cube(0.25)).unwrap()).is_ok());
+    assert!(p3_output_matches(&srgb_cube, &CubeLut::parse(&cube(0.3)).unwrap()).is_err());
+
+    // Encoded P3 holds the same colours: white and greys stay put, sRGB red
+    // becomes the less saturated P3 red it is.
+    let mut samples = image::Rgba32FImage::from_fn(3, 1, |x, _| match x {
+        0 => Rgba([1.0, 1.0, 1.0, 1.0]),
+        1 => Rgba([0.5, 0.5, 0.5, 1.0]),
+        _ => Rgba([1.0, 0.0, 0.0, 1.0]),
+    });
+    srgb_encoded_to_p3(&mut samples);
+    let s = samples.as_raw();
+    assert!((s[0] - 1.0).abs() < 1e-4 && (s[5] - 0.5).abs() < 1e-3);
+    assert!(
+        (s[8] - 0.9175).abs() < 2e-3 && s[9] > 0.2 && s[9] < 0.3,
+        "{:?}",
+        &s[8..11]
+    );
+}

@@ -36,6 +36,9 @@ pub struct Identity {
     /// The Display P3 capture, when one was installed at pinning time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_transform_p3: Option<Asset>,
+    /// The Display P3 output capture, when one was installed at pinning time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_transform_p3: Option<Asset>,
 }
 
 /// Effective pair used for an entire application render. A saved `None`
@@ -44,6 +47,7 @@ pub struct Resolved {
     pub input: Option<PathBuf>,
     pub input_p3: Option<PathBuf>,
     pub output: Option<PathBuf>,
+    pub output_p3: Option<PathBuf>,
     pub recovery: super::raw::Recovery,
 }
 
@@ -65,6 +69,7 @@ impl Identity {
             &self.input_transform,
             &self.output_transform,
             &self.input_transform_p3,
+            &self.output_transform_p3,
         ]
         .into_iter()
         .flatten()
@@ -110,6 +115,11 @@ pub fn resolve(state: &crate::AppState, edits: &Value) -> Result<Resolved> {
             input: super::application::input_transform(state),
             input_p3: state.input_transform_p3.lock().ok().and_then(|p| p.clone()),
             output: super::application::output_transform(state),
+            output_p3: state
+                .output_transform_p3
+                .lock()
+                .ok()
+                .and_then(|p| p.clone()),
             recovery,
         });
     };
@@ -136,6 +146,7 @@ pub fn resolve(state: &crate::AppState, edits: &Value) -> Result<Resolved> {
         input: asset(&identity.input_transform)?,
         input_p3: asset(&identity.input_transform_p3)?,
         output: asset(&identity.output_transform)?,
+        output_p3: asset(&identity.output_transform_p3)?,
         recovery,
     })
 }
@@ -198,6 +209,7 @@ pub fn pin(state: &crate::AppState, edits: &Value) -> Result<Identity> {
         input_transform: capture(pair.input)?,
         output_transform: capture(pair.output)?,
         input_transform_p3: capture(pair.input_p3)?,
+        output_transform_p3: capture(pair.output_p3)?,
     };
     identity.validate()?;
     Ok(identity)

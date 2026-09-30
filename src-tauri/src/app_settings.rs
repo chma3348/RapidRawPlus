@@ -343,6 +343,10 @@ pub struct AppSettings {
     pub high_res_zoom_multiplier: Option<f32>,
     #[serde(default)]
     pub enable_live_previews: Option<bool>,
+    /// "displayP3" (the default when unset) or "srgb": the colour space of
+    /// the editor preview and of exported files.
+    #[serde(default)]
+    pub output_color_space: Option<String>,
     #[serde(default)]
     pub live_preview_quality: Option<String>,
     pub sort_criteria: Option<SortCriteria>,
@@ -454,6 +458,7 @@ impl Default for AppSettings {
             enable_zoom_hifi: Some(true),
             use_full_dpi_rendering: Some(false),
             enable_live_previews: Some(true),
+            output_color_space: None,
             live_preview_quality: Some("high".to_string()),
             sort_criteria: None,
             filter_criteria: None,
@@ -601,6 +606,15 @@ pub fn load_settings(app_handle: AppHandle) -> Result<AppSettings, String> {
     Ok(settings)
 }
 
+/// Switch the preview/export colour space at once, before the settings file
+/// is written, so the preview that follows is already in the new space.
+#[tauri::command]
+pub fn set_output_color_space(space: String, app_handle: AppHandle) {
+    let state = app_handle.state::<AppState>();
+    *state.output_space.lock().unwrap() =
+        crate::color_engine::config::OutputSpace::from_setting(Some(space.as_str()));
+}
+
 #[tauri::command]
 pub fn save_settings(settings: AppSettings, app_handle: AppHandle) -> Result<(), String> {
     let path = get_settings_path(&app_handle)?;
@@ -608,6 +622,9 @@ pub fn save_settings(settings: AppSettings, app_handle: AppHandle) -> Result<(),
     fs::write(path, json_string).map_err(|e| e.to_string())?;
 
     let state = app_handle.state::<AppState>();
+    *state.output_space.lock().unwrap() = crate::color_engine::config::OutputSpace::from_setting(
+        settings.output_color_space.as_deref(),
+    );
     let cache_size = settings.image_cache_size.unwrap_or(5) as usize;
     state
         .decoded_image_cache
