@@ -293,7 +293,7 @@ export function useImageProcessing(
 
   const applyAdjustments = useCallback(
     (currentAdjustments: Adjustments, dragging: boolean = false, targetRes?: number) => {
-      if (!selectedImage?.isReady) return;
+      if (!selectedImage?.isReady || selectedImage.isVideo) return;
 
       if (dragging) {
         pendingApplyRef.current = { adjustments: currentAdjustments, targetRes };
@@ -303,17 +303,17 @@ export function useImageProcessing(
         executeApplyAdjustments(currentAdjustments, false, targetRes);
       }
     },
-    [selectedImage?.isReady, flushPipeline, executeApplyAdjustments],
+    [selectedImage?.isReady, selectedImage?.isVideo, flushPipeline, executeApplyAdjustments],
   );
 
   const generateUncroppedPreview = useCallback(
     (currentAdjustments: Adjustments) => {
-      if (!selectedImage?.isReady) return;
+      if (!selectedImage?.isReady || selectedImage.isVideo) return;
       invoke(Invokes.GenerateUncroppedPreview, { jsAdjustments: currentAdjustments }).catch((err) =>
         console.error('Failed to generate uncropped preview:', err),
       );
     },
-    [selectedImage?.isReady],
+    [selectedImage?.isReady, selectedImage?.isVideo],
   );
 
   const calculateTargetRes = useCallback(() => {
@@ -384,13 +384,13 @@ export function useImageProcessing(
   );
 
   useEffect(() => {
-    if (activeRightPanel === Panel.Crop && selectedImage?.isReady) {
+    if (activeRightPanel === Panel.Crop && selectedImage?.isReady && !selectedImage.isVideo) {
       generateUncroppedPreview(adjustments);
     }
   }, [adjustments, activeRightPanel, selectedImage?.isReady, generateUncroppedPreview]);
 
   useEffect(() => {
-    if (selectedImage?.isReady && displaySize.width > 0 && !isSliderDragging) {
+    if (selectedImage?.isReady && !selectedImage.isVideo && displaySize.width > 0 && !isSliderDragging) {
       let baseRes = calculateTargetRes();
       if (originalSize.width > 0 && originalSize.height > 0) {
         const maxRes = Math.max(originalSize.width, originalSize.height);
@@ -423,7 +423,7 @@ export function useImageProcessing(
   useEffect(() => {
     if (lastOutputColorSpace.current === outputColorSpace) return;
     lastOutputColorSpace.current = outputColorSpace;
-    if (!selectedImage?.isReady) return;
+    if (!selectedImage?.isReady || selectedImage.isVideo) return;
     currentOriginalResRef.current = 0;
     setEditor({ transformedOriginalUrl: null });
     const targetRes = calculateTargetRes();
@@ -433,7 +433,7 @@ export function useImageProcessing(
   }, [outputColorSpace]);
 
   useEffect(() => {
-    if (!selectedImage?.isReady) return;
+    if (!selectedImage?.isReady || selectedImage.isVideo) return;
 
     if (dragIdleTimer.current) clearTimeout(dragIdleTimer.current);
 

@@ -629,13 +629,21 @@ export default function Editor({ onBackToLibrary, onContextMenu, transformWrappe
         activeSubMask?.type === Mask.Clipped ||
         activeSubMask?.parameters?.isInitialDraw)) ||
     isWbPickerActive ||
-    isMixerPickerActive;
+    isMixerPickerActive ||
+    // A video's own controls take the clicks: no panning, no pointer
+    // capture (which would send the click to the canvas container instead
+    // of the play button), no click-to-zoom.
+    Boolean(selectedImage?.isVideo);
+  const isVideoRef = useRef(false);
+  isVideoRef.current = Boolean(selectedImage?.isVideo);
 
   useEffect(() => {
     const container = imageContainerRef.current;
     if (!container) return;
 
     const handleNativeWheel = (e: WheelEvent) => {
+      // Nothing to zoom on a video; leave the wheel to the player.
+      if (isVideoRef.current) return;
       e.preventDefault();
       if (animationFrameId.current) cancelAnimationFrame(animationFrameId.current);
       if (physicsFrameId.current) cancelAnimationFrame(physicsFrameId.current);
