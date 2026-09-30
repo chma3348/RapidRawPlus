@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Image as ImageIcon, Folder, FolderOpen, Star as StarIcon, SlidersHorizontal } from 'lucide-react';
+import { Image as ImageIcon, Folder, FolderOpen, Star as StarIcon, SlidersHorizontal, Layers } from 'lucide-react';
 import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
 import { COLOR_LABELS, Color } from '../../../utils/adjustments';
@@ -9,6 +9,7 @@ import { TextColors, TextVariants, TextWeights, TEXT_COLOR_KEYS } from '../../..
 import { ColumnWidths } from '../MainLibrary';
 import { useProcessStore } from '../../../store/useProcessStore';
 import { useSettingsStore } from '../../../store/useSettingsStore';
+import { useStackSize } from '../../../hooks/useStacks';
 import { IconAperture, IconFocalLength, IconIso, IconShutter } from '../editor/ExifIcons';
 
 interface ImageLayer {
@@ -62,6 +63,7 @@ const ThumbnailComponent = ({
       isVirtualCopy: parts.length > 1,
     };
   }, [path]);
+  const stackSize = useStackSize(path);
 
   const { shutter, fNumber, iso, focal } = useMemo(() => {
     const e = exif || {};
@@ -333,6 +335,27 @@ const ThumbnailComponent = ({
               VC
             </Text>
           )}
+          {stackSize > 1 && (
+            <Text
+              as="div"
+              variant={TextVariants.small}
+              weight={TextWeights.bold}
+              className={clsx(
+                'ml-1 flex shrink-0 items-center gap-1 px-1.5 py-0.5 rounded-full transition-colors duration-300 font-bold pointer-events-auto',
+                isAlways
+                  ? 'bg-border-color/30 text-text-primary shadow-none'
+                  : isHover
+                    ? 'bg-black/30 text-white backdrop-blur-xs shadow-md group-hover:bg-border-color/30 group-hover:text-text-primary group-hover:shadow-none group-hover:backdrop-blur-none'
+                    : 'bg-black/30 text-white backdrop-blur-xs shadow-md',
+              )}
+              data-tooltip={t('library.items.tooltipVersions', '{{count}} versions — open to switch between them', {
+                count: stackSize,
+              })}
+            >
+              <Layers size={11} />
+              {stackSize}
+            </Text>
+          )}
         </div>
 
         <div
@@ -441,6 +464,7 @@ const ListItemComponent = ({
       isVirtualCopy: parts.length > 1,
     };
   }, [path]);
+  const stackSize = useStackSize(path);
 
   const { shutter, fNumber, iso, focal } = useMemo(() => {
     const e = exif || {};
@@ -590,6 +614,21 @@ const ListItemComponent = ({
             data-tooltip={t('library.items.tooltipVirtualCopy')}
           >
             VC
+          </Text>
+        )}
+        {stackSize > 1 && (
+          <Text
+            as="div"
+            variant={TextVariants.small}
+            color={TextColors.secondary}
+            weight={TextWeights.bold}
+            className="flex shrink-0 items-center gap-1 bg-bg-primary px-1.5 py-0.5 rounded-full leading-none border border-border-color"
+            data-tooltip={t('library.items.tooltipVersions', '{{count}} versions — open to switch between them', {
+              count: stackSize,
+            })}
+          >
+            <Layers size={11} />
+            {stackSize}
           </Text>
         )}
       </div>

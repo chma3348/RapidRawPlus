@@ -60,6 +60,7 @@ import TaggingSubMenu from '../context/TaggingSubMenu';
 import { useEditorActions } from './useEditorActions';
 import { useLibraryActions } from './useLibraryActions';
 import { globalImageCache } from '../utils/ImageLRUCache';
+import { getStacks } from './useStacks';
 
 export interface UseAppContextMenusProps {
   handleImageSelect: (path: string) => void;
@@ -144,7 +145,13 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
             label: item.name,
             icon: ResolvedIcon,
             onClick: () => {
-              invoke(Invokes.AddToAlbum, { albumId: item.id, paths: pathsToAdd })
+              // A photo brings its versions (restores, copies…) with it, so
+              // the album shows the same stack as the folder.
+              const stacks = getStacks(useLibraryStore.getState().imageList);
+              const withVersions = Array.from(
+                new Set(pathsToAdd.flatMap((p) => (stacks.members.get(p) ?? [{ path: p }]).map((f) => f.path))),
+              );
+              invoke(Invokes.AddToAlbum, { albumId: item.id, paths: withVersions })
                 .then(() => {
                   console.log(`Added image(s) to ${item.name}`);
                   invoke(Invokes.GetAlbums).then((res: any) =>

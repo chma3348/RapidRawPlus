@@ -4,6 +4,7 @@ import { useShallow } from 'zustand/react/shallow';
 import clsx from 'clsx';
 
 import Editor from '../panel/Editor';
+import VersionStrip from '../panel/editor/VersionStrip';
 import BottomBar from '../panel/BottomBar';
 import RightPanelSwitcher from '../panel/right/RightPanelSwitcher';
 import Resizer from '../ui/Resizer';
@@ -248,6 +249,13 @@ export default function EditorView({
     <div className={clsx('flex grow h-full min-h-0', isCompactPortrait ? 'flex-col gap-2' : 'flex-row')}>
       <div className={clsx('flex-1 flex flex-col min-w-0', isCompactPortrait && 'min-h-0')}>
         {editorNode}
+        {!isFullScreen && (
+          <VersionStrip
+            selectedPath={selectedImage?.path}
+            onSelect={(path) => handleImageClick(path, {})}
+            requestThumbnails={requestThumbnails}
+          />
+        )}
         {!isCompactPortrait && editorBottomBarNode}
       </div>
       <div

@@ -12,6 +12,8 @@ interface ConfirmModalProps {
   message?: string;
   onClose(): void;
   onConfirm?(): void;
+  secondaryText?: string;
+  onSecondary?(): void;
   title?: string;
 }
 
@@ -23,6 +25,8 @@ export default function ConfirmModal({
   message,
   onClose,
   onConfirm,
+  secondaryText,
+  onSecondary,
   title,
 }: ConfirmModalProps) {
   const { t } = useTranslation();
@@ -111,6 +115,18 @@ export default function ConfirmModal({
           >
             {resolvedCancelText}
           </Button>
+          {secondaryText && onSecondary && (
+            <Button
+              onClick={() => {
+                onSecondary();
+                onClose();
+              }}
+              variant="secondary"
+              className="focus:outline-hidden focus:ring-0 focus:ring-offset-0"
+            >
+              {secondaryText}
+            </Button>
+          )}
           <Button
             onClick={handleConfirm}
             variant={confirmVariant}

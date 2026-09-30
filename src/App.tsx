@@ -31,6 +31,7 @@ import { useTauriListeners } from './hooks/useTauriListeners';
 import { useFileOperations } from './hooks/useFileOperations';
 import { useAppContextMenus } from './hooks/useAppContextMenus';
 import { useSortedLibrary } from './hooks/useSortedLibrary';
+import { LIBRARY_REFRESH_EVENT } from './utils/stacks';
 import { useAppNavigation } from './hooks/useAppNavigation';
 
 import { useEditorActions } from './hooks/useEditorActions';
@@ -307,6 +308,15 @@ function App() {
       }
     }
   }, [currentFolderPath, handleSelectSubfolder, handleSelectAlbum]);
+
+  // Views that write into the open folder ask for a refresh this way.
+  useEffect(() => {
+    const onRefresh = () => {
+      handleLibraryRefresh();
+    };
+    window.addEventListener(LIBRARY_REFRESH_EVENT, onRefresh);
+    return () => window.removeEventListener(LIBRARY_REFRESH_EVENT, onRefresh);
+  }, [handleLibraryRefresh]);
 
   const {
     executeDelete,

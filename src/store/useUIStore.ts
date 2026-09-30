@@ -25,6 +25,9 @@ export interface ConfirmModalState {
   isOpen: boolean;
   message?: string;
   onConfirm?(): void;
+  /** An optional middle choice, between Cancel and the main action. */
+  secondaryText?: string;
+  onSecondary?(): void;
   title?: string;
 }
 

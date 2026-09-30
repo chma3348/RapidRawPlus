@@ -9,6 +9,7 @@ import { useProcessStore } from '../store/useProcessStore';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { Invokes } from '../components/ui/AppProperties';
 import { Status } from '../components/ui/ExportImportProperties';
+import { getStacks } from './useStacks';
 
 export function useFileOperations(
   refreshImageList: () => Promise<void>,
@@ -38,7 +39,14 @@ export function useFileOperations(
         const physicalPath = activePath.split('?vc=')[0];
         const isActiveImageDeleted = pathsToDelete.some((p) => p === activePath || p === physicalPath);
 
-        if (isActiveImageDeleted) {
+        // Deleting a version that is open goes back to its original.
+        const stackRoot = getStacks(useLibraryStore.getState().imageList).rootOf.get(activePath);
+        const rootSurvives =
+          stackRoot && !pathsToDelete.some((p) => p === stackRoot || p === stackRoot.split('?vc=')[0]);
+
+        if (isActiveImageDeleted && rootSurvives) {
+          nextImagePath = stackRoot;
+        } else if (isActiveImageDeleted) {
           const currentIndex = sortedImageList.findIndex((img) => img.path === activePath);
           if (currentIndex !== -1) {
             const nextCandidate = sortedImageList
@@ -104,6 +112,32 @@ export function useFileOperations(
     }
 
     const isSingle = pathsToDelete.length === 1;
+
+    // Photos with versions: offer to take the versions too, so deleting a
+    // photo does not leave its restores and copies behind as strays.
+    const stacks = getStacks(imageList);
+    const versions = pathsToDelete.flatMap((p) => (stacks.members.get(p) ?? []).slice(1).map((f) => f.path));
+    if (versions.length > 0) {
+      const withVersions = Array.from(new Set([...pathsToDelete, ...versions]));
+      const photos = isSingle ? 'this photo' : `these ${pathsToDelete.length} photos`;
+      setUI({
+        confirmModalState: {
+          confirmText: 'Delete All',
+          confirmVariant: 'destructive',
+          isOpen: true,
+          message:
+            `${isSingle ? 'This photo has' : 'These photos have'} ${versions.length} other ` +
+            `version${versions.length === 1 ? '' : 's'} (restores, upscales, copies…). ` +
+            `Delete ${photos} and every version, or only ${photos}? ` +
+            `Virtual copies always go with their photo. Files are moved to the Trash.`,
+          onConfirm: () => executeDelete(withVersions, { includeAssociated: false }),
+          secondaryText: isSingle ? 'Only This Photo' : 'Only These Photos',
+          onSecondary: () => executeDelete(pathsToDelete, { includeAssociated: false }),
+          title: isSingle ? 'Delete Photo and Its Versions?' : 'Delete Photos and Their Versions?',
+        },
+      });
+      return;
+    }
 
     const selectionHasVirtualCopies =
       isSingle &&

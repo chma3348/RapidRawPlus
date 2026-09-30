@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { Camera, Pause, Play, StepBack, StepForward, Volume2, VolumeX } from 'lucide-react';
 import { toast } from 'react-toastify';
 import { Invokes } from '../../ui/AppProperties';
+import { LIBRARY_REFRESH_EVENT } from '../../../utils/stacks';
 
 /**
  * Plays a video from the library.
@@ -210,8 +211,7 @@ export default function VideoViewer({ path }: { path: string }) {
     const onKey = (event: KeyboardEvent) => {
       const el = document.activeElement as HTMLInputElement | null;
       const typing =
-        el &&
-        ((el.tagName === 'INPUT' && el.type !== 'range') || el.tagName === 'TEXTAREA' || el.isContentEditable);
+        el && ((el.tagName === 'INPUT' && el.type !== 'range') || el.tagName === 'TEXTAREA' || el.isContentEditable);
       if (typing || event.metaKey || event.ctrlKey || event.altKey) return;
       const back = event.key === 'ArrowLeft' || event.key === ',' || event.key === '<';
       const forward = event.key === 'ArrowRight' || event.key === '.' || event.key === '>';
@@ -254,9 +254,13 @@ export default function VideoViewer({ path }: { path: string }) {
         timeSeconds: video.currentTime,
         frameNumber: info?.frameRate ? frameAt(video.currentTime) + 1 : null,
       });
-      toast.success(t('editor.video.frameSaved', 'Frame saved as {{name}}', {
-        name: saved.split('/').pop() ?? saved,
-      }));
+      toast.success(
+        t('editor.video.frameSaved', 'Frame saved as {{name}}', {
+          name: saved.split('/').pop() ?? saved,
+        }),
+      );
+      // Show the new still in the library, placed right after this clip.
+      window.dispatchEvent(new Event(LIBRARY_REFRESH_EVENT));
     } catch (err) {
       report('error', `save frame failed: ${err}`);
       toast.error(`${t('editor.video.frameFailed', 'Could not save the frame')}: ${err}`);
@@ -373,9 +377,7 @@ export default function VideoViewer({ path }: { path: string }) {
           </div>
         </>
       ) : (
-        <p className="text-sm text-text-secondary">
-          {t('editor.video.loading', 'Loading the clip…')}
-        </p>
+        <p className="text-sm text-text-secondary">{t('editor.video.loading', 'Loading the clip…')}</p>
       )}
       <div className="flex items-center gap-3 text-xs text-text-secondary">
         {facts.length > 0 && <span>{facts.join('  ·  ')}</span>}
@@ -411,7 +413,10 @@ export default function VideoViewer({ path }: { path: string }) {
           onClick={saveFrame}
           disabled={saving || !src}
           className="flex items-center gap-1.5 rounded-md border border-surface px-2 py-1 text-text-primary hover:bg-card-active disabled:opacity-50"
-          data-tooltip={t('editor.video.saveFrameTooltip', 'Write the current frame beside the video as a PNG you can edit')}
+          data-tooltip={t(
+            'editor.video.saveFrameTooltip',
+            'Write the current frame beside the video as a PNG you can edit',
+          )}
         >
           <Camera size={14} />
           {t('editor.video.saveFrame', 'Save frame')}

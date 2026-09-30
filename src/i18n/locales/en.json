@@ -819,6 +819,21 @@
       "mute": "Mute",
       "unmute": "Unmute",
       "position": "Position"
+    },
+    "versions": {
+      "title": "Versions",
+      "tooltip": "Files made from this photo. Click one to open it.",
+      "kinds": {
+        "Original": "Original",
+        "Restored": "Restored",
+        "Deblurred": "Deblurred",
+        "Upscaled": "Upscaled",
+        "Denoised": "Denoised",
+        "Expanded": "Expanded",
+        "Positive": "Positive",
+        "Copy": "Copy",
+        "Version": "Version"
+      }
     }
   },
   "export": {
@@ -1050,7 +1065,8 @@
       "tooltipFocalLength": "Focal Length",
       "tooltipIso": "ISO",
       "tooltipShutterSpeed": "Shutter Speed",
-      "tooltipVirtualCopy": "Virtual Copy"
+      "tooltipVirtualCopy": "Virtual Copy",
+      "tooltipVersions": "{{count}} versions — open to switch between them"
     },
     "search": {
       "noResults": "No Results Found",

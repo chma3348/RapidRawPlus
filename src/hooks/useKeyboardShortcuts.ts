@@ -8,6 +8,8 @@ import { useUIStore } from '../store/useUIStore';
 import { useProcessStore } from '../store/useProcessStore';
 import { useEditorActions } from './useEditorActions';
 import { useLibraryActions } from './useLibraryActions';
+import { getStacks } from './useStacks';
+import { stackRootOf } from '../utils/stacks';
 
 interface KeyboardShortcutsProps {
   sortedImageList: Array<ImageFile>;
@@ -113,7 +115,9 @@ export const useKeyboardShortcuts = ({
         shouldFire: (s: any) => !!s.editor.selectedImage,
         execute: (e: any, s: any) => {
           e.preventDefault();
-          const currentIndex = sortedListRef.current.findIndex((img) => img.path === s.editor.selectedImage!.path);
+          // While a version is open, move on from its stack's tile.
+          const current = stackRootOf(getStacks(s.library.imageList), s.editor.selectedImage!.path);
+          const currentIndex = sortedListRef.current.findIndex((img) => img.path === current);
           if (currentIndex === -1) return;
           let nextIndex = currentIndex - 1 < 0 ? sortedListRef.current.length - 1 : currentIndex - 1;
           handleImageSelect(sortedListRef.current[nextIndex].path);
@@ -123,7 +127,9 @@ export const useKeyboardShortcuts = ({
         shouldFire: (s: any) => !!s.editor.selectedImage,
         execute: (e: any, s: any) => {
           e.preventDefault();
-          const currentIndex = sortedListRef.current.findIndex((img) => img.path === s.editor.selectedImage!.path);
+          // While a version is open, move on from its stack's tile.
+          const current = stackRootOf(getStacks(s.library.imageList), s.editor.selectedImage!.path);
+          const currentIndex = sortedListRef.current.findIndex((img) => img.path === current);
           if (currentIndex === -1) return;
           let nextIndex = currentIndex + 1 >= sortedListRef.current.length ? 0 : currentIndex + 1;
           handleImageSelect(sortedListRef.current[nextIndex].path);

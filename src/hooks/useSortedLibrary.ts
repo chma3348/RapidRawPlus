@@ -2,6 +2,7 @@ import { useMemo } from 'react';
 import { useLibraryStore } from '../store/useLibraryStore';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { RawStatus, EditedStatus, SortDirection, ImageFile } from '../components/ui/AppProperties';
+import { getStacks } from './useStacks';
 
 export const ADVANCED_QUERY_REGEX =
   /^(iso|aperture|f|shutter|s|focal|mm|rating|color|camera|make|model|lens)\s*(?::)?\s*(>=|<=|>|<|=)?\s*(.+)$/i;
@@ -219,7 +220,33 @@ export function computeSortedLibrary(libraryState: any, settingsState: any): Ima
           return tagsMatch && textMatch;
         });
 
-  const list = [...filteredBySearch];
+  // One tile per version stack: a stack is shown, as its original, when
+  // any of its members passes the filters. Saved video frames are held
+  // back and placed straight after their clip below.
+  const stacks = getStacks(imageList);
+  const byPath = new Map<string, ImageFile>(imageList.map((f: ImageFile) => [f.path, f]));
+  const shown = new Set<string>();
+  const list: ImageFile[] = [];
+  const framesOf = new Map<string, ImageFile[]>();
+  for (const image of filteredBySearch) {
+    const clip = stacks.frameSource.get(image.path);
+    if (clip) {
+      if (!framesOf.has(clip)) framesOf.set(clip, []);
+      framesOf.get(clip)!.push(image);
+      continue;
+    }
+    const root = stacks.rootOf.get(image.path) ?? image.path;
+    if (shown.has(root)) continue;
+    shown.add(root);
+    list.push(byPath.get(root) ?? image);
+  }
+  // Frames whose clip is filtered out sort on their own.
+  for (const [clip, frames] of framesOf) {
+    if (!shown.has(clip)) {
+      list.push(...frames);
+      framesOf.delete(clip);
+    }
+  }
 
   list.sort((a, b) => {
     const { key, order } = sortCriteria;
@@ -277,7 +304,12 @@ export function computeSortedLibrary(libraryState: any, settingsState: any): Ima
     return order === SortDirection.Ascending ? comparison : -comparison;
   });
 
-  return list;
+  if (framesOf.size === 0) return list;
+  const byName = (a: ImageFile, b: ImageFile) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  return list.flatMap((image) => {
+    const frames = framesOf.get(image.path);
+    return frames ? [image, ...frames.sort(byName)] : [image];
+  });
 }
 
 export function useSortedLibrary() {

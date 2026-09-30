@@ -293,6 +293,9 @@ export interface ImageFile {
   tags: Array<string> | null;
   exif: { [key: string]: string } | null;
   is_virtual_copy: boolean;
+  /** The photo this file is a version (or saved frame) of; see utils/stacks. */
+  derived_from?: string | null;
+  derived_kind?: string | null;
 }
 
 export interface Option {

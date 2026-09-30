@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo, memo } from 'react';
-import { Image as ImageIcon, Star, SlidersHorizontal } from 'lucide-react';
+import { Image as ImageIcon, Star, SlidersHorizontal, Layers } from 'lucide-react';
 import clsx from 'clsx';
 import { Grid, useGridCallbackRef } from 'react-window';
 import { useTranslation } from 'react-i18next';
@@ -9,6 +9,8 @@ import Text from '../ui/Text';
 import { TextColors, TextVariants, TextWeights } from '../../types/typography';
 import { useProcessStore } from '../../store/useProcessStore';
 import { useSettingsStore } from '../../store/useSettingsStore';
+import { useStacks, useStackSize } from '../../hooks/useStacks';
+import { stackRootOf } from '../../utils/stacks';
 
 const HORIZONTAL_PADDING = 4;
 const ITEM_GAP = 8;
@@ -82,6 +84,7 @@ const FilmstripThumbnail = memo(
     const colorTag = tags?.find((t: string) => t.startsWith('color:'))?.substring(6);
     const colorLabel = COLOR_LABELS.find((c: Color) => c.name === colorTag);
     const isVirtualCopy = path.includes('?vc=');
+    const stackSize = useStackSize(path);
     const displayEditIcon = useSettingsStore((s) => s.appSettings?.displayEditIcon ?? true);
     const showEditIcon = isEdited && displayEditIcon;
 
@@ -279,6 +282,27 @@ const FilmstripThumbnail = memo(
                 data-tooltip={t('ui.filmstrip.tooltips.virtualCopy')}
               >
                 {t('ui.filmstrip.virtualCopyAbbreviation')}
+              </Text>
+            </div>
+          </>
+        )}
+
+        {stackSize > 1 && (
+          <>
+            <div className="absolute bottom-0 right-0 w-1/2 h-1/2 bg-linear-to-tl from-black/30 via-black/0 to-transparent pointer-events-none z-0" />
+            <div className="absolute bottom-1 right-1 z-10">
+              <Text
+                as="div"
+                variant={TextVariants.small}
+                color={TextColors.white}
+                weight={TextWeights.bold}
+                className="flex items-center gap-0.5 shadow-md text-[10px] px-1 py-0.5 rounded-full bg-black/30"
+                data-tooltip={t('library.items.tooltipVersions', '{{count}} versions — open to switch between them', {
+                  count: stackSize,
+                })}
+              >
+                <Layers size={10} />
+                {stackSize}
               </Text>
             </div>
           </>
@@ -633,6 +657,9 @@ export default function Filmstrip({
   const clickTriggeredScroll = useRef(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ height: 0, width: 0 });
+  // While a version is open, its stack's tile is the one highlighted.
+  const stacks = useStacks();
+  const selectedTile = stackRootOf(stacks, selectedImage?.path) ?? undefined;
 
   useEffect(() => {
     const el = containerRef.current;
@@ -649,7 +676,7 @@ export default function Filmstrip({
   }, []);
 
   const handleImageSelect = (path: string, event: any) => {
-    if (path !== selectedImage?.path) {
+    if (path !== selectedTile) {
       clickTriggeredScroll.current = true;
     }
     onImageSelect?.(path, event);
@@ -664,7 +691,7 @@ export default function Filmstrip({
           data={{
             imageList,
             imageRatings,
-            selectedPath: selectedImage?.path,
+            selectedPath: selectedTile,
             multiSelectedPaths,
             thumbnailAspectRatio,
             onContextMenu,
