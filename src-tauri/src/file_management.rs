@@ -142,6 +142,38 @@ pub struct ImageFile {
     tags: Option<Vec<String>>,
     exif: Option<HashMap<String, String>>,
     is_virtual_copy: bool,
+    /// The photo this file is a version (or saved frame) of, as a full
+    /// path, when that photo is known. See `versions.rs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    derived_from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    derived_kind: Option<String>,
+}
+
+/// Fill in each listed file's original: from its sidecar where recorded,
+/// otherwise by name among the other listed files.
+fn link_versions(list: &mut [ImageFile]) {
+    let real_paths: Vec<PathBuf> = list
+        .iter()
+        .filter(|f| !f.is_virtual_copy)
+        .map(|f| PathBuf::from(&f.path))
+        .collect();
+    let by_name = crate::versions::originals_by_name(&real_paths);
+    for file in list.iter_mut() {
+        let real = PathBuf::from(file.path.split("?vc=").next().unwrap_or(&file.path));
+        if let Some(name) = file.derived_from.take() {
+            // Recorded as a file name beside the version.
+            let original = real.with_file_name(name);
+            if original != real {
+                file.derived_from = Some(original.to_string_lossy().into_owned());
+            }
+            continue;
+        }
+        if let Some((original, kind)) = by_name.get(&real) {
+            file.derived_from = Some(original.to_string_lossy().into_owned());
+            file.derived_kind = Some(kind.to_string());
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -342,7 +374,7 @@ pub fn list_images_in_dir(path: String, app_handle: AppHandle) -> Result<Vec<Ima
 
                 let sidecar_path = path_buf.with_file_name(sidecar_filename);
 
-                let (is_edited, tags, rating) = {
+                let (is_edited, tags, rating, derived_from, derived_kind) = {
                     let mut metadata = crate::exif_processing::load_sidecar(&sidecar_path);
 
                     if enable_xmp_sync
@@ -360,7 +392,13 @@ pub fn list_images_in_dir(path: String, app_handle: AppHandle) -> Result<Vec<Ima
                         is_raw,
                         tm_override,
                     );
-                    (edited, metadata.tags, metadata.rating)
+                    (
+                        edited,
+                        metadata.tags,
+                        metadata.rating,
+                        metadata.derived_from,
+                        metadata.derived_kind,
+                    )
                 };
 
                 file_results.push(ImageFile {
@@ -371,6 +409,8 @@ pub fn list_images_in_dir(path: String, app_handle: AppHandle) -> Result<Vec<Ima
                     exif: None,
                     is_virtual_copy,
                     rating,
+                    derived_from,
+                    derived_kind,
                 });
             }
 
@@ -378,6 +418,8 @@ pub fn list_images_in_dir(path: String, app_handle: AppHandle) -> Result<Vec<Ima
         })
         .collect();
 
+    let mut result_list = result_list;
+    link_versions(&mut result_list);
     Ok(result_list)
 }
 
@@ -465,7 +507,7 @@ pub fn list_images_recursive(
 
                 let sidecar_path = path_buf.with_file_name(sidecar_filename);
 
-                let (is_edited, tags, rating) = {
+                let (is_edited, tags, rating, derived_from, derived_kind) = {
                     let mut metadata = crate::exif_processing::load_sidecar(&sidecar_path);
 
                     if enable_xmp_sync
@@ -483,7 +525,13 @@ pub fn list_images_recursive(
                         is_raw,
                         tm_override,
                     );
-                    (edited, metadata.tags, metadata.rating)
+                    (
+                        edited,
+                        metadata.tags,
+                        metadata.rating,
+                        metadata.derived_from,
+                        metadata.derived_kind,
+                    )
                 };
 
                 file_results.push(ImageFile {
@@ -494,6 +542,8 @@ pub fn list_images_recursive(
                     exif: None,
                     is_virtual_copy,
                     rating,
+                    derived_from,
+                    derived_kind,
                 });
             }
 
@@ -501,6 +551,8 @@ pub fn list_images_recursive(
         })
         .collect();
 
+    let mut result_list = result_list;
+    link_versions(&mut result_list);
     Ok(result_list)
 }
 
@@ -729,7 +781,7 @@ pub fn get_album_images(
 
             let is_virtual_copy = virtual_path.contains("?vc=");
 
-            let (is_edited, tags, rating) = {
+            let (is_edited, tags, rating, derived_from, derived_kind) = {
                 let mut metadata = crate::exif_processing::load_sidecar(&sidecar_path);
 
                 if enable_xmp_sync
@@ -747,7 +799,13 @@ pub fn get_album_images(
                     is_raw,
                     tm_override,
                 );
-                (edited, metadata.tags, metadata.rating)
+                (
+                    edited,
+                    metadata.tags,
+                    metadata.rating,
+                    metadata.derived_from,
+                    metadata.derived_kind,
+                )
             };
 
             Some(ImageFile {
@@ -758,10 +816,14 @@ pub fn get_album_images(
                 exif: None,
                 is_virtual_copy,
                 rating,
+                derived_from,
+                derived_kind,
             })
         })
         .collect();
 
+    let mut result_list = result_list;
+    link_versions(&mut result_list);
     Ok(result_list)
 }
 
@@ -1458,6 +1520,7 @@ pub fn save_video_frame(
         n += 1;
     }
     fs::write(&target, bytes).map_err(|e| format!("Could not write {target:?}: {e}"))?;
+    crate::versions::record_version(&target, source, crate::versions::FRAME_KIND);
     Ok(target.to_string_lossy().to_string())
 }
 

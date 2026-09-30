@@ -133,25 +133,14 @@ pub async fn batch_denoise_images(
             ) {
                 Ok((image, _)) => {
                     let is_raw = crate::formats::is_raw_file(&real_path);
-                    let parent_dir = source_path.parent().unwrap_or(std::path::Path::new(""));
-                    let stem = source_path
-                        .file_stem()
-                        .unwrap_or_default()
-                        .to_string_lossy();
-
-                    let (output_filename, image_to_save) = if is_raw {
-                        (
-                            format!("{}_Denoised.tiff", stem),
-                            DynamicImage::ImageRgb16(image.to_rgb16()),
-                        )
+                    let (ext, image_to_save) = if is_raw {
+                        ("tiff", DynamicImage::ImageRgb16(image.to_rgb16()))
                     } else {
-                        (
-                            format!("{}_Denoised.png", stem),
-                            DynamicImage::ImageRgb8(image.to_rgb8()),
-                        )
+                        ("png", DynamicImage::ImageRgb8(image.to_rgb8()))
                     };
 
-                    let output_path = parent_dir.join(output_filename);
+                    let output_path =
+                        crate::versions::free_version_path(&source_path, "Denoised", ext);
                     if let Err(e) = image_to_save.save(&output_path) {
                         let _ = app_handle.emit(
                             "denoise-error",
@@ -171,6 +160,7 @@ pub async fn batch_denoise_images(
                             log::warn!("Failed to copy sidecar file for denoised image: {}", e);
                         }
                     }
+                    crate::versions::record_version(&output_path, &source_path, "Denoised");
 
                     results.push(output_path.to_string_lossy().to_string());
                 }
@@ -199,30 +189,17 @@ pub async fn save_denoised_image(
             .to_string()
     })?;
 
-    let is_raw = crate::formats::is_raw_file(&original_path_str);
-
     let (first_path, source_sidecar_path) =
         crate::file_management::parse_virtual_path(&original_path_str);
-    let parent_dir = first_path
-        .parent()
-        .ok_or_else(|| "Could not determine parent directory.".to_string())?;
-    let stem = first_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("denoised");
+    let is_raw = crate::formats::is_raw_file(&first_path);
 
-    let (output_filename, image_to_save): (String, DynamicImage) = if is_raw {
-        let filename = format!("{}_Denoised.tiff", stem);
-        (
-            filename,
-            DynamicImage::ImageRgb16(denoised_image.to_rgb16()),
-        )
+    let (ext, image_to_save): (&str, DynamicImage) = if is_raw {
+        ("tiff", DynamicImage::ImageRgb16(denoised_image.to_rgb16()))
     } else {
-        let filename = format!("{}_Denoised.png", stem);
-        (filename, DynamicImage::ImageRgb8(denoised_image.to_rgb8()))
+        ("png", DynamicImage::ImageRgb8(denoised_image.to_rgb8()))
     };
 
-    let output_path = parent_dir.join(output_filename);
+    let output_path = crate::versions::free_version_path(&first_path, "Denoised", ext);
 
     image_to_save
         .save(&output_path)
@@ -240,6 +217,7 @@ pub async fn save_denoised_image(
             log::warn!("Failed to copy sidecar file for denoised image: {}", e);
         }
     }
+    crate::versions::record_version(&output_path, &real_path, "Denoised");
 
     Ok(output_path.to_string_lossy().to_string())
 }

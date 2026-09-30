@@ -49,6 +49,7 @@ pub mod sky_replace;
 pub mod subject_selection;
 mod tagging;
 mod tagging_utils;
+pub mod versions;
 pub mod video;
 pub mod video_server;
 pub mod white_balance;

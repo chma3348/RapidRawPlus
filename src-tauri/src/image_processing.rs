@@ -58,6 +58,22 @@ pub struct ImageMetadata {
     pub tags: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exif: Option<std::collections::HashMap<String, String>>,
+    /// For a file the app made from a photo (a restore, a saved video
+    /// frame…): the original's file name, in the same folder. See
+    /// `versions.rs`.
+    #[serde(
+        default,
+        rename = "derivedFrom",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub derived_from: Option<String>,
+    /// What was done to make it: "Restored", "Denoised", "Frame"…
+    #[serde(
+        default,
+        rename = "derivedKind",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub derived_kind: Option<String>,
 }
 
 impl Default for ImageMetadata {
@@ -68,6 +84,8 @@ impl Default for ImageMetadata {
             adjustments: Value::Null,
             tags: None,
             exif: None,
+            derived_from: None,
+            derived_kind: None,
         }
     }
 }

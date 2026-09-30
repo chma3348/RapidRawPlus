@@ -438,30 +438,17 @@ pub async fn save_expanded_image(
             .ok_or("No expanded image found in memory for that variant.")?
     };
 
-    let is_raw = is_raw_file(&original_path_str);
     let (first_path, source_sidecar_path) = parse_virtual_path(&original_path_str);
-    let parent_dir = first_path
-        .parent()
-        .ok_or_else(|| "Could not determine parent directory.".to_string())?;
-    let stem = first_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("expanded");
+    let is_raw = is_raw_file(&first_path);
 
     let dynamic = DynamicImage::ImageRgba8(variant);
-    let (output_filename, image_to_save): (String, DynamicImage) = if is_raw {
-        (
-            format!("{}_Expanded.tiff", stem),
-            DynamicImage::ImageRgb16(dynamic.to_rgb16()),
-        )
+    let (ext, image_to_save): (&str, DynamicImage) = if is_raw {
+        ("tiff", DynamicImage::ImageRgb16(dynamic.to_rgb16()))
     } else {
-        (
-            format!("{}_Expanded.png", stem),
-            DynamicImage::ImageRgb8(dynamic.to_rgb8()),
-        )
+        ("png", DynamicImage::ImageRgb8(dynamic.to_rgb8()))
     };
 
-    let output_path = parent_dir.join(output_filename);
+    let output_path = crate::versions::free_version_path(&first_path, "Expanded", ext);
     image_to_save
         .save(&output_path)
         .map_err(|e| format!("Failed to save image: {}", e))?;
@@ -473,6 +460,7 @@ pub async fn save_expanded_image(
     // into this file, so inheriting them would re-apply crop/rotation/AI
     // patches on top of the baked pixels (tilted/warped display).
     let _ = source_sidecar_path;
+    crate::versions::record_version(&output_path, &real_path, "Expanded");
 
     Ok(output_path.to_string_lossy().to_string())
 }

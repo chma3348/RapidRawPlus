@@ -1419,30 +1419,18 @@ pub async fn save_enhanced_image(
         "restore" => "Restored",
         _ => "Upscaled",
     };
-    let is_raw = is_raw_file(&original_path_str);
-
+    // The real file, not a virtual copy's `?vc=` path: its extension decides
+    // 16-bit TIFF for RAWs, and its name is what the version is named after.
     let (first_path, source_sidecar_path) = parse_virtual_path(&original_path_str);
-    let parent_dir = first_path
-        .parent()
-        .ok_or_else(|| "Could not determine parent directory.".to_string())?;
-    let stem = first_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("enhanced");
+    let is_raw = is_raw_file(&first_path);
 
-    let (output_filename, image_to_save): (String, DynamicImage) = if is_raw {
-        (
-            format!("{}_{}.tiff", stem, suffix),
-            DynamicImage::ImageRgb16(enhanced_image.to_rgb16()),
-        )
+    let (ext, image_to_save): (&str, DynamicImage) = if is_raw {
+        ("tiff", DynamicImage::ImageRgb16(enhanced_image.to_rgb16()))
     } else {
-        (
-            format!("{}_{}.png", stem, suffix),
-            DynamicImage::ImageRgb8(enhanced_image.to_rgb8()),
-        )
+        ("png", DynamicImage::ImageRgb8(enhanced_image.to_rgb8()))
     };
 
-    let output_path = parent_dir.join(output_filename);
+    let output_path = crate::versions::free_version_path(&first_path, suffix, ext);
 
     let (out_w, out_h) = image_to_save.dimensions();
     log::info!(
@@ -1465,6 +1453,7 @@ pub async fn save_enhanced_image(
     // into this file, so inheriting them would re-apply crop/rotation/AI
     // patches on top of the baked pixels (tilted/warped display).
     let _ = source_sidecar_path;
+    crate::versions::record_version(&output_path, &real_path, suffix);
 
     Ok(output_path.to_string_lossy().to_string())
 }

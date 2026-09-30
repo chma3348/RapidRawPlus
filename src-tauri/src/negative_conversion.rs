@@ -325,11 +325,12 @@ pub async fn convert_negatives(
 
             let processed = run_pipeline(&img, &params, Some(bounds));
 
-            let p = Path::new(&real_path);
-            let parent = p.parent().unwrap_or(Path::new(""));
-            let stem = p.file_stem().unwrap_or_default().to_string_lossy();
-            let filename = format!("{}_Positive.tiff", stem);
-            let out_path = parent.join(&filename);
+            let out_path = crate::versions::free_version_path(&source_path, "Positive", "tiff");
+            let filename = out_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
 
             processed
                 .to_rgb16()
@@ -337,6 +338,7 @@ pub async fn convert_negatives(
                 .map_err(|e| format!("Failed to save {}: {}", filename, e))?;
 
             let _ = crate::exif_processing::write_rrexif_sidecar(&real_path, &out_path);
+            crate::versions::record_version(&out_path, &source_path, "Positive");
             results.push(out_path.to_string_lossy().to_string());
         }
 
