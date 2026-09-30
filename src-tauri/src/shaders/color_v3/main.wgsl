@@ -121,11 +121,15 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     // without a neighbourhood, the pixel's own.
     var key_wide: f32;
     var key_fine: f32;
+    var detail_base: f32;
     if parameters.basic_flags.z == 1u {
         tonal = neighbourhood[id.x * 2u].rgb;
         structure = neighbourhood[id.x * 2u + 1u].rgb;
         key_fine = neighbourhood[id.x * 2u].w;
-        key_wide = neighbourhood[id.x * 2u + 1u].w;
+        // Packed: the Shadows key and the detail base, half precision each.
+        let packed = unpack2x16float(bitcast<u32>(neighbourhood[id.x * 2u + 1u].w));
+        key_wide = packed.x;
+        detail_base = packed.y;
     } else {
         var own = max(parameters.work_to_output * working, vec3<f32>(0.0));
         if parameters.domain.x == 1u { own = to_display_domain(working); }
@@ -133,8 +137,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         structure = tonal;
         key_wide = shadow_key(working);
         key_fine = key_wide;
+        // No neighbourhood: no detail to bring out.
+        detail_base = log_luma709(working);
     }
-    let graded = film_saturation(vignette(grade(centre(calibrate(working), position, dims), tonal, structure, key_wide, key_fine), position, dims));
+    let graded = film_saturation(vignette(grade(centre(calibrate(working), position, dims), tonal, structure, key_wide, key_fine, detail_base), position, dims));
     // A captured transform replaces the whole rendering step, encode included,
     // and reads working values directly: its domain is the working space.
     let scene = look_scene(graded);

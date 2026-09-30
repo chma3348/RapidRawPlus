@@ -640,16 +640,24 @@ fn neighbourhood(
         .to_cols_array_2d()
         .map(|r| r.map(|v| v as f32));
     let luminance = [0.274_118_5f32, 0.873_631_9, -0.147_750_4];
+    let rec709 = [0.2126f32, 0.7152, 0.0722];
     let mut planes = vec![vec![0f32; w * h]; 4];
+    // The detail Resolve's Shadows lift brings out is measured against the
+    // Rec.709 luma of the working values in Intermediate, blurred at its own
+    // radius (see `shadows_finish` in the shader).
+    let mut detail = vec![0f32; w * h];
     for (i, p) in pixels.pixels().enumerate() {
+        let working: [f32; 3] = std::array::from_fn(|c| {
+            to_working[c][0] * p[0] + to_working[c][1] * p[1] + to_working[c][2] * p[2]
+        });
         let y: f32 = (0..3)
-            .map(|c| {
-                luminance[c]
-                    * (to_working[c][0] * p[0] + to_working[c][1] * p[1] + to_working[c][2] * p[2])
-            })
+            .map(|c| luminance[c] * working[c])
             .sum::<f32>()
             .max(0.);
         planes[3][i] = spaces::encode_intermediate(y as f64) as f32;
+        detail[i] = (0..3)
+            .map(|c| rec709[c] * spaces::encode_intermediate(working[c].max(0.) as f64) as f32)
+            .sum();
         // A rendered picture's controls see its display values: the code
         // values Resolve's rendering gives the scene data, already encoded.
         if let Some(output) = display {
@@ -686,6 +694,20 @@ fn neighbourhood(
             .collect()
     };
     let (tonal, structure) = (blurred(3.5), blurred(40.));
+    // Sigma 0.8% of the short edge, fitted on Resolve's Shadows exports.
+    let detail = {
+        let radius = (DETAIL_BLUR_BASE * scale).ceil().max(1.) as usize;
+        if radius <= 24 {
+            exact_gaussian(&detail, w, h, radius)
+        } else {
+            super::detail::blur(
+                &detail,
+                w,
+                h,
+                super::detail::Gaussian::new(radius as f32 / 2.),
+            )
+        }
+    };
     let mut blurs = Vec::with_capacity(w * h * 2);
     for i in 0..w * h {
         blurs.push([tonal[0][i], tonal[1][i], tonal[2][i], tonal[3][i]]);
@@ -693,7 +715,7 @@ fn neighbourhood(
             structure[0][i],
             structure[1][i],
             structure[2][i],
-            structure[3][i],
+            pack_keys(structure[3][i], detail[i]),
         ]);
     }
     let blurs = Arc::new(blurs);
@@ -705,6 +727,19 @@ fn neighbourhood(
         });
     }
     blurs
+}
+
+/// The Shadows detail blur, in the neighbourhood's units (radius at a 1080
+/// pixel short edge; sigma is half the radius): sigma = 0.8% of the short edge.
+const DETAIL_BLUR_BASE: f32 = 17.28;
+
+/// Two keys in one slot at half precision (0.0005 in Intermediate, under a
+/// hundredth of a stop): the structure entry's fourth component carries the
+/// Shadows key and the detail base, unpacked by `unpack2x16float` in WGSL.
+fn pack_keys(key: f32, detail: f32) -> f32 {
+    let lo = half::f16::from_f32(key).to_bits() as u32;
+    let hi = half::f16::from_f32(detail).to_bits() as u32;
+    f32::from_bits(lo | (hi << 16))
 }
 
 /// The previous engine's blur: a Gaussian of sigma radius/2 truncated at

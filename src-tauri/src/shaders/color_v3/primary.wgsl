@@ -135,6 +135,50 @@ fn decode_intermediate_soft(v: f32) -> f32 {
     if v <= 0.02740668 { return v / 10.44426855; }
     return exp2(v / 0.07329248 - 7.0) - 0.0075;
 }
+// What Resolve's Shadows does beyond the lift itself, fitted on its exports
+// of five photographs and the chart at +50 and +100 (a smooth gain alone
+// matched the chart's flat patches but left photographs flat and grey):
+// lifting brings out local contrast and colour, both in proportion to the
+// lift. In Intermediate, per channel:
+//   out = in + lift + w * (DETAIL * (luma - blurred luma)
+//                          + COLOUR * (1 + DARK * (0.4 - luma)) * (in - luma))
+// with luma the Rec.709 luma of the Intermediate values and w the lift in
+// Intermediate units over 0.169 (the lift at +100 in the midtones). Darkening
+// has neither (measured: both terms fit to zero at -50 and -100).
+const SHADOW_DETAIL: f32 = 0.348;
+const SHADOW_COLOUR: f32 = 0.48;
+const SHADOW_COLOUR_DARK: f32 = 2.09;
+fn log_luma709(rgb: vec3<f32>) -> f32 {
+    return dot(vec3<f32>(channel_key(rgb.r), channel_key(rgb.g), channel_key(rgb.b)), vec3<f32>(0.2126, 0.7152, 0.0722));
+}
+fn shadows_finish(lifted: vec3<f32>, lift: f32, own_luma: f32, detail_base: f32) -> vec3<f32> {
+    if lift <= 0.0 { return lifted; }
+    let w = lift * 0.07329248 / 0.169;
+    let logged = vec3<f32>(channel_key(lifted.r), channel_key(lifted.g), channel_key(lifted.b));
+    let luma = dot(logged, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let colour = SHADOW_COLOUR * max(1.0 + SHADOW_COLOUR_DARK * (0.4 - own_luma), 0.0);
+    let out = logged + vec3<f32>(w * SHADOW_DETAIL * (own_luma - detail_base)) + w * colour * (logged - vec3<f32>(luma));
+    return max(vec3<f32>(decode_intermediate_soft(out.r), decode_intermediate_soft(out.g), decode_intermediate_soft(out.b)), vec3<f32>(0.0));
+}
+// Highlights has the same kind of finish, fitted the same way, with its own
+// signs: lifting highlights softens local contrast and colour a little,
+// pulling them brings out a little local contrast. w is the key's gain in
+// Intermediate units over 0.2.
+fn highlights_finish(rgb: vec3<f32>, key_fine: f32, own_luma: f32, detail_base: f32) -> vec3<f32> {
+    let stops = highlight_stops(key_fine);
+    if stops == 0.0 { return rgb; }
+    let w = abs(stops) * 0.07329248 / 0.2;
+    var detail = 0.215;
+    var colour = -0.045;
+    if parameters.basic[0].w > 0.0 {
+        detail = -0.205;
+        colour = -0.258;
+    }
+    let logged = vec3<f32>(channel_key(rgb.r), channel_key(rgb.g), channel_key(rgb.b));
+    let luma = dot(logged, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let out = logged + vec3<f32>(w * detail * (own_luma - detail_base)) + w * colour * (logged - vec3<f32>(luma));
+    return max(vec3<f32>(decode_intermediate_soft(out.r), decode_intermediate_soft(out.g), decode_intermediate_soft(out.b)), vec3<f32>(0.0));
+}
 fn channel_key(v: f32) -> f32 {
     let y = max(v, 0.0);
     if y <= 0.00262409 { return y * 10.44426855; }
@@ -174,7 +218,7 @@ fn basic_v2(rgb: vec3<f32>, tonal: vec3<f32>, structure: vec3<f32>) -> vec3<f32>
     return parameters.srgb_to_work * max(c, vec3<f32>(0.0));
 }
 
-fn grade(input:vec3<f32>, tonal:vec3<f32>, structure:vec3<f32>, key_wide:f32, key_fine:f32) -> vec3<f32> {
+fn grade(input:vec3<f32>, tonal:vec3<f32>, structure:vec3<f32>, key_wide:f32, key_fine:f32, detail_base:f32) -> vec3<f32> {
     if parameters.flags.x == 0u {return input;}
     let balanced=parameters.white_balance*input;
     // Both keys come from the unedited picture, so the two gains commute.
@@ -185,7 +229,10 @@ fn grade(input:vec3<f32>, tonal:vec3<f32>, structure:vec3<f32>, key_wide:f32, ke
     }
     // The previous engine's controls see the picture as these two left it.
     let seen=lift+highlight_stops(key_fine);
-    var rgb=basic_v2(balanced*exp2(vec3<f32>(lift)+pull), lifted_neighbourhood(tonal, seen), lifted_neighbourhood(structure, seen));
+    let own_luma=log_luma709(balanced);
+    let shadowed=shadows_finish(balanced*exp2(lift), lift, own_luma, detail_base);
+    let highlighted=highlights_finish(shadowed*exp2(pull), key_fine, own_luma, detail_base);
+    var rgb=basic_v2(highlighted, lifted_neighbourhood(tonal, seen), lifted_neighbourhood(structure, seen));
     let y=dot(rgb,vec3<f32>(0.27411851,0.87363190,-0.14775041));
     // DWG's blue coefficient is negative, so a non-physical pixel can land at
     // or below zero luminance. Fade the curve out across the bottom of the

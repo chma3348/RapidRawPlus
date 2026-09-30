@@ -66,3 +66,12 @@ levels where the per-channel gain meets the output transform's shoulder.
 The order in which Resolve applies Shadows and Highlights when both are
 set is unmeasured (both keys are taken from the unedited picture here); the
 `order-check` export in the captures README would settle it.
+
+## Revision, 30 September: colour and local contrast
+
+The same fit as Shadows' revision found Highlights has the same kind of
+terms with opposite signs. Lifting highlights softens local contrast and
+colour a little (detail −0.205, colour −0.258 per unit of the key's gain
+over 0.2 Intermediate); pulling them adds a little local contrast (detail
++0.215, colour −0.045). Full resolution, mean levels on the sRGB JPEGs:
++100 1.50 → 0.97, +50 0.91 → 0.58, −100 1.88 → 1.73, −50 1.02 → 0.95.

@@ -1038,7 +1038,7 @@ fn stabilization_contracts(context: &GpuContext) {
         )
         .is_err()
     );
-    assert_eq!(before["stage_revision"], "v3-application-stages-4");
+    assert_eq!(before["stage_revision"], "v3-application-stages-5");
 }
 
 fn pinned_pipeline_contracts(context: &GpuContext) {
@@ -2000,22 +2000,35 @@ fn highlights_is_resolves_measured_gain() {
             }
         }
         let stages = engine.render(&colour, &plan, true).unwrap().stages.unwrap();
+        let enc = |v: f32| spaces::encode_intermediate(v.max(0.0) as f64);
+        let dec = |v: f64| spaces::decode(v, Transfer::DavinciIntermediate) as f32;
         for (before, after) in stages.working.pixels().zip(stages.graded.pixels()) {
             let luminance =
                 0.274_118_5 * before[0] + 0.873_631_9 * before[1] - 0.147_750_4 * before[2];
+            // A pull is one gain by the luminance key; a lift is per channel.
+            let gained: Vec<f64> = (0..3)
+                .map(|ch| {
+                    let key = if slider > 0.0 {
+                        key_of(before[ch])
+                    } else {
+                        key_of(luminance)
+                    };
+                    enc(before[ch] * table_stops(&GAIN_STOPS, key, slider).exp2())
+                })
+                .collect();
+            // Then the colour finish, in proportion to the key's gain. No
+            // neighbourhood is bound, so there is no detail term.
+            let w =
+                table_stops(&GAIN_STOPS, key_of(luminance), slider).abs() as f64 * 0.07329248 / 0.2;
+            let colour = if slider > 0.0 { -0.258 } else { -0.045 };
+            let luma = 0.2126 * gained[0] + 0.7152 * gained[1] + 0.0722 * gained[2];
             for ch in 0..3 {
-                let stops = (after[ch] / before[ch]).log2();
-                // A pull is one gain by the luminance key; a lift is per channel.
-                let key = if slider > 0.0 {
-                    key_of(before[ch])
-                } else {
-                    key_of(luminance)
-                };
-                let want = table_stops(&GAIN_STOPS, key, slider);
+                let want = dec(gained[ch] + w * colour * (gained[ch] - luma)).max(0.0);
                 assert!(
-                    (stops - want).abs() < 0.02,
-                    "highlights {slider} channel {ch}: {stops:.3} stops, table says {want:.3} ({:?})",
-                    before
+                    (after[ch] - want).abs() < 2e-3 * want.max(0.01),
+                    "highlights {slider} channel {ch}: {:?} -> {:?}, wanted {want}",
+                    before,
+                    after
                 );
             }
         }
@@ -2101,12 +2114,47 @@ fn shadows_is_resolves_measured_gain() {
         }
         let frame = engine.render(&colour, &plan, true).unwrap();
         let stages = frame.stages.unwrap();
-        for (before, after) in stages.working.pixels().zip(stages.graded.pixels()) {
+        let enc = |v: f32| spaces::encode_intermediate(v.max(0.0) as f64);
+        let dec = |v: f64| spaces::decode(v, Transfer::DavinciIntermediate) as f32;
+        for (i, (before, after)) in stages
+            .working
+            .pixels()
+            .zip(stages.graded.pixels())
+            .enumerate()
+        {
+            if slider > 0.0 {
+                // A lift also brings out colour, in proportion to the lift
+                // and more in darker colours. No neighbourhood is bound, so
+                // there is no detail term here.
+                let key = spaces::encode_intermediate(
+                    (0.274_118_5 * before[0] + 0.873_631_9 * before[1] - 0.147_750_4 * before[2])
+                        .max(0.0) as f64,
+                ) as f32;
+                let stops = table_stops(&GAIN_STOPS, key, slider) as f64;
+                let w = stops * 0.07329248 / 0.169;
+                let own: Vec<f64> = (0..3).map(|c| enc(before[c])).collect();
+                let own_luma = 0.2126 * own[0] + 0.7152 * own[1] + 0.0722 * own[2];
+                let lifted: Vec<f64> = (0..3)
+                    .map(|c| enc(before[c] * (stops as f32).exp2()))
+                    .collect();
+                let luma = 0.2126 * lifted[0] + 0.7152 * lifted[1] + 0.0722 * lifted[2];
+                let colour = 0.48 * (1.0 + 2.09 * (0.4 - own_luma)).max(0.0);
+                for ch in 0..3 {
+                    let want = dec(lifted[ch] + w * colour * (lifted[ch] - luma)).max(0.0);
+                    assert!(
+                        (after[ch] - want).abs() < 2e-3 * want.max(0.01),
+                        "shadows {slider} pixel {i} channel {ch}: {:?} -> {:?}, wanted {want}",
+                        before,
+                        after
+                    );
+                }
+                continue;
+            }
             let g = after[1] / before[1];
             for ch in [0, 2] {
                 assert!(
                     (after[ch] / before[ch] - g).abs() < 1e-3 * g.max(1.0),
-                    "all channels take the same gain: {:?} -> {:?}",
+                    "darkening: all channels take the same gain: {:?} -> {:?}",
                     before,
                     after
                 );
