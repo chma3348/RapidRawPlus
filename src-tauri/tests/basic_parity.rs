@@ -144,12 +144,8 @@ fn basic_sliders_match_the_previous_engine() {
             json!({"brightness": -2.0}),
             json!({"contrast": 60, "contrastPivot": 35}),
             json!({"contrast": -60}),
-            // Shadows and Highlights are not compared: v3's follow Resolve's
-            // measured responses (resolve_*_table), not the previous engine's.
-            json!({"whites": 60}),
-            json!({"whites": -60}),
-            json!({"blacks": 70}),
-            json!({"blacks": -70}),
+            // Shadows, Highlights, Whites and Blacks are not compared: they are
+            // v3's tone zones (tone_zones_table), not the previous engine's.
         ] {
             let mut edits = json!({"processVersion": 2, "toneMapper": "basic"});
             for (k, v) in extra.as_object().unwrap() {

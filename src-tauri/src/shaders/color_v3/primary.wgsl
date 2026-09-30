@@ -76,47 +76,59 @@ fn channel_curve(v: f32, channel: u32) -> f32 {
 // given values past white for such a picture — its brightness curve, handed
 // one, breaks into bands — and at neutral the round trip is skipped, so an
 // unedited picture is untouched.
-// Resolve's Photo-page Shadows, measured (resolve_shadows_table.rs): one gain
-// in linear light on all three channels, in stops read off the table by the
-// slider and by a blurred luminance key in DaVinci Intermediate. Flat regions
-// behave pointwise, edges carry Resolve's soft halo, and the dark channels of
-// a saturated colour stay dark, which a lift in log would not do. Zero at
-// slider 0, linear between the measured stops. Runs in the working space
-// before the previous engine's remaining Basic controls.
+// The four tone zones: Blacks, Shadows, Highlights, Whites (tone_zones.rs,
+// tables from tools/design_tone_zones.py). Each slider moves only its own
+// part of the tonal range, judged on the tonal key: the working-space
+// luminance in DaVinci Intermediate, taken from an edge-aware regional
+// average of the unedited picture, so a region moves as one (texture rides
+// along) and a dark subject against a bright sky lifts without a halo. The
+// zones apply in order, each on the previous result; every step is monotone,
+// so no combination of sliders can reverse tones. The result is a target
+// key, reached with one gain on all three channels (hues stay put); where
+// the region is too dark for any gain to reach it (pure black under a
+// Blacks lift), the rest is filled in neutral.
 fn shadow_key(working: vec3<f32>) -> f32 {
     let y = max(dot(working, vec3<f32>(0.27411851, 0.87363190, -0.14775041)), 0.0);
     if y <= 0.00262409 { return y * 10.44426855; }
     return (log2(y + 0.0075) + 7.0) * 0.07329248;
 }
-// A table row holds the gain at slider -100, -50, +50, +100; zero at 0 and
-// linear between.
-fn row_stops(row: vec4<f32>, slider: f32) -> f32 {
-    let a = abs(slider);
-    if slider > 0.0 {
-        return select(row.z * (a / 50.0), mix(row.z, row.w, (a - 50.0) / 50.0), a > 50.0);
-    }
-    return select(row.y * (a / 50.0), mix(row.y, row.x, (a - 50.0) / 50.0), a > 50.0);
-}
-fn shadow_stops(key: f32) -> f32 {
-    // The shared parser hands the slider over divided by 120.
-    let slider = clamp(parameters.basic[1].x * 120.0, -100.0, 100.0);
-    if slider == 0.0 { return 0.0; }
-    let x = clamp(key, 0.0, 1.0) * 64.0;
+// One zone's offset at key `k`, for a slider in -1..1.
+fn zone_offset(k: f32, zone: u32, amount: f32) -> f32 {
+    if amount == 0.0 { return 0.0; }
+    let x = clamp(k, 0.0, 1.0) * 64.0;
     // At the top knot i stays 63 and the fraction reaches one.
     let i = min(u32(floor(x)), 63u);
-    return row_stops(mix(parameters.shadow_curve[i], parameters.shadow_curve[i + 1u], x - f32(i)), slider);
+    let f = x - f32(i);
+    var row: vec4<f32>;
+    if amount > 0.0 {
+        row = mix(parameters.zone_lift[i], parameters.zone_lift[i + 1u], f);
+    } else {
+        row = mix(parameters.zone_cut[i], parameters.zone_cut[i + 1u], f);
+    }
+    return abs(amount) * row[zone];
 }
-// Resolve's Highlights, measured the same way (resolve_highlights_table.rs).
-// Pulling highlights is one gain on all channels keyed on a finely blurred
-// luminance; lifting them acts on each channel by its own value, which is
-// what the chart's colours and the photographs both said (a colour's
-// brighter channels run into white first, as they do in Resolve).
-fn highlight_stops(key: f32) -> f32 {
-    let slider = clamp(parameters.basic[0].w * 120.0, -100.0, 100.0);
-    if slider == 0.0 { return 0.0; }
-    let x = clamp(key, 0.0, 1.0) * 64.0;
-    let i = min(u32(floor(x)), 63u);
-    return row_stops(mix(parameters.highlight_curve[i], parameters.highlight_curve[i + 1u], x - f32(i)), slider);
+// The sliders in -1..1. The shared parser hands them over divided by 120
+// (Shadows, Highlights), 30 (Whites) and 40 (Blacks).
+fn zone_amounts() -> vec4<f32> {
+    return clamp(vec4<f32>(parameters.basic[1].z * 0.4, parameters.basic[1].x * 1.2,
+        parameters.basic[0].w * 1.2, parameters.basic[1].y * 0.3), vec4<f32>(-1.0), vec4<f32>(1.0));
+}
+struct Zones {
+    // The target key.
+    key: f32,
+    // Each zone's own offset, in Intermediate: [blacks, shadows, highlights, whites].
+    parts: vec4<f32>,
+}
+fn tone_zones(key: f32) -> Zones {
+    let amounts = zone_amounts();
+    var k = key;
+    var parts = vec4<f32>(0.0);
+    for (var z = 0u; z < 4u; z++) {
+        let d = zone_offset(k, z, amounts[z]);
+        parts[z] = d;
+        k = max(k + d, 0.0);
+    }
+    return Zones(k, parts);
 }
 // Resolve's Saturation, measured: a mix toward Rec.709 luma of the DaVinci
 // Intermediate log values, by exactly 1 + slider/100 (fitted 0.005, 0.503,
@@ -135,16 +147,14 @@ fn decode_intermediate_soft(v: f32) -> f32 {
     if v <= 0.02740668 { return v / 10.44426855; }
     return exp2(v / 0.07329248 - 7.0) - 0.0075;
 }
-// What Resolve's Shadows does beyond the lift itself, fitted on its exports
-// of five photographs and the chart at +50 and +100 (a smooth gain alone
-// matched the chart's flat patches but left photographs flat and grey):
-// lifting brings out local contrast and colour, both in proportion to the
-// lift. In Intermediate, per channel:
+// What lifting shadows does beyond the lift itself, measured on Resolve's
+// exports (a smooth gain alone left photographs flat and grey): it brings
+// out local contrast and colour, both in proportion to the lift, and so only
+// where the Shadows zone lifts. In Intermediate, per channel:
 //   out = in + lift + w * (DETAIL * (luma - blurred luma)
 //                          + COLOUR * (1 + DARK * (0.4 - luma)) * (in - luma))
-// with luma the Rec.709 luma of the Intermediate values and w the lift in
-// Intermediate units over 0.169 (the lift at +100 in the midtones). Darkening
-// has neither (measured: both terms fit to zero at -50 and -100).
+// with luma the Rec.709 luma of the Intermediate values and w the zone's
+// lift in Intermediate units over 0.169. Darkening has neither (measured).
 const SHADOW_DETAIL: f32 = 0.348;
 const SHADOW_COLOUR: f32 = 0.48;
 const SHADOW_COLOUR_DARK: f32 = 2.09;
@@ -153,24 +163,22 @@ fn log_luma709(rgb: vec3<f32>) -> f32 {
 }
 fn shadows_finish(lifted: vec3<f32>, lift: f32, own_luma: f32, detail_base: f32) -> vec3<f32> {
     if lift <= 0.0 { return lifted; }
-    let w = lift * 0.07329248 / 0.169;
+    let w = lift / 0.169;
     let logged = vec3<f32>(channel_key(lifted.r), channel_key(lifted.g), channel_key(lifted.b));
     let luma = dot(logged, vec3<f32>(0.2126, 0.7152, 0.0722));
     let colour = SHADOW_COLOUR * max(1.0 + SHADOW_COLOUR_DARK * (0.4 - own_luma), 0.0);
     let out = logged + vec3<f32>(w * SHADOW_DETAIL * (own_luma - detail_base)) + w * colour * (logged - vec3<f32>(luma));
     return max(vec3<f32>(decode_intermediate_soft(out.r), decode_intermediate_soft(out.g), decode_intermediate_soft(out.b)), vec3<f32>(0.0));
 }
-// Highlights has the same kind of finish, fitted the same way, with its own
-// signs: lifting highlights softens local contrast and colour a little,
-// pulling them brings out a little local contrast. w is the key's gain in
-// Intermediate units over 0.2.
-fn highlights_finish(rgb: vec3<f32>, key_fine: f32, own_luma: f32, detail_base: f32) -> vec3<f32> {
-    let stops = highlight_stops(key_fine);
-    if stops == 0.0 { return rgb; }
-    let w = abs(stops) * 0.07329248 / 0.2;
+// Highlights has the same kind of finish with its own signs: lifting them
+// softens local contrast and colour a little, pulling them brings out a
+// little local contrast. w is the zone's offset in Intermediate over 0.2.
+fn highlights_finish(rgb: vec3<f32>, offset: f32, own_luma: f32, detail_base: f32) -> vec3<f32> {
+    if offset == 0.0 { return rgb; }
+    let w = abs(offset) / 0.2;
     var detail = 0.215;
     var colour = -0.045;
-    if parameters.basic[0].w > 0.0 {
+    if offset > 0.0 {
         detail = -0.205;
         colour = -0.258;
     }
@@ -206,9 +214,10 @@ fn basic_v2(rgb: vec3<f32>, tonal: vec3<f32>, structure: vec3<f32>) -> vec3<f32>
     var c: vec3<f32>;
     if display { c = to_display_domain(rgb) * gain; } else { c = parameters.work_to_output * (rgb * gain); }
     c = apply_filmic_exposure(c, a.x);
-    // Shadows is Resolve's now (shadow_stops); the previous engine's is off.
-    c = apply_tonal_adjustments_v2(c, structure, raw, a.y, 0.0, b.y, b.z, a.z);
-    // Highlights is Resolve's now too (highlight_stops).
+    // Shadows, Whites and Blacks are the tone zones now (tone_zones); the
+    // previous engine's only supplies Contrast here.
+    c = apply_tonal_adjustments_v2(c, structure, raw, a.y, 0.0, 0.0, 0.0, a.z);
+    // Highlights is a tone zone now too.
     c = apply_highlights_adjustment_v2(c, tonal, structure, raw, 0.0);
     if display { return from_display_domain(c); }
     // The previous engine's next stage, its HSL panel, runs on every pixel
@@ -218,21 +227,26 @@ fn basic_v2(rgb: vec3<f32>, tonal: vec3<f32>, structure: vec3<f32>) -> vec3<f32>
     return parameters.srgb_to_work * max(c, vec3<f32>(0.0));
 }
 
-fn grade(input:vec3<f32>, tonal:vec3<f32>, structure:vec3<f32>, key_wide:f32, key_fine:f32, detail_base:f32) -> vec3<f32> {
+fn grade(input:vec3<f32>, tonal:vec3<f32>, structure:vec3<f32>, key:f32, detail_base:f32) -> vec3<f32> {
     if parameters.flags.x == 0u {return input;}
     let balanced=parameters.white_balance*input;
-    // Both keys come from the unedited picture, so the two gains commute.
-    let lift=shadow_stops(key_wide);
-    var pull=vec3<f32>(highlight_stops(key_fine));
-    if parameters.basic[0].w > 0.0 {
-        pull=vec3<f32>(highlight_stops(channel_key(balanced.r)), highlight_stops(channel_key(balanced.g)), highlight_stops(channel_key(balanced.b)));
+    var toned=balanced;
+    var seen=0.0;
+    let zones=tone_zones(key);
+    if zones.key != key {
+        let from_lin=max(decode_intermediate_soft(key),0.0);
+        let to_lin=max(decode_intermediate_soft(zones.key),0.0);
+        var gain=1.0;
+        if from_lin > 1e-6 { gain=min(to_lin/from_lin, 64.0); }
+        let fill=max(to_lin-from_lin*gain,0.0);
+        toned=balanced*gain+vec3<f32>(fill);
+        let own_luma=log_luma709(balanced);
+        toned=shadows_finish(toned, zones.parts.y, own_luma, detail_base);
+        toned=highlights_finish(toned, zones.parts.z, own_luma, detail_base);
+        seen=log2(max(gain,1e-4));
     }
-    // The previous engine's controls see the picture as these two left it.
-    let seen=lift+highlight_stops(key_fine);
-    let own_luma=log_luma709(balanced);
-    let shadowed=shadows_finish(balanced*exp2(lift), lift, own_luma, detail_base);
-    let highlighted=highlights_finish(shadowed*exp2(pull), key_fine, own_luma, detail_base);
-    var rgb=basic_v2(highlighted, lifted_neighbourhood(tonal, seen), lifted_neighbourhood(structure, seen));
+    // The previous engine's controls see the picture as the zones left it.
+    var rgb=basic_v2(toned, lifted_neighbourhood(tonal, seen), lifted_neighbourhood(structure, seen));
     let y=dot(rgb,vec3<f32>(0.27411851,0.87363190,-0.14775041));
     // DWG's blue coefficient is negative, so a non-physical pixel can land at
     // or below zero luminance. Fade the curve out across the bottom of the

@@ -632,46 +632,71 @@ fn neighbourhood(
             1.055 * v.powf(1. / 2.4) - 0.055
         }
     };
-    // The fourth plane is Resolve's Shadows key: the working-space
-    // luminance in DaVinci Intermediate, whatever the previous engine's
-    // planes are encoded as.
+    // The tone zones' key: the working-space luminance in DaVinci
+    // Intermediate, whatever the previous engine's planes are encoded as.
     let to_working = spaces::conversion(source.color.primaries, Primaries::DavinciWideGamut)
         .transpose()
         .to_cols_array_2d()
         .map(|r| r.map(|v| v as f32));
     let luminance = [0.274_118_5f32, 0.873_631_9, -0.147_750_4];
     let rec709 = [0.2126f32, 0.7152, 0.0722];
-    let mut planes = vec![vec![0f32; w * h]; 4];
-    // The detail Resolve's Shadows lift brings out is measured against the
-    // Rec.709 luma of the working values in Intermediate, blurred at its own
-    // radius (see `shadows_finish` in the shader).
+    let mut planes = vec![vec![0f32; w * h]; 3];
+    let mut zone_key = vec![0f32; w * h];
+    // The detail a Shadows lift brings out is measured against the Rec.709
+    // luma of the working values in Intermediate, blurred at its own radius
+    // (see `shadows_finish` in the shader).
     let mut detail = vec![0f32; w * h];
-    for (i, p) in pixels.pixels().enumerate() {
-        let working: [f32; 3] = std::array::from_fn(|c| {
-            to_working[c][0] * p[0] + to_working[c][1] * p[1] + to_working[c][2] * p[2]
-        });
-        let y: f32 = (0..3)
-            .map(|c| luminance[c] * working[c])
-            .sum::<f32>()
-            .max(0.);
-        planes[3][i] = spaces::encode_intermediate(y as f64) as f32;
-        detail[i] = (0..3)
-            .map(|c| rec709[c] * spaces::encode_intermediate(working[c].max(0.) as f64) as f32)
-            .sum();
-        // A rendered picture's controls see its display values: the code
-        // values Resolve's rendering gives the scene data, already encoded.
-        if let Some(output) = display {
-            let logged = [p[0], p[1], p[2]].map(|v| spaces::encode_intermediate(v as f64) as f32);
-            let shown = output.sample(logged);
-            for (c, plane) in planes.iter_mut().take(3).enumerate() {
-                plane[i] = shown[c].clamp(0., 1.);
-            }
-            continue;
-        }
-        for (c, plane) in planes.iter_mut().take(3).enumerate() {
-            let v = (m[c][0] * p[0] + m[c][1] * p[1] + m[c][2] * p[2]).clamp(0., 65504.);
-            plane[i] = if scene { v } else { encode(v) };
-        }
+    // Every pixel on its own, so in parallel, in chunks of the same range of
+    // each output.
+    {
+        use rayon::prelude::*;
+        const CHUNK: usize = 1 << 14;
+        let raw = pixels.as_raw();
+        let [p0, p1, p2] = &mut planes[..] else {
+            unreachable!()
+        };
+        p0.par_chunks_mut(CHUNK)
+            .zip(p1.par_chunks_mut(CHUNK))
+            .zip(p2.par_chunks_mut(CHUNK))
+            .zip(zone_key.par_chunks_mut(CHUNK))
+            .zip(detail.par_chunks_mut(CHUNK))
+            .enumerate()
+            .for_each(|(chunk, ((((o0, o1), o2), keys), details))| {
+                for j in 0..o0.len() {
+                    let i = chunk * CHUNK + j;
+                    let p = &raw[i * 4..i * 4 + 3];
+                    let working: [f32; 3] = std::array::from_fn(|c| {
+                        to_working[c][0] * p[0] + to_working[c][1] * p[1] + to_working[c][2] * p[2]
+                    });
+                    let y: f32 = (0..3)
+                        .map(|c| luminance[c] * working[c])
+                        .sum::<f32>()
+                        .max(0.);
+                    keys[j] = spaces::encode_intermediate(y as f64) as f32;
+                    details[j] = (0..3)
+                        .map(|c| {
+                            rec709[c] * spaces::encode_intermediate(working[c].max(0.) as f64) as f32
+                        })
+                        .sum();
+                    // A rendered picture's controls see its display values:
+                    // the code values Resolve's rendering gives the scene
+                    // data, already encoded.
+                    let values: [f32; 3] = if let Some(output) = display {
+                        let logged =
+                            [p[0], p[1], p[2]].map(|v| spaces::encode_intermediate(v as f64) as f32);
+                        output.sample(logged).map(|v| v.clamp(0., 1.))
+                    } else {
+                        std::array::from_fn(|c| {
+                            let v = (m[c][0] * p[0] + m[c][1] * p[1] + m[c][2] * p[2])
+                                .clamp(0., 65504.);
+                            if scene { v } else { encode(v) }
+                        })
+                    };
+                    o0[j] = values[0];
+                    o1[j] = values[1];
+                    o2[j] = values[2];
+                }
+            });
     }
     let scale = w.min(h) as f32 / 1080.;
     let blurred = |base: f32| -> Vec<Vec<f32>> {
@@ -694,6 +719,17 @@ fn neighbourhood(
             .collect()
     };
     let (tonal, structure) = (blurred(3.5), blurred(40.));
+    // The tone zones judge a region, not a pixel, so texture inside a
+    // shadow lifts with it; an edge-aware average, so a dark subject against
+    // a bright sky is its own region and lifts without a halo. Differences
+    // under about 1.4 stops count as texture (eps), stronger ones as edges.
+    let zone_key = guided_filter(
+        &zone_key,
+        w,
+        h,
+        (ZONE_KEY_RADIUS * w.min(h) as f32).round().max(1.) as usize,
+        ZONE_KEY_EPS,
+    );
     // Sigma 0.8% of the short edge, fitted on Resolve's Shadows exports.
     let detail = {
         let radius = (DETAIL_BLUR_BASE * scale).ceil().max(1.) as usize;
@@ -710,12 +746,12 @@ fn neighbourhood(
     };
     let mut blurs = Vec::with_capacity(w * h * 2);
     for i in 0..w * h {
-        blurs.push([tonal[0][i], tonal[1][i], tonal[2][i], tonal[3][i]]);
+        blurs.push([tonal[0][i], tonal[1][i], tonal[2][i], 0.]);
         blurs.push([
             structure[0][i],
             structure[1][i],
             structure[2][i],
-            pack_keys(structure[3][i], detail[i]),
+            pack_keys(zone_key[i], detail[i]),
         ]);
     }
     let blurs = Arc::new(blurs);
@@ -727,6 +763,97 @@ fn neighbourhood(
         });
     }
     blurs
+}
+
+/// The zone key's region size, as a fraction of the short edge, and how big a
+/// difference in Intermediate (squared) counts as an edge rather than texture.
+const ZONE_KEY_RADIUS: f32 = 0.02;
+const ZONE_KEY_EPS: f32 = 0.01;
+
+/// He, Sun and Tang's guided filter, guided by the image itself: an
+/// edge-preserving average. Flat and textured areas are averaged; edges
+/// whose variance exceeds `eps` are kept.
+fn guided_filter(plane: &[f32], w: usize, h: usize, r: usize, eps: f32) -> Vec<f32> {
+    use rayon::prelude::*;
+    let squares: Vec<f32> = plane.par_iter().map(|v| v * v).collect();
+    let (mean, mean_sq) = rayon::join(|| box_mean(plane, w, h, r), || box_mean(&squares, w, h, r));
+    let (a, b): (Vec<f32>, Vec<f32>) = mean
+        .par_iter()
+        .zip(mean_sq.par_iter())
+        .map(|(&m, &m2)| {
+            let variance = (m2 - m * m).max(0.);
+            let a = variance / (variance + eps);
+            (a, m - a * m)
+        })
+        .unzip();
+    let (mean_a, mean_b) = rayon::join(|| box_mean(&a, w, h, r), || box_mean(&b, w, h, r));
+    plane
+        .par_iter()
+        .zip(mean_a.par_iter().zip(mean_b.par_iter()))
+        .map(|(&i, (&ma, &mb))| ma * i + mb)
+        .collect()
+}
+
+/// Mean over a (2r+1)-square window, clamped at the borders (divided by
+/// the pixels actually inside), in time proportional to the pixel count
+/// whatever the radius.
+fn box_mean(plane: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
+    use rayon::prelude::*;
+    let mut rows = vec![0f32; w * h];
+    rows.par_chunks_mut(w).enumerate().for_each(|(y, out)| {
+        let src = &plane[y * w..(y + 1) * w];
+        let mut prefix = vec![0f64; w + 1];
+        for x in 0..w {
+            prefix[x + 1] = prefix[x] + src[x] as f64;
+        }
+        for (x, o) in out.iter_mut().enumerate() {
+            let (lo, hi) = (x.saturating_sub(r), (x + r + 1).min(w));
+            *o = ((prefix[hi] - prefix[lo]) / (hi - lo) as f64) as f32;
+        }
+    });
+    // Columns: a running window of rows, contiguous across a band of the
+    // width; bands run in parallel and are written back row by row.
+    const BAND: usize = 256;
+    let bands: Vec<(usize, Vec<f32>)> = (0..w.div_ceil(BAND))
+        .into_par_iter()
+        .map(|band| {
+            let (x0, x1) = (band * BAND, ((band + 1) * BAND).min(w));
+            let bw = x1 - x0;
+            let mut out = vec![0f32; bw * h];
+            let mut sum = vec![0f64; bw];
+            let mut count = 0usize;
+            let (mut lo, mut hi) = (0usize, 0usize);
+            for y in 0..h {
+                let (want_lo, want_hi) = (y.saturating_sub(r), (y + r + 1).min(h));
+                while hi < want_hi {
+                    for (s, v) in sum.iter_mut().zip(&rows[hi * w + x0..hi * w + x1]) {
+                        *s += *v as f64;
+                    }
+                    hi += 1;
+                    count += 1;
+                }
+                while lo < want_lo {
+                    for (s, v) in sum.iter_mut().zip(&rows[lo * w + x0..lo * w + x1]) {
+                        *s -= *v as f64;
+                    }
+                    lo += 1;
+                    count -= 1;
+                }
+                for (o, s) in out[y * bw..(y + 1) * bw].iter_mut().zip(&sum) {
+                    *o = (*s / count as f64) as f32;
+                }
+            }
+            (x0, out)
+        })
+        .collect();
+    let mut out = vec![0f32; w * h];
+    out.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        for (x0, band) in &bands {
+            let bw = band.len() / h;
+            row[*x0..x0 + bw].copy_from_slice(&band[y * bw..(y + 1) * bw]);
+        }
+    });
+    out
 }
 
 /// The Shadows detail blur, in the neighbourhood's units (radius at a 1080
@@ -1586,6 +1713,63 @@ pub fn preview_bytes(
         .write_srgb_png(&mut bytes, false)
         .map_err(|e| e.to_string())?;
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod zone_key_tests {
+    use super::*;
+    #[test]
+    fn box_mean_matches_a_direct_average() {
+        let (w, h, r) = (13usize, 9usize, 3usize);
+        let plane: Vec<f32> = (0..w * h).map(|i| ((i * 37) % 11) as f32).collect();
+        let fast = box_mean(&plane, w, h, r);
+        for y in 0..h {
+            for x in 0..w {
+                let (mut sum, mut n) = (0f64, 0f64);
+                for yy in y.saturating_sub(r)..(y + r + 1).min(h) {
+                    for xx in x.saturating_sub(r)..(x + r + 1).min(w) {
+                        sum += plane[yy * w + xx] as f64;
+                        n += 1.;
+                    }
+                }
+                assert!((fast[y * w + x] as f64 - sum / n).abs() < 1e-4);
+            }
+        }
+    }
+    #[test]
+    fn guided_filter_keeps_edges_and_averages_texture() {
+        // Left half dark with fine texture, right half bright and flat.
+        let (w, h) = (80usize, 20usize);
+        let plane: Vec<f32> = (0..w * h)
+            .map(|i| {
+                let x = i % w;
+                if x < w / 2 {
+                    0.2 + if (i / w + x) % 2 == 0 { 0.02 } else { -0.02 }
+                } else {
+                    0.7
+                }
+            })
+            .collect();
+        let out = guided_filter(&plane, w, h, 6, ZONE_KEY_EPS);
+        let row = &out[10 * w..11 * w];
+        // Texture averaged away on the dark side, the edge kept sharp: a
+        // plain blur would put 0.45 at the edge. Within the radius each side
+        // leans a little toward the other (the guided filter's known, mild
+        // bleed), and not at all beyond twice the radius.
+        assert!(
+            row[10..30].iter().all(|v| (v - 0.2).abs() < 0.006),
+            "{:?}",
+            &row[10..30]
+        );
+        assert!(
+            row[w / 2] - row[w / 2 - 1] > 0.35,
+            "edge blurred: {:?}",
+            &row[36..44]
+        );
+        assert!(row[w / 2..].iter().all(|v| (v - 0.7).abs() < 0.06));
+        // Two averaging passes: the reach is twice the radius.
+        assert!(row[w / 2 + 13..].iter().all(|v| (v - 0.7).abs() < 0.002));
+    }
 }
 
 #[cfg(test)]

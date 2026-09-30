@@ -28,8 +28,8 @@ struct Parameters {
     agx_to: mat3x3<f32>,
     agx_from: mat3x3<f32>,
     domain: vec4<u32>,
-    shadow_curve: array<vec4<f32>,65>,
-    highlight_curve: array<vec4<f32>,65>,
+    zone_lift: array<vec4<f32>,65>,
+    zone_cut: array<vec4<f32>,65>,
 }
 @group(0) @binding(0) var<storage, read> source: array<vec4<f32>>;
 @group(0) @binding(1) var<storage, read_write> results: array<vec4<f32>>;
@@ -116,31 +116,26 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     // bound they see the pixel itself, in the encoding they expect.
     var tonal: vec3<f32>;
     var structure: vec3<f32>;
-    // Resolve's Shadows reads a wide-blurred luminance key and its Highlights
-    // a fine one (the fourth components of the structure and tonal entries);
-    // without a neighbourhood, the pixel's own.
-    var key_wide: f32;
-    var key_fine: f32;
+    // The tone zones read an edge-aware regional key and the detail base,
+    // packed in the structure entry's fourth component; without a
+    // neighbourhood, the pixel's own (and so no detail term).
+    var key: f32;
     var detail_base: f32;
     if parameters.basic_flags.z == 1u {
         tonal = neighbourhood[id.x * 2u].rgb;
         structure = neighbourhood[id.x * 2u + 1u].rgb;
-        key_fine = neighbourhood[id.x * 2u].w;
-        // Packed: the Shadows key and the detail base, half precision each.
         let packed = unpack2x16float(bitcast<u32>(neighbourhood[id.x * 2u + 1u].w));
-        key_wide = packed.x;
+        key = packed.x;
         detail_base = packed.y;
     } else {
         var own = max(parameters.work_to_output * working, vec3<f32>(0.0));
         if parameters.domain.x == 1u { own = to_display_domain(working); }
         tonal = select(linear_to_srgb_extended(own), own, parameters.basic_flags.y == 1u);
         structure = tonal;
-        key_wide = shadow_key(working);
-        key_fine = key_wide;
-        // No neighbourhood: no detail to bring out.
+        key = shadow_key(working);
         detail_base = log_luma709(working);
     }
-    let graded = film_saturation(vignette(grade(centre(calibrate(working), position, dims), tonal, structure, key_wide, key_fine, detail_base), position, dims));
+    let graded = film_saturation(vignette(grade(centre(calibrate(working), position, dims), tonal, structure, key, detail_base), position, dims));
     // A captured transform replaces the whole rendering step, encode included,
     // and reads working values directly: its domain is the working space.
     let scene = look_scene(graded);

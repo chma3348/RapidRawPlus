@@ -1038,7 +1038,7 @@ fn stabilization_contracts(context: &GpuContext) {
         )
         .is_err()
     );
-    assert_eq!(before["stage_revision"], "v3-application-stages-5");
+    assert_eq!(before["stage_revision"], "v3-application-stages-6");
 }
 
 fn pinned_pipeline_contracts(context: &GpuContext) {
@@ -1862,17 +1862,194 @@ fn a_patch_of_the_photo_itself_is_invisible_on_a_p3_file() {
     }
 }
 
-/// Shadows and Highlights follow Resolve's measured responses: gains in
-/// linear light read off their tables by the slider and by the key. Without
-/// a neighbourhood the key is the pixel's own luminance, so a grey ramp reads
-/// each table back directly; slider 0 must be the identity. Shadows and a
-/// Highlights pull keep a colour's channel ratios; a Highlights lift acts on
-/// each channel by its own value.
+/// The four tone zones (Blacks, Shadows, Highlights, Whites): each moves only
+/// its own part of the tonal range, exactly as tone_zones_table says, applied
+/// in order; middle grey never moves; hues are kept by one gain on all
+/// channels (with a neutral fill where no gain can reach, pure black under a
+/// Blacks lift); lifting shadows or highlights carries its colour finish; and
+/// no combination of sliders reverses tones. Without a neighbourhood the key
+/// is the pixel's own luminance, so a grey ramp reads the tables back.
 #[test]
-fn tone_sliders_are_resolves_measured_gains() {
-    shadows_is_resolves_measured_gain();
-    highlights_is_resolves_measured_gain();
+fn tone_sliders_are_the_tone_zones() {
+    tone_zones_on_greys();
+    tone_zones_on_colour();
     saturation_is_resolves_log_mix();
+}
+
+const ZONE_NAMES: [&str; 4] = ["blacks", "shadows", "highlights", "whites"];
+
+fn zone_config(amounts: [f32; 4]) -> PipelineConfig {
+    let mut c = config();
+    c.source = SourceColor {
+        primaries: Primaries::DavinciWideGamut,
+        transfer: Transfer::Linear,
+        reference: ReferenceDomain::Scene,
+    };
+    c.output_rendering = OutputRendering::SceneLuminanceV1;
+    // The shared parser's scales: Blacks /40, Shadows and Highlights /120, Whites /30.
+    c.controls.tone.blacks = amounts[0] * 100.0 / 40.0;
+    c.controls.tone.shadows = amounts[1] * 100.0 / 120.0;
+    c.controls.tone.highlights = amounts[2] * 100.0 / 120.0;
+    c.controls.tone.whites = amounts[3] * 100.0 / 30.0;
+    c
+}
+
+fn zone_table_offset(key: f32, zone: usize, amount: f32) -> f32 {
+    use rapidraw_lib::color_engine::tone_zones_table::{CUT, KNOTS, LIFT};
+    if amount == 0.0 {
+        return 0.0;
+    }
+    let table = if amount > 0.0 { &LIFT } else { &CUT };
+    let x = key.clamp(0.0, 1.0) * (KNOTS - 1) as f32;
+    let i = (x.floor() as usize).min(KNOTS - 2);
+    let f = x - i as f32;
+    amount.abs() * (table[i][zone] * (1.0 - f) + table[i + 1][zone] * f)
+}
+
+/// The target key and each zone's own offset, as the engine applies them.
+fn zone_target(key: f32, amounts: [f32; 4]) -> (f32, [f32; 4]) {
+    let mut k = key;
+    let mut parts = [0.0; 4];
+    for (z, part) in parts.iter_mut().enumerate() {
+        let d = zone_table_offset(k, z, amounts[z]);
+        *part = d;
+        k = (k + d).max(0.0);
+    }
+    (k, parts)
+}
+
+fn tone_zones_on_greys() {
+    let engine = ColorEngine::new(gpu()).unwrap();
+    let enc = |v: f32| spaces::encode_intermediate(v.max(0.0) as f64) as f32;
+    let dec = |v: f32| spaces::decode(v as f64, Transfer::DavinciIntermediate) as f32;
+    // Greys along the key, black included.
+    let ramp = ImageBuffer::from_fn(1025, 1, |x, _| {
+        let v = dec(x as f32 / 1024.0).max(0.0);
+        Rgba([v, v, v, 1.0])
+    });
+    let render = |amounts: [f32; 4]| {
+        let plan = RenderPlan::build(zone_config(amounts)).unwrap();
+        engine.render(&ramp, &plan, true).unwrap().stages.unwrap()
+    };
+    let neutral = render([0.0; 4]);
+    for z in 0..4 {
+        for amount in [-1.0f32, -0.5, 0.5, 1.0] {
+            let mut amounts = [0.0; 4];
+            amounts[z] = amount;
+            let stages = render(amounts);
+            for (i, after) in stages.graded.pixels().enumerate() {
+                let key = i as f32 / 1024.0;
+                let (target, _) = zone_target(key, amounts);
+                let got = enc(after[1]);
+                assert!(
+                    (got - target).abs() < 0.002,
+                    "{} {amount}: key {key:.3} went to {got:.4}, the zone says {target:.4}",
+                    ZONE_NAMES[z]
+                );
+                assert!(
+                    (after[0] - after[1]).abs() < 1e-5 && (after[2] - after[1]).abs() < 1e-5,
+                    "greys stay grey"
+                );
+                // Nothing moves outside a zone. Middle grey (key 0.39, display
+                // level ~118) moves only under Shadows, by at most ~9 levels.
+                let untouched = match z {
+                    0 => key > 0.34,
+                    1 => key > 0.52,
+                    2 => key < 0.34,
+                    _ => key < 0.47,
+                };
+                if untouched {
+                    assert!(
+                        (got - key).abs() < 0.0015,
+                        "{} {amount} moved key {key:.3} outside its zone (to {got:.4})",
+                        ZONE_NAMES[z]
+                    );
+                }
+                if (key - 0.39).abs() < 0.002 {
+                    let limit = if z == 1 { 0.02 } else { 0.0015 };
+                    assert!(
+                        (got - key).abs() < limit,
+                        "{} {amount} moved middle grey to {got:.4}",
+                        ZONE_NAMES[z]
+                    );
+                }
+            }
+        }
+    }
+    // Blacks +100 lifts pure black to a soft matte, filled in neutral.
+    let lifted = render([1.0, 0.0, 0.0, 0.0]);
+    let black = lifted.graded.get_pixel(0, 0);
+    assert!(
+        black[1] > 0.004 && (black[0] - black[1]).abs() < 1e-6,
+        "pure black under Blacks +100: {black:?}"
+    );
+    // Slider 0 is the identity.
+    assert_eq!(neutral.working, neutral.graded);
+    // No combination of sliders at any strength reverses tones.
+    for combo in 0..81u32 {
+        let amounts: [f32; 4] =
+            std::array::from_fn(|z| [-1.0, 0.0, 1.0][((combo / 3u32.pow(z as u32)) % 3) as usize]);
+        let stages = render(amounts);
+        let mut previous = -1.0f32;
+        for p in stages.graded.pixels() {
+            assert!(p[1] + 1e-6 >= previous, "tones reversed at {amounts:?}");
+            previous = previous.max(p[1]);
+        }
+    }
+}
+
+fn tone_zones_on_colour() {
+    let engine = ColorEngine::new(gpu()).unwrap();
+    let enc = |v: f32| spaces::encode_intermediate(v.max(0.0) as f64);
+    let dec = |v: f64| spaces::decode(v, Transfer::DavinciIntermediate) as f32;
+    let colour = ImageBuffer::from_fn(96, 1, |x, _| {
+        let v = 0.004 * 1.07f32.powi(x as i32);
+        Rgba([v * 2.2, v, v * 0.35, 1.0])
+    });
+    for z in 0..4 {
+        for amount in [-1.0f32, 1.0] {
+            let mut amounts = [0.0; 4];
+            amounts[z] = amount;
+            let plan = RenderPlan::build(zone_config(amounts)).unwrap();
+            let stages = engine.render(&colour, &plan, true).unwrap().stages.unwrap();
+            for (before, after) in stages.working.pixels().zip(stages.graded.pixels()) {
+                let y = 0.274_118_5 * before[0] + 0.873_631_9 * before[1] - 0.147_750_4 * before[2];
+                let key = enc(y) as f32;
+                let (target, parts) = zone_target(key, amounts);
+                let (from, to) = (dec(key as f64).max(0.0), dec(target as f64).max(0.0));
+                let gain = if from > 1e-6 {
+                    (to / from).min(64.0)
+                } else {
+                    1.0
+                };
+                let fill = (to - from * gain).max(0.0);
+                let mut logged: Vec<f64> = (0..3).map(|c| enc(before[c] * gain + fill)).collect();
+                let own: Vec<f64> = (0..3).map(|c| enc(before[c])).collect();
+                let own_luma = 0.2126 * own[0] + 0.7152 * own[1] + 0.0722 * own[2];
+                let luma = |l: &[f64]| 0.2126 * l[0] + 0.7152 * l[1] + 0.0722 * l[2];
+                if parts[1] > 0.0 {
+                    let w = parts[1] as f64 / 0.169;
+                    let colour = 0.48 * (1.0 + 2.09 * (0.4 - own_luma)).max(0.0);
+                    let l = luma(&logged);
+                    logged = logged.iter().map(|v| v + w * colour * (v - l)).collect();
+                }
+                if parts[2] != 0.0 {
+                    let w = parts[2].abs() as f64 / 0.2;
+                    let colour = if parts[2] > 0.0 { -0.258 } else { -0.045 };
+                    let l = luma(&logged);
+                    logged = logged.iter().map(|v| v + w * colour * (v - l)).collect();
+                }
+                for c in 0..3 {
+                    let want = dec(logged[c]).max(0.0);
+                    assert!(
+                        (after[c] - want).abs() < 2e-3 * want.max(0.01),
+                        "{} {amount} channel {c}: {before:?} -> {after:?}, wanted {want}",
+                        ZONE_NAMES[z]
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// Saturation mixes the Intermediate log values toward their Rec.709 luma by
@@ -1935,238 +2112,6 @@ fn gpu() -> GpuContext {
     }
 }
 
-fn table_stops(table: &[[f32; 4]], key: f32, slider: f32) -> f32 {
-    let n = table.len();
-    let x = key.clamp(0.0, 1.0) * (n - 1) as f32;
-    let i = (x.floor() as usize).min(n - 2);
-    let f = x - i as f32;
-    let row: Vec<f32> = (0..4)
-        .map(|c| table[i][c] * (1.0 - f) + table[i + 1][c] * f)
-        .collect();
-    let a = slider.abs();
-    let (half, full) = if slider > 0.0 {
-        (row[2], row[3])
-    } else {
-        (row[1], row[0])
-    };
-    if a <= 50.0 {
-        half * a / 50.0
-    } else {
-        half + (full - half) * (a - 50.0) / 50.0
-    }
-}
-
-fn highlights_is_resolves_measured_gain() {
-    use rapidraw_lib::color_engine::resolve_highlights_table::GAIN_STOPS;
-    let engine = ColorEngine::new(gpu()).unwrap();
-    let grey = ImageBuffer::from_fn(2048, 1, |x, _| {
-        let v = spaces::decode(x as f64 / 2047.0, Transfer::DavinciIntermediate) as f32;
-        Rgba([v, v, v, 1.0])
-    });
-    let colour = ImageBuffer::from_fn(64, 1, |x, _| {
-        let v = 0.02 + x as f32 * 0.01;
-        Rgba([v * 3.0, v, v * 0.4, 1.0])
-    });
-    let key_of = |v: f32| spaces::encode_intermediate(v.max(0.0) as f64) as f32;
-    for slider in [-100.0f32, -50.0, -20.0, 0.0, 35.0, 50.0, 100.0] {
-        let mut c = config();
-        c.source = SourceColor {
-            primaries: Primaries::DavinciWideGamut,
-            transfer: Transfer::Linear,
-            reference: ReferenceDomain::Scene,
-        };
-        c.output_rendering = OutputRendering::SceneLuminanceV1;
-        c.controls.tone.highlights = slider / 120.0;
-        let plan = RenderPlan::build(c).unwrap();
-        let stages = engine.render(&grey, &plan, true).unwrap().stages.unwrap();
-        for (i, (before, after)) in stages
-            .working
-            .pixels()
-            .zip(stages.graded.pixels())
-            .enumerate()
-        {
-            if before[1] < 1e-4 {
-                continue;
-            }
-            let key = i as f32 / 2047.0;
-            let stops = (after[1] / before[1]).log2();
-            let want = table_stops(&GAIN_STOPS, key, slider);
-            assert!(
-                (stops - want).abs() < 0.02,
-                "highlights {slider} key {key:.3}: {stops:.3} stops, table says {want:.3}"
-            );
-            if slider == 0.0 {
-                assert_eq!(before, after, "slider 0 must be the identity");
-            }
-        }
-        let stages = engine.render(&colour, &plan, true).unwrap().stages.unwrap();
-        let enc = |v: f32| spaces::encode_intermediate(v.max(0.0) as f64);
-        let dec = |v: f64| spaces::decode(v, Transfer::DavinciIntermediate) as f32;
-        for (before, after) in stages.working.pixels().zip(stages.graded.pixels()) {
-            let luminance =
-                0.274_118_5 * before[0] + 0.873_631_9 * before[1] - 0.147_750_4 * before[2];
-            // A pull is one gain by the luminance key; a lift is per channel.
-            let gained: Vec<f64> = (0..3)
-                .map(|ch| {
-                    let key = if slider > 0.0 {
-                        key_of(before[ch])
-                    } else {
-                        key_of(luminance)
-                    };
-                    enc(before[ch] * table_stops(&GAIN_STOPS, key, slider).exp2())
-                })
-                .collect();
-            // Then the colour finish, in proportion to the key's gain. No
-            // neighbourhood is bound, so there is no detail term.
-            let w =
-                table_stops(&GAIN_STOPS, key_of(luminance), slider).abs() as f64 * 0.07329248 / 0.2;
-            let colour = if slider > 0.0 { -0.258 } else { -0.045 };
-            let luma = 0.2126 * gained[0] + 0.7152 * gained[1] + 0.0722 * gained[2];
-            for ch in 0..3 {
-                let want = dec(gained[ch] + w * colour * (gained[ch] - luma)).max(0.0);
-                assert!(
-                    (after[ch] - want).abs() < 2e-3 * want.max(0.01),
-                    "highlights {slider} channel {ch}: {:?} -> {:?}, wanted {want}",
-                    before,
-                    after
-                );
-            }
-        }
-    }
-}
-
-fn shadows_is_resolves_measured_gain() {
-    use rapidraw_lib::color_engine::resolve_shadows_table::{GAIN_STOPS, KNOTS};
-    let instance = wgpu::Instance::default();
-    let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
-    let limits = adapter.limits();
-    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        required_limits: limits.clone(),
-        ..Default::default()
-    }))
-    .unwrap();
-    let context = GpuContext {
-        device: Arc::new(device),
-        queue: Arc::new(queue),
-        limits,
-        display: Arc::new(Mutex::new(None)),
-    };
-    let engine = ColorEngine::new(context).unwrap();
-    // Linear DaVinci Wide Gamut in, so the working values are the inputs.
-    let grey = ImageBuffer::from_fn(2048, 1, |x, _| {
-        let v = spaces::decode(x as f64 / 2047.0, Transfer::DavinciIntermediate) as f32;
-        Rgba([v, v, v, 1.0])
-    });
-    let colour = ImageBuffer::from_fn(64, 1, |x, _| {
-        let v = 0.02 + x as f32 * 0.01;
-        Rgba([v * 3.0, v, v * 0.4, 1.0])
-    });
-    let expected = |key: f32, slider: f32| -> f32 {
-        let x = key.clamp(0.0, 1.0) * (KNOTS - 1) as f32;
-        let i = (x.floor() as usize).min(KNOTS - 2);
-        let f = x - i as f32;
-        let row: Vec<f32> = (0..4)
-            .map(|c| GAIN_STOPS[i][c] * (1.0 - f) + GAIN_STOPS[i + 1][c] * f)
-            .collect();
-        let a = slider.abs();
-        let (half, full) = if slider > 0.0 {
-            (row[2], row[3])
-        } else {
-            (row[1], row[0])
-        };
-        if a <= 50.0 {
-            half * a / 50.0
-        } else {
-            half + (full - half) * (a - 50.0) / 50.0
-        }
-    };
-    for slider in [-100.0f32, -50.0, -20.0, 0.0, 35.0, 50.0, 100.0] {
-        let mut c = config();
-        c.source = SourceColor {
-            primaries: Primaries::DavinciWideGamut,
-            transfer: Transfer::Linear,
-            reference: ReferenceDomain::Scene,
-        };
-        c.output_rendering = OutputRendering::SceneLuminanceV1;
-        c.controls.tone.shadows = slider / 120.0;
-        let plan = RenderPlan::build(c).unwrap();
-        let frame = engine.render(&grey, &plan, true).unwrap();
-        let stages = frame.stages.unwrap();
-        for (i, (before, after)) in stages
-            .working
-            .pixels()
-            .zip(stages.graded.pixels())
-            .enumerate()
-        {
-            let key = i as f32 / 2047.0;
-            if before[1] < 1e-4 {
-                continue;
-            }
-            let stops = (after[1] / before[1]).log2();
-            let want = expected(key, slider);
-            assert!(
-                (stops - want).abs() < 0.02,
-                "slider {slider} key {key:.3}: {stops:.3} stops, table says {want:.3}"
-            );
-            if slider == 0.0 {
-                assert_eq!(before, after, "slider 0 must be the identity");
-            }
-        }
-        let frame = engine.render(&colour, &plan, true).unwrap();
-        let stages = frame.stages.unwrap();
-        let enc = |v: f32| spaces::encode_intermediate(v.max(0.0) as f64);
-        let dec = |v: f64| spaces::decode(v, Transfer::DavinciIntermediate) as f32;
-        for (i, (before, after)) in stages
-            .working
-            .pixels()
-            .zip(stages.graded.pixels())
-            .enumerate()
-        {
-            if slider > 0.0 {
-                // A lift also brings out colour, in proportion to the lift
-                // and more in darker colours. No neighbourhood is bound, so
-                // there is no detail term here.
-                let key = spaces::encode_intermediate(
-                    (0.274_118_5 * before[0] + 0.873_631_9 * before[1] - 0.147_750_4 * before[2])
-                        .max(0.0) as f64,
-                ) as f32;
-                let stops = table_stops(&GAIN_STOPS, key, slider) as f64;
-                let w = stops * 0.07329248 / 0.169;
-                let own: Vec<f64> = (0..3).map(|c| enc(before[c])).collect();
-                let own_luma = 0.2126 * own[0] + 0.7152 * own[1] + 0.0722 * own[2];
-                let lifted: Vec<f64> = (0..3)
-                    .map(|c| enc(before[c] * (stops as f32).exp2()))
-                    .collect();
-                let luma = 0.2126 * lifted[0] + 0.7152 * lifted[1] + 0.0722 * lifted[2];
-                let colour = 0.48 * (1.0 + 2.09 * (0.4 - own_luma)).max(0.0);
-                for ch in 0..3 {
-                    let want = dec(lifted[ch] + w * colour * (lifted[ch] - luma)).max(0.0);
-                    assert!(
-                        (after[ch] - want).abs() < 2e-3 * want.max(0.01),
-                        "shadows {slider} pixel {i} channel {ch}: {:?} -> {:?}, wanted {want}",
-                        before,
-                        after
-                    );
-                }
-                continue;
-            }
-            let g = after[1] / before[1];
-            for ch in [0, 2] {
-                assert!(
-                    (after[ch] / before[ch] - g).abs() < 1e-3 * g.max(1.0),
-                    "darkening: all channels take the same gain: {:?} -> {:?}",
-                    before,
-                    after
-                );
-            }
-        }
-    }
-}
-
-/// The chosen output space reaches the finished picture: Display P3 renders
-/// through Resolve's P3 output capture where the picture ends in Resolve's
-/// transform, otherwise the sRGB rendering is stored as P3 (the same colours),
-/// and sRGB renders are untouched. Pinning carries the P3 capture too.
 #[test]
 fn output_space_contracts() {
     use rapidraw_lib::color_engine::{

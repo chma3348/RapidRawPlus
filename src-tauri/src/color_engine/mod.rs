@@ -17,10 +17,9 @@ pub mod plan;
 pub mod raw;
 pub mod reference;
 mod renderer;
-pub mod resolve_highlights_table;
-pub mod resolve_shadows_table;
 pub mod selection;
 pub mod spaces;
+pub mod tone_zones_table;
 
 pub(crate) use renderer::tpdf as renderer_tpdf;
 pub use renderer::{ColorEngine, RenderedFrame, StageCapture};

@@ -65,11 +65,10 @@ pub(crate) struct GpuParameters {
     /// the display values the captured output transform gives back, and
     /// return through the captured input transform.
     pub domain: [u32; 4],
-    /// Resolve's measured Shadows response: per key knot, the gain in stops
-    /// at slider -100, -50, +50, +100 (see `resolve_shadows_table`).
-    pub shadow_curve: [[f32; 4]; super::resolve_shadows_table::KNOTS],
-    /// Resolve's measured Highlights response, laid out the same way.
-    pub highlight_curve: [[f32; 4]; super::resolve_highlights_table::KNOTS],
+    /// The tone zones' offsets per key knot, [blacks, shadows, highlights,
+    /// whites], at slider +100 and at -100 (see `tone_zones_table`).
+    pub zone_lift: [[f32; 4]; super::tone_zones_table::KNOTS],
+    pub zone_cut: [[f32; 4]; super::tone_zones_table::KNOTS],
 }
 
 /// What a creative LUT expects to be fed, and therefore where in the
@@ -324,8 +323,8 @@ impl RenderPlan {
                     .as_dmat3(),
             ),
             domain: [0; 4],
-            shadow_curve: super::resolve_shadows_table::GAIN_STOPS,
-            highlight_curve: super::resolve_highlights_table::GAIN_STOPS,
+            zone_lift: super::tone_zones_table::LIFT,
+            zone_cut: super::tone_zones_table::CUT,
             look: [0.; 4],
             look_flags: [0; 4],
             work_to_look: packed(

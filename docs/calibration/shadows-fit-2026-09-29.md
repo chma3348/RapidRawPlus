@@ -1,3 +1,5 @@
+
+> **Superseded 30 September 2026** by the tone zones (`docs/tone-zones.md`): the app no longer uses this broad, Resolve-matched response. The measured colour and texture finishes carry over.
 # Shadows, fitted to Resolve — 29 September 2026
 
 The first control calibrated against DaVinci Resolve 21's Photo page, from
