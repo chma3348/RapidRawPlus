@@ -1433,6 +1433,7 @@ pub fn save_video_frame(
     video_path: String,
     png_base64: String,
     time_seconds: f64,
+    frame_number: Option<u64>,
 ) -> Result<String, String> {
     let source = std::path::Path::new(&video_path);
     let stem = source
@@ -1443,8 +1444,13 @@ pub fn save_video_frame(
     let bytes = general_purpose::STANDARD
         .decode(png_base64.as_bytes())
         .map_err(|e| format!("Could not read the frame: {e}"))?;
-    // Name by timestamp so grabbing several frames does not overwrite.
-    let stamp = format!("{:.2}", time_seconds.max(0.0)).replace('.', "s");
+    // Name by frame number (or by time when the rate is unknown) so
+    // grabbing several frames does not overwrite, and the names sort in
+    // playback order.
+    let stamp = match frame_number {
+        Some(frame) => format!("{frame:05}"),
+        None => format!("{:.3}", time_seconds.max(0.0)).replace('.', "s"),
+    };
     let mut target = parent.join(format!("{stem}_frame_{stamp}.png"));
     let mut n = 2;
     while target.exists() {

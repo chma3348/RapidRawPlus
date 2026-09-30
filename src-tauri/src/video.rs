@@ -24,6 +24,10 @@ pub struct VideoInfo {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub codecs: Vec<String>,
+    /// Frames per second of the picture track, from the file's own sample
+    /// table, so the player can step exactly one frame.
+    pub frame_rate: Option<f64>,
+    pub frame_count: Option<u64>,
 }
 
 /// Parse the `mdls` output we ask for. Kept separate from the command so
@@ -75,12 +79,163 @@ pub fn video_info(path: &Path) -> Result<VideoInfo> {
         .arg(path)
         .output()
         .context("could not run mdls")?;
-    Ok(parse_mdls(&String::from_utf8_lossy(&output.stdout)))
+    let mut info = parse_mdls(&String::from_utf8_lossy(&output.stdout));
+    add_frame_timing(&mut info, path);
+    Ok(info)
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn video_info(_path: &Path) -> Result<VideoInfo> {
-    Ok(VideoInfo::default())
+pub fn video_info(path: &Path) -> Result<VideoInfo> {
+    let mut info = VideoInfo::default();
+    add_frame_timing(&mut info, path);
+    Ok(info)
+}
+
+fn add_frame_timing(info: &mut VideoInfo, path: &Path) {
+    match frame_timing(path) {
+        Ok(timing) => {
+            info.frame_rate = Some(timing.frame_rate);
+            info.frame_count = Some(timing.frame_count);
+        }
+        Err(e) => log::debug!("no frame timing for {}: {e:#}", path.display()),
+    }
+}
+
+/// The picture track's timing, as the container records it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FrameTiming {
+    pub frame_rate: f64,
+    pub frame_count: u64,
+}
+
+/// Read the frame rate from a MOV or MP4 file's sample table.
+///
+/// Spotlight does not record a frame rate, and the webview does not expose
+/// one, so stepping a frame needs it from the file. Both containers are
+/// ISO boxes: `moov` holds a `trak` per stream; the picture track is the
+/// one whose `hdlr` says `vide`; its `mdhd` gives the time scale and its
+/// `stts` the duration of every sample in that scale. Phones record at a
+/// slightly variable rate, so the rate is taken from the most common
+/// sample duration rather than an average.
+pub fn frame_timing(path: &Path) -> Result<FrameTiming> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).context("opening the clip")?;
+    let len = file.metadata()?.len();
+    let mut at = 0u64;
+    // Walk the top-level boxes by their headers; `moov` is often after
+    // gigabytes of media data, which is never read.
+    while at + 8 <= len {
+        file.seek(SeekFrom::Start(at))?;
+        let mut head = [0u8; 16];
+        file.read_exact(&mut head[..8])?;
+        let mut size = u32::from_be_bytes(head[..4].try_into().unwrap()) as u64;
+        let mut header = 8u64;
+        if size == 1 {
+            file.read_exact(&mut head[8..16])?;
+            size = u64::from_be_bytes(head[8..16].try_into().unwrap());
+            header = 16;
+        } else if size == 0 {
+            size = len - at;
+        }
+        if size < header {
+            return Err(anyhow!("malformed box at byte {at}"));
+        }
+        if &head[4..8] == b"moov" {
+            let body = size - header;
+            if body > 256 * 1024 * 1024 {
+                return Err(anyhow!("movie header is implausibly large"));
+            }
+            let mut moov = vec![0u8; body as usize];
+            file.read_exact(&mut moov)?;
+            return timing_from_moov(&moov);
+        }
+        at += size;
+    }
+    Err(anyhow!("no movie header"))
+}
+
+/// Child boxes of `data` as (type, body).
+fn boxes(mut data: &[u8]) -> impl Iterator<Item = (&[u8], &[u8])> {
+    std::iter::from_fn(move || {
+        if data.len() < 8 {
+            return None;
+        }
+        let mut size = u32::from_be_bytes(data[..4].try_into().ok()?) as usize;
+        let mut header = 8;
+        if size == 1 {
+            size = usize::try_from(u64::from_be_bytes(data.get(8..16)?.try_into().ok()?)).ok()?;
+            header = 16;
+        } else if size == 0 {
+            size = data.len();
+        }
+        if size < header || size > data.len() {
+            return None;
+        }
+        let kind = &data[4..8];
+        let body = &data[header..size];
+        data = &data[size..];
+        Some((kind, body))
+    })
+}
+
+fn child<'a>(data: &'a [u8], kind: &[u8]) -> Option<&'a [u8]> {
+    boxes(data).find(|(k, _)| *k == kind).map(|(_, b)| b)
+}
+
+fn be32(data: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_be_bytes(data.get(at..at + 4)?.try_into().ok()?))
+}
+
+fn timing_from_moov(moov: &[u8]) -> Result<FrameTiming> {
+    for (kind, trak) in boxes(moov) {
+        if kind != b"trak" {
+            continue;
+        }
+        let Some(mdia) = child(trak, b"mdia") else {
+            continue;
+        };
+        // hdlr: version+flags, pre_defined, then the handler type.
+        if child(mdia, b"hdlr").and_then(|h| h.get(8..12)) != Some(b"vide") {
+            continue;
+        }
+        let mdhd = child(mdia, b"mdhd").ok_or_else(|| anyhow!("picture track has no mdhd"))?;
+        let timescale = match mdhd.first() {
+            Some(1) => be32(mdhd, 20),
+            _ => be32(mdhd, 12),
+        }
+        .filter(|&t| t > 0)
+        .ok_or_else(|| anyhow!("picture track has no time scale"))?;
+        let stts = child(mdia, b"minf")
+            .and_then(|m| child(m, b"stbl"))
+            .and_then(|s| child(s, b"stts"))
+            .ok_or_else(|| anyhow!("picture track has no sample durations"))?;
+        let entries = be32(stts, 4).unwrap_or(0) as usize;
+        let mut frame_count = 0u64;
+        let mut by_delta: Vec<(u32, u64)> = Vec::new();
+        for i in 0..entries {
+            let (Some(count), Some(delta)) = (be32(stts, 8 + i * 8), be32(stts, 12 + i * 8)) else {
+                break;
+            };
+            frame_count += count as u64;
+            if delta == 0 {
+                continue;
+            }
+            match by_delta.iter_mut().find(|(d, _)| *d == delta) {
+                Some((_, n)) => *n += count as u64,
+                None => by_delta.push((delta, count as u64)),
+            }
+        }
+        let delta = by_delta
+            .iter()
+            .max_by_key(|(_, n)| *n)
+            .map(|(d, _)| *d)
+            .ok_or_else(|| anyhow!("picture track has no timed samples"))?;
+        return Ok(FrameTiming {
+            frame_rate: timescale as f64 / delta as f64,
+            frame_count,
+        });
+    }
+    Err(anyhow!("no picture track"))
 }
 
 /// A still from the video to stand in for it in the grid.
@@ -175,5 +330,83 @@ kMDItemPixelWidth      = 3840"#;
     #[test]
     fn empty_output_is_harmless() {
         assert_eq!(parse_mdls(""), VideoInfo::default());
+    }
+
+    fn boxed(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut out = ((body.len() + 8) as u32).to_be_bytes().to_vec();
+        out.extend_from_slice(kind);
+        out.extend_from_slice(body);
+        out
+    }
+
+    fn track(handler: &[u8; 4], mdhd: Vec<u8>, stts: &[(u32, u32)]) -> Vec<u8> {
+        let mut hdlr = vec![0u8; 8];
+        hdlr.extend_from_slice(handler);
+        hdlr.extend_from_slice(&[0u8; 12]);
+        let mut table = vec![0u8; 4];
+        table.extend_from_slice(&(stts.len() as u32).to_be_bytes());
+        for (count, delta) in stts {
+            table.extend_from_slice(&count.to_be_bytes());
+            table.extend_from_slice(&delta.to_be_bytes());
+        }
+        let stbl = boxed(b"stbl", &boxed(b"stts", &table));
+        let minf = boxed(b"minf", &stbl);
+        let mdia = [boxed(b"hdlr", &hdlr), boxed(b"mdhd", &mdhd), minf].concat();
+        boxed(b"trak", &boxed(b"mdia", &mdia))
+    }
+
+    fn mdhd_v0(timescale: u32) -> Vec<u8> {
+        let mut m = vec![0u8; 12];
+        m.extend_from_slice(&timescale.to_be_bytes());
+        m.extend_from_slice(&[0u8; 8]);
+        m
+    }
+
+    #[test]
+    fn frame_rate_comes_from_the_picture_track() {
+        let dir = tempfile::tempdir().unwrap();
+        let clip = dir.path().join("clip.MOV");
+        // An audio track first (which must be skipped), then 29.97 fps
+        // picture with one odd-length frame, after a large media box as
+        // cameras write it.
+        let audio = track(b"soun", mdhd_v0(48000), &[(300, 1024)]);
+        let picture = track(
+            b"vide",
+            mdhd_v0(30000),
+            &[(200, 1001), (1, 1500), (11, 1001)],
+        );
+        let moov = boxed(b"moov", &[audio, picture].concat());
+        let file = [
+            boxed(b"ftyp", b"qt  \0\0\0\0"),
+            boxed(b"mdat", &vec![7u8; 100_000]),
+            moov,
+        ]
+        .concat();
+        std::fs::write(&clip, file).unwrap();
+        let timing = frame_timing(&clip).unwrap();
+        assert!((timing.frame_rate - 29.97).abs() < 0.001, "{timing:?}");
+        assert_eq!(timing.frame_count, 212);
+    }
+
+    #[test]
+    fn version_one_media_headers_are_read() {
+        let mut mdhd = vec![1u8, 0, 0, 0];
+        mdhd.extend_from_slice(&[0u8; 16]);
+        mdhd.extend_from_slice(&600u32.to_be_bytes());
+        mdhd.extend_from_slice(&[0u8; 12]);
+        let moov = boxed(b"moov", &track(b"vide", mdhd, &[(120, 10)]));
+        let timing = timing_from_moov(&moov[8..]).unwrap();
+        assert_eq!(timing.frame_rate, 60.0);
+        assert_eq!(timing.frame_count, 120);
+    }
+
+    #[test]
+    fn files_without_a_movie_header_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let clip = dir.path().join("clip.mp4");
+        std::fs::write(&clip, boxed(b"mdat", &[0u8; 64])).unwrap();
+        assert!(frame_timing(&clip).is_err());
+        std::fs::write(&clip, b"not a video").unwrap();
+        assert!(frame_timing(&clip).is_err());
     }
 }

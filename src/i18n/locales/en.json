@@ -810,7 +810,10 @@
       "saveFrame": "Save frame",
       "saveFrameTooltip": "Write the current frame beside the video as a PNG you can edit",
       "frameSaved": "Frame saved as {{name}}",
-      "frameFailed": "Could not save the frame"
+      "frameFailed": "Could not save the frame",
+      "frameCounter": "Frame {{frame}} of {{total}}",
+      "prevFrameTooltip": "Previous frame (← or ,  ·  Shift for 10)",
+      "nextFrameTooltip": "Next frame (→ or .  ·  Shift for 10)"
     }
   },
   "export": {
