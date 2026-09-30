@@ -1455,6 +1455,13 @@ pub fn save_video_frame(
     Ok(target.to_string_lossy().to_string())
 }
 
+/// The address the player streams a video from: a local HTTP endpoint that
+/// AVFoundation, which WebKit plays media through, can actually open.
+#[tauri::command]
+pub fn video_stream_url(path: String) -> Result<String, String> {
+    crate::video_server::stream_url(std::path::Path::new(&path))
+}
+
 /// Duration, size and codecs for a video, so the library can label it.
 /// Returns empty fields rather than failing when the system has nothing.
 #[tauri::command]

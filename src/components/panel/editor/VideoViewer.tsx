@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { convertFileSrc, invoke } from '@tauri-apps/api/core';
+import { invoke } from '@tauri-apps/api/core';
 import { useTranslation } from 'react-i18next';
 import { Camera } from 'lucide-react';
 import { toast } from 'react-toastify';
@@ -45,50 +45,33 @@ export default function VideoViewer({ path }: { path: string }) {
     };
   }, [path]);
 
-  // Why the file is not simply handed to the element by its asset URL.
+  // Why the clip is streamed from a local address.
   //
-  // WebKit plays media through AVFoundation, which opens the URL itself
-  // in another process. It has no idea what Tauri's `asset:` scheme is,
-  // so it gets far enough to read the header and then stalls with no
-  // error: a sized black box and a play button that does nothing.
-  //
-  // A blob URL is backed by WebKit's own storage, so the media engine can
-  // read it. It also keeps the frame grab working — a canvas that has
-  // drawn from a custom-scheme video is tainted, and `toDataURL` on it
-  // throws.
-  //
-  // The cost is that the clip is held in memory, hence the cap.
-  const MAX_BYTES = 1_500_000_000;
+  // WebKit plays media through AVFoundation, which opens the element's URL
+  // itself in another process. It cannot read Tauri's `asset:` scheme, and
+  // it cannot read a page's `blob:` URLs either: both give a sized black box
+  // that never plays and never reports an error. The backend serves each
+  // clip over HTTP on 127.0.0.1 (see video_server.rs), which AVFoundation
+  // plays natively, with seeking and no need to hold the clip in memory.
   useEffect(() => {
     let cancelled = false;
-    let url: string | null = null;
     setSrc(null);
     setProblem(null);
-    (async () => {
-      try {
-        const res = await fetch(convertFileSrc(path));
-        if (!res.ok) throw new Error(`the file could not be read (${res.status})`);
-        const declared = Number(res.headers.get('content-length') ?? '0');
-        if (declared > MAX_BYTES) {
-          throw new Error(`this clip is ${Math.round(declared / 1e9)} GB, too large to play here`);
-        }
-        const blob = await res.blob();
-        if (cancelled) return;
-        if (blob.size > MAX_BYTES) throw new Error('this clip is too large to play here');
-        url = URL.createObjectURL(blob);
-        setSrc(url);
-      } catch (err: any) {
+    invoke('frontend_log', { level: 'info', message: `[video] opening ${path}` }).catch(() => {});
+    invoke<string>(Invokes.VideoStreamUrl, { path })
+      .then((url) => {
+        if (!cancelled) setSrc(url);
+      })
+      .catch((err) => {
         if (cancelled) return;
         setProblem(String(err?.message ?? err));
         invoke('frontend_log', {
           level: 'error',
-          message: `[video] could not load ${path}: ${err}`,
+          message: `[video] could not open ${path}: ${err}`,
         }).catch(() => {});
-      }
-    })();
+      });
     return () => {
       cancelled = true;
-      if (url) URL.revokeObjectURL(url);
     };
   }, [path]);
 
@@ -156,6 +139,9 @@ export default function VideoViewer({ path }: { path: string }) {
           ref={videoRef}
           key={src}
           src={src}
+          // The server allows any origin, so frames drawn to a canvas stay
+          // readable for "Save frame".
+          crossOrigin="anonymous"
           controls
           autoFocus
           onError={() => report('error', 'failed')}

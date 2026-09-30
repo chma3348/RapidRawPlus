@@ -50,6 +50,7 @@ pub mod subject_selection;
 mod tagging;
 mod tagging_utils;
 pub mod video;
+pub mod video_server;
 pub mod white_balance;
 mod window_customizer;
 
@@ -1768,6 +1769,7 @@ pub fn run() {
             file_management::update_exif_fields,
             file_management::get_supported_file_types,
             file_management::load_video_info,
+            file_management::video_stream_url,
             file_management::save_video_frame,
             sky_commands::list_sky_plates,
             sky_commands::prepare_sky_replacement,

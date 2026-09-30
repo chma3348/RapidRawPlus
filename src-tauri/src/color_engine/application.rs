@@ -675,15 +675,16 @@ fn neighbourhood(
                     keys[j] = spaces::encode_intermediate(y as f64) as f32;
                     details[j] = (0..3)
                         .map(|c| {
-                            rec709[c] * spaces::encode_intermediate(working[c].max(0.) as f64) as f32
+                            rec709[c]
+                                * spaces::encode_intermediate(working[c].max(0.) as f64) as f32
                         })
                         .sum();
                     // A rendered picture's controls see its display values:
                     // the code values Resolve's rendering gives the scene
                     // data, already encoded.
                     let values: [f32; 3] = if let Some(output) = display {
-                        let logged =
-                            [p[0], p[1], p[2]].map(|v| spaces::encode_intermediate(v as f64) as f32);
+                        let logged = [p[0], p[1], p[2]]
+                            .map(|v| spaces::encode_intermediate(v as f64) as f32);
                         output.sample(logged).map(|v| v.clamp(0., 1.))
                     } else {
                         std::array::from_fn(|c| {

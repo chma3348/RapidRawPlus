@@ -86,6 +86,7 @@ export enum Invokes {
   MatchWhiteBalance = 'match_white_balance',
   LoadImage = 'load_image',
   LoadVideoInfo = 'load_video_info',
+  VideoStreamUrl = 'video_stream_url',
   SaveVideoFrame = 'save_video_frame',
   ListSkyPlates = 'list_sky_plates',
   PrepareSkyReplacement = 'prepare_sky_replacement',
