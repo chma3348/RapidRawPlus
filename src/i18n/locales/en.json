@@ -2156,6 +2156,8 @@
       "Midtones": "Midtones",
       "Shadows": "Shadows"
     },
-    "whiteBalance": "White Balance"
+    "whiteBalance": "White Balance",
+    "gradingCompact": "Compact wheels",
+    "gradingPrecise": "Precise values"
   }
 }

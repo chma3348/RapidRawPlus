@@ -6,6 +6,8 @@ import Slider from '../ui/Slider';
 import Dropdown from '../ui/Dropdown';
 import Switch from '../ui/Switch';
 import LUTControl from '../ui/LUTControl';
+import ColorWheel from '../ui/ColorWheel';
+import type { HueSatLum } from '../../utils/adjustments';
 import FlatFieldControl from './FlatFieldControl';
 import { ColorRangeControls, ToneCurveControls } from './ColorV3Advanced';
 import BasicAdjustments from './Basic';
@@ -305,7 +307,7 @@ export default function ColorV3Controls({
   const selectedPath = useEditorStore((s) => s.selectedImage?.path);
   const [layout, updateLayout] = useEditorLayout();
   const [band, setBand] = useState(0);
-  const [wheel, setWheel] = useState(0);
+  const [gradingExpanded, setGradingExpanded] = useState(false);
   const update = (key: keyof V3Controls, value: any) =>
     setAdjustments((prev: any) => ({ ...prev, v3: { ...defaultV3Controls(), ...prev.v3, [key]: value } }));
   const slider = (key: keyof V3Controls, label: string, min = -100, max = 100, step = 1) => (
@@ -560,15 +562,44 @@ export default function ColorV3Controls({
       modified: differs(values.grading, defaults.grading),
       available: true,
       body: (
+        // One wheel per range: the angle is the tint's hue, the distance
+        // from the centre its amount, the slider below its lightness.
         <>
-          <Dropdown
-            options={wheels.map((w, i) => ({ value: i, label: t(`colorV3.wheel.${w}`, { defaultValue: w }) }))}
-            value={wheel}
-            onChange={(i: number) => setWheel(i)}
-          />
-          {arraySlider('grading', wheel, 0, t('colorV3.gradingHue', { defaultValue: 'Tint hue' }), 0, 360)}
-          {arraySlider('grading', wheel, 1, t('colorV3.gradingAmount', { defaultValue: 'Tint amount' }), 0, 100)}
-          {arraySlider('grading', wheel, 2, t('colorV3.bandLightness', { defaultValue: 'Lightness' }), -100, 100)}
+          <button
+            type="button"
+            onClick={() => setGradingExpanded((v) => !v)}
+            aria-pressed={gradingExpanded}
+            className="self-end rounded-md px-2 py-0.5 text-xs text-text-secondary hover:bg-surface hover:text-text-primary"
+          >
+            {gradingExpanded
+              ? t('colorV3.gradingCompact', { defaultValue: 'Compact wheels' })
+              : t('colorV3.gradingPrecise', { defaultValue: 'Precise values' })}
+          </button>
+          <div className={gradingExpanded ? 'flex flex-col gap-4' : 'grid grid-cols-2 gap-x-4 gap-y-3'}>
+            {[1, 2, 3, 0].map((index) => (
+              <div key={wheels[index]} className="min-w-0">
+                <ColorWheel
+                  label={t(`colorV3.wheel.${wheels[index]}`, { defaultValue: wheels[index] })}
+                  defaultValue={{ hue: 0, saturation: 0, luminance: 0 }}
+                  value={{
+                    hue: values.grading[index][0],
+                    saturation: values.grading[index][1],
+                    luminance: values.grading[index][2],
+                  }}
+                  onChange={(hsl: HueSatLum) =>
+                    update(
+                      'grading',
+                      values.grading.map((v, i) =>
+                        i === index ? [hsl.hue, Math.max(0, Math.min(100, hsl.saturation)), hsl.luminance] : v,
+                      ),
+                    )
+                  }
+                  onDragStateChange={onDragStateChange}
+                  isExpanded={gradingExpanded}
+                />
+              </div>
+            ))}
+          </div>
         </>
       ),
     },
