@@ -153,83 +153,94 @@ const useFolderPhotos = (path: string, ref: RefObject<HTMLElement | null>) => {
 };
 
 /**
- * Slowly scroll a strip along by itself. The photos are laid out three times
- * (so an arrow's glide never runs out of room either way), and when the
- * first set has scrolled fully past, the position jumps back by exactly its
- * width, so the strip loops without a seam. It pauses while the pointer is
- * over the strip, while it is off screen, and for people who have asked
- * their system for reduced motion; scrolling by hand still works and the
- * drift carries on from wherever it was left.
+ * Drift a strip of photos along by itself. The photos are laid out twice and
+ * the track is moved with a transform, which lands on fractions of a pixel,
+ * so slow speeds glide rather than stepping a whole pixel at a time; its
+ * position wraps by exactly one set's width, so the loop has no seam. It
+ * eases to a stop under the pointer and back up to speed afterwards, rests
+ * while off screen and for people who have asked their system for reduced
+ * motion, and a sideways trackpad swipe or an arrow moves it by hand.
  */
 const useDrift = (
-  scrollerRef: RefObject<HTMLDivElement | null>,
+  viewportRef: RefObject<HTMLDivElement | null>,
+  trackRef: RefObject<HTMLDivElement | null>,
   firstRef: RefObject<HTMLDivElement | null>,
   secondRef: RefObject<HTMLDivElement | null>,
+  /** Pixels a second; negative drifts the other way. */
   speed: number,
   enabled: boolean,
 ) => {
   const paused = useRef(false);
-  const position = useRef(0);
+  const offset = useRef(0);
+  /** Distance still to travel from an arrow press, used up over a fraction of a second. */
+  const glide = useRef(0);
 
   useEffect(() => {
-    const el = scrollerRef.current;
-    if (!el || !enabled) return;
-    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
+    const viewport = viewportRef.current;
+    const track = trackRef.current;
+    if (!viewport || !track) return;
+    if (!enabled) {
+      offset.current = 0;
+      track.style.transform = '';
+      return;
+    }
+    const still = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    const period = () => (secondRef.current?.offsetLeft ?? 0) - (firstRef.current?.offsetLeft ?? 0);
+    const place = () => {
+      const p = period();
+      if (p <= 0) return;
+      offset.current = ((offset.current % p) + p) % p;
+      track.style.transform = `translate3d(${-offset.current}px, 0, 0)`;
+    };
 
-    let visible = false;
+    let visible = true;
     const observer = new IntersectionObserver((entries) => {
       visible = entries.some((e) => e.isIntersecting);
     });
-    observer.observe(el);
+    observer.observe(viewport);
 
-    position.current = el.scrollLeft;
+    // A sideways swipe moves the strip; an up-and-down one still scrolls the page.
+    const onWheel = (e: WheelEvent) => {
+      const dx = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.shiftKey ? e.deltaY : 0;
+      if (!dx) return;
+      e.preventDefault();
+      offset.current += dx;
+      place();
+    };
+    viewport.addEventListener('wheel', onWheel, { passive: false });
+
+    let velocity = still ? 0 : speed;
     let last = performance.now();
     let frame = requestAnimationFrame(function step(now) {
       const dt = Math.min(now - last, 100) / 1000;
       last = now;
-      const period = (secondRef.current?.offsetLeft ?? 0) - (firstRef.current?.offsetLeft ?? 0);
-      if (visible && !paused.current && period > el.clientWidth) {
-        // Pick up any scrolling done by hand before moving on from there.
-        if (Math.abs(el.scrollLeft - position.current) > 2) position.current = el.scrollLeft;
-        position.current += speed * dt;
-        if (position.current >= period) position.current -= period;
-        el.scrollLeft = position.current;
+      if (visible) {
+        const target = paused.current || still ? 0 : speed;
+        velocity += (target - velocity) * (1 - Math.exp(-dt / 0.35));
+        const glideStep = glide.current * (1 - Math.exp(-dt / 0.12));
+        glide.current -= glideStep;
+        if (Math.abs(glide.current) < 0.1) glide.current = 0;
+        if (Math.abs(velocity) > 0.01 || glideStep) {
+          offset.current += velocity * dt + glideStep;
+          place();
+        }
       }
       frame = requestAnimationFrame(step);
     });
     return () => {
       cancelAnimationFrame(frame);
       observer.disconnect();
+      viewport.removeEventListener('wheel', onWheel);
     };
-  }, [scrollerRef, firstRef, secondRef, speed, enabled]);
-
-  /** Keep a hand scroll inside the loop so it never runs out of photos. */
-  const wrap = () => {
-    const el = scrollerRef.current;
-    const period = (secondRef.current?.offsetLeft ?? 0) - (firstRef.current?.offsetLeft ?? 0);
-    if (!el || !enabled || period <= el.clientWidth) return;
-    const max = el.scrollWidth - el.clientWidth;
-    if (el.scrollLeft >= Math.min(period + el.clientWidth, max - 1)) el.scrollLeft -= period;
-  };
-
-  /** Move an arrow's worth, first stepping back a loop if that would run off either end. */
-  const step = (direction: number) => {
-    const el = scrollerRef.current;
-    if (!el) return;
-    const distance = el.clientWidth * 0.8;
-    const period = (secondRef.current?.offsetLeft ?? 0) - (firstRef.current?.offsetLeft ?? 0);
-    if (enabled && period > el.clientWidth) {
-      if (direction > 0 && el.scrollLeft >= period) el.scrollLeft -= period;
-      if (direction < 0 && el.scrollLeft - distance < 0) el.scrollLeft += period;
-    }
-    el.scrollBy({ left: direction * distance, behavior: 'smooth' });
-  };
+  }, [viewportRef, trackRef, firstRef, secondRef, speed, enabled]);
 
   return {
     pause: () => (paused.current = true),
     resume: () => (paused.current = false),
-    wrap,
-    step,
+    /** Glide most of a strip's width one way or the other. */
+    step: (direction: number) => {
+      glide.current += direction * (viewportRef.current?.clientWidth ?? 0) * 0.8;
+    },
   };
 };
 
@@ -254,7 +265,7 @@ function StripPhoto({
   return (
     <button
       className={`relative shrink-0 rounded-md overflow-hidden bg-surface group/photo focus:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
-        highlighted ? 'ring-2 ring-accent' : ''
+        highlighted ? 'ring-2 ring-inset ring-accent' : ''
       }`}
       style={{ height }}
       onClick={onOpen}
@@ -282,67 +293,52 @@ function StripPhoto({
   );
 }
 
-const FADE_EDGES = {
-  maskImage: 'linear-gradient(to right, transparent 0, black 28px, black calc(100% - 28px), transparent 100%)',
-  WebkitMaskImage: 'linear-gradient(to right, transparent 0, black 28px, black calc(100% - 28px), transparent 100%)',
+const fade = (left: boolean) => {
+  const mask = `linear-gradient(to right, ${left ? 'transparent 0, black 28px' : 'black 0'}, black calc(100% - 28px), transparent 100%)`;
+  return { maskImage: mask, WebkitMaskImage: mask };
 };
 
 /** A horizontal strip of photos that drifts along on its own and loops. */
 function DriftStrip({
   photos,
   height,
-  padLeft,
   speed,
   arrows = true,
-  fadeEdges = true,
+  fadeLeft = true,
   highlight,
-  tail,
   onOpenPhoto,
   requestThumbnails,
 }: {
   /** null while the folder is still being read. */
   photos: string[] | null;
   height: number;
-  padLeft: number;
+  /** Pixels a second; negative drifts the other way. */
   speed: number;
   arrows?: boolean;
-  /** Soften both ends while it drifts, so photos glide in and out rather than being cut off. */
-  fadeEdges?: boolean;
+  /** Soften the left end; off where the strip sits against a See all tile. */
+  fadeLeft?: boolean;
   highlight?: string;
-  /** A last tile, such as See all, repeated with each loop. */
-  tail?: ReactNode;
   onOpenPhoto(path: string): void;
   requestThumbnails(paths: string[]): void;
 }) {
   const { t } = useTranslation();
-  const scrollerRef = useRef<HTMLDivElement>(null);
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const trackRef = useRef<HTMLDivElement>(null);
   const firstRef = useRef<HTMLDivElement>(null);
   const secondRef = useRef<HTMLDivElement>(null);
-  const [canScroll, setCanScroll] = useState({ left: false, right: false });
   // Loop only once the photos are wider than the strip.
   const [loops, setLoops] = useState(false);
-  const drift = useDrift(scrollerRef, firstRef, secondRef, speed, loops);
+  const drift = useDrift(viewportRef, trackRef, firstRef, secondRef, speed, loops);
 
   useEffect(() => {
     const first = firstRef.current;
-    const el = scrollerRef.current;
-    if (!first || !el) return;
-    const observer = new ResizeObserver(() => setLoops(first.offsetWidth > el.clientWidth));
+    const viewport = viewportRef.current;
+    if (!first || !viewport) return;
+    const observer = new ResizeObserver(() => setLoops(first.offsetWidth > viewport.clientWidth));
     observer.observe(first);
-    observer.observe(el);
+    observer.observe(viewport);
     return () => observer.disconnect();
   }, [photos]);
-
-  const updateArrows = () => {
-    const el = scrollerRef.current;
-    if (!el) return;
-    setCanScroll(
-      loops
-        ? { left: true, right: true }
-        : { left: el.scrollLeft > 4, right: el.scrollLeft + el.clientWidth < el.scrollWidth - 4 },
-    );
-  };
-  useEffect(updateArrows, [photos, loops]);
 
   const set = (copy: boolean) =>
     photos!.map((p) => (
@@ -357,63 +353,47 @@ function DriftStrip({
       />
     ));
 
-  const arrow = 'absolute top-1/2 -translate-y-1/2 rounded-full bg-bg-primary/80 p-2 shadow-lg transition-opacity';
+  const arrow =
+    'absolute top-1/2 -translate-y-1/2 rounded-full bg-bg-primary/80 p-2 shadow-lg opacity-0 group-hover/strip:opacity-100 transition-opacity';
   return (
-    // The strip starts at its folder's indent, so drifting photos never pass under the tree's lines.
-    <div
-      className="relative group/strip"
-      style={{ marginLeft: padLeft }}
-      onPointerEnter={drift.pause}
-      onPointerLeave={drift.resume}
-    >
-      <div
-        ref={scrollerRef}
-        onScroll={() => {
-          drift.wrap();
-          if (!loops) updateArrows();
-        }}
-        className="flex gap-2.5 overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-        style={{ paddingRight: fadeEdges ? PAGE_PAD : 0, ...(loops && fadeEdges ? FADE_EDGES : {}) }}
-      >
-        <div ref={firstRef} className="flex gap-2.5 shrink-0">
-          {photos
-            ? set(false)
-            : Array.from({ length: 6 }, (_, i) => (
-                <div
-                  key={i}
-                  className="shrink-0 rounded-md bg-surface animate-pulse"
-                  style={{ height, width: height * 1.4 }}
-                />
-              ))}
-          {tail}
-        </div>
-        {loops &&
-          photos &&
-          [secondRef, null].map((ref, copy) => (
-            <div key={copy} ref={ref} className="flex gap-2.5 shrink-0" aria-hidden="true">
+    <div className="relative group/strip min-w-0 flex-1" onPointerEnter={drift.pause} onPointerLeave={drift.resume}>
+      <div ref={viewportRef} className="overflow-hidden" style={loops ? fade(fadeLeft) : undefined}>
+        <div ref={trackRef} className="flex gap-2.5 w-max will-change-transform">
+          <div ref={firstRef} className="flex gap-2.5 shrink-0">
+            {photos
+              ? set(false)
+              : Array.from({ length: 6 }, (_, i) => (
+                  <div
+                    key={i}
+                    className="shrink-0 rounded-md bg-surface animate-pulse"
+                    style={{ height, width: height * 1.4 }}
+                  />
+                ))}
+          </div>
+          {loops && photos && (
+            <div ref={secondRef} className="flex gap-2.5 shrink-0" aria-hidden="true">
               {set(true)}
-              {tail}
             </div>
-          ))}
+          )}
+        </div>
       </div>
-      {arrows && canScroll.left && (
-        <button
-          className={`${arrow} opacity-0 group-hover/strip:opacity-100`}
-          style={{ left: 4 }}
-          onClick={() => drift.step(-1)}
-          aria-label={t('library.home.scrollBack')}
-        >
-          <ChevronLeft size={20} />
-        </button>
-      )}
-      {arrows && canScroll.right && (
-        <button
-          className={`${arrow} right-2 opacity-0 group-hover/strip:opacity-100`}
-          onClick={() => drift.step(1)}
-          aria-label={t('library.home.scrollForward')}
-        >
-          <ChevronRight size={20} />
-        </button>
+      {arrows && loops && (
+        <>
+          <button
+            className={`${arrow} left-2`}
+            onClick={() => drift.step(-1)}
+            aria-label={t('library.home.scrollBack')}
+          >
+            <ChevronLeft size={20} />
+          </button>
+          <button
+            className={`${arrow} right-2`}
+            onClick={() => drift.step(1)}
+            aria-label={t('library.home.scrollForward')}
+          >
+            <ChevronRight size={20} />
+          </button>
+        </>
       )}
     </div>
   );
@@ -619,7 +599,6 @@ function ContinueBanner({
               <DriftStrip
                 photos={neighbours}
                 height={52}
-                padLeft={0}
                 speed={BANNER_DRIFT_SPEED}
                 arrows={false}
                 highlight={image}
@@ -683,7 +662,7 @@ function FolderSection({
   requestThumbnails,
 }: {
   row: FolderRow;
-  /** Its place on the page, which sets how fast it drifts. */
+  /** Its place on the page: sets how fast it drifts, and every other row drifts the other way. */
   index: number;
   collapsed: boolean;
   onToggle(): void;
@@ -697,45 +676,29 @@ function FolderSection({
   const left = PAGE_PAD + row.depth * INDENT;
   const top = row.depth === 0;
   const height = top ? 150 : 120;
+  const speed = DRIFT_SPEEDS[index % DRIFT_SPEEDS.length] * (index % 2 ? -1 : 1);
 
   const shown = photos?.slice(0, SHELF_LENGTH).map((f) => f.path) ?? null;
-  const seeAllTile = photos && photos.length > SHELF_LENGTH && (
-    <button
-      className="shrink-0 rounded-md bg-surface hover:bg-card-active transition-colors flex flex-col items-center justify-center gap-1"
-      style={{ height, width: height }}
-      onClick={() => onOpen({ folder: row.path })}
-    >
-      <Text weight={TextWeights.semibold}>{t('library.home.seeAll')}</Text>
-      <Text variant={TextVariants.small} color={TextColors.secondary}>
-        {t('library.home.photoCount', { count: photos.length })}
-      </Text>
-    </button>
-  );
   const empty = photos !== null && photos.length === 0;
 
   return (
-    <section
-      ref={ref}
-      className={`relative group/shelf ${top ? 'pt-8' : 'pt-1'} ${empty || collapsed ? 'pb-3' : 'pb-5'}`}
-    >
+    <section ref={ref} className={`relative ${top ? 'pt-8' : 'pt-1'} ${empty || collapsed ? 'pb-3' : 'pb-5'}`}>
       <GuideLines row={row} headerY={top ? 46 : 16} />
-      <div
-        className="flex items-center justify-between gap-4 mb-2.5"
-        style={{ paddingLeft: left, paddingRight: PAGE_PAD }}
-      >
-        <div className="flex items-center gap-2 min-w-0">
-          {row.hasChildren ? (
-            <button
-              className="text-text-secondary hover:text-text-primary transition-colors shrink-0"
-              onClick={onToggle}
-              aria-label={collapsed ? t('library.home.expand') : t('library.home.collapse')}
-              aria-expanded={!collapsed}
-            >
-              {collapsed ? <Folder size={top ? 18 : 15} /> : <FolderOpen size={top ? 18 : 15} />}
-            </button>
-          ) : (
-            <Folder size={top ? 18 : 15} className="text-text-secondary shrink-0" />
-          )}
+      <div className="flex items-center gap-2 min-w-0 mb-2.5" style={{ paddingLeft: left, paddingRight: PAGE_PAD }}>
+        {row.hasChildren ? (
+          <button
+            className="text-text-secondary hover:text-text-primary transition-colors shrink-0"
+            onClick={onToggle}
+            aria-label={collapsed ? t('library.home.expand') : t('library.home.collapse')}
+            aria-expanded={!collapsed}
+          >
+            {collapsed ? <Folder size={top ? 18 : 15} /> : <FolderOpen size={top ? 18 : 15} />}
+          </button>
+        ) : (
+          <Folder size={top ? 18 : 15} className="text-text-secondary shrink-0" />
+        )}
+        {/* Hide from Home only shows while the pointer is on the folder's name. */}
+        <div className="group/name flex items-center gap-2 min-w-0">
           <Text
             variant={top ? TextVariants.title : TextVariants.body}
             weight={top ? undefined : TextWeights.semibold}
@@ -767,36 +730,43 @@ function FolderSection({
               <ChevronDown size={14} className={`transition-transform ${collapsed ? '-rotate-90' : ''}`} />
             </button>
           )}
-        </div>
-        <div className="flex items-center gap-4 shrink-0">
           <button
-            className="flex items-center gap-1 text-sm text-text-secondary hover:text-text-primary opacity-0 group-hover/shelf:opacity-100 transition-opacity"
+            className="ml-1 flex items-center gap-1 text-xs text-text-secondary hover:text-text-primary whitespace-nowrap opacity-0 group-hover/name:opacity-100 focus-visible:opacity-100 transition-opacity"
             onClick={onHide}
           >
-            <EyeOff size={14} />
+            <EyeOff size={13} />
             {t('library.home.hide')}
           </button>
-          {!empty && (
-            <button
-              className="flex items-center gap-1 text-sm text-text-secondary hover:text-accent transition-colors"
-              onClick={() => onOpen({ folder: row.path })}
-            >
-              {t('library.home.seeAll')}
-              <ChevronRight size={16} />
-            </button>
-          )}
         </div>
       </div>
       {!empty && !(top && collapsed) && (
-        <DriftStrip
-          photos={shown}
-          height={height}
-          padLeft={left}
-          speed={DRIFT_SPEEDS[index % DRIFT_SPEEDS.length]}
-          tail={seeAllTile}
-          onOpenPhoto={(p) => onOpen({ folder: row.path, image: p })}
-          requestThumbnails={requestThumbnails}
-        />
+        <div className="flex gap-2.5" style={{ paddingLeft: left }}>
+          {/* See all stays put at the start of the shelf while the photos drift past it. */}
+          <button
+            className="shrink-0 rounded-md bg-surface hover:bg-card-active border border-border-color/60 transition-colors flex flex-col items-center justify-center gap-1.5 px-2 text-center group/all"
+            style={{ height, width: Math.round(height * 0.8) }}
+            onClick={() => onOpen({ folder: row.path })}
+          >
+            <FolderOpen
+              size={top ? 22 : 18}
+              className="text-text-secondary group-hover/all:text-accent transition-colors"
+            />
+            <Text weight={TextWeights.semibold}>{t('library.home.seeAll')}</Text>
+            {photos && (
+              <Text variant={TextVariants.small} color={TextColors.secondary}>
+                {t('library.home.photoCount', { count: photos.length })}
+              </Text>
+            )}
+          </button>
+          <DriftStrip
+            photos={shown}
+            height={height}
+            speed={speed}
+            fadeLeft
+            onOpenPhoto={(p) => onOpen({ folder: row.path, image: p })}
+            requestThumbnails={requestThumbnails}
+          />
+        </div>
       )}
     </section>
   );
