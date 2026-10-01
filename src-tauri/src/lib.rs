@@ -440,13 +440,31 @@ fn generate_uncropped_preview(
         .clone()
         .ok_or("No original image loaded")?;
 
+    // Each request supersedes the last: renders finish out of order, and an
+    // older one arriving after a newer one would put a stale picture back.
+    static LATEST_UNCROPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let request = LATEST_UNCROPPED.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+
     thread::spawn(move || {
         let state = app_handle.state::<AppState>();
         let path = loaded_image.path.clone();
 
+        // The crop view draws the whole picture and turns it by the fine
+        // rotation itself, so this render must have neither the crop nor
+        // the rotation. With the rotation baked in, every tilt was applied
+        // twice and the picture jumped as each render arrived.
         let mut edits = adjustments_clone.clone();
         edits["crop"] = Value::Null;
-        match color_engine::application::preview_bytes(&context, &state, &path, &edits, 1920) {
+        edits["rotation"] = serde_json::json!(0.0);
+        if request != LATEST_UNCROPPED.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let rendered =
+            color_engine::application::preview_bytes(&context, &state, &path, &edits, 1920);
+        if request != LATEST_UNCROPPED.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        match rendered {
             Ok(bytes) => {
                 let _ = app_handle.emit(
                     "preview-update-uncropped",

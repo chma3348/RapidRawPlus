@@ -188,7 +188,7 @@ export function useImageProcessing(
         if (currentPath !== selectedImagePathRef.current) return;
 
         if (buffer && buffer.byteLength > 0 && jobId >= latestRenderedJobIdRef.current) {
-          setEditor({colorV3Error: null});
+          setEditor({ colorV3Error: null });
           latestRenderedJobIdRef.current = jobId;
 
           const textDecoder = new TextDecoder();
@@ -257,8 +257,12 @@ export function useImageProcessing(
           }
         }
       } catch (err) {
-        if (payload.processVersion === 3 && currentPath === selectedImagePathRef.current && err !== 'Superseded or worker failed') {
-          setEditor({colorV3Error: String(err)});
+        if (
+          payload.processVersion === 3 &&
+          currentPath === selectedImagePathRef.current &&
+          err !== 'Superseded or worker failed'
+        ) {
+          setEditor({ colorV3Error: String(err) });
         }
         if (err !== 'Superseded or worker failed') {
           console.error('Failed to apply adjustments:', err);
@@ -383,11 +387,27 @@ export function useImageProcessing(
     [setEditor],
   );
 
+  // The crop view's picture is the whole photo without crop or fine
+  // rotation (it draws both itself), so dragging the crop box or the
+  // rotation must not render it again: only a change to anything else
+  // does. Edits replace changed keys and keep the rest, so comparing each
+  // key by reference is enough.
+  const lastUncroppedRef = useRef<{ path: string; adjustments: Adjustments } | null>(null);
   useEffect(() => {
-    if (activeRightPanel === Panel.Crop && selectedImage?.isReady && !selectedImage.isVideo) {
-      generateUncroppedPreview(adjustments);
+    if (activeRightPanel !== Panel.Crop || !selectedImage?.isReady || selectedImage.isVideo) {
+      lastUncroppedRef.current = null;
+      return;
     }
-  }, [adjustments, activeRightPanel, selectedImage?.isReady, generateUncroppedPreview]);
+    const last = lastUncroppedRef.current;
+    const changed =
+      !last ||
+      last.path !== selectedImage.path ||
+      Object.keys({ ...last.adjustments, ...adjustments }).some(
+        (key) => key !== 'crop' && key !== 'rotation' && (last.adjustments as any)[key] !== (adjustments as any)[key],
+      );
+    lastUncroppedRef.current = { path: selectedImage.path, adjustments };
+    if (changed) generateUncroppedPreview(adjustments);
+  }, [adjustments, activeRightPanel, selectedImage?.isReady, selectedImage?.path, generateUncroppedPreview]);
 
   useEffect(() => {
     if (selectedImage?.isReady && !selectedImage.isVideo && displaySize.width > 0 && !isSliderDragging) {
