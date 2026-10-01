@@ -60,7 +60,7 @@ import TaggingSubMenu from '../context/TaggingSubMenu';
 import { useEditorActions } from './useEditorActions';
 import { useLibraryActions } from './useLibraryActions';
 import { globalImageCache } from '../utils/ImageLRUCache';
-import { getStacks } from './useStacks';
+import { getStacks, withVersions } from './useStacks';
 
 export interface UseAppContextMenusProps {
   handleImageSelect: (path: string) => void;
@@ -729,7 +729,7 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
           label: copyLabel,
           icon: Copy,
           onClick: () => {
-            setProcess({ copiedFilePaths: finalSelection, isCopied: true });
+            setProcess({ copiedFilePaths: withVersions(finalSelection), isCopied: true });
           },
         },
         {

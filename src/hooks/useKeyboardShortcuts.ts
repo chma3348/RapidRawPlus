@@ -8,7 +8,7 @@ import { useUIStore } from '../store/useUIStore';
 import { useProcessStore } from '../store/useProcessStore';
 import { useEditorActions } from './useEditorActions';
 import { useLibraryActions } from './useLibraryActions';
-import { getStacks } from './useStacks';
+import { getStacks, withVersions } from './useStacks';
 import { stackRootOf } from '../utils/stacks';
 
 interface KeyboardShortcutsProps {
@@ -84,7 +84,7 @@ export const useKeyboardShortcuts = ({
         shouldFire: (s: any) => s.library.multiSelectedPaths.length > 0,
         execute: (e: any, s: any) => {
           e.preventDefault();
-          s.process.setProcess({ copiedFilePaths: s.library.multiSelectedPaths });
+          s.process.setProcess({ copiedFilePaths: withVersions(s.library.multiSelectedPaths) });
         },
       },
       paste_files: {
