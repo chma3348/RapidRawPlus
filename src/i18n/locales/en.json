@@ -1244,7 +1244,7 @@
     },
     "culling": {
       "actionDelete": "Move to Trash",
-      "actionRateZero": "Set Rating to 1 Stars",
+      "actionRateZero": "Set Rating to 1 Star",
       "actionReject": "Mark as Rejected (Red Label)",
       "applyButton_one": "Apply to 1 image",
       "applyButton_other": "Apply to {{count}} images",

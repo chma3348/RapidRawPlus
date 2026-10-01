@@ -175,9 +175,17 @@ export function useTauriListeners({
             progress: { current: event.payload.current, total: event.payload.total },
           });
       }),
-      listen('import-complete', () => {
+      listen('import-complete', (event: any) => {
         if (isEffectActive) {
           useProcessStore.getState().setImportState({ status: Status.Success });
+          const summary = event.payload as { imported: number; skipped: number; failed: string[] } | null;
+          if (summary && (summary.skipped > 0 || summary.failed.length > 0)) {
+            const parts = [`Imported ${summary.imported}`];
+            if (summary.skipped > 0) parts.push(`skipped ${summary.skipped} already imported`);
+            if (summary.failed.length > 0) parts.push(`${summary.failed.length} failed`);
+            const detail = summary.failed.slice(0, 3).join('\n');
+            (summary.failed.length > 0 ? toast.warn : toast.info)(`${parts.join(', ')}${detail ? `\n${detail}` : ''}`);
+          }
           refs.current.refreshAllFolderTrees();
           const currentPath = useLibraryStore.getState().currentFolderPath;
           if (currentPath) {
@@ -240,10 +248,7 @@ export function useTauriListeners({
               isProcessing: false,
               previewBase64: payload?.enhanced ?? null,
               originalBase64: payload?.original ?? null,
-              resultDims:
-                payload?.width && payload?.height
-                  ? { width: payload.width, height: payload.height }
-                  : null,
+              resultDims: payload?.width && payload?.height ? { width: payload.width, height: payload.height } : null,
               progressMessage: null,
               // Finished while dismissed → light up the background pill.
               hasUnseenResult: !state.enhanceModalState.isOpen,

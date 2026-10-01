@@ -23,6 +23,25 @@ use crate::image_processing::{GpuContext, get_or_init_gpu_context, render_adjust
 use crate::hydrate_adjustments;
 
 #[cfg(test)]
+mod format_tests {
+    use crate::color_engine::config::OutputSpace;
+    use image::{DynamicImage, ImageBuffer};
+
+    /// Every format the Export panel offers encodes.
+    #[test]
+    fn every_offered_format_encodes() {
+        let img = DynamicImage::ImageRgba16(ImageBuffer::from_fn(24, 16, |x, y| {
+            image::Rgba([(x * 2000) as u16, (y * 3000) as u16, 30000, 65535])
+        }));
+        for format in ["jpg", "png", "tiff", "webp", "jxl", "avif"] {
+            let bytes = super::encode_image_to_bytes(&img, format, 90, OutputSpace::Srgb)
+                .unwrap_or_else(|e| panic!("{format}: {e}"));
+            assert!(bytes.len() > 16, "{format} produced {} bytes", bytes.len());
+        }
+    }
+}
+
+#[cfg(test)]
 mod precision_tests {
     /// Eight-bit exports of a 16-bit render: dither must break the plateaus
     /// rounding leaves in a slow ramp, keep the average, stay within a level
@@ -755,22 +774,38 @@ pub async fn export_images(
                         if extension == "cube" || export_settings.export_masks {
                             return Err("V3 currently exports the composited photo; separate mask-image and LUT exports are not supported.".into());
                         }
-                        if !matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "tif" | "tiff") {
-                            return Err(
-                                "Use PNG, TIFF or JPEG for profile-tagged v3 export.".into()
-                            );
+                        if !matches!(
+                            extension.as_str(),
+                            "png" | "jpg" | "jpeg" | "tif" | "tiff" | "webp" | "jxl" | "avif"
+                        ) {
+                            return Err(format!("{extension} export is not supported."));
                         }
                     }
 
-                    // The output space the editor previews in, so the file
-                    // holds exactly what was on screen.
-                    let frame = crate::color_engine::application::render_for_output(
-                        &context_clone,
-                        &state,
-                        &image_path_str,
-                        &js_adjustments,
-                        None,
-                    )
+                    // PNG, JPEG and TIFF carry a colour profile, so they are
+                    // rendered in the space the editor previews in and hold
+                    // exactly what was on screen. WebP, JPEG XL and AVIF are
+                    // written without one, so they are rendered in sRGB,
+                    // which every viewer assumes for an untagged image.
+                    let carries_profile =
+                        matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "tif" | "tiff");
+                    let frame = if carries_profile {
+                        crate::color_engine::application::render_for_output(
+                            &context_clone,
+                            &state,
+                            &image_path_str,
+                            &js_adjustments,
+                            None,
+                        )
+                    } else {
+                        crate::color_engine::application::render_file(
+                            &context_clone,
+                            &state,
+                            &image_path_str,
+                            &js_adjustments,
+                            None,
+                        )
+                    }
                     .map_err(|e| e.to_string())?;
                     let space = frame.space;
                     let rendered = frame.export_rgba16();

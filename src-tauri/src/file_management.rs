@@ -2974,13 +2974,19 @@ pub async fn import_files(
     let _ = app_handle.emit("import-start", serde_json::json!({ "total": total_files }));
 
     tauri::async_runtime::spawn_blocking(move || {
+        // One file failing (a locked file, a full disk for one shot) does
+        // not stop the rest; a summary at the end says what happened.
+        let mut imported = 0usize;
+        let mut skipped = 0usize;
+        let mut failed: Vec<String> = Vec::new();
+        let mut actions = Vec::new();
         for (i, source_path_str) in source_paths.iter().enumerate() {
             let _ = app_handle.emit(
                 "import-progress",
                 serde_json::json!({ "current": i, "total": total_files, "path": source_path_str }),
             );
 
-            let import_result: Result<(), String> = (|| {
+            let import_result: Result<Option<PathBuf>, String> = (|| {
                 #[cfg(target_os = "android")]
                 if is_android_content_uri(source_path_str) {
                     let resolved_name = resolve_android_content_uri_name(source_path_str)?;
@@ -3035,7 +3041,7 @@ pub async fn import_files(
                         );
                     }
 
-                    return Ok(());
+                    return Ok(Some(dest_file_path));
                 }
 
                 let (source_path, source_sidecar) = parse_virtual_path(source_path_str);
@@ -3074,8 +3080,16 @@ pub async fn import_files(
                 let dest_file_path = final_dest_folder.join(new_filename);
 
                 if dest_file_path.exists() {
+                    // Same name and size: imported before, skip it quietly.
+                    let same_size = fs::metadata(&dest_file_path)
+                        .ok()
+                        .zip(fs::metadata(&source_path).ok())
+                        .is_some_and(|(a, b)| a.len() == b.len());
+                    if same_size {
+                        return Ok(None);
+                    }
                     return Err(format!(
-                        "File already exists at destination: {}",
+                        "A different file is already at {}",
                         dest_file_path.display()
                     ));
                 }
@@ -3138,21 +3152,39 @@ pub async fn import_files(
                     }
                 }
 
-                Ok(())
+                Ok(Some(dest_file_path))
             })();
 
-            if let Err(e) = import_result {
-                eprintln!("Failed to import {}: {}", source_path_str, e);
-                let _ = app_handle.emit("import-error", e);
-                return;
+            match import_result {
+                Ok(Some(dest)) => {
+                    imported += 1;
+                    actions.push(crate::journal::Action::Created { path: dest });
+                }
+                Ok(None) => skipped += 1,
+                Err(e) => {
+                    log::warn!("Failed to import {}: {}", source_path_str, e);
+                    let name = Path::new(source_path_str)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| source_path_str.clone());
+                    failed.push(format!("{name}: {e}"));
+                }
             }
         }
 
+        crate::journal::record(format!("Import {}", photos(imported)), actions);
         let _ = app_handle.emit(
             "import-progress",
             serde_json::json!({ "current": total_files, "total": total_files, "path": "" }),
         );
-        let _ = app_handle.emit("import-complete", ());
+        if imported == 0 && !failed.is_empty() {
+            let _ = app_handle.emit("import-error", failed.join("\n"));
+        } else {
+            let _ = app_handle.emit(
+                "import-complete",
+                serde_json::json!({ "imported": imported, "skipped": skipped, "failed": failed }),
+            );
+        }
     });
 
     Ok(())
