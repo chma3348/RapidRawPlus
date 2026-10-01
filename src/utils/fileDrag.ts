@@ -224,13 +224,17 @@ export function listenForFinderDrops(): () => void {
       }
     })
     .then((fn) => {
-      if (cancelled) fn();
+      if (cancelled) Promise.resolve(fn()).catch(() => {});
       else unlisten = fn;
     })
     .catch((err) => console.warn('File drops from Finder are unavailable:', err));
   return () => {
     cancelled = true;
-    unlisten?.();
+    try {
+      Promise.resolve(unlisten?.()).catch(() => {});
+    } catch {
+      // Already gone (a reload): nothing to undo.
+    }
   };
 }
 

@@ -3402,6 +3402,14 @@ pub fn file_operation_history() -> Vec<crate::journal::HistoryEntry> {
 /// Follow changes made outside the app under these library roots.
 #[tauri::command]
 pub fn watch_library_roots(roots: Vec<String>, app_handle: AppHandle) -> Result<(), String> {
+    // Before the library has loaded its roots, watch the saved ones.
+    let roots = if roots.is_empty() {
+        load_settings(app_handle.clone())
+            .map(|s| s.root_folders)
+            .unwrap_or_default()
+    } else {
+        roots
+    };
     let roots: Vec<PathBuf> = roots.into_iter().map(PathBuf::from).collect();
     crate::watcher::watch_roots(app_handle, &roots)
 }
