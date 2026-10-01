@@ -10,6 +10,7 @@ import { ColumnWidths } from '../MainLibrary';
 import { useProcessStore } from '../../../store/useProcessStore';
 import { useSettingsStore } from '../../../store/useSettingsStore';
 import { useStackSize } from '../../../hooks/useStacks';
+import { beginFileDrag } from '../../../utils/fileDrag';
 import { IconAperture, IconFocalLength, IconIso, IconShutter } from '../editor/ExifIcons';
 
 interface ImageLayer {
@@ -151,6 +152,7 @@ const ThumbnailComponent = ({
         e.stopPropagation();
         onImageClick(path, e);
       }}
+      onPointerDown={(e) => beginFileDrag(e, path)}
       onContextMenu={(e: any) => onContextMenu(e, path)}
       onDoubleClick={() => onImageDoubleClick(path)}
     >
@@ -560,6 +562,7 @@ const ListItemComponent = ({
         e.stopPropagation();
         onImageClick(path, e);
       }}
+      onPointerDown={(e) => beginFileDrag(e, path)}
       onContextMenu={(e: any) => onContextMenu(e, path)}
       onDoubleClick={() => onImageDoubleClick(path)}
     >

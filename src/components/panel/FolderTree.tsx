@@ -1,3 +1,4 @@
+import { useFileDragStore } from '../../utils/fileDrag';
 import {
   Folder,
   FolderOpen,
@@ -340,13 +341,17 @@ function AlbumTreeNode({
   }
   const iconKey = item.icon || (isGroup ? (isExpanded ? 'group-open' : 'group-closed') : 'album');
 
+  const isDropTarget = useFileDragStore((d) => d.target?.kind === 'album' && d.target.id === item.id);
   return (
     <Text as="div" color={TextColors.primary} weight={TextWeights.medium}>
       <div
         className={clsx('flex items-center gap-2 p-1.5 rounded-md transition-colors cursor-pointer', {
-          'bg-surface': isSelected,
-          'hover:bg-card-active': !isSelected,
+          'bg-surface': isSelected && !isDropTarget,
+          'hover:bg-card-active': !isSelected && !isDropTarget,
+          'bg-accent/25 ring-1 ring-accent': isDropTarget,
         })}
+        data-drop-album={isGroup ? undefined : item.id}
+        data-drop-name={isGroup ? undefined : item.name}
         onClick={() => (isGroup ? onToggle(item.id) : onSelectAlbum(item.id, item.name, (item as Album).images))}
         onContextMenu={(e) => onContextMenu(e, item)}
       >
@@ -492,13 +497,16 @@ function TreeNode({
   }
   const iconKey = currentFolderIconKey || (isExpanded ? 'folder-open' : 'folder-closed');
 
+  const isDropTarget = useFileDragStore((d) => d.target?.kind === 'folder' && d.target.path === node.path);
   return (
     <Text as="div" color={TextColors.primary} weight={TextWeights.medium}>
       <div
         className={clsx('flex items-center gap-2 p-1.5 rounded-md transition-colors cursor-pointer', {
-          'bg-surface': isSelected,
-          'hover:bg-card-active': !isSelected,
+          'bg-surface': isSelected && !isDropTarget,
+          'hover:bg-card-active': !isSelected && !isDropTarget,
+          'bg-accent/25 ring-1 ring-accent': isDropTarget,
         })}
+        data-drop-folder={node.path}
         onClick={handleNameClick}
         onContextMenu={(e: any) => onContextMenu(e, node.path, isPinned)}
       >

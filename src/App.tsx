@@ -32,6 +32,8 @@ import { useFileOperations } from './hooks/useFileOperations';
 import { useAppContextMenus } from './hooks/useAppContextMenus';
 import { useSortedLibrary } from './hooks/useSortedLibrary';
 import { LIBRARY_REFRESH_EVENT } from './utils/stacks';
+import { listenForFinderDrops } from './utils/fileDrag';
+import FileDragGhost from './components/ui/FileDragGhost';
 import { useAppNavigation } from './hooks/useAppNavigation';
 
 import { useEditorActions } from './hooks/useEditorActions';
@@ -308,6 +310,9 @@ function App() {
       }
     }
   }, [currentFolderPath, handleSelectSubfolder, handleSelectAlbum]);
+
+  // Files dragged in from Finder.
+  useEffect(() => listenForFinderDrops(), []);
 
   // Views that write into the open folder ask for a refresh this way.
   useEffect(() => {
@@ -754,6 +759,7 @@ function App() {
           handleCreateAlbumItem={handleCreateAlbumItem}
           handleRenameAlbumItem={handleRenameAlbumItem}
         />
+        <FileDragGhost />
         <ToastContainer
           position="bottom-right"
           autoClose={5000}
