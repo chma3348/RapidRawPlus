@@ -90,6 +90,7 @@ half = { version = "2.7.1", features = ["bytemuck"] }
 glam = "0.32.1"
 quick-xml = { version = "0.40", features = ["serialize"] }
 roxmltree = "0.20"
+notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
 fuzzy-matcher = "0.3.7"
 image-hdr = { version = "0.6.0", default-features = false }
 mozjpeg-rs = "0.9.2"

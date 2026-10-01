@@ -54,6 +54,7 @@ mod tagging_utils;
 pub mod versions;
 pub mod video;
 pub mod video_server;
+pub mod watcher;
 pub mod white_balance;
 mod window_customizer;
 pub mod xmp;
@@ -1794,6 +1795,8 @@ pub fn run() {
             file_management::video_stream_url,
             file_management::undo_file_operation,
             file_management::file_operation_history,
+            file_management::watch_library_roots,
+            file_management::watch_open_folder,
             file_management::save_video_frame,
             sky_commands::list_sky_plates,
             sky_commands::prepare_sky_replacement,

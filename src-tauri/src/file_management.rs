@@ -3367,6 +3367,19 @@ pub fn file_operation_history() -> Vec<crate::journal::HistoryEntry> {
     crate::journal::history()
 }
 
+/// Follow changes made outside the app under these library roots.
+#[tauri::command]
+pub fn watch_library_roots(roots: Vec<String>, app_handle: AppHandle) -> Result<(), String> {
+    let roots: Vec<PathBuf> = roots.into_iter().map(PathBuf::from).collect();
+    crate::watcher::watch_roots(app_handle, &roots)
+}
+
+/// The folder the library has open (checked by polling on network shares).
+#[tauri::command]
+pub fn watch_open_folder(path: Option<String>, app_handle: AppHandle) {
+    crate::watcher::watch_open_folder(app_handle, path.map(PathBuf::from));
+}
+
 #[cfg(test)]
 mod companion_tests {
     use super::*;

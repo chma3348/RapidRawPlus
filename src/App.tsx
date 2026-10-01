@@ -181,6 +181,8 @@ function App() {
   const cachedEditStateRef = useRef<any | null>(null);
 
   const [libraryViewMode, setLibraryViewMode] = useState<LibraryViewMode>(defaultLibraryViewMode);
+  const libraryViewModeRef = useRef(libraryViewMode);
+  libraryViewModeRef.current = libraryViewMode;
   const [isResizing, setIsResizing] = useState(false);
   const [thumbnailSize, setThumbnailSize] = useState(defaultThumbnailSize);
   const [thumbnailAspectRatio, setThumbnailAspectRatio] = useState(ThumbnailAspectRatio.Cover);
@@ -313,6 +315,30 @@ function App() {
 
   // Files dragged in from Finder.
   useEffect(() => listenForFinderDrops(), []);
+
+  // Live updates: follow files changed outside the app (see watcher.rs).
+  useEffect(() => {
+    invoke('watch_library_roots', { roots: rootPaths }).catch((err) =>
+      console.warn('Library changes outside the app will not show until refreshed:', err),
+    );
+  }, [rootPaths]);
+  useEffect(() => {
+    const folder = currentFolderPath && !currentFolderPath.startsWith('Album: ') ? currentFolderPath : null;
+    invoke('watch_open_folder', { path: folder }).catch(() => {});
+  }, [currentFolderPath]);
+  useEffect(() => {
+    const unlisten = listen<{ folders: string[]; structure: boolean }>('library-changed', (event) => {
+      const open = useLibraryStore.getState().currentFolderPath;
+      const recursive = libraryViewModeRef.current === LibraryViewMode.Recursive;
+      const affectsOpenFolder =
+        !!open && event.payload.folders.some((f) => f === open || (recursive && f.startsWith(`${open}/`)));
+      if (affectsOpenFolder) handleLibraryRefresh();
+      if (event.payload.structure) refreshAllFolderTrees();
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, [handleLibraryRefresh, refreshAllFolderTrees]);
 
   // Views that write into the open folder ask for a refresh this way.
   useEffect(() => {

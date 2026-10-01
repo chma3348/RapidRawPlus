@@ -697,6 +697,7 @@ pub fn push(path: &str, metadata: &mut ImageMetadata, create_if_missing: bool) {
     };
     // Write beside it and rename, so a crash never leaves half a file.
     let tmp = xmp.with_extension("xmp.rapidraw-tmp");
+    crate::watcher::note_own_write(&xmp);
     if let Err(e) = std::fs::write(&tmp, written).and_then(|_| std::fs::rename(&tmp, &xmp)) {
         log::warn!("Could not write XMP {xmp:?}: {e}");
         let _ = std::fs::remove_file(&tmp);
