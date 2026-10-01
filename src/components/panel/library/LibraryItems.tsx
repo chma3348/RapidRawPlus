@@ -153,6 +153,8 @@ const ThumbnailComponent = ({
         onImageClick(path, e);
       }}
       onPointerDown={(e) => beginFileDrag(e, path)}
+      // The browser's own image dragging would take the pointer away.
+      onDragStart={(e) => e.preventDefault()}
       onContextMenu={(e: any) => onContextMenu(e, path)}
       onDoubleClick={() => onImageDoubleClick(path)}
     >
@@ -170,6 +172,7 @@ const ThumbnailComponent = ({
                 onTransitionEnd={() => handleTransitionEnd(layer.id)}
               >
                 <img
+                  draggable={false}
                   alt={path.split(/[\\/]/).pop()}
                   className={`w-full h-full group-hover:scale-[1.02] transition-transform duration-300 will-change-transform ${
                     thumbnailAspectRatio === ThumbnailAspectRatio.Contain ? 'object-contain' : 'object-cover'
@@ -563,6 +566,8 @@ const ListItemComponent = ({
         onImageClick(path, e);
       }}
       onPointerDown={(e) => beginFileDrag(e, path)}
+      // The browser's own image dragging would take the pointer away.
+      onDragStart={(e) => e.preventDefault()}
       onContextMenu={(e: any) => onContextMenu(e, path)}
       onDoubleClick={() => onImageDoubleClick(path)}
     >
@@ -581,6 +586,7 @@ const ListItemComponent = ({
                   onTransitionEnd={() => handleTransitionEnd(layer.id)}
                 >
                   <img
+                    draggable={false}
                     alt={baseName}
                     className={`w-full h-full relative ${
                       thumbnailAspectRatio === ThumbnailAspectRatio.Contain ? 'object-contain' : 'object-cover'

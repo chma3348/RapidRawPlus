@@ -107,6 +107,7 @@ export function beginFileDrag(e: React.PointerEvent, path: string) {
   const stop = () => {
     window.removeEventListener('pointermove', onMove);
     window.removeEventListener('pointerup', onUp);
+    window.removeEventListener('pointercancel', onCancel);
     window.removeEventListener('keydown', onKey, true);
     if (dragging) document.body.style.userSelect = previousUserSelect;
   };
@@ -144,8 +145,13 @@ export function beginFileDrag(e: React.PointerEvent, path: string) {
       useFileDragStore.setState({ copy: true });
     }
   };
+  const onCancel = () => {
+    stop();
+    useFileDragStore.setState(IDLE);
+  };
   window.addEventListener('pointermove', onMove);
   window.addEventListener('pointerup', onUp);
+  window.addEventListener('pointercancel', onCancel);
   window.addEventListener('keydown', onKey, true);
 }
 

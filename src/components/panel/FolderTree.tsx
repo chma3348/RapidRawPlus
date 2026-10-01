@@ -348,7 +348,7 @@ function AlbumTreeNode({
         className={clsx('flex items-center gap-2 p-1.5 rounded-md transition-colors cursor-pointer', {
           'bg-surface': isSelected && !isDropTarget,
           'hover:bg-card-active': !isSelected && !isDropTarget,
-          'bg-accent/25 ring-1 ring-accent': isDropTarget,
+          'bg-accent/30 ring-2 ring-accent text-text-primary': isDropTarget,
         })}
         data-drop-album={isGroup ? undefined : item.id}
         data-drop-name={isGroup ? undefined : item.name}
@@ -504,7 +504,7 @@ function TreeNode({
         className={clsx('flex items-center gap-2 p-1.5 rounded-md transition-colors cursor-pointer', {
           'bg-surface': isSelected && !isDropTarget,
           'hover:bg-card-active': !isSelected && !isDropTarget,
-          'bg-accent/25 ring-1 ring-accent': isDropTarget,
+          'bg-accent/30 ring-2 ring-accent text-text-primary': isDropTarget,
         })}
         data-drop-folder={node.path}
         onClick={handleNameClick}
