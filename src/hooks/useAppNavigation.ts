@@ -13,6 +13,7 @@ import { isVideoPath } from '../utils/media';
 import { INITIAL_ADJUSTMENTS, normalizeLoadedAdjustments } from '../utils/adjustments';
 import { globalImageCache } from '../utils/ImageLRUCache';
 import { debouncedSave, debouncedSetHistory } from './useEditorActions';
+import { useCullStore } from '../components/panel/library/CullView';
 
 export interface AppNavigationProps {
   clearThumbnailQueue: () => void;
@@ -519,8 +520,10 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
    * Reopen the library with the saved folders. With a `folder` it lands there
    * instead of where the last session left off, and with an `image` it then
    * opens that photo in the editor — the home screen's shelves and banner.
+   * An `action` then starts culling the folder's unflagged photos, or selects
+   * its picks with the export panel open.
    */
-  const openLibrary = (target?: { folder?: string; image?: string }) => {
+  const openLibrary = (target?: { folder?: string; image?: string; action?: 'cull' | 'exportPicks' }) => {
     const restore = async () => {
       const { appSettings } = useSettingsStore.getState();
       const { setLibrary } = useLibraryStore.getState();
@@ -630,6 +633,20 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
               .setLibrary({ libraryActivePath: target.image, multiSelectedPaths: [target.image] });
             await handleImageSelect(target.image);
           }
+        }
+        const files = useLibraryStore
+          .getState()
+          .imageList.filter((f: ImageFile) => !f.path.includes('?vc='))
+          .sort((a: ImageFile, b: ImageFile) => a.path.localeCompare(b.path, undefined, { numeric: true }));
+        if (target?.action === 'cull') {
+          // Cull what hasn't been picked or rejected yet.
+          const rest = files.filter((f: ImageFile) => !f.flag).map((f: ImageFile) => f.path);
+          if (rest.length > 0) useCullStore.getState().openCull(rest, rest[0]);
+        }
+        if (target?.action === 'exportPicks') {
+          const picks = files.filter((f: ImageFile) => f.flag === 'pick').map((f: ImageFile) => f.path);
+          useLibraryStore.getState().setLibrary({ multiSelectedPaths: picks, libraryActivePath: picks[0] ?? null });
+          useUIStore.getState().setUI({ isLibraryExportPanelVisible: true });
         }
       }
     };

@@ -12,11 +12,10 @@ import {
   Folder,
   FolderOpen,
   FolderPlus,
-  Pencil,
   Play,
   Settings,
   Star,
-  X,
+  Upload,
 } from 'lucide-react';
 
 import Button from '../../ui/Button';
@@ -49,6 +48,8 @@ const isWithin = (path: string, folder: string) =>
 export interface HomeTarget {
   folder?: string;
   image?: string;
+  /** After opening the folder: cull what's left in it, or select its picks for export. */
+  action?: 'cull' | 'exportPicks';
 }
 
 interface HomeScreenProps {
@@ -422,14 +423,38 @@ const formatDate = (exifDate?: string) => {
   });
 };
 
-function Chip({ children }: { children: ReactNode }) {
+/** One label and value in the banner's details; left out when there's no value. */
+function Spec({ label, children }: { label: string; children: ReactNode }) {
+  if (!children) return null;
   return (
-    <span className="inline-flex items-center gap-1 rounded-full bg-bg-primary/60 px-2.5 py-1 text-xs text-text-secondary whitespace-nowrap">
-      {children}
-    </span>
+    <>
+      <dt className="text-xs text-text-secondary/80 pt-px">{label}</dt>
+      <dd className="text-sm text-text-primary break-words">{children}</dd>
+    </>
   );
 }
 
+function Progress({ label, done, total }: { label: string; done: number; total: number }) {
+  return (
+    <div>
+      <Text variant={TextVariants.small} color={TextColors.secondary} className="mb-1.5">
+        {label}
+      </Text>
+      <div className="h-1.5 rounded-full bg-bg-primary/70 overflow-hidden">
+        <div
+          className="h-full rounded-full bg-accent transition-[width] duration-700"
+          style={{ width: `${total ? (done / total) * 100 : 0}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Back to where you were: the last-edited photo, its details and a large
+ * Continue editing button, beside how far through its folder you are with
+ * the next steps, over a filmstrip of the folder drifting along the bottom.
+ */
 function ContinueBanner({
   folder,
   image,
@@ -482,16 +507,35 @@ function ContinueBanner({
     return [...paths.slice(start), ...paths.slice(0, start)];
   }, [files, cover, showPicture]);
 
+  const total = files?.length ?? 0;
+  const edited = files?.filter((f) => f.is_edited).length ?? 0;
+  const picked = files?.filter((f) => f.flag === 'pick').length ?? 0;
+  const rejected = files?.filter((f) => f.flag === 'reject').length ?? 0;
+
   const fNumber =
     exif?.FNumber && (String(exif.FNumber).toLowerCase().startsWith('f') ? exif.FNumber : `f/${exif.FNumber}`);
-  const settings = [
+  const exposure = [
     exif?.FocalLengthIn35mmFilm || exif?.FocalLength,
     fNumber,
     exif?.ExposureTime,
     (exif?.PhotographicSensitivity || exif?.ISO) && `ISO ${exif?.PhotographicSensitivity || exif?.ISO}`,
-  ].filter(Boolean);
-  const camera = [exif?.Model, exif?.LensModel].filter(Boolean).join(' · ');
-  const date = formatDate(exif?.DateTimeOriginal);
+  ]
+    .filter(Boolean)
+    .join('  ');
+  const status = [
+    info?.flag === 'pick' ? t('library.home.picked') : info?.flag === 'reject' ? t('library.home.rejected') : null,
+    info?.is_edited ? t('library.home.edited') : null,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  const rating = info?.rating && info.rating > 0 && (
+    <span className="inline-flex gap-0.5 align-[-1px]">
+      {Array.from({ length: info.rating }, (_, i) => (
+        <Star key={i} size={12} className="text-accent" fill="currentColor" />
+      ))}
+    </span>
+  );
+  const showDetails = !!image && showPicture;
 
   return (
     <div className="relative mx-8 rounded-xl overflow-hidden bg-surface isolate">
@@ -504,20 +548,27 @@ function ContinueBanner({
         />
       )}
       <div className="absolute inset-0 -z-10 bg-gradient-to-r from-bg-secondary/70 via-bg-secondary/85 to-bg-secondary/95" />
-      <div className="flex gap-7 p-6 h-72">
+
+      <div
+        className="grid p-6 pb-5"
+        style={{
+          gridTemplateColumns: url ? 'auto minmax(0, 1.4fr) minmax(0, 1fr)' : 'minmax(0, 1.4fr) minmax(0, 1fr)',
+        }}
+      >
         {url && (
           <button
-            className="hidden md:block h-full shrink-0 rounded-lg overflow-hidden shadow-xl"
+            className="hidden md:block h-60 shrink-0 rounded-lg overflow-hidden shadow-xl mr-7"
             onClick={() => onOpen(image ? { folder, image } : { folder })}
           >
             <img
               src={url}
               alt={cover ? baseName(cover) : ''}
-              className="h-full w-auto max-w-[22rem] object-cover transition-transform duration-500 hover:scale-[1.02]"
+              className="h-full w-auto max-w-[min(20rem,24vw)] object-cover transition-transform duration-500 hover:scale-[1.02]"
             />
           </button>
         )}
-        <div className="flex-1 min-w-0 flex flex-col">
+
+        <div className="flex flex-col min-w-0 pr-7">
           <Text
             variant={TextVariants.small}
             color={TextColors.accent}
@@ -544,71 +595,112 @@ function ContinueBanner({
             ))}
           </div>
 
-          {image && showPicture && (
-            <div className="flex flex-wrap gap-1.5 mt-3">
-              {!!info?.rating && info.rating > 0 && (
-                <Chip>
-                  {Array.from({ length: info.rating }, (_, i) => (
-                    <Star key={i} size={11} className="text-accent" fill="currentColor" />
-                  ))}
-                </Chip>
-              )}
-              {info?.flag === 'pick' && (
-                <Chip>
-                  <Check size={12} /> {t('library.home.picked')}
-                </Chip>
-              )}
-              {info?.flag === 'reject' && (
-                <Chip>
-                  <X size={12} /> {t('library.home.rejected')}
-                </Chip>
-              )}
-              {info?.is_edited && (
-                <Chip>
-                  <Pencil size={11} /> {t('library.home.edited')}
-                </Chip>
-              )}
-              {camera && <Chip>{camera}</Chip>}
-              {settings.length > 0 && <Chip>{settings.join('  ')}</Chip>}
-              {date && <Chip>{date}</Chip>}
+          {showDetails && (
+            <div className="grid grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)] gap-x-6 mt-4">
+              <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1.5 content-start">
+                <Spec label={t('library.home.camera')}>{exif?.Model}</Spec>
+                <Spec label={t('library.home.lens')}>{exif?.LensModel}</Spec>
+                <Spec label={t('library.home.exposure')}>{exposure}</Spec>
+              </dl>
+              <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1.5 content-start">
+                <Spec label={t('library.home.rating')}>{rating}</Spec>
+                <Spec label={t('library.home.status')}>{status}</Spec>
+                <Spec label={t('library.home.taken')}>{formatDate(exif?.DateTimeOriginal)}</Spec>
+              </dl>
             </div>
           )}
 
-          <div className="flex gap-3 mt-4">
+          <div className="flex items-center gap-3 mt-auto pt-5">
             {image ? (
               <>
-                <Button className="h-10 px-5" onClick={() => onOpen({ folder, image })}>
-                  <Play size={16} className="mr-2" />
+                <Button
+                  className="h-12 px-7 text-base rounded-lg shadow-lg shadow-accent/20 whitespace-nowrap shrink-0"
+                  onClick={() => onOpen({ folder, image })}
+                >
+                  <Play size={18} className="mr-2.5" fill="currentColor" />
                   {t('library.home.continueEditing')}
                 </Button>
-                <Button className="h-10 px-5 bg-surface text-text-primary" onClick={() => onOpen({ folder })}>
-                  <Folder size={16} className="mr-2" />
-                  {t('library.home.openFolder', { name: baseName(folder) })}
+                {/* On narrower windows this shrinks to its icon, leaving room for Continue editing. */}
+                <Button
+                  className="h-12 px-4 xl:px-5 bg-surface text-text-primary rounded-lg whitespace-nowrap min-w-0"
+                  onClick={() => onOpen({ folder })}
+                  data-tooltip={t('library.home.openFolder', { name: baseName(folder) })}
+                >
+                  <Folder size={16} className="xl:mr-2 shrink-0" />
+                  <span className="hidden xl:inline truncate">
+                    {t('library.home.openFolder', { name: baseName(folder) })}
+                  </span>
                 </Button>
               </>
             ) : (
-              <Button className="h-10 px-5" onClick={() => onOpen({ folder })}>
-                <Folder size={16} className="mr-2" />
+              <Button className="h-12 px-7 text-base rounded-lg" onClick={() => onOpen({ folder })}>
+                <Folder size={18} className="mr-2.5" />
                 {t('library.home.openFolder', { name: baseName(folder) })}
               </Button>
             )}
           </div>
+        </div>
 
-          {neighbours && neighbours.length > 1 && (
-            <div className="mt-auto -mr-6 pt-4">
-              <DriftStrip
-                photos={neighbours}
-                height={52}
-                speed={BANNER_DRIFT_SPEED}
-                arrows={false}
-                highlight={image}
-                onOpenPhoto={(p) => onOpen({ folder, image: p })}
-                requestThumbnails={requestThumbnails}
-              />
-            </div>
-          )}
+        <div className="flex flex-col min-w-0 border-l border-text-secondary/20 pl-7">
+          <Text weight={TextWeights.semibold}>{t('library.home.thisFolder')}</Text>
+          <Text variant={TextVariants.small} color={TextColors.secondary} className="mb-4">
+            {files ? t('library.home.photoCount', { count: total }) : ' '}
+          </Text>
+          <div className="flex flex-col gap-4">
+            <Progress label={t('library.home.editedOf', { done: edited, total })} done={edited} total={total} />
+            <Progress
+              label={t('library.home.culledOf', { done: picked + rejected, total, picked, rejected })}
+              done={picked + rejected}
+              total={total}
+            />
+          </div>
+          <div className="flex flex-wrap items-center gap-2 mt-auto pt-5">
+            {files && picked + rejected < total ? (
+              <Button
+                className="h-12 px-4 bg-surface text-text-primary rounded-lg whitespace-nowrap"
+                onClick={() => onOpen({ folder, action: 'cull' })}
+              >
+                <Check size={16} className="mr-2" />
+                {t('library.home.cullRest')}
+              </Button>
+            ) : (
+              files &&
+              total > 0 && (
+                <Text
+                  variant={TextVariants.small}
+                  color={TextColors.secondary}
+                  className="flex items-center gap-1.5 h-12"
+                >
+                  <Check size={14} /> {t('library.home.allCulled')}
+                </Text>
+              )
+            )}
+            {picked > 0 && (
+              <Button
+                className="h-12 px-4 bg-surface text-text-primary rounded-lg whitespace-nowrap"
+                onClick={() => onOpen({ folder, action: 'exportPicks' })}
+              >
+                <Upload size={16} className="mr-2" />
+                {t('library.home.exportPicks')}
+              </Button>
+            )}
+          </div>
         </div>
       </div>
+
+      {neighbours && neighbours.length > 1 && (
+        <div className="border-t border-text-secondary/15 py-3">
+          <DriftStrip
+            photos={neighbours}
+            height={56}
+            speed={BANNER_DRIFT_SPEED}
+            arrows={false}
+            highlight={image}
+            onOpenPhoto={(p) => onOpen({ folder, image: p })}
+            requestThumbnails={requestThumbnails}
+          />
+        </div>
+      )}
     </div>
   );
 }

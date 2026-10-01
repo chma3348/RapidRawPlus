@@ -28,7 +28,7 @@ interface LibraryViewProps {
   handleThumbnailContextMenu: (...args: any) => void;
   handleMainLibraryContextMenu: (...args: any) => void;
   handleContinueSession: (...args: any) => void;
-  openLibrary: (target: { folder?: string; image?: string }) => void;
+  openLibrary: (target: { folder?: string; image?: string; action?: 'cull' | 'exportPicks' }) => void;
   handleGoHome: (...args: any) => void;
   handleOpenFolder: (...args: any) => void;
   handleImportClick: (path: string) => void;
