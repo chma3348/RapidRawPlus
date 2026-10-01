@@ -151,6 +151,7 @@ export default function LibraryView({
             onImageClick={handleLibraryImageSingleClick}
             onImageDoubleClick={handleImageSelect}
             onImportClick={() => handleImportClick(currentFolderPath as string)}
+            onImportInto={handleImportClick}
             onLibraryRefresh={handleLibraryRefresh}
             onOpenFolder={handleOpenFolder}
             onSettingsChange={handleSettingsChange}

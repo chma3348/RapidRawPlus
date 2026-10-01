@@ -1101,11 +1101,17 @@
       }
     },
     "home": {
+      "addFolder": "Add a folder…",
+      "addFolderDesc": "Show a folder that already holds photos, without copying anything.",
       "continueEditing": "Continue editing",
       "continueTitle": "Continue where you left off",
       "hiddenCount_one": "{{count}} folder hidden from Home",
       "hiddenCount_other": "{{count}} folders hidden from Home",
       "hide": "Hide from Home",
+      "import": "Import",
+      "importPhotos": "Import photos…",
+      "importPhotosDesc": "Copy photos in from a memory card, phone or another folder.",
+      "importWhere": "Choose the folder to import the photos into",
       "inFolder": "in {{name}}",
       "openFolder": "Open {{name}}",
       "photoCount_one": "{{count}} photo",

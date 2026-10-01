@@ -69,6 +69,7 @@ interface MainLibraryProps {
   onImageClick(path: string, event: any): void;
   onImageDoubleClick(path: string): void;
   onImportClick(): void;
+  onImportInto(folder: string): void;
   onLibraryRefresh(): void;
   onOpenFolder(): void;
   onSettingsChange(settings: AppSettings): Promise<void>;
@@ -312,6 +313,7 @@ export default function MainLibrary(props: MainLibraryProps) {
             </Text>
           }
           onAddFolder={props.onOpenFolder}
+          onImportInto={props.onImportInto}
           onOpen={props.onOpenLibrary}
           onOpenSettings={() => setShowSettings(true)}
           onSettingsChange={props.onSettingsChange}

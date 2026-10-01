@@ -1,7 +1,18 @@
-import { ReactNode, useEffect, useMemo, useRef, useState } from 'react';
+import { ReactNode, RefObject, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { useTranslation } from 'react-i18next';
-import { ChevronLeft, ChevronRight, EyeOff, Folder, Play, Settings } from 'lucide-react';
+import {
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  Download,
+  EyeOff,
+  Folder,
+  FolderPlus,
+  Play,
+  Settings,
+} from 'lucide-react';
 
 import Button from '../../ui/Button';
 import Text from '../../ui/Text';
@@ -13,6 +24,9 @@ import { isVideoPath } from '../../../utils/media';
 
 /** How many photos a shelf shows before "See all". */
 const SHELF_LENGTH = 40;
+
+/** Drift speeds in pixels a second, shelf by shelf, so neighbours never move in step. */
+const DRIFT_SPEEDS = [16, 23, 19, 27, 14, 21, 25, 17];
 
 const realPath = (path: string) => path.split('?vc=')[0];
 const baseName = (path: string) => realPath(path).split(/[\\/]/).pop() || path;
@@ -30,6 +44,8 @@ interface HomeScreenProps {
   brand: ReactNode;
   footer: ReactNode;
   onAddFolder(): void;
+  /** Pick photos to copy into `folder` (the library's Import). */
+  onImportInto(folder: string): void;
   onOpen(target: HomeTarget): void;
   onOpenSettings(): void;
   onSettingsChange(settings: AppSettings): void;
@@ -157,10 +173,13 @@ function ContinueBanner({
 
 function ShelfPhoto({
   path,
+  copy,
   onOpen,
   requestThumbnails,
 }: {
   path: string;
+  /** The repeat that lets a drifting shelf loop: hidden from keyboard and screen readers. */
+  copy?: boolean;
   onOpen(): void;
   requestThumbnails(paths: string[]): void;
 }) {
@@ -168,8 +187,10 @@ function ShelfPhoto({
   const video = isVideoPath(path);
   return (
     <button
-      className="relative h-40 shrink-0 rounded-md overflow-hidden bg-surface snap-start group/photo focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+      className="relative h-40 shrink-0 rounded-md overflow-hidden bg-surface group/photo focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
       onClick={onOpen}
+      tabIndex={copy ? -1 : undefined}
+      aria-hidden={copy || undefined}
       data-tooltip={baseName(path)}
     >
       {url ? (
@@ -191,13 +212,97 @@ function ShelfPhoto({
   );
 }
 
+/**
+ * Slowly scroll a shelf along by itself. The photos are laid out three times
+ * (so an arrow's glide never runs out of room either way), and when the
+ * first set has scrolled fully past, the position jumps back by exactly its
+ * width, so the strip loops without a seam. It pauses while the
+ * pointer is over the shelf, while it is off screen, and for people who
+ * have asked their system for reduced motion; scrolling by hand still works
+ * and the drift carries on from wherever it was left.
+ */
+const useDrift = (
+  scrollerRef: RefObject<HTMLDivElement | null>,
+  firstRef: RefObject<HTMLDivElement | null>,
+  secondRef: RefObject<HTMLDivElement | null>,
+  speed: number,
+  enabled: boolean,
+) => {
+  const paused = useRef(false);
+  const position = useRef(0);
+
+  useEffect(() => {
+    const el = scrollerRef.current;
+    if (!el || !enabled) return;
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
+
+    let visible = false;
+    const observer = new IntersectionObserver((entries) => {
+      visible = entries.some((e) => e.isIntersecting);
+    });
+    observer.observe(el);
+
+    position.current = el.scrollLeft;
+    let last = performance.now();
+    let frame = requestAnimationFrame(function step(now) {
+      const dt = Math.min(now - last, 100) / 1000;
+      last = now;
+      const period = (secondRef.current?.offsetLeft ?? 0) - (firstRef.current?.offsetLeft ?? 0);
+      if (visible && !paused.current && period > el.clientWidth) {
+        // Pick up any scrolling done by hand before moving on from there.
+        if (Math.abs(el.scrollLeft - position.current) > 2) position.current = el.scrollLeft;
+        position.current += speed * dt;
+        if (position.current >= period) position.current -= period;
+        el.scrollLeft = position.current;
+      }
+      frame = requestAnimationFrame(step);
+    });
+    return () => {
+      cancelAnimationFrame(frame);
+      observer.disconnect();
+    };
+  }, [scrollerRef, firstRef, secondRef, speed, enabled]);
+
+  /** Keep a hand scroll inside the loop so it never runs out of photos. */
+  const wrap = () => {
+    const el = scrollerRef.current;
+    const period = (secondRef.current?.offsetLeft ?? 0) - (firstRef.current?.offsetLeft ?? 0);
+    if (!el || !enabled || period <= el.clientWidth) return;
+    const max = el.scrollWidth - el.clientWidth;
+    if (el.scrollLeft >= Math.min(period + el.clientWidth, max - 1)) el.scrollLeft -= period;
+  };
+
+  /** Move an arrow's worth, first stepping back a loop if that would run off either end. */
+  const step = (direction: number) => {
+    const el = scrollerRef.current;
+    if (!el) return;
+    const distance = el.clientWidth * 0.8;
+    const period = (secondRef.current?.offsetLeft ?? 0) - (firstRef.current?.offsetLeft ?? 0);
+    if (enabled && period > el.clientWidth) {
+      if (direction > 0 && el.scrollLeft >= period) el.scrollLeft -= period;
+      if (direction < 0 && el.scrollLeft - distance < 0) el.scrollLeft += period;
+    }
+    el.scrollBy({ left: direction * distance, behavior: 'smooth' });
+  };
+
+  return {
+    pause: () => (paused.current = true),
+    resume: () => (paused.current = false),
+    wrap,
+    step,
+  };
+};
+
 function Shelf({
   shelf,
+  index,
   onHide,
   onOpen,
   requestThumbnails,
 }: {
   shelf: ShelfInfo;
+  /** Its place on the page, which sets how fast it drifts. */
+  index: number;
   onHide(): void;
   onOpen(target: HomeTarget): void;
   requestThumbnails(paths: string[]): void;
@@ -205,8 +310,24 @@ function Shelf({
   const { t } = useTranslation();
   const sectionRef = useRef<HTMLElement>(null);
   const scrollerRef = useRef<HTMLDivElement>(null);
+  const firstRef = useRef<HTMLDivElement>(null);
+  const secondRef = useRef<HTMLDivElement>(null);
   const [photos, setPhotos] = useState<ImageFile[] | null>(null);
   const [canScroll, setCanScroll] = useState({ left: false, right: false });
+  // Loop only once the photos are wider than the shelf.
+  const [loops, setLoops] = useState(false);
+  const drift = useDrift(scrollerRef, firstRef, secondRef, DRIFT_SPEEDS[index % DRIFT_SPEEDS.length], loops);
+
+  useEffect(() => {
+    const first = firstRef.current;
+    const el = scrollerRef.current;
+    if (!first || !el) return;
+    const measure = () => setLoops(first.offsetWidth > el.clientWidth);
+    const observer = new ResizeObserver(measure);
+    observer.observe(first);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [photos]);
 
   // A folder is only read once its shelf comes near the screen.
   useEffect(() => {
@@ -229,17 +350,27 @@ function Shelf({
   const updateArrows = () => {
     const el = scrollerRef.current;
     if (!el) return;
-    setCanScroll({ left: el.scrollLeft > 4, right: el.scrollLeft + el.clientWidth < el.scrollWidth - 4 });
+    setCanScroll(
+      loops
+        ? { left: true, right: true }
+        : { left: el.scrollLeft > 4, right: el.scrollLeft + el.clientWidth < el.scrollWidth - 4 },
+    );
   };
-  useEffect(updateArrows, [photos]);
-
-  const scrollBy = (direction: number) => {
-    const el = scrollerRef.current;
-    if (el) el.scrollBy({ left: direction * el.clientWidth * 0.8, behavior: 'smooth' });
-  };
+  useEffect(updateArrows, [photos, loops]);
 
   if (photos && photos.length === 0) return null;
   const shown = photos?.slice(0, SHELF_LENGTH);
+  const seeAllTile = photos && photos.length > SHELF_LENGTH && (
+    <button
+      className="h-40 w-40 shrink-0 rounded-md bg-surface hover:bg-card-active transition-colors flex flex-col items-center justify-center gap-1"
+      onClick={() => onOpen({ folder: shelf.path })}
+    >
+      <Text weight={TextWeights.semibold}>{t('library.home.seeAll')}</Text>
+      <Text variant={TextVariants.small} color={TextColors.secondary}>
+        {t('library.home.photoCount', { count: photos.length })}
+      </Text>
+    </button>
+  );
 
   return (
     <section ref={sectionRef} className="group/shelf">
@@ -270,40 +401,51 @@ function Shelf({
           </button>
         </div>
       </div>
-      <div className="relative">
+      <div className="relative" onPointerEnter={drift.pause} onPointerLeave={drift.resume}>
         <div
           ref={scrollerRef}
-          onScroll={updateArrows}
-          className="flex gap-3 overflow-x-auto px-8 pb-1 snap-x scroll-px-8 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+          onScroll={() => {
+            drift.wrap();
+            if (!loops) updateArrows();
+          }}
+          className="flex gap-3 overflow-x-auto px-8 pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
         >
-          {shown
-            ? shown.map((f) => (
-                <ShelfPhoto
-                  key={f.path}
-                  path={f.path}
-                  onOpen={() => onOpen({ folder: shelf.path, image: f.path })}
-                  requestThumbnails={requestThumbnails}
-                />
-              ))
-            : Array.from({ length: 6 }, (_, i) => (
-                <div key={i} className="h-40 w-56 shrink-0 rounded-md bg-surface animate-pulse" />
-              ))}
-          {photos && photos.length > SHELF_LENGTH && (
-            <button
-              className="h-40 w-40 shrink-0 rounded-md bg-surface hover:bg-card-active transition-colors flex flex-col items-center justify-center gap-1 snap-start"
-              onClick={() => onOpen({ folder: shelf.path })}
-            >
-              <Text weight={TextWeights.semibold}>{t('library.home.seeAll')}</Text>
-              <Text variant={TextVariants.small} color={TextColors.secondary}>
-                {t('library.home.photoCount', { count: photos.length })}
-              </Text>
-            </button>
-          )}
+          <div ref={firstRef} className="flex gap-3 shrink-0">
+            {shown
+              ? shown.map((f) => (
+                  <ShelfPhoto
+                    key={f.path}
+                    path={f.path}
+                    onOpen={() => onOpen({ folder: shelf.path, image: f.path })}
+                    requestThumbnails={requestThumbnails}
+                  />
+                ))
+              : Array.from({ length: 6 }, (_, i) => (
+                  <div key={i} className="h-40 w-56 shrink-0 rounded-md bg-surface animate-pulse" />
+                ))}
+            {seeAllTile}
+          </div>
+          {loops &&
+            shown &&
+            [secondRef, null].map((ref, copy) => (
+              <div key={copy} ref={ref} className="flex gap-3 shrink-0" aria-hidden="true">
+                {shown.map((f) => (
+                  <ShelfPhoto
+                    key={f.path}
+                    path={f.path}
+                    copy
+                    onOpen={() => onOpen({ folder: shelf.path, image: f.path })}
+                    requestThumbnails={requestThumbnails}
+                  />
+                ))}
+                {seeAllTile}
+              </div>
+            ))}
         </div>
         {canScroll.left && (
           <button
             className="absolute left-2 top-1/2 -translate-y-1/2 rounded-full bg-bg-primary/80 p-2 shadow-lg opacity-0 group-hover/shelf:opacity-100 transition-opacity"
-            onClick={() => scrollBy(-1)}
+            onClick={() => drift.step(-1)}
             aria-label={t('library.home.scrollBack')}
           >
             <ChevronLeft size={20} />
@@ -312,7 +454,7 @@ function Shelf({
         {canScroll.right && (
           <button
             className="absolute right-2 top-1/2 -translate-y-1/2 rounded-full bg-bg-primary/80 p-2 shadow-lg opacity-0 group-hover/shelf:opacity-100 transition-opacity"
-            onClick={() => scrollBy(1)}
+            onClick={() => drift.step(1)}
             aria-label={t('library.home.scrollForward')}
           >
             <ChevronRight size={20} />
@@ -320,6 +462,80 @@ function Shelf({
         )}
       </div>
     </section>
+  );
+}
+
+/** Import: copy photos in from a card or another folder, or add a folder that's already in place. */
+function ImportMenu({
+  defaultFolder,
+  onAddFolder,
+  onImportInto,
+}: {
+  defaultFolder?: string;
+  onAddFolder(): void;
+  onImportInto(folder: string): void;
+}) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: PointerEvent) => {
+      if (!ref.current?.contains(e.target as Node)) setOpen(false);
+    };
+    window.addEventListener('pointerdown', close);
+    return () => window.removeEventListener('pointerdown', close);
+  }, [open]);
+
+  const importPhotos = async () => {
+    setOpen(false);
+    const folder = await openDialog({
+      directory: true,
+      multiple: false,
+      defaultPath: defaultFolder,
+      title: t('library.home.importWhere'),
+    });
+    if (typeof folder === 'string') onImportInto(folder);
+  };
+
+  const item = 'w-full flex items-start gap-3 rounded-md px-3 py-2.5 text-left hover:bg-card-active transition-colors';
+  return (
+    <div ref={ref} className="relative">
+      <Button className="h-10 px-4" onClick={() => setOpen(!open)}>
+        <Download size={16} className="mr-2" />
+        {t('library.home.import')}
+        <ChevronDown size={14} className="ml-1.5" />
+      </Button>
+      {open && (
+        <div className="absolute right-0 top-12 z-20 w-72 rounded-lg bg-surface p-1.5 shadow-xl border border-border-color">
+          <button className={item} onClick={importPhotos}>
+            <Download size={16} className="mt-0.5 shrink-0" />
+            <span>
+              <Text weight={TextWeights.semibold}>{t('library.home.importPhotos')}</Text>
+              <Text variant={TextVariants.small} color={TextColors.secondary}>
+                {t('library.home.importPhotosDesc')}
+              </Text>
+            </span>
+          </button>
+          <button
+            className={item}
+            onClick={() => {
+              setOpen(false);
+              onAddFolder();
+            }}
+          >
+            <FolderPlus size={16} className="mt-0.5 shrink-0" />
+            <span>
+              <Text weight={TextWeights.semibold}>{t('library.home.addFolder')}</Text>
+              <Text variant={TextVariants.small} color={TextColors.secondary}>
+                {t('library.home.addFolderDesc')}
+              </Text>
+            </span>
+          </button>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -333,6 +549,7 @@ export default function HomeScreen({
   brand,
   footer,
   onAddFolder,
+  onImportInto,
   onOpen,
   onOpenSettings,
   onSettingsChange,
@@ -394,10 +611,7 @@ export default function HomeScreen({
         <header className="flex items-center justify-between gap-4 px-8 pt-8 pb-6">
           {brand}
           <div className="flex items-center gap-2">
-            <Button className="h-10 px-4 bg-surface text-text-primary" onClick={onAddFolder}>
-              <Folder size={16} className="mr-2" />
-              {t('library.splash.addFolder')}
-            </Button>
+            <ImportMenu defaultFolder={roots[0]} onAddFolder={onAddFolder} onImportInto={onImportInto} />
             <Button
               className="h-10 px-3 bg-surface text-text-primary"
               onClick={onOpenSettings}
@@ -422,10 +636,11 @@ export default function HomeScreen({
         <div className="flex flex-col gap-10 py-10">
           {(shelves || [])
             .filter((shelf) => !hidden.some((h) => isWithin(shelf.path, h)))
-            .map((shelf) => (
+            .map((shelf, i) => (
               <Shelf
                 key={shelf.path}
                 shelf={shelf}
+                index={i}
                 onHide={() => setHidden([...hidden, shelf.path])}
                 onOpen={onOpen}
                 requestThumbnails={requestThumbnails}
