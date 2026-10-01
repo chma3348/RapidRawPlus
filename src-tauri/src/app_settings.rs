@@ -384,6 +384,9 @@ pub struct AppSettings {
     /// Folders left off the home screen's shelves.
     #[serde(default)]
     pub home_hidden_folders: Option<Vec<String>>,
+    /// Folders whose contents are folded away on the home screen.
+    #[serde(default)]
+    pub home_collapsed_folders: Option<Vec<String>>,
     #[serde(default)]
     pub font_family: Option<String>,
     pub decorations: Option<bool>,
@@ -498,6 +501,7 @@ impl Default for AppSettings {
             theme: Some("graphite".to_string()),
             accent_color: None,
             home_hidden_folders: None,
+            home_collapsed_folders: None,
             font_family: None,
             decorations: Some(false),
             ai_connector_address: None,

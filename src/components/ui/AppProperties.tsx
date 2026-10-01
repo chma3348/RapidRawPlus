@@ -214,6 +214,8 @@ export interface AppSettings {
   rootFolders?: string[];
   /** Folders left off the home screen's shelves. */
   homeHiddenFolders?: string[];
+  /** Folders whose contents are folded away on the home screen. */
+  homeCollapsedFolders?: string[];
   libraryViewMode?: LibraryViewMode;
   sortCriteria?: SortCriteria;
   theme: Theme;
