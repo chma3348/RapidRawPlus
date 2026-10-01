@@ -157,6 +157,13 @@ export default function EditorView({
 
   const editorBottomBarComponent = (
     <BottomBar
+      topSlot={
+        <VersionStrip
+          selectedPath={selectedImage?.path}
+          onSelect={(path) => handleImageClick(path, {})}
+          requestThumbnails={requestThumbnails}
+        />
+      }
       filmstripHeight={bottomPanelHeight}
       imageList={sortedImageList}
       imageRatings={imageRatings}
@@ -259,13 +266,6 @@ export default function EditorView({
     >
       <div className={clsx('flex-1 flex flex-col min-w-0', isCompactPortrait && 'min-h-0')}>
         {editorNode}
-        {!isFullScreen && (
-          <VersionStrip
-            selectedPath={selectedImage?.path}
-            onSelect={(path) => handleImageClick(path, {})}
-            requestThumbnails={requestThumbnails}
-          />
-        )}
         {!isCompactPortrait && editorBottomBarNode}
       </div>
       <div

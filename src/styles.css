@@ -6,6 +6,9 @@
   --color-bg-secondary: var(--app-bg-secondary);
   --color-surface: var(--app-surface);
   --color-card-active: var(--app-card-active);
+  /* A raised background between surface and card-active; used by
+     status pills, LUT lists and AI panels. */
+  --color-bg-tertiary: var(--app-card-active);
   --color-button-text: var(--app-button-text);
   --color-text-primary: var(--app-text-primary);
   --color-text-secondary: var(--app-text-secondary);

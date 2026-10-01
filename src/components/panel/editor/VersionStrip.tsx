@@ -35,7 +35,7 @@ export default function VersionStrip({
   if (!group || group.length < 2) return null;
 
   return (
-    <div className="flex shrink-0 items-center justify-center gap-2 px-4 pb-1 pt-2">
+    <div className="flex shrink-0 items-center justify-center gap-2 border-b border-surface px-4 pb-1.5 pt-2">
       <span
         className="flex items-center gap-1 text-xs text-text-secondary"
         data-tooltip={t('editor.versions.tooltip', 'Files made from this photo. Click one to open it.')}

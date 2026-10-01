@@ -13,6 +13,8 @@ import { useLibraryStore } from '../../store/useLibraryStore';
 import { COLOR_LABELS } from '../../utils/adjustments';
 
 interface BottomBarProps {
+  /** Shown at the top of the card, above the filmstrip (the photo's versions). */
+  topSlot?: React.ReactNode;
   filmstripHeight?: number;
   imageList?: Array<ImageFile>;
   imageRatings?: Record<string, number> | null;
@@ -92,6 +94,7 @@ const StarRating = ({ rating, onRate, disabled }: StarRatingProps) => {
 };
 
 export default function BottomBar({
+  topSlot,
   filmstripHeight,
   imageList = [],
   imageRatings,
@@ -259,6 +262,7 @@ export default function BottomBar({
 
   return (
     <div className="shrink-0 bg-bg-secondary rounded-lg flex flex-col">
+      {!isLibraryView && topSlot}
       {!isLibraryView && showFilmstrip && (
         <div
           className={clsx('overflow-hidden', !isResizing && 'transition-all duration-300 ease-in-out')}
@@ -384,6 +388,10 @@ export default function BottomBar({
               data-tooltip={t('ui.bottomBar.tooltips.quickFilter', 'Quick Filter')}
             >
               <Filter size={18} />
+              {/* A filter is narrowing the filmstrip even while this is folded. */}
+              {(filterCriteria.rating > 0 || (filterCriteria.colors || []).length > 0) && (
+                <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-accent" />
+              )}
             </button>
 
             <div
@@ -406,6 +414,10 @@ export default function BottomBar({
                           }))
                         }
                         className="p-0.5 focus:outline-none"
+                        data-tooltip={t('ui.bottomBar.tooltips.filterRating', {
+                          defaultValue: 'Show {{count}}+ stars',
+                          count: starValue,
+                        })}
                       >
                         <Star
                           size={16}
