@@ -17,6 +17,7 @@ import clsx from 'clsx';
 
 import TitleBar from './window/TitleBar';
 import FolderTree from './components/panel/FolderTree';
+import RejectsPrompt from './components/modals/RejectsPrompt';
 import ExportPanel from './components/panel/right/ExportPanel';
 import Resizer from './components/ui/Resizer';
 import GlobalTooltip from './components/ui/GlobalTooltip';
@@ -895,6 +896,7 @@ function App() {
         />
         <FileDragGhost />
         <CullView onEdit={handleImageSelect} />
+        <RejectsPrompt />
         <ConvertModal />
         <ToastContainer
           position="bottom-right"

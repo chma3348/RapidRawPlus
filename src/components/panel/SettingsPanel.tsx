@@ -508,6 +508,11 @@ export default function SettingsPanel({
 }: SettingsPanelProps) {
   const { user: _user } = useUser();
   const { t } = useTranslation();
+  const rejectsOptions: OptionItem<string>[] = [
+    { value: 'ask', label: t('settings.general.rejectsAsk') },
+    { value: 'move', label: t('settings.general.rejectsMove') },
+    { value: 'keep', label: t('settings.general.rejectsKeep') },
+  ];
   const [isClearing, setIsClearing] = useState(false);
   const [clearMessage, setClearMessage] = useState('');
   const [isClearingCache, setIsClearingCache] = useState(false);
@@ -1176,6 +1181,56 @@ export default function SettingsPanel({
                         )}
                       </AnimatePresence>
                     </div>
+
+                    <SettingItem label={t('settings.general.rejects')} description={t('settings.general.rejectsDesc')}>
+                      <Dropdown
+                        onChange={(value: any) => onSettingsChange({ ...appSettings, rejectsAfterCull: value })}
+                        options={rejectsOptions}
+                        value={appSettings?.rejectsAfterCull ?? 'ask'}
+                        triggerClassName="bg-bg-primary"
+                      />
+                      {Object.keys(appSettings?.rejectsFolderChoices || {}).length > 0 && (
+                        <div className="mt-4 space-y-2">
+                          <Text variant={TextVariants.small} color={TextColors.secondary}>
+                            {t('settings.general.rejectsFolders')}
+                          </Text>
+                          {Object.entries(appSettings?.rejectsFolderChoices || {}).map(([folder, choice]) => {
+                            const setOwn = (next: Record<string, 'ask' | 'move' | 'keep'>) =>
+                              onSettingsChange({ ...appSettings, rejectsFolderChoices: next });
+                            return (
+                              <div
+                                key={folder}
+                                className="flex items-center gap-2 rounded-md bg-bg-primary pl-3 pr-1 py-1"
+                              >
+                                <span className="flex-1 min-w-0 truncate text-sm" data-tooltip={folder}>
+                                  {folder.split(/[\\/]/).pop()}
+                                </span>
+                                <Dropdown
+                                  className="w-64 shrink-0"
+                                  onChange={(value: any) =>
+                                    setOwn({ ...(appSettings?.rejectsFolderChoices || {}), [folder]: value })
+                                  }
+                                  options={rejectsOptions}
+                                  value={choice}
+                                  triggerClassName="bg-surface"
+                                />
+                                <button
+                                  className="p-1.5 rounded hover:bg-card-active text-text-secondary hover:text-text-primary"
+                                  data-tooltip={t('settings.general.rejectsUseDefault')}
+                                  onClick={() => {
+                                    const next = { ...(appSettings?.rejectsFolderChoices || {}) };
+                                    delete next[folder];
+                                    setOwn(next);
+                                  }}
+                                >
+                                  <X size={14} />
+                                </button>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </SettingItem>
 
                     <SettingItem
                       label={t('settings.general.folderImageCounts')}

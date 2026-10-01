@@ -11,6 +11,7 @@ import { useProcessStore } from '../../../store/useProcessStore';
 import { isVideoPath } from '../../../utils/media';
 import { COLOR_LABELS } from '../../../utils/adjustments';
 import { setFlagForPaths } from '../../../utils/flags';
+import { afterCulling } from '../../../utils/rejectsAfterCull';
 
 /**
  * Culling: going through a shoot quickly, one big photo at a time,
@@ -32,14 +33,20 @@ interface CullState {
   startPath: string | null;
   openCull: (paths: string[], startPath: string | null) => void;
   closeCull: () => void;
+  /** Close at the end of a cull (Done or Esc), then deal with what was rejected. */
+  finishCull: () => void;
 }
 
-export const useCullStore = create<CullState>((set) => ({
+export const useCullStore = create<CullState>((set, get) => ({
   open: false,
   paths: [],
   startPath: null,
   openCull: (paths, startPath) => set({ open: paths.length > 0, paths, startPath }),
   closeCull: () => set({ open: false }),
+  finishCull: () => {
+    set({ open: false });
+    afterCulling(get().paths);
+  },
 }));
 
 /** Open culling on the selection (when several are selected) or the whole view. */
@@ -124,7 +131,7 @@ function usePreviews(paths: string[], index: number) {
 
 export default function CullView({ onEdit }: { onEdit: (path: string) => void }) {
   const { t } = useTranslation();
-  const { open, paths, startPath, closeCull } = useCullStore();
+  const { open, paths, startPath, closeCull, finishCull } = useCullStore();
   const imageList = useLibraryStore((s) => s.imageList);
   const imageRatings = useLibraryStore((s) => s.imageRatings);
   const thumbnails = useProcessStore((s) => s.thumbnails);
@@ -201,7 +208,7 @@ export default function CullView({ onEdit }: { onEdit: (path: string) => void })
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       const key = e.key.toLowerCase();
       let handled = true;
-      if (key === 'escape') closeCull();
+      if (key === 'escape') finishCull();
       else if (key === 'arrowright') go(index + 1);
       else if (key === 'arrowleft') go(index - 1);
       else if (key === 'p') setFlag('pick');
@@ -223,7 +230,7 @@ export default function CullView({ onEdit }: { onEdit: (path: string) => void })
     };
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
-  }, [open, index, go, setFlag, setRating, setLabel, closeCull, compare, targetPath, onEdit]);
+  }, [open, index, go, setFlag, setRating, setLabel, closeCull, finishCull, compare, targetPath, onEdit]);
 
   if (!open || paths.length === 0) return null;
 
@@ -296,7 +303,7 @@ export default function CullView({ onEdit }: { onEdit: (path: string) => void })
         </button>
         <button
           type="button"
-          onClick={closeCull}
+          onClick={finishCull}
           className="rounded-md bg-surface px-3 py-1 text-xs hover:bg-card-active"
         >
           {t('cull.done', { defaultValue: 'Done' })}

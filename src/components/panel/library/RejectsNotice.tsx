@@ -1,9 +1,11 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Eye, EyeOff, FolderInput, X } from 'lucide-react';
+import { Check, ChevronDown, Eye, EyeOff, FolderInput, X } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 
 import { useLibraryStore } from '../../../store/useLibraryStore';
+import { useSettingsStore } from '../../../store/useSettingsStore';
+import { RejectsHandling, rejectsHandlingFor } from '../../../utils/rejectsAfterCull';
 import { isRejectsFolder, movableRejects, moveRejectsToSubfolders, rejectsFolderFor } from '../../../utils/flags';
 
 const parentOf = (path: string) => path.split('?vc=')[0].replace(/[\\/][^\\/]*$/, '');
@@ -32,6 +34,7 @@ export default function RejectsNotice() {
   const folders = useMemo(() => new Set(movable.map(parentOf)), [movable]);
 
   if (rejected === 0 || flagFilter === 'rejected' || isRejectsFolder(currentFolderPath)) return null;
+  const isFolder = !!currentFolderPath && !currentFolderPath.startsWith('Album: ');
 
   const target =
     folders.size === 1
@@ -75,6 +78,68 @@ export default function RejectsNotice() {
             defaultValue: 'Move {{count}} to “{{target}}”',
           })}
         </button>
+      )}
+      {isFolder && <AfterCullChoice folder={currentFolderPath!} />}
+    </div>
+  );
+}
+
+/** This folder's own choice for rejects when culling finishes, or the one for all folders. */
+function AfterCullChoice({ folder }: { folder: string }) {
+  const { t } = useTranslation();
+  const { appSettings, handleSettingsChange } = useSettingsStore(
+    useShallow((s) => ({ appSettings: s.appSettings, handleSettingsChange: s.handleSettingsChange })),
+  );
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: PointerEvent) => !ref.current?.contains(e.target as Node) && setOpen(false);
+    window.addEventListener('pointerdown', close);
+    return () => window.removeEventListener('pointerdown', close);
+  }, [open]);
+
+  const labels: Record<RejectsHandling, string> = {
+    ask: t('settings.general.rejectsAsk'),
+    move: t('settings.general.rejectsMove'),
+    keep: t('settings.general.rejectsKeep'),
+  };
+  const own = appSettings?.rejectsFolderChoices?.[folder];
+  const general = appSettings?.rejectsAfterCull ?? 'ask';
+  const current = rejectsHandlingFor(appSettings, folder);
+
+  const set = (choice: RejectsHandling | null) => {
+    if (!appSettings) return;
+    const next = { ...(appSettings.rejectsFolderChoices || {}) };
+    if (choice === null) delete next[folder];
+    else next[folder] = choice;
+    handleSettingsChange({ ...appSettings, rejectsFolderChoices: next });
+    setOpen(false);
+  };
+
+  const item = 'w-full flex items-center gap-2 rounded px-2.5 py-1.5 text-left text-xs hover:bg-card-active';
+  return (
+    <div ref={ref} className="relative ml-auto">
+      <button
+        className="inline-flex items-center gap-1 hover:text-text-primary transition-colors"
+        onClick={() => setOpen(!open)}
+      >
+        {t('library.rejects.afterCull')}: <span className="text-text-primary">{labels[current]}</span>
+        <ChevronDown size={12} />
+      </button>
+      {open && (
+        <div className="absolute right-0 top-6 z-30 w-64 rounded-lg border border-border-color bg-surface p-1 shadow-xl">
+          <button className={item} onClick={() => set(null)}>
+            <Check size={12} className={own ? 'invisible' : ''} />
+            {t('library.rejects.default', { choice: labels[general] })}
+          </button>
+          {(['ask', 'move', 'keep'] as RejectsHandling[]).map((choice) => (
+            <button key={choice} className={item} onClick={() => set(choice)}>
+              <Check size={12} className={own === choice ? '' : 'invisible'} />
+              {labels[choice]}
+            </button>
+          ))}
+        </div>
       )}
     </div>
   );

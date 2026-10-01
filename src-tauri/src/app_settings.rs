@@ -387,6 +387,12 @@ pub struct AppSettings {
     /// Folders whose contents are folded away on the home screen.
     #[serde(default)]
     pub home_collapsed_folders: Option<Vec<String>>,
+    /// What happens to rejects when culling is finished: "ask", "move" or "keep".
+    #[serde(default)]
+    pub rejects_after_cull: Option<String>,
+    /// Folders with their own choice, by path.
+    #[serde(default)]
+    pub rejects_folder_choices: Option<serde_json::Value>,
     #[serde(default)]
     pub font_family: Option<String>,
     pub decorations: Option<bool>,
@@ -502,6 +508,8 @@ impl Default for AppSettings {
             accent_color: None,
             home_hidden_folders: None,
             home_collapsed_folders: None,
+            rejects_after_cull: None,
+            rejects_folder_choices: None,
             font_family: None,
             decorations: Some(false),
             ai_connector_address: None,

@@ -1166,13 +1166,15 @@
       "tooltipVersions": "{{count}} versions — open to switch between them"
     },
     "rejects": {
+      "afterCull": "After culling here",
+      "default": "As all folders ({{choice}})",
       "folders": "rejects folders",
       "hidden_one": "{{count}} rejected hidden",
       "hidden_other": "{{count}} rejected hidden",
       "hide": "Hide",
+      "moveTip": "Move them, with their sidecars and copies, into a subfolder. ⌘Z undoes it.",
       "move_one": "Move {{count}} to “{{target}}”",
       "move_other": "Move {{count}} to “{{target}}”",
-      "moveTip": "Move them, with their sidecars and copies, into a subfolder. ⌘Z undoes it.",
       "show": "Show",
       "showing_one": "Showing {{count}} rejected",
       "showing_other": "Showing {{count}} rejected"
@@ -1665,6 +1667,22 @@
     "noModels": "No models available",
     "notDownloaded": "not downloaded"
   },
+  "rejectsPrompt": {
+    "changeLater": "You can change this any time in Settings › General › Rejected photos.",
+    "forAll": "For all folders",
+    "forFolder": "For {{name}}",
+    "keep": "Keep hidden here",
+    "keepDesc": "They stay in the folder, hidden in this app. Show them any time.",
+    "move": "Move to “{{target}}”",
+    "moveDesc": "Out of the folder in Finder and other apps too, with their sidecars. ⌘Z undoes it.",
+    "once": "Just this time",
+    "question": "What should happen to them? Either way nothing is deleted.",
+    "remember": "Remember my choice",
+    "theirFolders": "their rejects folders",
+    "theseFolders": "For these folders",
+    "title_one": "{{count}} photo rejected",
+    "title_other": "{{count}} photos rejected"
+  },
   "settings": {
     "accents": {
       "ember": "Ember",
@@ -1769,6 +1787,13 @@
       "nativeTitlebar": "Native Titlebar",
       "nativeTitlebarDesc": "Use your system's default window titlebar instead of RapidRAW's custom one.",
       "poppins": "Poppins",
+      "rejects": "Rejected photos after culling",
+      "rejectsAsk": "Ask each time",
+      "rejectsDesc": "When you finish culling, rejects can be moved into a subfolder named after the folder (“Tahiti/Tahiti rejects”) or kept where they are, hidden.",
+      "rejectsFolders": "Folders with their own choice",
+      "rejectsKeep": "Keep hidden in the folder",
+      "rejectsMove": "Move to a rejects subfolder",
+      "rejectsUseDefault": "Use the choice for all folders",
       "showImageCounts": "Show Image Counts",
       "system": "System Default",
       "theme": "Theme",

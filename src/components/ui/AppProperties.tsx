@@ -216,6 +216,10 @@ export interface AppSettings {
   homeHiddenFolders?: string[];
   /** Folders whose contents are folded away on the home screen. */
   homeCollapsedFolders?: string[];
+  /** What happens to rejects when culling is finished: ask, move to a rejects subfolder, or keep hidden. */
+  rejectsAfterCull?: 'ask' | 'move' | 'keep';
+  /** Folders with their own choice, overriding rejectsAfterCull. */
+  rejectsFolderChoices?: Record<string, 'ask' | 'move' | 'keep'>;
   libraryViewMode?: LibraryViewMode;
   sortCriteria?: SortCriteria;
   theme: Theme;
