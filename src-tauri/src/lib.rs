@@ -32,6 +32,7 @@ pub mod hdr_merge;
 pub mod heal_blend;
 pub mod image_loader;
 pub mod image_processing;
+pub mod journal;
 mod lens_correction;
 pub mod lut_processing;
 mod mask_generation;
@@ -1791,6 +1792,8 @@ pub fn run() {
             file_management::get_supported_file_types,
             file_management::load_video_info,
             file_management::video_stream_url,
+            file_management::undo_file_operation,
+            file_management::file_operation_history,
             file_management::save_video_frame,
             sky_commands::list_sky_plates,
             sky_commands::prepare_sky_replacement,

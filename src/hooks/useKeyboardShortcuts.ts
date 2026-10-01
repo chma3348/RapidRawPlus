@@ -10,6 +10,7 @@ import { useEditorActions } from './useEditorActions';
 import { useLibraryActions } from './useLibraryActions';
 import { getStacks, withVersions } from './useStacks';
 import { stackRootOf } from '../utils/stacks';
+import { undoFileOperation } from '../utils/fileUndo';
 
 interface KeyboardShortcutsProps {
   sortedImageList: Array<ImageFile>;
@@ -243,10 +244,12 @@ export const useKeyboardShortcuts = ({
         },
       },
       undo: {
-        shouldFire: (s: any) => !!s.editor.selectedImage && s.editor.historyIndex > 0,
+        // In the editor it undoes edits; in the library, file operations.
+        shouldFire: (s: any) => !s.editor.selectedImage || s.editor.historyIndex > 0,
         execute: (e: any, s: any) => {
           e.preventDefault();
-          s.editor.undo();
+          if (s.editor.selectedImage) s.editor.undo();
+          else undoFileOperation();
         },
       },
       redo: {

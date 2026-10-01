@@ -1580,7 +1580,14 @@ pub fn create_folder(path: String) -> Result<(), String> {
             }
         }
     }
-    fs::create_dir_all(&path).map_err(|e| e.to_string())
+    fs::create_dir_all(&path).map_err(|e| e.to_string())?;
+    crate::journal::record(
+        format!("New folder {}", folder_name(Path::new(&path))),
+        vec![crate::journal::Action::FolderCreated {
+            path: PathBuf::from(&path),
+        }],
+    );
+    Ok(())
 }
 
 #[tauri::command]
@@ -1600,6 +1607,13 @@ pub fn rename_folder(path: String, new_name: String, app_handle: AppHandle) -> R
         }
         let new_path = parent.join(&new_name);
         fs::rename(p, &new_path).map_err(|e| e.to_string())?;
+        crate::journal::record(
+            format!("Rename folder {} to {new_name}", folder_name(p)),
+            vec![crate::journal::Action::Moved {
+                from: p.to_path_buf(),
+                to: new_path.clone(),
+            }],
+        );
 
         let new_folder_str = new_path.to_string_lossy().into_owned();
         sync_album_path_changes(&app_handle, None, None, Some((&path, &new_folder_str)));
@@ -1612,21 +1626,11 @@ pub fn rename_folder(path: String, new_name: String, app_handle: AppHandle) -> R
 
 #[tauri::command]
 pub fn delete_folder(path: String, app_handle: AppHandle) -> Result<(), String> {
-    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
-    {
-        if let Err(trash_error) = trash::delete(&path) {
-            log::warn!(
-                "Failed to move folder to trash: {}. Falling back to permanent delete.",
-                trash_error
-            );
-            fs::remove_dir_all(&path).map_err(|e| e.to_string())?;
-        }
-    }
-
-    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-    {
-        fs::remove_dir_all(&path).map_err(|e| e.to_string())?;
-    }
+    let actions = crate::journal::trash_all(&[PathBuf::from(&path)])?;
+    crate::journal::record(
+        format!("Delete folder {}", folder_name(Path::new(&path))),
+        actions,
+    );
 
     let mut deletions = HashSet::new();
     deletions.insert(path);
@@ -1674,6 +1678,9 @@ pub fn duplicate_file(
     }
 
     fs::copy(&source_path, &dest_path).map_err(|e| e.to_string())?;
+    let mut actions = vec![crate::journal::Action::Created {
+        path: dest_path.clone(),
+    }];
 
     // Its edits and XMP come along; its virtual copies stay with the original.
     let name = source_path
@@ -1696,8 +1703,10 @@ pub fn duplicate_file(
         let target = companion_target(&companion, &source_path, &dest_path);
         if !target.exists() {
             fs::copy(&companion, &target).map_err(|e| e.to_string())?;
+            actions.push(crate::journal::Action::Created { path: target });
         }
     }
+    crate::journal::record("Duplicate 1 photo", actions);
 
     let dest_path_str = dest_path.to_string_lossy().into_owned();
 
@@ -1755,6 +1764,18 @@ pub fn companion_target(companion: &Path, old_image: &Path, new_image: &Path) ->
     parent.join(&*file)
 }
 
+/// "3 photos", "1 photo".
+fn photos(n: usize) -> String {
+    format!("{n} photo{}", if n == 1 { "" } else { "s" })
+}
+
+/// A folder's name for an operation's label.
+fn folder_name(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
 /// A photo plus everything that travels with it.
 fn find_all_associated_files(source_image_path: &Path) -> Result<Vec<PathBuf>, String> {
     let mut files = vec![source_image_path.to_path_buf()];
@@ -1777,23 +1798,6 @@ fn free_copy_name(folder: &Path, image: &Path) -> PathBuf {
             return candidate;
         }
         n += 1;
-    }
-}
-
-/// Move one file: a rename on the same volume (instant, nothing copied),
-/// otherwise a copy. Returns whether it was copied, so the caller removes
-/// the original once everything has arrived.
-fn move_or_copy(from: &Path, to: &Path) -> Result<bool, String> {
-    match fs::rename(from, to) {
-        Ok(()) => Ok(false),
-        Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => fs::copy(from, to)
-            .map(|_| true)
-            .map_err(|e| format!("Could not copy {} to {}: {e}", from.display(), to.display())),
-        Err(e) => Err(format!(
-            "Could not move {} to {}: {e}",
-            from.display(),
-            to.display()
-        )),
     }
 }
 
@@ -1843,6 +1847,7 @@ pub fn copy_files(
         .collect();
 
     let mut created = Vec::new();
+    let mut actions = Vec::new();
     for source_image_path in unique_source_images {
         let file_name = source_image_path
             .file_name()
@@ -1853,14 +1858,26 @@ pub fn copy_files(
             dest_image = free_copy_name(dest_path, &source_image_path);
         }
         fs::copy(&source_image_path, &dest_image).map_err(|e| e.to_string())?;
+        actions.push(crate::journal::Action::Created {
+            path: dest_image.clone(),
+        });
         for companion in companion_files(&source_image_path) {
             let target = companion_target(&companion, &source_image_path, &dest_image);
             if !target.exists() {
                 fs::copy(&companion, &target).map_err(|e| e.to_string())?;
+                actions.push(crate::journal::Action::Created { path: target });
             }
         }
         created.push(dest_image.to_string_lossy().into_owned());
     }
+    crate::journal::record(
+        format!(
+            "Copy {} to {}",
+            photos(created.len()),
+            folder_name(dest_path)
+        ),
+        actions,
+    );
     Ok(created)
 }
 
@@ -1885,6 +1902,7 @@ pub fn move_files(
 
     let mut all_files_to_trash = Vec::new();
     let mut renames = HashMap::new();
+    let mut actions = Vec::new();
 
     for source_image_path in unique_source_images {
         let source_parent = source_image_path
@@ -1909,9 +1927,13 @@ pub fn move_files(
         }
 
         for (from, to) in files_to_move.iter().zip(&targets) {
-            if move_or_copy(from, to)? {
+            if crate::journal::move_or_copy(from, to)? {
                 all_files_to_trash.push(from.clone());
             }
+            actions.push(crate::journal::Action::Moved {
+                from: from.clone(),
+                to: to.clone(),
+            });
         }
 
         renames.insert(
@@ -1920,30 +1942,20 @@ pub fn move_files(
         );
     }
 
-    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
-    if !all_files_to_trash.is_empty()
-        && let Err(trash_error) = trash::delete_all(&all_files_to_trash)
-    {
-        log::warn!(
-            "Failed to move source files to trash: {}. Falling back to permanent delete.",
-            trash_error
-        );
-        for path in all_files_to_trash {
-            if path.is_file() {
-                fs::remove_file(&path).map_err(|e| {
-                    format!("Failed to delete source file {}: {}", path.display(), e)
-                })?;
-            }
-        }
+    // Originals copied across volumes go to the Trash once everything has
+    // arrived. Undo brings the moved files back, so these are not journalled.
+    if !all_files_to_trash.is_empty() {
+        crate::journal::trash_all(&all_files_to_trash)?;
     }
 
-    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-    for path in all_files_to_trash {
-        if path.is_file() {
-            fs::remove_file(&path)
-                .map_err(|e| format!("Failed to delete source file {}: {}", path.display(), e))?;
-        }
-    }
+    crate::journal::record(
+        format!(
+            "Move {} to {}",
+            photos(renames.len()),
+            folder_name(dest_path)
+        ),
+        actions,
+    );
 
     sync_album_path_changes(&app_handle, Some(&renames), None, None);
 
@@ -2792,33 +2804,11 @@ pub fn delete_files_from_disk(paths: Vec<String>, app_handle: AppHandle) -> Resu
     }
 
     let final_paths_to_delete: Vec<PathBuf> = files_to_trash.into_iter().collect();
-    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
-    if let Err(trash_error) = trash::delete_all(&final_paths_to_delete) {
-        log::warn!(
-            "Failed to move files to trash: {}. Falling back to permanent delete.",
-            trash_error
-        );
-        for path in final_paths_to_delete {
-            if path.is_file() {
-                fs::remove_file(&path)
-                    .map_err(|e| format!("Failed to delete file {}: {}", path.display(), e))?;
-            } else if path.is_dir() {
-                fs::remove_dir_all(&path)
-                    .map_err(|e| format!("Failed to delete directory {}: {}", path.display(), e))?;
-            }
-        }
-    }
-
-    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-    for path in final_paths_to_delete {
-        if path.is_file() {
-            fs::remove_file(&path)
-                .map_err(|e| format!("Failed to delete file {}: {}", path.display(), e))?;
-        } else if path.is_dir() {
-            fs::remove_dir_all(&path)
-                .map_err(|e| format!("Failed to delete directory {}: {}", path.display(), e))?;
-        }
-    }
+    let actions = crate::journal::trash_all(&final_paths_to_delete)?;
+    crate::journal::record(
+        format!("Delete {} and associated files", photos(deletions.len())),
+        actions,
+    );
 
     sync_album_path_changes(&app_handle, None, Some(&deletions), None);
 
@@ -3264,6 +3254,7 @@ pub fn rename_files(
     }
     operations.extend(sidecar_operations);
 
+    let mut actions = Vec::new();
     for (old_path, new_path) in operations {
         fs::rename(&old_path, &new_path).map_err(|e| {
             format!(
@@ -3276,6 +3267,10 @@ pub fn rename_files(
 
         let old_str = old_path.to_string_lossy().into_owned();
         let new_str = new_path.to_string_lossy().into_owned();
+        actions.push(crate::journal::Action::Moved {
+            from: old_path.clone(),
+            to: new_path.clone(),
+        });
 
         renames.insert(old_str, new_str.clone());
 
@@ -3287,6 +3282,7 @@ pub fn rename_files(
     for (old, new) in &image_renames {
         relink_versions(old, new);
     }
+    crate::journal::record(format!("Rename {}", photos(image_renames.len())), actions);
 
     sync_album_path_changes(&app_handle, Some(&renames), None, None);
 
@@ -3312,14 +3308,63 @@ pub fn create_virtual_copy(
         let default_metadata = ImageMetadata::default();
         let json_string =
             serde_json::to_string_pretty(&default_metadata).map_err(|e| e.to_string())?;
-        fs::write(new_sidecar_path, json_string).map_err(|e| e.to_string())?;
+        fs::write(&new_sidecar_path, json_string).map_err(|e| e.to_string())?;
     }
+    crate::journal::record(
+        "Create virtual copy",
+        vec![crate::journal::Action::Created {
+            path: new_sidecar_path,
+        }],
+    );
 
     if let Some(album_id) = target_album_id {
         let _ = add_to_album(album_id, vec![new_virtual_path.clone()], app_handle);
     }
 
     Ok(new_virtual_path)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UndoOutcome {
+    /// What was undone, e.g. "Move 3 photos to Tahiti".
+    pub label: String,
+    /// Anything that could not be put back.
+    pub problems: Vec<String>,
+}
+
+/// Undo the most recent file operation (move, rename, copy, delete…).
+#[tauri::command]
+pub fn undo_file_operation(app_handle: AppHandle) -> Result<UndoOutcome, String> {
+    let report = crate::journal::undo_last()?;
+    let mut renames = HashMap::new();
+    for (gone, back) in &report.moved_back {
+        let (gone_s, back_s) = (
+            gone.to_string_lossy().into_owned(),
+            back.to_string_lossy().into_owned(),
+        );
+        if back.is_dir() {
+            sync_album_path_changes(&app_handle, None, None, Some((&gone_s, &back_s)));
+        } else if is_supported_media_file(back) {
+            if gone.parent() == back.parent() {
+                relink_versions(gone, back);
+            }
+            renames.insert(gone_s, back_s);
+        }
+    }
+    if !renames.is_empty() {
+        sync_album_path_changes(&app_handle, Some(&renames), None, None);
+    }
+    Ok(UndoOutcome {
+        label: report.label,
+        problems: report.problems,
+    })
+}
+
+/// The session's file operations, newest first.
+#[tauri::command]
+pub fn file_operation_history() -> Vec<crate::journal::HistoryEntry> {
+    crate::journal::history()
 }
 
 #[cfg(test)]
@@ -3405,7 +3450,7 @@ mod companion_tests {
         fs::create_dir(&dst).unwrap();
         touch(&src);
         assert!(
-            !move_or_copy(&src, &dst.join("a.ARW")).unwrap(),
+            !crate::journal::move_or_copy(&src, &dst.join("a.ARW")).unwrap(),
             "renamed, not copied"
         );
         assert!(!src.exists() && dst.join("a.ARW").exists());

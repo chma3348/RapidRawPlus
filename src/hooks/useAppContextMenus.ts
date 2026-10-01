@@ -61,6 +61,7 @@ import { useEditorActions } from './useEditorActions';
 import { useLibraryActions } from './useLibraryActions';
 import { globalImageCache } from '../utils/ImageLRUCache';
 import { getStacks, withVersions } from './useStacks';
+import { undoFileOperation } from '../utils/fileUndo';
 
 export interface UseAppContextMenusProps {
   handleImageSelect: (path: string) => void;
@@ -1327,9 +1328,14 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
   );
 
   const handleMainLibraryContextMenu = useCallback(
-    (event: any) => {
+    async (event: any) => {
       event.preventDefault();
       event.stopPropagation();
+      const { clientX, clientY } = event;
+      // The last file operation, to offer undoing it by name.
+      const lastOperation = await invoke<Array<{ label: string; undoable: boolean }>>('file_operation_history')
+        .then((history) => history[0] ?? null)
+        .catch(() => null);
 
       const { copiedFilePaths, setProcess } = useProcessStore.getState();
       const { currentFolderPath, activeAlbumId, setLibrary } = useLibraryStore.getState();
@@ -1398,6 +1404,12 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
           };
 
       const options = [
+        {
+          label: lastOperation ? `Undo ${lastOperation.label}` : 'Undo',
+          icon: Undo,
+          onClick: undoFileOperation,
+          disabled: !lastOperation?.undoable,
+        },
         { label: t('contextMenus.library.refreshView'), icon: RefreshCw, onClick: props.handleLibraryRefresh },
         { type: OPTION_SEPARATOR },
         pasteOption,
@@ -1409,7 +1421,7 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
         },
       ];
 
-      showContextMenu(event.clientX, event.clientY, options);
+      showContextMenu(clientX, clientY, options);
     },
     [props, showContextMenu, t],
   );

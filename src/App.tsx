@@ -313,10 +313,11 @@ function App() {
   useEffect(() => {
     const onRefresh = () => {
       handleLibraryRefresh();
+      refreshAllFolderTrees();
     };
     window.addEventListener(LIBRARY_REFRESH_EVENT, onRefresh);
     return () => window.removeEventListener(LIBRARY_REFRESH_EVENT, onRefresh);
-  }, [handleLibraryRefresh]);
+  }, [handleLibraryRefresh, refreshAllFolderTrees]);
 
   const {
     executeDelete,
