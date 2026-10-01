@@ -382,16 +382,12 @@ fn look(state: &AppState, edits: &Value) -> Result<Option<Look>> {
 /// one has been installed. It replaces the built-in rendering entirely rather
 /// than running after it — two rendering transforms in series is the mistake
 /// the whole pipeline is arranged to avoid.
-/// The Tone Mapper switch. "resolve", v3's own, renders through the
-/// captured Resolve transform when one is installed (the built-in rendering
-/// otherwise); the others are the previous engine's, kept selectable.
-fn tone_mapper(edits: &Value) -> Option<OutputRendering> {
-    match edits["toneMapper"].as_str() {
-        Some("basic") => Some(OutputRendering::PreviousBasic),
-        Some("agx") => Some(OutputRendering::PreviousAgx),
-        Some("filmic") => Some(OutputRendering::PreviousFilmic),
-        _ => None,
-    }
+/// The rendering is always v3's own: the captured Resolve transform when
+/// one is installed, the built-in rendering otherwise. The previous
+/// engine's tone mappers (Basic, AgX, Filmic) are no longer offered; a
+/// photo that saved one of them renders with v3 like every other.
+fn tone_mapper(_edits: &Value) -> Option<OutputRendering> {
+    None
 }
 
 fn plan(

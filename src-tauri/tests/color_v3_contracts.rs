@@ -230,6 +230,21 @@ fn gpu_color_pipeline_contracts() {
         .unwrap();
         assert_eq!(migrated.encoded_srgb, reference.encoded_srgb);
     }
+    // v3 only: a photo that saved one of the previous engine's tone
+    // mappers renders exactly as v3 renders it.
+    for mapper in ["basic", "agx", "filmic"] {
+        let mut old = reference_edits.clone();
+        old["toneMapper"] = serde_json::json!(mapper);
+        let rendered = rapidraw_lib::color_engine::application::render_file(
+            &context,
+            &state,
+            path,
+            &old,
+            Some(32),
+        )
+        .unwrap();
+        assert_eq!(rendered.encoded_srgb, reference.encoded_srgb, "{mapper}");
+    }
     let plan = RenderPlan::build(config()).unwrap();
     // Cross the 65536-pixel chunk boundary, with distinct RGB and straight alpha.
     let input = ImageBuffer::from_fn(257, 257, |x, y| {
@@ -2193,20 +2208,15 @@ fn output_space_contracts() {
     );
     *state.output_space.lock().unwrap() = OutputSpace::DisplayP3;
 
-    // The previous engine's tone mappers render sRGB, stored as P3.
+    // v3 only: a saved previous-engine tone mapper renders through the P3
+    // capture like any other photo.
     let mut basic = edits.clone();
     basic["toneMapper"] = json!("basic");
-    *state.output_space.lock().unwrap() = OutputSpace::Srgb;
-    let mut expected = render_for_output(&context, &state, path, &basic, None)
-        .unwrap()
-        .encoded_srgb;
-    srgb_encoded_to_p3(&mut expected);
-    *state.output_space.lock().unwrap() = OutputSpace::DisplayP3;
     assert_eq!(
         render_for_output(&context, &state, path, &basic, None)
             .unwrap()
             .encoded_srgb,
-        expected
+        native.encoded_srgb
     );
 
     // Pinning keeps the P3 capture: removing the installed files changes nothing.

@@ -585,14 +585,6 @@ export default function SettingsPanel({
     [t],
   );
 
-  const tonemapperOptions = useMemo<OptionItem<string>[]>(
-    () => [
-      { value: 'agx', label: t('settings.processing.preprocessing.tonemapperOptions.agx') },
-      { value: 'basic', label: t('settings.processing.preprocessing.tonemapperOptions.basic') },
-    ],
-    [t],
-  );
-
   const fontOptions = useMemo<OptionItem<string>[]>(
     () => [
       { value: 'poppins', label: t('settings.general.poppins') },
@@ -1962,63 +1954,6 @@ export default function SettingsPanel({
                         triggerClassName="bg-bg-primary"
                       />
                     </SettingItem>
-
-                    <div className="space-y-4">
-                      <SettingItem
-                        label={t('settings.processing.preprocessing.tonemapperOverride')}
-                        description={t('settings.processing.preprocessing.tonemapperOverrideDesc')}
-                      >
-                        <Switch
-                          checked={appSettings?.tonemapperOverrideEnabled ?? false}
-                          id="tonemapper-override-toggle"
-                          label={t('settings.processing.preprocessing.enableTonemapperOverride')}
-                          onChange={(checked) =>
-                            onSettingsChange({ ...appSettings, tonemapperOverrideEnabled: checked })
-                          }
-                        />
-                      </SettingItem>
-
-                      <AnimatePresence>
-                        {(appSettings?.tonemapperOverrideEnabled ?? false) && (
-                          <motion.div
-                            initial={{ height: 0, opacity: 0 }}
-                            animate={{ height: 'auto', opacity: 1 }}
-                            exit={{ height: 0, opacity: 0 }}
-                            transition={{ duration: 0.3, ease: 'easeInOut' }}
-                          >
-                            <div className="pl-4 border-l-2 border-border-color ml-1 space-y-3">
-                              <SettingItem
-                                label={t('settings.processing.preprocessing.defaultRawTonemapper')}
-                                description={t('settings.processing.preprocessing.defaultRawTonemapperDesc')}
-                              >
-                                <Dropdown
-                                  onChange={(value: any) =>
-                                    onSettingsChange({ ...appSettings, defaultRawTonemapper: value })
-                                  }
-                                  options={tonemapperOptions}
-                                  value={appSettings?.defaultRawTonemapper || 'agx'}
-                                  triggerClassName="bg-bg-primary"
-                                />
-                              </SettingItem>
-
-                              <SettingItem
-                                label={t('settings.processing.preprocessing.defaultNonRawTonemapper')}
-                                description={t('settings.processing.preprocessing.defaultNonRawTonemapperDesc')}
-                              >
-                                <Dropdown
-                                  onChange={(value: any) =>
-                                    onSettingsChange({ ...appSettings, defaultNonRawTonemapper: value })
-                                  }
-                                  options={tonemapperOptions}
-                                  value={appSettings?.defaultNonRawTonemapper || 'basic'}
-                                  triggerClassName="bg-bg-primary"
-                                />
-                              </SettingItem>
-                            </div>
-                          </motion.div>
-                        )}
-                      </AnimatePresence>
-                    </div>
                   </div>
                 </div>
 

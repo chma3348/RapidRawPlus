@@ -8,7 +8,6 @@ import LUTControl from '../ui/LUTControl';
 import FlatFieldControl from './FlatFieldControl';
 import ColorV3Advanced from './ColorV3Advanced';
 import BasicAdjustments from './Basic';
-import { useSettingsStore } from '../../store/useSettingsStore';
 import { useEditorStore } from '../../store/useEditorStore';
 import { useEditorActions } from '../../hooks/useEditorActions';
 import {
@@ -291,7 +290,6 @@ export default function ColorV3Controls({
   const { t } = useTranslation();
   const values: V3Controls = { ...defaultV3Controls(), ...adjustments.v3 };
   const renderError = useEditorStore((s) => s.colorV3Error);
-  const appSettings = useSettingsStore((s) => s.appSettings);
   const selectedPath = useEditorStore((s) => s.selectedImage?.path);
   const [band, setBand] = useState(0);
   const [wheel, setWheel] = useState(0);
@@ -393,10 +391,7 @@ export default function ColorV3Controls({
       <BasicAdjustments
         adjustments={adjustments}
         setAdjustments={setAdjustments}
-        isForMask={!showEffects}
         onDragStateChange={onDragStateChange}
-        appSettings={appSettings}
-        engineV3
       />
       <h3 className="mt-3 text-sm font-medium text-text-primary">
         {t('colorV3.whiteBalance', { defaultValue: 'White balance' })}
