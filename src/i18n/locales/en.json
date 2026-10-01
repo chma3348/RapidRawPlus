@@ -1032,6 +1032,14 @@
       "collapseSection": "Collapse {{section}}",
       "expandSection": "Expand {{section}}",
       "loading": "Loading folders...",
+      "mode": {
+        "auto": "Pop out when the pointer reaches the edge",
+        "autoShort": "Pops out at the edge",
+        "collapsed": "Collapse",
+        "collapsedShort": "Collapsed",
+        "pinned": "Keep open",
+        "pinnedShort": "Kept open"
+      },
       "noFoldersFound": "No folders found.",
       "openFolderInstruction": "Open a folder to see its structure.",
       "searchPlaceholder": "Search folders...",
@@ -1771,6 +1779,7 @@
     },
     "keybinds": {
       "actions": {
+        "back_to_grid": "Back to the grid",
         "brush_size_down": "Decrease brush size",
         "brush_size_up": "Increase brush size",
         "color_label_blue": "Color label: Blue",
@@ -1781,8 +1790,13 @@
         "color_label_yellow": "Color label: Yellow",
         "copy_adjustments": "Copy selected adjustments",
         "copy_files": "Copy selected file(s)",
+        "cycle_folder_panel": "Folder panel: keep open, pop out at the edge, or collapse",
         "cycle_zoom": "Cycle zoom (Fit, 2x Fit, 100%)",
         "delete_selected": "Delete selected file(s)",
+        "flag_clear": "Clear flag",
+        "flag_pick": "Pick (flag as a keeper)",
+        "flag_reject": "Reject",
+        "open_cull": "Cull photos one at a time",
         "open_image": "Open selected image",
         "paste_adjustments": "Paste copied adjustments",
         "paste_files": "Paste file(s) to current folder",
@@ -1805,6 +1819,7 @@
         "toggle_crop": "Toggle Crop / Straighten",
         "toggle_crop_panel": "Toggle Crop panel",
         "toggle_export": "Toggle Export panel",
+        "toggle_filter_bar": "Show or hide the filter bar",
         "toggle_fullscreen": "Toggle fullscreen",
         "toggle_library_exif": "Toggle EXIF overlay",
         "toggle_masks": "Toggle Masks panel",
@@ -1816,13 +1831,7 @@
         "zoom_in": "Zoom in",
         "zoom_in_step": "Zoom in (by step)",
         "zoom_out": "Zoom out",
-        "zoom_out_step": "Zoom out (by step)",
-        "flag_pick": "Pick (flag as a keeper)",
-        "flag_reject": "Reject",
-        "flag_clear": "Clear flag",
-        "open_cull": "Cull photos one at a time",
-        "toggle_filter_bar": "Show or hide the filter bar",
-        "back_to_grid": "Back to the grid"
+        "zoom_out_step": "Zoom out (by step)"
       },
       "sections": {
         "editing": "Editing",

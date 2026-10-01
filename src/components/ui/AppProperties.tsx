@@ -379,10 +379,18 @@ export interface TransformState {
   scale: number;
 }
 
+/** How the folder panel sits: always open, folded to a strip, or out of the way until the pointer comes near. */
+export type FolderPanelMode = 'pinned' | 'collapsed' | 'auto';
+
 export interface UiVisibility {
+  /** Kept for older settings: true when the panel is pinned open. */
   folderTree: boolean;
+  folderTreeMode?: FolderPanelMode;
   filmstrip: boolean;
 }
+
+export const folderPanelMode = (ui: UiVisibility): FolderPanelMode =>
+  ui.folderTreeMode ?? (ui.folderTree ? 'pinned' : 'collapsed');
 
 export interface WaveformData {
   blue: string;

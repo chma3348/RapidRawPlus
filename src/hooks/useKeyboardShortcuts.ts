@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { ImageFile, Panel, ExifOverlay } from '../components/ui/AppProperties';
+import { ImageFile, Panel, ExifOverlay, FolderPanelMode, folderPanelMode } from '../components/ui/AppProperties';
 import { KEYBIND_DEFINITIONS, normalizeCombo } from '../utils/keyboardUtils';
 import { useEditorStore } from '../store/useEditorStore';
 import { useLibraryStore } from '../store/useLibraryStore';
@@ -329,6 +329,18 @@ export const useKeyboardShortcuts = ({
         execute: (e: any) => {
           e.preventDefault();
           startCulling(sortedListRef.current);
+        },
+      },
+      cycle_folder_panel: {
+        // Kept open → pops out at the edge → collapsed → kept open.
+        shouldFire: () => true,
+        execute: (e: any, s: any) => {
+          e.preventDefault();
+          s.ui.setUI((state: any) => {
+            const order: FolderPanelMode[] = ['pinned', 'auto', 'collapsed'];
+            const next = order[(order.indexOf(folderPanelMode(state.uiVisibility)) + 1) % order.length];
+            return { uiVisibility: { ...state.uiVisibility, folderTreeMode: next, folderTree: next === 'pinned' } };
+          });
         },
       },
       toggle_filter_bar: {

@@ -281,6 +281,12 @@ export const KEYBIND_DEFINITIONS: KeybindDefinition[] = [
     section: 'library',
   },
   {
+    action: 'cycle_folder_panel',
+    description: 'settings.keybinds.actions.cycle_folder_panel',
+    defaultCombo: ['shift', 'KeyF'],
+    section: 'view',
+  },
+  {
     action: 'toggle_filter_bar',
     description: 'settings.keybinds.actions.toggle_filter_bar',
     defaultCombo: ['Backslash'],

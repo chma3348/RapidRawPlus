@@ -1,4 +1,13 @@
-import { type PointerEvent as ReactPointerEvent, useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import {
+  type ComponentProps,
+  type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
+  useState,
+  useEffect,
+  useCallback,
+  useRef,
+  useMemo,
+} from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -54,6 +63,8 @@ import {
   Orientation,
   ThumbnailSize,
   ThumbnailAspectRatio,
+  FolderPanelMode,
+  folderPanelMode,
 } from './components/ui/AppProperties';
 
 import ImageProcessingManager from './components/managers/ImageProcessingManager';
@@ -624,8 +635,104 @@ function App() {
 
   const hasRoots = rootPaths && rootPaths.length > 0;
 
+  const panelMode = folderPanelMode(uiVisibility);
+  const setPanelMode = useCallback(
+    (mode: FolderPanelMode) =>
+      setUI((state) => ({
+        uiVisibility: { ...state.uiVisibility, folderTreeMode: mode, folderTree: mode === 'pinned' },
+      })),
+    [setUI],
+  );
+
+  // In pop-out mode the panel waits off to the side, slides out over the photos
+  // when the pointer reaches the edge (a file being dragged too), and tucks away
+  // again a moment after the pointer leaves it, unless you're typing in its search.
+  const [panelOut, setPanelOut] = useState(false);
+  const panelEdgeRef = useRef<HTMLDivElement>(null);
+  const panelCloseTimer = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    if (panelMode !== 'auto') {
+      setPanelOut(false);
+      return;
+    }
+    const onMove = (e: PointerEvent) => {
+      const edge = panelEdgeRef.current?.getBoundingClientRect();
+      if (edge && e.clientX <= edge.right + 2 && e.clientY >= edge.top && e.clientY <= edge.bottom) {
+        window.clearTimeout(panelCloseTimer.current);
+        setPanelOut(true);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setPanelOut(false);
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [panelMode]);
+  const keepPanelOut = () => window.clearTimeout(panelCloseTimer.current);
+  const tuckPanelAway = () => {
+    window.clearTimeout(panelCloseTimer.current);
+    panelCloseTimer.current = window.setTimeout(() => {
+      const panel = panelEdgeRef.current?.parentElement;
+      const typing = panel?.contains(document.activeElement) && document.activeElement?.tagName === 'INPUT';
+      // Wait while you're searching or a folder's menu is open, then tuck away.
+      if (typing || document.querySelector('[role="menu"]')) tuckPanelAway();
+      else setPanelOut(false);
+    }, 350);
+  };
+
   const renderFolderTree = () => {
     if (!hasRoots) return null;
+
+    const tree = (style: CSSProperties, visible: boolean, extra: Partial<ComponentProps<typeof FolderTree>> = {}) => (
+      <FolderTree
+        isResizing={isResizing}
+        isVisible={visible}
+        onContextMenu={handleFolderTreeContextMenu}
+        onAlbumContextMenu={handleAlbumTreeContextMenu}
+        onSelectAlbum={handleSelectAlbum}
+        onFolderSelect={(path) => handleSelectSubfolder(path, false)}
+        onToggleFolder={handleToggleFolder}
+        onOpenFolder={handleOpenFolder}
+        setIsVisible={(value: boolean) => setPanelMode(value ? 'pinned' : 'collapsed')}
+        mode={panelMode}
+        onModeChange={setPanelMode}
+        style={style}
+        isInstantTransition={isInstantTransition}
+        {...extra}
+      />
+    );
+
+    if (panelMode === 'auto' && !isFullScreen) {
+      return (
+        <div className="relative h-full shrink-0 mr-2 z-40">
+          {/* The sliver left at the edge: a hint of the panel, and where the pointer brings it out. */}
+          <div
+            ref={panelEdgeRef}
+            className="h-full w-2.5 rounded-lg bg-bg-secondary/70 flex items-center justify-center"
+            data-tooltip="Folders"
+          >
+            <span className="w-0.5 h-10 rounded-full bg-text-secondary/40" />
+          </div>
+          {tree(
+            {
+              position: 'absolute',
+              left: 0,
+              top: 0,
+              bottom: 0,
+              width: `${leftPanelWidth}px`,
+              transform: panelOut ? 'translateX(0)' : `translateX(calc(-100% - 16px))`,
+              transition: 'transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 220ms',
+              boxShadow: panelOut ? '0 20px 50px rgba(0, 0, 0, 0.45)' : 'none',
+              pointerEvents: panelOut ? 'auto' : 'none',
+            },
+            true,
+            { onMouseEnter: keepPanelOut, onMouseLeave: tuckPanelAway },
+          )}
+        </div>
+      );
+    }
 
     return (
       <div
@@ -638,21 +745,7 @@ function App() {
           opacity: isFullScreen ? 0 : 1,
         }}
       >
-        <FolderTree
-          isResizing={isResizing}
-          isVisible={uiVisibility.folderTree}
-          onContextMenu={handleFolderTreeContextMenu}
-          onAlbumContextMenu={handleAlbumTreeContextMenu}
-          onSelectAlbum={handleSelectAlbum}
-          onFolderSelect={(path) => handleSelectSubfolder(path, false)}
-          onToggleFolder={handleToggleFolder}
-          onOpenFolder={handleOpenFolder}
-          setIsVisible={(value: boolean) =>
-            setUI((state) => ({ uiVisibility: { ...state.uiVisibility, folderTree: value } }))
-          }
-          style={{ width: uiVisibility.folderTree ? `${leftPanelWidth}px` : '32px' }}
-          isInstantTransition={isInstantTransition}
-        />
+        {tree({ width: panelMode === 'pinned' ? `${leftPanelWidth}px` : '32px' }, panelMode === 'pinned')}
         <Resizer direction={Orientation.Vertical} onMouseDown={createResizeHandler('left', leftPanelWidth)} />
       </div>
     );

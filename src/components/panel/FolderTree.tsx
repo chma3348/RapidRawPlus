@@ -2,7 +2,6 @@ import { useFileDragStore } from '../../utils/fileDrag';
 import {
   Folder,
   FolderOpen,
-  ChevronLeft,
   ChevronRight,
   ChevronUp,
   ChevronDown,
@@ -23,6 +22,9 @@ import {
   Briefcase,
   ArrowUpDown,
   Check,
+  Pin,
+  PanelLeftClose,
+  PanelLeftDashed,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -33,7 +35,15 @@ import Text from '../ui/Text';
 import { TEXT_COLOR_KEYS, TextColors, TextVariants, TextWeights } from '../../types/typography';
 import { useLibraryStore } from '../../store/useLibraryStore';
 import { useSettingsStore } from '../../store/useSettingsStore';
-import { AlbumItem, AlbumGroup, Album, Invokes, FolderTreeSort, SortDirection } from '../ui/AppProperties';
+import {
+  AlbumItem,
+  AlbumGroup,
+  Album,
+  FolderPanelMode,
+  Invokes,
+  FolderTreeSort,
+  SortDirection,
+} from '../ui/AppProperties';
 
 export interface FolderTree {
   children: FolderTree[];
@@ -56,8 +66,43 @@ interface FolderTreeProps {
   onToggleFolder(folder: string): void;
   onOpenFolder(): void;
   setIsVisible(visible: boolean): void;
+  /** How the panel sits, chosen from the switch in its header. */
+  mode: FolderPanelMode;
+  onModeChange(mode: FolderPanelMode): void;
   style: any;
   isInstantTransition: boolean;
+  onMouseEnter?(): void;
+  onMouseLeave?(): void;
+}
+
+const PANEL_MODES: { mode: FolderPanelMode; icon: typeof Pin; key: string; label: string }[] = [
+  { mode: 'pinned', icon: Pin, key: 'pinned', label: 'Keep open' },
+  { mode: 'auto', icon: PanelLeftDashed, key: 'auto', label: 'Pop out when the pointer reaches the edge' },
+  { mode: 'collapsed', icon: PanelLeftClose, key: 'collapsed', label: 'Collapse' },
+];
+
+/** Three small buttons: keep the folder panel open, pop it out on hover, or fold it away. */
+function PanelModeSwitch({ mode, onChange }: { mode: FolderPanelMode; onChange(mode: FolderPanelMode): void }) {
+  const { t } = useTranslation();
+  return (
+    <div className="flex items-center bg-surface rounded-md p-0.5 shrink-0" role="radiogroup">
+      {PANEL_MODES.map(({ mode: m, icon: Icon, key, label }) => (
+        <button
+          key={m}
+          role="radio"
+          aria-checked={mode === m}
+          className={clsx(
+            'w-7 h-7 rounded flex items-center justify-center transition-colors',
+            mode === m ? 'bg-card-active text-text-primary' : 'text-text-secondary hover:text-text-primary',
+          )}
+          onClick={() => onChange(m)}
+          data-tooltip={t(`library.folders.mode.${key}`, { defaultValue: label })}
+        >
+          <Icon size={14} />
+        </button>
+      ))}
+    </div>
+  );
 }
 
 interface TreeNodeProps {
@@ -619,8 +664,12 @@ export default function FolderTree({
   onToggleFolder,
   onOpenFolder,
   setIsVisible,
+  mode,
+  onModeChange,
   style,
   isInstantTransition,
+  onMouseEnter,
+  onMouseLeave,
 }: FolderTreeProps) {
   const { t } = useTranslation();
   const { appSettings, handleSettingsChange } = useSettingsStore();
@@ -774,8 +823,14 @@ export default function FolderTree({
         !isResizing && 'transition-[width] duration-300 ease-in-out',
       )}
       style={style}
-      onMouseEnter={() => setIsHovering(true)}
-      onMouseLeave={() => setIsHovering(false)}
+      onMouseEnter={() => {
+        setIsHovering(true);
+        onMouseEnter?.();
+      }}
+      onMouseLeave={() => {
+        setIsHovering(false);
+        onMouseLeave?.();
+      }}
     >
       {!isVisible && (
         <button
@@ -791,26 +846,6 @@ export default function FolderTree({
         <div className="p-2 flex flex-col h-full">
           <div className="pt-1 pb-2">
             <div className="flex items-center">
-              <AnimatePresence>
-                {showHeaderButtons && (
-                  <motion.div
-                    initial={{ width: 0, opacity: 0, marginRight: 0 }}
-                    animate={{ width: 'auto', opacity: 1, marginRight: 4 }}
-                    exit={{ width: 0, opacity: 0, marginRight: 0 }}
-                    transition={{ duration: 0.2, ease: 'easeInOut' }}
-                    className="flex items-center shrink-0 overflow-hidden"
-                  >
-                    <button
-                      className="bg-surface rounded-md hover:bg-card-active flex items-center justify-center shrink-0 transition-colors w-9 h-9"
-                      onClick={() => setIsVisible(false)}
-                      data-tooltip={t('library.folders.tooltips.collapse')}
-                    >
-                      <ChevronLeft size={17.5} className="text-text-secondary" />
-                    </button>
-                  </motion.div>
-                )}
-              </AnimatePresence>
-
               <div className="relative flex-1 min-w-0">
                 <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-secondary" />
                 <input
@@ -1079,6 +1114,15 @@ export default function FolderTree({
                 )}
               </div>
             )}
+          </div>
+          {/* How the panel sits: kept open, popping out at the edge, or folded away. */}
+          <div className="flex items-center justify-between gap-2 pt-2 mt-1 border-t border-surface">
+            <Text variant={TextVariants.small} color={TextColors.secondary} className="pl-1 truncate">
+              {t(`library.folders.mode.${mode}Short`, {
+                defaultValue: mode === 'pinned' ? 'Kept open' : mode === 'auto' ? 'Pops out at the edge' : 'Collapsed',
+              })}
+            </Text>
+            <PanelModeSwitch mode={mode} onChange={onModeChange} />
           </div>
         </div>
       )}
