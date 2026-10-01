@@ -376,6 +376,8 @@ pub struct AppSettings {
     pub filter_criteria: Option<FilterCriteria>,
     pub theme: Option<String>,
     #[serde(default)]
+    pub accent_color: Option<String>,
+    #[serde(default)]
     pub font_family: Option<String>,
     pub decorations: Option<bool>,
     #[serde(alias = "comfyuiAddress")]
@@ -486,7 +488,8 @@ impl Default for AppSettings {
             live_preview_quality: Some("high".to_string()),
             sort_criteria: None,
             filter_criteria: None,
-            theme: Some("dark".to_string()),
+            theme: Some("graphite".to_string()),
+            accent_color: None,
             font_family: None,
             decorations: Some(false),
             ai_connector_address: None,

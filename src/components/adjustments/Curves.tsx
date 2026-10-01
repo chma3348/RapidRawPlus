@@ -3,9 +3,10 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { RotateCcw, Copy, ClipboardPaste, Spline, Settings2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { ActiveChannel, Adjustments, Coord, ParametricCurveSettings } from '../../utils/adjustments';
-import { Theme, OPTION_SEPARATOR } from '../ui/AppProperties';
+import { OPTION_SEPARATOR } from '../ui/AppProperties';
 import { useContextMenu } from '../../context/ContextMenuContext';
 import Text from '../ui/Text';
+import { isLightTheme as isLightThemeId } from '../../utils/themes';
 import Slider from '../ui/Slider';
 import { TextColors, TextVariants, TextWeights } from '../../types/typography';
 
@@ -472,7 +473,7 @@ export default function CurveGraph({
     };
   }, [draggingPointIndex, draggingSplitKey, isParametricMode]);
 
-  const isLightTheme = theme === Theme.Light || theme === Theme.Arctic;
+  const isLightTheme = isLightThemeId(theme);
   const histogramOpacity = isLightTheme ? 0.6 : 0.15;
 
   const channelConfig: ChannelConfig = useMemo(

@@ -32,6 +32,7 @@ import { useFileOperations } from './hooks/useFileOperations';
 import { useAppContextMenus } from './hooks/useAppContextMenus';
 import { useSortedLibrary } from './hooks/useSortedLibrary';
 import { LIBRARY_REFRESH_EVENT } from './utils/stacks';
+import { isLightTheme as isLightThemeId } from './utils/themes';
 import { listenForFinderDrops } from './utils/fileDrag';
 import FileDragGhost from './components/ui/FileDragGhost';
 import CullView from './components/panel/library/CullView';
@@ -50,7 +51,6 @@ import {
   ImageFile,
   LibraryViewMode,
   Panel,
-  Theme,
   Orientation,
   ThumbnailSize,
   ThumbnailAspectRatio,
@@ -480,7 +480,7 @@ function App() {
     return () => window.removeEventListener('contextmenu', handleGlobalContextMenu);
   }, []);
 
-  const isLightTheme = useMemo(() => [Theme.Light, Theme.Snow, Theme.Arctic].includes(theme as Theme), [theme]);
+  const isLightTheme = useMemo(() => isLightThemeId(theme), [theme]);
 
   useEffect(() => {
     if (

@@ -19,7 +19,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
 import Button from '../ui/Button';
 import SettingsPanel from './SettingsPanel';
-import { ThemeProps, THEMES, DEFAULT_THEME_ID } from '../../utils/themes';
+import { getTheme } from '../../utils/themes';
 import {
   AppSettings,
   ImageFile,
@@ -235,11 +235,7 @@ export default function MainLibrary(props: MainLibraryProps) {
       return null;
     }
     const hasLastPath = !!props.appSettings.lastRootPath || !!props.appSettings.rootFolders?.length;
-    const currentThemeId = props.theme || DEFAULT_THEME_ID;
-    const selectedTheme: ThemeProps | undefined =
-      THEMES.find((t: ThemeProps) => t.id === currentThemeId) ||
-      THEMES.find((t: ThemeProps) => t.id === DEFAULT_THEME_ID);
-    const splashImage = selectedTheme?.splashImage;
+    const splashImage = getTheme(props.theme).splashImage;
 
     return (
       <div className="flex-1 flex h-full p-2 bg-transparent">

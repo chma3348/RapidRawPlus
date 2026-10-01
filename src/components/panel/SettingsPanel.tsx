@@ -33,7 +33,15 @@ import ModelPicker, { ModelTaskType } from '../ui/ModelPicker';
 import Switch from '../ui/Switch';
 import Input from '../ui/Input';
 import Slider from '../ui/Slider';
-import { ThemeProps, THEMES, DEFAULT_THEME_ID } from '../../utils/themes';
+import {
+  ACCENTS,
+  AccentProps,
+  DEFAULT_ACCENT_ID,
+  ThemeProps,
+  THEMES,
+  resolveThemeId,
+  themeCssVariables,
+} from '../../utils/themes';
 import { useTranslation } from 'react-i18next';
 import { Invokes } from '../ui/AppProperties';
 import {
@@ -1035,12 +1043,68 @@ export default function SettingsPanel({
                   </Text>
                   <div className="space-y-8">
                     <SettingItem label={t('settings.general.theme')} description={t('settings.general.themeDesc')}>
-                      <Dropdown
-                        onChange={(value: any) => onSettingsChange({ ...appSettings, theme: value })}
-                        options={THEMES.map((theme: ThemeProps) => ({ value: theme.id, label: t(theme.name as any) }))}
-                        value={appSettings?.theme || DEFAULT_THEME_ID}
-                        triggerClassName="bg-bg-primary"
-                      />
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                        {THEMES.map((theme: ThemeProps) => {
+                          const selected = resolveThemeId(appSettings?.theme) === theme.id;
+                          const v = theme.cssVariables;
+                          return (
+                            <button
+                              key={theme.id}
+                              onClick={() => onSettingsChange({ ...appSettings, theme: theme.id })}
+                              className={`rounded-lg p-1.5 text-left transition-colors border-2 ${
+                                selected ? 'border-accent' : 'border-transparent hover:border-border-color'
+                              }`}
+                            >
+                              <div
+                                className="h-14 rounded-md flex gap-1 p-1.5"
+                                style={{ background: v['--app-bg-primary'] }}
+                              >
+                                <div className="w-1/3 rounded-sm" style={{ background: v['--app-bg-secondary'] }} />
+                                <div className="flex-1 flex flex-col gap-1">
+                                  <div className="flex-1 rounded-sm" style={{ background: v['--app-surface'] }} />
+                                  <div
+                                    className="h-1.5 w-2/3 rounded-full"
+                                    style={{
+                                      background: themeCssVariables(theme.id, appSettings?.accentColor)['--app-accent'],
+                                    }}
+                                  />
+                                </div>
+                              </div>
+                              <Text className="mt-1.5 px-0.5">{t(theme.name as any)}</Text>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </SettingItem>
+
+                    <SettingItem label={t('settings.general.accent')} description={t('settings.general.accentDesc')}>
+                      <div className="flex gap-3">
+                        {ACCENTS.map((accent: AccentProps) => {
+                          const selected = (appSettings?.accentColor || DEFAULT_ACCENT_ID) === accent.id;
+                          const color = themeCssVariables(appSettings?.theme, accent.id)['--app-accent'];
+                          return (
+                            <button
+                              key={accent.id}
+                              onClick={() => onSettingsChange({ ...appSettings, accentColor: accent.id })}
+                              className="flex flex-col items-center gap-1.5 w-14"
+                              data-tooltip={t(accent.name as any)}
+                            >
+                              <span
+                                className={`w-8 h-8 rounded-full ring-2 ring-offset-2 ring-offset-surface transition-all ${
+                                  selected ? 'ring-text-primary' : 'ring-transparent hover:ring-border-color'
+                                }`}
+                                style={{ background: color }}
+                              />
+                              <Text
+                                variant={TextVariants.small}
+                                color={selected ? TextColors.primary : TextColors.secondary}
+                              >
+                                {t(accent.name as any)}
+                              </Text>
+                            </button>
+                          );
+                        })}
+                      </div>
                     </SettingItem>
 
                     <SettingItem label={t('settings.language')} description={t('settings.languageDesc')}>

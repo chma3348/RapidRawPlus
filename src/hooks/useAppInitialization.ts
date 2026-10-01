@@ -5,7 +5,7 @@ import { useSettingsStore } from '../store/useSettingsStore';
 import { useUIStore } from '../store/useUIStore';
 import { useLibraryStore } from '../store/useLibraryStore';
 import { useEditorStore } from '../store/useEditorStore';
-import { THEMES, DEFAULT_THEME_ID, ThemeProps } from '../utils/themes';
+import { DEFAULT_THEME_ID, themeCssVariables } from '../utils/themes';
 import { COPYABLE_ADJUSTMENT_KEYS } from '../utils/adjustments';
 import {
   FilterCriteria,
@@ -403,17 +403,8 @@ export const useAppInitialization = ({
 
   useEffect(() => {
     const root = document.documentElement;
-    const currentThemeId = theme || DEFAULT_THEME_ID;
-
-    const baseTheme =
-      THEMES.find((t: ThemeProps) => t.id === currentThemeId) ||
-      THEMES.find((t: ThemeProps) => t.id === DEFAULT_THEME_ID);
-    if (!baseTheme) return;
-
-    let finalCssVariables: any = { ...baseTheme.cssVariables };
-
-    Object.entries(finalCssVariables).forEach(([key, value]) => {
-      root.style.setProperty(key, value as string);
+    Object.entries(themeCssVariables(theme, appSettings?.accentColor)).forEach(([key, value]) => {
+      root.style.setProperty(key, value);
     });
 
     const fontFamily = appSettings?.fontFamily || 'poppins';
@@ -422,5 +413,5 @@ export const useAppInitialization = ({
         ? '-apple-system, BlinkMacSystemFont, system-ui, sans-serif'
         : "'Poppins', system-ui, sans-serif";
     root.style.setProperty('--font-family', fontStack);
-  }, [theme, appSettings?.fontFamily]);
+  }, [theme, appSettings?.accentColor, appSettings?.fontFamily]);
 };

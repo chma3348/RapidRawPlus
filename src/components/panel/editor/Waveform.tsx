@@ -4,6 +4,7 @@ import { AlertOctagon } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { WaveformData } from '../../ui/AppProperties';
 import { DisplayMode } from '../../../utils/adjustments';
+import { isLightTheme as isLightThemeId } from '../../../utils/themes';
 
 interface WaveformProps {
   waveformData: WaveformData | null;
@@ -461,7 +462,7 @@ export default function Waveform({
   const [isHovered, setIsHovered] = useState(false);
   const hoverTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const isLightTheme = theme ? ['light', 'snow', 'arctic'].includes(theme) : false;
+  const isLightTheme = isLightThemeId(theme);
   const isHistogram = displayMode === DisplayMode.Histogram;
   const isVectorscope = displayMode === DisplayMode.Vectorscope;
   const isReady = isHistogram ? !!(histogram && histogram.red) : !!waveformData;

@@ -182,14 +182,10 @@ export interface FolderTreeSort {
 }
 
 export enum Theme {
-  Arctic = 'arctic',
-  Blue = 'blue',
-  Dark = 'dark',
-  Grey = 'grey',
-  Light = 'light',
-  MutedGreen = 'muted-green',
-  Sepia = 'sepia',
-  Snow = 'snow',
+  Graphite = 'graphite',
+  StudioGrey = 'studio-grey',
+  Darkroom = 'darkroom',
+  Paper = 'paper',
 }
 
 export enum ThumbnailAspectRatio {
@@ -217,6 +213,7 @@ export interface AppSettings {
   libraryViewMode?: LibraryViewMode;
   sortCriteria?: SortCriteria;
   theme: Theme;
+  accentColor?: string;
   thumbnailSize?: ThumbnailSize;
   thumbnailAspectRatio?: ThumbnailAspectRatio;
   uiVisibility?: UiVisibility;
