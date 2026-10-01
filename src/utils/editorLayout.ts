@@ -22,20 +22,44 @@ export interface EditorLayout {
   showRailLabels: boolean;
 }
 
-/** The Advanced sections, in their default order, and whether each starts open. */
+/**
+ * The Advanced sections, in their default order, and whether each starts
+ * open. The order follows the editing workflow Lightroom and darktable
+ * share: set the starting look and fix white balance, then exposure, then
+ * presence (local contrast and colour intensity), then shape tone and
+ * colour, then clean up (detail, lens), then creative finishing, and the
+ * set-once camera settings last.
+ */
 export const ADVANCED_SECTIONS: Array<{ id: string; defaultOpen: boolean }> = [
-  { id: 'light', defaultOpen: true },
+  { id: 'look', defaultOpen: false },
   { id: 'whiteBalance', defaultOpen: true },
-  { id: 'toneCurve', defaultOpen: true },
-  { id: 'color', defaultOpen: true },
+  { id: 'light', defaultOpen: true },
+  { id: 'presence', defaultOpen: true },
+  { id: 'toneCurve', defaultOpen: false },
   { id: 'colorMixer', defaultOpen: false },
   { id: 'colorGrading', defaultOpen: false },
   { id: 'detail', defaultOpen: false },
-  { id: 'effects', defaultOpen: false },
   { id: 'optics', defaultOpen: false },
+  { id: 'effects', defaultOpen: false },
   { id: 'calibration', defaultOpen: false },
-  { id: 'look', defaultOpen: false },
   { id: 'raw', defaultOpen: false },
+];
+
+/** The first release's default order. A saved layout still in exactly this
+ *  order was never rearranged, so it moves to the current default. */
+const FIRST_DEFAULT_ORDER = [
+  'light',
+  'whiteBalance',
+  'toneCurve',
+  'color',
+  'colorMixer',
+  'colorGrading',
+  'detail',
+  'effects',
+  'optics',
+  'calibration',
+  'look',
+  'raw',
 ];
 
 export function defaultEditorLayout(): EditorLayout {
@@ -56,7 +80,16 @@ export function resolveEditorLayout(saved?: Partial<EditorLayout> | null): Edito
   const base = defaultEditorLayout();
   if (!saved || typeof saved !== 'object') return base;
 
-  const savedOrder = Array.isArray(saved.sectionOrder) ? saved.sectionOrder.filter((id) => known.has(id)) : [];
+  const untouched =
+    Array.isArray(saved.sectionOrder) &&
+    saved.sectionOrder.length === FIRST_DEFAULT_ORDER.length &&
+    saved.sectionOrder.every((id, i) => id === FIRST_DEFAULT_ORDER[i]);
+  // "Color" became "Presence" (it gained texture, clarity and dehaze).
+  const renamed = (id: string) => (id === 'color' ? 'presence' : id);
+  const savedOrder =
+    Array.isArray(saved.sectionOrder) && !untouched
+      ? saved.sectionOrder.map(renamed).filter((id) => known.has(id))
+      : [];
   const order = [...new Set(savedOrder)];
   // A section the saved order does not know goes after the section that
   // precedes it by default, so it lands near its neighbours.
@@ -71,9 +104,14 @@ export function resolveEditorLayout(saved?: Partial<EditorLayout> | null): Edito
 
   return {
     adjustmentsMode: saved.adjustmentsMode === 'advanced' ? 'advanced' : 'basic',
-    openSections: { ...base.openSections, ...(saved.openSections ?? {}) },
+    openSections: {
+      ...base.openSections,
+      ...Object.fromEntries(Object.entries(saved.openSections ?? {}).map(([id, open]) => [renamed(id), open])),
+    },
     sectionOrder: order,
-    hiddenSections: Array.isArray(saved.hiddenSections) ? saved.hiddenSections.filter((id) => known.has(id)) : [],
+    hiddenSections: Array.isArray(saved.hiddenSections)
+      ? saved.hiddenSections.map(renamed).filter((id) => known.has(id))
+      : [],
     panelSide: saved.panelSide === 'left' ? 'left' : 'right',
     showRailLabels: saved.showRailLabels === true,
   };

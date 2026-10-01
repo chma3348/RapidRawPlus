@@ -2187,6 +2187,7 @@
     "hideSection": "Hide this section",
     "moveSection": "Drag to move this section",
     "hiddenSections": "Hidden:",
-    "showSection": "Show this section again"
+    "showSection": "Show this section again",
+    "presence": "Presence"
   }
 }

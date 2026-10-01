@@ -513,6 +513,22 @@ export default function ColorV3Controls({
             {t('colorV3.auto', { defaultValue: 'Auto' })}
           </button>
         )}
+        {showEffects && (
+          <div className="flex flex-col gap-1">
+            <BasicGroupTitle>{t('colorV3.look', { defaultValue: 'Look' })}</BasicGroupTitle>
+            <BasicLook
+              adjustments={adjustments}
+              setAdjustments={setAdjustments}
+              onDragStateChange={onDragStateChange}
+            />
+          </div>
+        )}
+        <div className="flex flex-col">
+          <BasicGroupTitle>{t('colorV3.whiteBalance', { defaultValue: 'White Balance' })}</BasicGroupTitle>
+          {wbPicker}
+          {slider('temperature', t('colorV3.temperature', { defaultValue: 'Warmth' }))}
+          {slider('tint', t('colorV3.tint', { defaultValue: 'Tint' }))}
+        </div>
         <div>
           <BasicGroupTitle>{t('colorV3.groupLight', { defaultValue: 'Light' })}</BasicGroupTitle>
           <BasicAdjustments
@@ -522,20 +538,17 @@ export default function ColorV3Controls({
             simple
           />
         </div>
-        <div className="flex flex-col">
-          <BasicGroupTitle>{t('colorV3.color', { defaultValue: 'Color' })}</BasicGroupTitle>
-          {wbPicker}
-          {slider('temperature', t('colorV3.temperature', { defaultValue: 'Warmth' }))}
-          {slider('tint', t('colorV3.tint', { defaultValue: 'Tint' }))}
+        <div>
+          <BasicGroupTitle>{t('colorV3.presence', { defaultValue: 'Presence' })}</BasicGroupTitle>
+          {showDetail && detailSlider('texture', t('colorV3.texture', { defaultValue: 'Texture' }))}
+          {showDetail && detailSlider('clarity', t('colorV3.clarity', { defaultValue: 'Clarity' }))}
+          {showDetail && detailSlider('dehaze', t('colorV3.dehaze', { defaultValue: 'Dehaze' }))}
           {slider('vibrance', t('colorV3.vibrance', { defaultValue: 'Vibrance' }))}
           {slider('saturation', t('colorV3.saturation', { defaultValue: 'Saturation' }))}
         </div>
         {showDetail && (
           <div>
-            <BasicGroupTitle>{t('colorV3.groupDetailClarity', { defaultValue: 'Detail & Clarity' })}</BasicGroupTitle>
-            {detailSlider('texture', t('colorV3.texture', { defaultValue: 'Texture' }))}
-            {detailSlider('clarity', t('colorV3.clarity', { defaultValue: 'Clarity' }))}
-            {detailSlider('dehaze', t('colorV3.dehaze', { defaultValue: 'Dehaze' }))}
+            <BasicGroupTitle>{t('colorV3.detail', { defaultValue: 'Detail' })}</BasicGroupTitle>
             {detailSlider('sharpening', t('colorV3.sharpening', { defaultValue: 'Sharpening' }))}
             {detailSlider('luminance_noise', t('colorV3.luminanceNoise', { defaultValue: 'Noise reduction' }), 0, 100)}
           </div>
@@ -545,16 +558,6 @@ export default function ColorV3Controls({
             <BasicGroupTitle>{t('colorV3.groupEffects', { defaultValue: 'Effects' })}</BasicGroupTitle>
             {effectSlider('vignette_amount', t('colorV3.vignette', { defaultValue: 'Vignette' }), -100, 100)}
             {effectSlider('grain_amount', t('colorV3.grain', { defaultValue: 'Grain' }), 0, 100)}
-          </div>
-        )}
-        {showEffects && (
-          <div className="flex flex-col gap-1">
-            <BasicGroupTitle>{t('colorV3.look', { defaultValue: 'Look' })}</BasicGroupTitle>
-            <BasicLook
-              adjustments={adjustments}
-              setAdjustments={setAdjustments}
-              onDragStateChange={onDragStateChange}
-            />
           </div>
         )}
         <p className="text-center text-xs text-text-secondary">
@@ -598,25 +601,39 @@ export default function ColorV3Controls({
       available: true,
       body: <ToneCurveControls values={values} update={update} onDragStateChange={onDragStateChange} />,
     },
-    color: {
-      title: t('colorV3.color', { defaultValue: 'Color' }),
-      modified: values.saturation !== 0 || values.vibrance !== 0 || values.hue !== 0,
+    // Presence, as Lightroom has it: local contrast and colour intensity,
+    // the controls reached for right after exposure.
+    presence: {
+      title: t('colorV3.presence', { defaultValue: 'Presence' }),
+      modified:
+        values.saturation !== 0 ||
+        values.vibrance !== 0 ||
+        detail.texture !== 0 ||
+        detail.clarity !== 0 ||
+        detail.dehaze !== 0 ||
+        detail.structure !== 0,
       available: true,
       body: (
         <>
-          {slider('saturation', t('colorV3.saturation', { defaultValue: 'Saturation' }))}
+          {showDetail && detailSlider('texture', t('colorV3.texture', { defaultValue: 'Texture' }))}
+          {showDetail && detailSlider('clarity', t('colorV3.clarity', { defaultValue: 'Clarity' }))}
+          {showDetail && detailSlider('dehaze', t('colorV3.dehaze', { defaultValue: 'Dehaze' }))}
+          {showDetail && detailSlider('structure', t('colorV3.structure', { defaultValue: 'Structure' }))}
           {slider('vibrance', t('colorV3.vibrance', { defaultValue: 'Vibrance' }))}
-          {slider('hue', t('colorV3.hue', { defaultValue: 'Hue rotation' }), -180, 180)}
+          {slider('saturation', t('colorV3.saturation', { defaultValue: 'Saturation' }))}
         </>
       ),
     },
     colorMixer: {
       title: t('colorV3.colorMixer', { defaultValue: 'Color Mixer' }),
-      modified: differs(values.bands, defaults.bands) || values.ranges.length > 0,
+      modified: differs(values.bands, defaults.bands) || values.ranges.length > 0 || values.hue !== 0,
       available: true,
       body: (
         <>
-          <p className="text-xs text-text-secondary">{t('colorV3.selective', { defaultValue: 'Selective color' })}</p>
+          {slider('hue', t('colorV3.hue', { defaultValue: 'Hue rotation' }), -180, 180)}
+          <p className="mt-2 text-xs text-text-secondary">
+            {t('colorV3.selective', { defaultValue: 'Selective color' })}
+          </p>
           <Dropdown
             options={bands.map((b, i) => ({ value: i, label: t(`colorV3.band.${b}`, { defaultValue: b }) }))}
             value={band}
@@ -687,16 +704,17 @@ export default function ColorV3Controls({
     },
     detail: {
       title: t('colorV3.detail', { defaultValue: 'Detail' }),
-      modified: differs(detail, defaultV3Detail()),
+      // Cleanup: sharpening and noise. Texture, clarity and dehaze are in Presence.
+      modified:
+        detail.sharpening !== 0 ||
+        detail.threshold !== defaultV3Detail().threshold ||
+        detail.luminance_noise !== 0 ||
+        detail.color_noise !== 0,
       available: showDetail,
       body: (
         <>
-          {detailSlider('dehaze', t('colorV3.dehaze', { defaultValue: 'Dehaze' }))}
           {detailSlider('sharpening', t('colorV3.sharpening', { defaultValue: 'Sharpening' }))}
           {detailSlider('threshold', t('colorV3.threshold', { defaultValue: 'Sharpening threshold' }), 0, 80, 15)}
-          {detailSlider('texture', t('colorV3.texture', { defaultValue: 'Texture' }))}
-          {detailSlider('clarity', t('colorV3.clarity', { defaultValue: 'Clarity' }))}
-          {detailSlider('structure', t('colorV3.structure', { defaultValue: 'Structure' }))}
           {detailSlider('luminance_noise', t('colorV3.luminanceNoise', { defaultValue: 'Noise reduction' }), 0, 100)}
           {detailSlider('color_noise', t('colorV3.colorNoise', { defaultValue: 'Color noise reduction' }), 0, 100)}
           <p className="text-xs text-text-secondary leading-relaxed">

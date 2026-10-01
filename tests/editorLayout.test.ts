@@ -15,7 +15,8 @@ test('nothing saved means the defaults: Basic mode, every section in order', () 
 });
 
 test('a saved order is kept, and sections it does not know appear near their neighbours', () => {
-  // An older layout that knew neither "colorMixer" nor "raw", with Look moved to the top.
+  // A rearranged older layout (Look moved to the top) that knew neither
+  // "colorMixer" nor "raw", with the old "color" section.
   const saved = {
     adjustmentsMode: 'advanced' as const,
     sectionOrder: [
@@ -32,14 +33,33 @@ test('a saved order is kept, and sections it does not know appear near their nei
       'gone',
     ],
     hiddenSections: ['calibration', 'gone'],
-    openSections: { look: true },
+    openSections: { look: true, color: false },
   };
   const layout = resolveEditorLayout(saved);
   assert.equal(layout.adjustmentsMode, 'advanced');
-  // RAW follows Look, which precedes it by default — wherever Look now is.
   assert.deepEqual(layout.sectionOrder, [
     'look',
+    'light',
+    'whiteBalance',
+    'toneCurve',
+    'colorMixer',
+    'presence',
+    'colorGrading',
+    'detail',
+    'effects',
+    'optics',
+    'calibration',
     'raw',
+  ]);
+  assert.deepEqual(layout.hiddenSections, ['calibration']);
+  assert.equal(layout.openSections.look, true);
+  assert.equal(layout.openSections.presence, false, '"color" carries over as "presence"');
+  assert.equal(layout.openSections.light, true, 'unsaved open states fall back to defaults');
+  assert.equal(new Set(layout.sectionOrder).size, ids.length);
+});
+
+test('a layout still in the first default order moves to the workflow order', () => {
+  const first = [
     'light',
     'whiteBalance',
     'toneCurve',
@@ -50,11 +70,13 @@ test('a saved order is kept, and sections it does not know appear near their nei
     'effects',
     'optics',
     'calibration',
-  ]);
-  assert.deepEqual(layout.hiddenSections, ['calibration']);
-  assert.equal(layout.openSections.look, true);
-  assert.equal(layout.openSections.light, true, 'unsaved open states fall back to defaults');
-  assert.equal(new Set(layout.sectionOrder).size, ids.length);
+    'look',
+    'raw',
+  ];
+  const layout = resolveEditorLayout({ sectionOrder: first, hiddenSections: ['color'] });
+  assert.deepEqual(layout.sectionOrder, ids);
+  assert.deepEqual(ids.slice(0, 4), ['look', 'whiteBalance', 'light', 'presence']);
+  assert.deepEqual(layout.hiddenSections, ['presence']);
 });
 
 test('nonsense values fall back safely', () => {
