@@ -45,6 +45,7 @@ dependencies = [
  "once_cell",
  "ort",
  "os_info",
+ "plist",
  "png 0.18.1",
  "pollster",
  "quick-xml 0.40.1",
@@ -54,6 +55,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rgb",
+ "roxmltree",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -75,6 +77,7 @@ dependencies = [
  "webkit2gtk",
  "webp",
  "wgpu",
+ "xattr",
 ]
 
 [[package]]
@@ -2648,7 +2651,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.61.2",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
@@ -4137,7 +4140,7 @@ version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
 dependencies = [
- "proc-macro-crate 2.0.2",
+ "proc-macro-crate 3.5.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -5428,6 +5431,12 @@ name = "rle-decode-fast"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3582f63211428f83597b51b2ddb88e2a91a9d52d12831f9d08f5e624e8977422"
+
+[[package]]
+name = "roxmltree"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
 
 [[package]]
 name = "rustc-demangle"

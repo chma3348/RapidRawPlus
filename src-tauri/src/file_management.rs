@@ -258,7 +258,13 @@ pub async fn read_exif_for_paths(
 pub async fn update_exif_fields(
     paths: Vec<String>,
     updates: HashMap<String, String>,
+    app_handle: AppHandle,
 ) -> Result<(), String> {
+    let settings = load_settings(app_handle).unwrap_or_default();
+    let xmp = settings
+        .enable_xmp_sync
+        .unwrap_or(true)
+        .then(|| settings.create_xmp_if_missing.unwrap_or(false));
     tauri::async_runtime::spawn_blocking(move || {
         paths.par_iter().for_each(|path| {
             let original_path = Path::new(&path);
@@ -289,6 +295,10 @@ pub async fn update_exif_fields(
             let mut final_metadata = crate::exif_processing::load_sidecar(&primary_path);
 
             final_metadata.exif = Some(exif_data);
+            // Caption, author and copyright are shared through XMP.
+            if let Some(create_if_missing) = xmp {
+                crate::xmp::push(path, &mut final_metadata, create_if_missing);
+            }
             if let Ok(json) = serde_json::to_string_pretty(&final_metadata) {
                 let _ = std::fs::write(&primary_path, json);
             }
@@ -302,7 +312,7 @@ pub async fn update_exif_fields(
 #[tauri::command]
 pub fn list_images_in_dir(path: String, app_handle: AppHandle) -> Result<Vec<ImageFile>, String> {
     let settings = load_settings(app_handle).unwrap_or_default();
-    let enable_xmp_sync = settings.enable_xmp_sync.unwrap_or(false);
+    let enable_xmp_sync = settings.enable_xmp_sync.unwrap_or(true);
 
     let entries = fs::read_dir(&path).map_err(|e| e.to_string())?;
     let mut images = Vec::new();
@@ -378,7 +388,8 @@ pub fn list_images_in_dir(path: String, app_handle: AppHandle) -> Result<Vec<Ima
                     let mut metadata = crate::exif_processing::load_sidecar(&sidecar_path);
 
                     if enable_xmp_sync
-                        && sync_metadata_from_xmp(&path_buf, &mut metadata)
+                        && !is_virtual_copy
+                        && crate::xmp::pull(&path_str, &mut metadata)
                         && let Ok(json) = serde_json::to_string_pretty(&metadata)
                     {
                         let _ = fs::write(&sidecar_path, json);
@@ -429,7 +440,7 @@ pub fn list_images_recursive(
     app_handle: AppHandle,
 ) -> Result<Vec<ImageFile>, String> {
     let settings = load_settings(app_handle).unwrap_or_default();
-    let enable_xmp_sync = settings.enable_xmp_sync.unwrap_or(false);
+    let enable_xmp_sync = settings.enable_xmp_sync.unwrap_or(true);
 
     let root_path = Path::new(&path);
     let mut images = Vec::new();
@@ -511,7 +522,8 @@ pub fn list_images_recursive(
                     let mut metadata = crate::exif_processing::load_sidecar(&sidecar_path);
 
                     if enable_xmp_sync
-                        && sync_metadata_from_xmp(&path_buf, &mut metadata)
+                        && !is_virtual_copy
+                        && crate::xmp::pull(&path_str, &mut metadata)
                         && let Ok(json) = serde_json::to_string_pretty(&metadata)
                     {
                         let _ = fs::write(&sidecar_path, json);
@@ -762,7 +774,7 @@ pub fn get_album_images(
     app_handle: AppHandle,
 ) -> Result<Vec<ImageFile>, String> {
     let settings = load_settings(app_handle.clone()).unwrap_or_default();
-    let enable_xmp_sync = settings.enable_xmp_sync.unwrap_or(false);
+    let enable_xmp_sync = settings.enable_xmp_sync.unwrap_or(true);
 
     let result_list: Vec<ImageFile> = paths
         .into_par_iter()
@@ -785,7 +797,7 @@ pub fn get_album_images(
                 let mut metadata = crate::exif_processing::load_sidecar(&sidecar_path);
 
                 if enable_xmp_sync
-                    && sync_metadata_from_xmp(&source_path, &mut metadata)
+                    && crate::xmp::pull(&virtual_path, &mut metadata)
                     && let Ok(json) = serde_json::to_string_pretty(&metadata)
                 {
                     let _ = fs::write(&sidecar_path, json);
@@ -1897,7 +1909,7 @@ pub fn save_metadata_and_update_thumbnail(
     app_handle: AppHandle,
     state: tauri::State<AppState>,
 ) -> Result<(), String> {
-    let (source_path, sidecar_path) = parse_virtual_path(&path);
+    let (_, sidecar_path) = parse_virtual_path(&path);
 
     let mut metadata = crate::exif_processing::load_sidecar(&sidecar_path);
 
@@ -1931,15 +1943,16 @@ pub fn save_metadata_and_update_thumbnail(
     }
     metadata.adjustments = final_adjustments;
 
-    let json_string = serde_json::to_string_pretty(&metadata).map_err(|e| e.to_string())?;
-    std::fs::write(&sidecar_path, json_string).map_err(|e| e.to_string())?;
-
+    // XMP first: writing it records its time in the sidecar saved below.
     if let Ok(settings) = load_settings(app_handle.clone())
-        && settings.enable_xmp_sync.unwrap_or(false)
+        && settings.enable_xmp_sync.unwrap_or(true)
     {
         let create_if_missing = settings.create_xmp_if_missing.unwrap_or(false);
-        sync_metadata_to_xmp(&source_path, &metadata, create_if_missing);
+        crate::xmp::push(&path, &mut metadata, create_if_missing);
     }
+
+    let json_string = serde_json::to_string_pretty(&metadata).map_err(|e| e.to_string())?;
+    std::fs::write(&sidecar_path, json_string).map_err(|e| e.to_string())?;
 
     let gpu_context = gpu_processing::get_or_init_gpu_context(&state, &app_handle).ok();
     let app_handle_clone = app_handle.clone();
@@ -1998,7 +2011,7 @@ pub async fn apply_adjustments_to_paths(
 
     tauri::async_runtime::spawn_blocking(move || {
         let settings = load_settings(app_handle.clone()).unwrap_or_default();
-        let enable_xmp_sync = settings.enable_xmp_sync.unwrap_or(false);
+        let enable_xmp_sync = settings.enable_xmp_sync.unwrap_or(true);
         let create_xmp_if_missing = settings.create_xmp_if_missing.unwrap_or(false);
 
         let lens_db = app_handle
@@ -2034,13 +2047,12 @@ pub async fn apply_adjustments_to_paths(
 
             existing_metadata.adjustments = new_adjustments;
 
-            if let Ok(json_string) = serde_json::to_string_pretty(&existing_metadata) {
-                let _ = std::fs::write(&sidecar_path, json_string);
+            if enable_xmp_sync {
+                crate::xmp::push(path, &mut existing_metadata, create_xmp_if_missing);
             }
 
-            if enable_xmp_sync {
-                let source_path = parse_virtual_path(path).0;
-                sync_metadata_to_xmp(&source_path, &existing_metadata, create_xmp_if_missing);
+            if let Ok(json_string) = serde_json::to_string_pretty(&existing_metadata) {
+                let _ = std::fs::write(&sidecar_path, json_string);
             }
         });
 
@@ -2095,7 +2107,7 @@ pub async fn reset_adjustments_for_paths(
 
     tauri::async_runtime::spawn_blocking(move || {
         let settings = load_settings(app_handle.clone()).unwrap_or_default();
-        let enable_xmp_sync = settings.enable_xmp_sync.unwrap_or(false);
+        let enable_xmp_sync = settings.enable_xmp_sync.unwrap_or(true);
         let create_xmp_if_missing = settings.create_xmp_if_missing.unwrap_or(false);
 
         paths.par_iter().for_each(|path| {
@@ -2105,13 +2117,12 @@ pub async fn reset_adjustments_for_paths(
 
             existing_metadata.adjustments = serde_json::json!({});
 
-            if let Ok(json_string) = serde_json::to_string_pretty(&existing_metadata) {
-                let _ = std::fs::write(&sidecar_path, json_string);
+            if enable_xmp_sync {
+                crate::xmp::push(path, &mut existing_metadata, create_xmp_if_missing);
             }
 
-            if enable_xmp_sync {
-                let source_path = parse_virtual_path(path).0;
-                sync_metadata_to_xmp(&source_path, &existing_metadata, create_xmp_if_missing);
+            if let Ok(json_string) = serde_json::to_string_pretty(&existing_metadata) {
+                let _ = std::fs::write(&sidecar_path, json_string);
             }
         });
 
@@ -2166,7 +2177,7 @@ pub async fn apply_auto_adjustments_to_paths(
 
     tauri::async_runtime::spawn_blocking(move || {
         let settings = load_settings(app_handle.clone()).unwrap_or_default();
-        let enable_xmp_sync = settings.enable_xmp_sync.unwrap_or(false);
+        let enable_xmp_sync = settings.enable_xmp_sync.unwrap_or(true);
         let create_xmp_if_missing = settings.create_xmp_if_missing.unwrap_or(false);
 
         let state = app_handle.state::<AppState>();
@@ -2235,12 +2246,12 @@ pub async fn apply_auto_adjustments_to_paths(
                     }
                 }
 
-                if let Ok(json_string) = serde_json::to_string_pretty(&existing_metadata) {
-                    let _ = std::fs::write(&sidecar_path, json_string);
+                if enable_xmp_sync {
+                    crate::xmp::push(path, &mut existing_metadata, create_xmp_if_missing);
                 }
 
-                if enable_xmp_sync {
-                    sync_metadata_to_xmp(&source_path, &existing_metadata, create_xmp_if_missing);
+                if let Ok(json_string) = serde_json::to_string_pretty(&existing_metadata) {
+                    let _ = std::fs::write(&sidecar_path, json_string);
                 }
                 Ok(image)
             })()
@@ -2277,7 +2288,7 @@ pub fn set_color_label_for_paths(
     app_handle: AppHandle,
 ) -> Result<(), String> {
     let settings = load_settings(app_handle.clone()).unwrap_or_default();
-    let enable_xmp_sync = settings.enable_xmp_sync.unwrap_or(false);
+    let enable_xmp_sync = settings.enable_xmp_sync.unwrap_or(true);
     let create_xmp_if_missing = settings.create_xmp_if_missing.unwrap_or(false);
 
     paths.par_iter().for_each(|path| {
@@ -2300,13 +2311,19 @@ pub fn set_color_label_for_paths(
             metadata.tags = Some(tags);
         }
 
-        if let Ok(json_string) = serde_json::to_string_pretty(&metadata) {
-            let _ = std::fs::write(&sidecar_path, json_string);
+        if !path.contains("?vc=") {
+            crate::finder_tags::set_color_label(
+                Path::new(path),
+                color.as_deref().filter(|c| !c.is_empty()),
+            );
         }
 
         if enable_xmp_sync {
-            let source_path = parse_virtual_path(path).0;
-            sync_metadata_to_xmp(&source_path, &metadata, create_xmp_if_missing);
+            crate::xmp::push(path, &mut metadata, create_xmp_if_missing);
+        }
+
+        if let Ok(json_string) = serde_json::to_string_pretty(&metadata) {
+            let _ = std::fs::write(&sidecar_path, json_string);
         }
     });
 
@@ -2320,7 +2337,7 @@ pub fn set_rating_for_paths(
     app_handle: AppHandle,
 ) -> Result<(), String> {
     let settings = load_settings(app_handle.clone()).unwrap_or_default();
-    let enable_xmp_sync = settings.enable_xmp_sync.unwrap_or(false);
+    let enable_xmp_sync = settings.enable_xmp_sync.unwrap_or(true);
     let create_xmp_if_missing = settings.create_xmp_if_missing.unwrap_or(false);
 
     paths.par_iter().for_each(|path| {
@@ -2330,13 +2347,12 @@ pub fn set_rating_for_paths(
 
         metadata.rating = rating;
 
-        if let Ok(json_string) = serde_json::to_string_pretty(&metadata) {
-            let _ = std::fs::write(&sidecar_path, json_string);
+        if enable_xmp_sync {
+            crate::xmp::push(path, &mut metadata, create_xmp_if_missing);
         }
 
-        if enable_xmp_sync {
-            let source_path = parse_virtual_path(path).0;
-            sync_metadata_to_xmp(&source_path, &metadata, create_xmp_if_missing);
+        if let Ok(json_string) = serde_json::to_string_pretty(&metadata) {
+            let _ = std::fs::write(&sidecar_path, json_string);
         }
     });
 
@@ -2346,13 +2362,13 @@ pub fn set_rating_for_paths(
 #[tauri::command]
 pub fn load_metadata(path: String, app_handle: AppHandle) -> Result<ImageMetadata, String> {
     let settings = load_settings(app_handle).unwrap_or_default();
-    let enable_xmp_sync = settings.enable_xmp_sync.unwrap_or(false);
+    let enable_xmp_sync = settings.enable_xmp_sync.unwrap_or(true);
 
-    let (source_path, sidecar_path) = parse_virtual_path(&path);
+    let (_, sidecar_path) = parse_virtual_path(&path);
     let mut metadata = crate::exif_processing::load_sidecar(&sidecar_path);
 
     if enable_xmp_sync
-        && sync_metadata_from_xmp(&source_path, &mut metadata)
+        && crate::xmp::pull(&path, &mut metadata)
         && let Ok(json) = serde_json::to_string_pretty(&metadata)
     {
         let _ = fs::write(&sidecar_path, json);
@@ -3280,225 +3296,4 @@ pub fn create_virtual_copy(
     }
 
     Ok(new_virtual_path)
-}
-
-pub fn extract_xmp_rating(content: &str) -> Option<u8> {
-    if let Some(idx) = content.find("xmp:Rating=\"") {
-        let start = idx + 12;
-        let end = content[start..].find('"').map(|i| start + i)?;
-        return content[start..end].parse().ok();
-    }
-    if let Some(idx) = content.find("<xmp:Rating>") {
-        let start = idx + 12;
-        let end = content[start..].find('<').map(|i| start + i)?;
-        return content[start..end].parse().ok();
-    }
-    None
-}
-
-pub fn extract_xmp_label(content: &str) -> Option<String> {
-    if let Some(idx) = content.find("xmp:Label=\"") {
-        let start = idx + 11;
-        let end = content[start..].find('"').map(|i| start + i)?;
-        return Some(content[start..end].to_string());
-    }
-    if let Some(idx) = content.find("<xmp:Label>") {
-        let start = idx + 11;
-        let end = content[start..].find('<').map(|i| start + i)?;
-        return Some(content[start..end].to_string());
-    }
-    None
-}
-
-pub fn extract_xmp_tags(content: &str) -> Vec<String> {
-    let mut tags = Vec::new();
-    if let Some(start_idx) = content.find("<dc:subject>")
-        && let Some(end_idx) = content[start_idx..].find("</dc:subject>")
-    {
-        let subject_block = &content[start_idx..start_idx + end_idx];
-        let mut current_idx = 0;
-        while let Some(li_start) = subject_block[current_idx..].find("<rdf:li>") {
-            let val_start = current_idx + li_start + 8;
-            if let Some(li_end) = subject_block[val_start..].find("</rdf:li>") {
-                tags.push(subject_block[val_start..val_start + li_end].to_string());
-                current_idx = val_start + li_end + 9;
-            } else {
-                break;
-            }
-        }
-    }
-    tags
-}
-
-pub fn sync_metadata_from_xmp(source_path: &Path, metadata: &mut ImageMetadata) -> bool {
-    let xmp_path = source_path.with_extension("xmp");
-    let xmp_path_upper = source_path.with_extension("XMP");
-    let actual_xmp = if xmp_path.exists() {
-        Some(xmp_path)
-    } else if xmp_path_upper.exists() {
-        Some(xmp_path_upper)
-    } else {
-        None
-    };
-
-    let mut changed = false;
-
-    if let Some(xmp_file) = actual_xmp
-        && let Ok(content) = fs::read_to_string(&xmp_file)
-    {
-        if metadata.rating == 0
-            && let Some(rating) = extract_xmp_rating(&content)
-            && rating != 0
-        {
-            metadata.rating = rating;
-            if let Some(obj) = metadata.adjustments.as_object_mut() {
-                obj.insert("rating".to_string(), serde_json::json!(rating));
-            } else {
-                metadata.adjustments = serde_json::json!({"rating": rating});
-            }
-            changed = true;
-        }
-
-        let xmp_label = extract_xmp_label(&content);
-        let xmp_tags = extract_xmp_tags(&content);
-
-        let mut current_tags = metadata.tags.clone().unwrap_or_default();
-        let original_len = current_tags.len();
-        let had_no_tags = metadata.tags.is_none();
-
-        for tag in xmp_tags {
-            if !current_tags.contains(&tag) {
-                current_tags.push(tag);
-            }
-        }
-
-        if let Some(label) = xmp_label {
-            let label_tag = format!("{}{}", COLOR_TAG_PREFIX, label.to_lowercase());
-            if !current_tags.contains(&label_tag) {
-                current_tags.retain(|t| !t.starts_with(COLOR_TAG_PREFIX));
-                current_tags.push(label_tag);
-            }
-        }
-
-        if current_tags.len() != original_len || (had_no_tags && !current_tags.is_empty()) {
-            metadata.tags = Some(current_tags);
-            changed = true;
-        }
-    }
-    changed
-}
-
-pub fn sync_metadata_to_xmp(source_path: &Path, metadata: &ImageMetadata, create_if_missing: bool) {
-    let xmp_path = source_path.with_extension("xmp");
-    let xmp_path_upper = source_path.with_extension("XMP");
-
-    let mut actual_xmp = if xmp_path.exists() {
-        Some(xmp_path.clone())
-    } else if xmp_path_upper.exists() {
-        Some(xmp_path_upper.clone())
-    } else {
-        None
-    };
-
-    if actual_xmp.is_none() {
-        if !create_if_missing {
-            return;
-        }
-        let skeleton = r#"<?xml version="1.0" encoding="UTF-8"?>
-<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="RapidRAW">
- <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
-  <rdf:Description rdf:about=""
-    xmlns:xmp="http://ns.adobe.com/xap/1.0/"
-    xmlns:dc="http://purl.org/dc/elements/1.1/">
-  </rdf:Description>
- </rdf:RDF>
-</x:xmpmeta>"#;
-        if let Err(e) = fs::write(&xmp_path, skeleton) {
-            log::error!("Failed to create skeleton XMP: {}", e);
-            return;
-        }
-        actual_xmp = Some(xmp_path);
-    }
-
-    if let Some(xmp_file) = actual_xmp
-        && let Ok(mut content) = fs::read_to_string(&xmp_file)
-    {
-        let rating_str = metadata.rating.to_string();
-        let re_rating_attr = Regex::new(r#"xmp:Rating\s*=\s*"[^"]*""#).unwrap();
-        let re_rating_tag = Regex::new(r#"<xmp:Rating\s*>[^<]*</xmp:Rating>"#).unwrap();
-
-        if re_rating_attr.is_match(&content) {
-            content = re_rating_attr
-                .replace(&content, format!("xmp:Rating=\"{}\"", rating_str))
-                .to_string();
-        } else if re_rating_tag.is_match(&content) {
-            content = re_rating_tag
-                .replace(&content, format!("<xmp:Rating>{}</xmp:Rating>", rating_str))
-                .to_string();
-        } else if let Some(last_index) = content.rfind("</rdf:Description>") {
-            let (start, end) = content.split_at(last_index);
-            content = format!("{} <xmp:Rating>{}</xmp:Rating>\n{}", start, rating_str, end);
-        }
-
-        let current_tags = metadata.tags.clone().unwrap_or_default();
-        let mut label = None;
-        let mut normal_tags = Vec::new();
-
-        for t in current_tags {
-            if let Some(color) = t.strip_prefix(COLOR_TAG_PREFIX) {
-                let mut c = color.chars();
-                let cap_color = match c.next() {
-                    None => String::new(),
-                    Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
-                };
-                label = Some(cap_color);
-            } else {
-                normal_tags.push(t);
-            }
-        }
-
-        if let Some(lbl) = label {
-            let re_label_attr = Regex::new(r#"xmp:Label\s*=\s*"[^"]*""#).unwrap();
-            let re_label_tag = Regex::new(r#"<xmp:Label\s*>[^<]*</xmp:Label>"#).unwrap();
-
-            if re_label_attr.is_match(&content) {
-                content = re_label_attr
-                    .replace(&content, format!("xmp:Label=\"{}\"", lbl))
-                    .to_string();
-            } else if re_label_tag.is_match(&content) {
-                content = re_label_tag
-                    .replace(&content, format!("<xmp:Label>{}</xmp:Label>", lbl))
-                    .to_string();
-            } else if let Some(last_index) = content.rfind("</rdf:Description>") {
-                let (start, end) = content.split_at(last_index);
-                content = format!("{} <xmp:Label>{}</xmp:Label>\n{}", start, lbl, end);
-            }
-        } else {
-            let re_label_attr = Regex::new(r#"\s*xmp:Label\s*=\s*"[^"]*""#).unwrap();
-            let re_label_tag = Regex::new(r#"\s*<xmp:Label\s*>[^<]*</xmp:Label>"#).unwrap();
-            content = re_label_attr.replace_all(&content, "").to_string();
-            content = re_label_tag.replace_all(&content, "").to_string();
-        }
-
-        let re_subject =
-            Regex::new(r#"(?s)<dc:subject>\s*<rdf:Bag>.*?</rdf:Bag>\s*</dc:subject>"#).unwrap();
-        if normal_tags.is_empty() {
-            content = re_subject.replace_all(&content, "").to_string();
-        } else {
-            let mut bag = String::from("<dc:subject>\n    <rdf:Bag>\n");
-            for t in normal_tags {
-                bag.push_str(&format!("     <rdf:li>{}</rdf:li>\n", t));
-            }
-            bag.push_str("    </rdf:Bag>\n   </dc:subject>");
-
-            if re_subject.is_match(&content) {
-                content = re_subject.replace(&content, bag).to_string();
-            } else if let Some(last_index) = content.rfind("</rdf:Description>") {
-                let (start, end) = content.split_at(last_index);
-                content = format!("{} {}\n  {}", start, bag, end);
-            }
-        }
-
-        let _ = fs::write(&xmp_file, content);
-    }
 }

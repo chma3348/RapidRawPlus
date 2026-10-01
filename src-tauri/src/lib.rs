@@ -23,6 +23,7 @@ mod exif_processing;
 pub mod expansion;
 mod export_processing;
 mod file_management;
+pub mod finder_tags;
 pub mod flat_field;
 mod flog2c;
 pub mod formats;
@@ -54,6 +55,7 @@ pub mod video;
 pub mod video_server;
 pub mod white_balance;
 mod window_customizer;
+pub mod xmp;
 
 use std::collections::HashMap;
 use std::fs;

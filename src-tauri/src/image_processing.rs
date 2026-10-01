@@ -74,6 +74,10 @@ pub struct ImageMetadata {
         skip_serializing_if = "Option::is_none"
     )]
     pub derived_kind: Option<String>,
+    /// The XMP sidecar's modification time (ms) when last read or written,
+    /// to tell another program's changes from ours. See `xmp.rs`.
+    #[serde(default, rename = "xmpSeen", skip_serializing_if = "Option::is_none")]
+    pub xmp_seen: Option<u64>,
 }
 
 impl Default for ImageMetadata {
@@ -86,6 +90,7 @@ impl Default for ImageMetadata {
             exif: None,
             derived_from: None,
             derived_kind: None,
+            xmp_seen: None,
         }
     }
 }
