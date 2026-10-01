@@ -1797,6 +1797,7 @@ pub fn run() {
             file_management::file_operation_history,
             file_management::watch_library_roots,
             file_management::watch_open_folder,
+            file_management::set_flag_for_paths,
             file_management::save_video_frame,
             sky_commands::list_sky_plates,
             sky_commands::prepare_sky_replacement,

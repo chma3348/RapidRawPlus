@@ -296,6 +296,8 @@ export interface ImageFile {
   /** The photo this file is a version (or saved frame) of; see utils/stacks. */
   derived_from?: string | null;
   derived_kind?: string | null;
+  /** Culling flag. */
+  flag?: 'pick' | 'reject' | null;
 }
 
 export interface Option {

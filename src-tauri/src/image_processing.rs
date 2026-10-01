@@ -78,6 +78,9 @@ pub struct ImageMetadata {
     /// to tell another program's changes from ours. See `xmp.rs`.
     #[serde(default, rename = "xmpSeen", skip_serializing_if = "Option::is_none")]
     pub xmp_seen: Option<u64>,
+    /// Culling flag: "pick" or "reject" (none when unflagged).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flag: Option<String>,
 }
 
 impl Default for ImageMetadata {
@@ -91,6 +94,7 @@ impl Default for ImageMetadata {
             derived_from: None,
             derived_kind: None,
             xmp_seen: None,
+            flag: None,
         }
     }
 }

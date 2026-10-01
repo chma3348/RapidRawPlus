@@ -34,6 +34,7 @@ import { useSortedLibrary } from './hooks/useSortedLibrary';
 import { LIBRARY_REFRESH_EVENT } from './utils/stacks';
 import { listenForFinderDrops } from './utils/fileDrag';
 import FileDragGhost from './components/ui/FileDragGhost';
+import CullView from './components/panel/library/CullView';
 import { useAppNavigation } from './hooks/useAppNavigation';
 
 import { useEditorActions } from './hooks/useEditorActions';
@@ -797,6 +798,7 @@ function App() {
           handleRenameAlbumItem={handleRenameAlbumItem}
         />
         <FileDragGhost />
+        <CullView onEdit={handleImageSelect} />
         <ToastContainer
           position="bottom-right"
           autoClose={5000}

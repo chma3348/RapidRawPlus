@@ -510,7 +510,13 @@ fn fields_from_metadata(m: &ImageMetadata) -> XmpFields {
             .filter(|v| !v.is_empty())
     };
     XmpFields {
-        rating: Some(m.rating as i32),
+        // Lightroom writes a rejected photo as rating -1; picks live only
+        // in its catalog, so they stay in the app's sidecar.
+        rating: Some(if m.flag.as_deref() == Some("reject") {
+            -1
+        } else {
+            m.rating as i32
+        }),
         label,
         keywords,
         hierarchical: Vec::new(),
@@ -524,6 +530,12 @@ fn fields_from_metadata(m: &ImageMetadata) -> XmpFields {
 /// is seen) keeps what the app already has and adds to it; otherwise the
 /// XMP values replace the app's.
 fn apply_to_metadata(m: &mut ImageMetadata, x: &XmpFields, merge: bool) {
+    if x.rating == Some(-1) {
+        m.flag = Some("reject".into());
+    } else if !merge && m.flag.as_deref() == Some("reject") && x.rating.is_some() {
+        // Un-rejected in another program.
+        m.flag = None;
+    }
     if let Some(r) = x.rating.filter(|r| (0..=5).contains(r))
         && (!merge || m.rating == 0)
     {
@@ -647,7 +659,8 @@ pub fn push(path: &str, metadata: &mut ImageMetadata, create_if_missing: bool) {
             }
         }
     } else {
-        let worth_it = mine.rating.unwrap_or(0) > 0
+        // Stars, or a reject (-1), are worth sharing.
+        let worth_it = mine.rating.unwrap_or(0) != 0
             || mine.label.is_some()
             || !mine.keywords.is_empty()
             || mine.description.is_some()
@@ -903,6 +916,60 @@ mod tests {
         let before = std::fs::read_to_string(&xmp).unwrap();
         push(&format!("{raw_s}?vc=abc123"), &mut vc, true);
         assert_eq!(std::fs::read_to_string(&xmp).unwrap(), before);
+    }
+
+    #[test]
+    fn rejects_travel_as_lightroom_writes_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let raw = dir.path().join("DSC2.ARW");
+        std::fs::write(&raw, b"raw").unwrap();
+        let raw_s = raw.to_string_lossy().to_string();
+        let xmp = dir.path().join("DSC2.xmp");
+
+        // Rejected in the app: XMP says -1, the star rating is kept in the app.
+        let mut m = ImageMetadata {
+            rating: 3,
+            flag: Some("reject".into()),
+            ..Default::default()
+        };
+        push(&raw_s, &mut m, true);
+        assert_eq!(
+            read(&std::fs::read_to_string(&xmp).unwrap())
+                .unwrap()
+                .rating,
+            Some(-1)
+        );
+        assert_eq!(m.rating, 3);
+
+        // Lightroom un-rejects it and gives it 4 stars.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let theirs = apply(
+            Some(&std::fs::read_to_string(&xmp).unwrap()),
+            &XmpUpdate {
+                rating: Some(4),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        std::fs::write(&xmp, theirs).unwrap();
+        assert!(pull(&raw_s, &mut m));
+        assert_eq!(m.flag, None);
+        assert_eq!(m.rating, 4);
+
+        // And rejects it again.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let theirs = apply(
+            Some(&std::fs::read_to_string(&xmp).unwrap()),
+            &XmpUpdate {
+                rating: Some(-1),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        std::fs::write(&xmp, theirs).unwrap();
+        assert!(pull(&raw_s, &mut m));
+        assert_eq!(m.flag.as_deref(), Some("reject"));
+        assert_eq!(m.rating, 4, "a reject does not erase the stars");
     }
 
     #[test]

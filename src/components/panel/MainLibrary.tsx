@@ -3,6 +3,7 @@ import { getVersion } from '@tauri-apps/api/app';
 import { open } from '@tauri-apps/plugin-shell';
 import {
   AlertTriangle,
+  ScanEye,
   Check,
   Folder,
   FolderInput,
@@ -36,6 +37,7 @@ import { useLibraryStore } from '../../store/useLibraryStore';
 
 import LibraryGrid from './library/LibraryGrid';
 import { SearchInput, ViewOptionsDropdown } from './library/LibraryHeader';
+import { startCulling } from './library/CullView';
 
 interface MainLibraryProps {
   activePath: string | null;
@@ -485,6 +487,16 @@ export default function MainLibrary(props: MainLibraryProps) {
             editedStatusOptions={translatedEditedStatusOptions}
             sortOptions={translatedSortOptions}
           />
+          <Button
+            className="h-12 px-4 bg-surface text-text-primary shadow-none flex items-center justify-center gap-2"
+            onClick={() => startCulling(props.imageList)}
+            data-tooltip={t('cull.openTip', {
+              defaultValue: 'Go through photos one at a time: pick, reject, rate (C)',
+            })}
+          >
+            <ScanEye className="w-5 h-5" />
+            {t('cull.title', { defaultValue: 'Cull' })}
+          </Button>
           {!props.isAndroid && (
             <>
               <Button

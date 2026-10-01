@@ -1,5 +1,14 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Image as ImageIcon, Folder, FolderOpen, Star as StarIcon, SlidersHorizontal, Layers } from 'lucide-react';
+import {
+  Image as ImageIcon,
+  Folder,
+  FolderOpen,
+  Star as StarIcon,
+  SlidersHorizontal,
+  Layers,
+  Flag,
+  X,
+} from 'lucide-react';
 import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
 import { COLOR_LABELS, Color } from '../../../utils/adjustments';
@@ -32,6 +41,7 @@ const ThumbnailComponent = ({
   aspectRatio: thumbnailAspectRatio,
   isEdited,
   exif,
+  flag = null,
 }: any) => {
   const { t } = useTranslation();
   const data = useProcessStore((s) => s.thumbnails[path]);
@@ -176,7 +186,7 @@ const ThumbnailComponent = ({
                   alt={path.split(/[\\/]/).pop()}
                   className={`w-full h-full group-hover:scale-[1.02] transition-transform duration-300 will-change-transform ${
                     thumbnailAspectRatio === ThumbnailAspectRatio.Contain ? 'object-contain' : 'object-cover'
-                  } relative`}
+                  } relative ${flag === 'reject' ? 'opacity-35' : ''}`}
                   decoding="async"
                   loading="lazy"
                   src={layer.url}
@@ -190,6 +200,18 @@ const ThumbnailComponent = ({
         {layers.length === 0 && showPlaceholder && (
           <div className="absolute inset-0 w-full h-full flex items-center justify-center bg-surface">
             <ImageIcon className="text-text-secondary animate-pulse" />
+          </div>
+        )}
+        {flag && (
+          <div
+            className="absolute left-1.5 top-1.5 z-10 rounded-full bg-black/45 p-1 text-white backdrop-blur-xs pointer-events-none"
+            data-tooltip={
+              flag === 'pick'
+                ? t('cull.picked', { defaultValue: 'Picked' })
+                : t('cull.rejected', { defaultValue: 'Rejected' })
+            }
+          >
+            {flag === 'pick' ? <Flag size={12} className="fill-white" /> : <X size={12} />}
           </div>
         )}
       </div>
@@ -823,6 +845,7 @@ const RowComponent = ({
               path={imageFile.path}
               rating={imageRatings?.[imageFile.path] || 0}
               tags={imageFile.tags}
+              flag={imageFile.flag ?? null}
               exif={imageFile.exif}
               aspectRatio={thumbnailAspectRatio}
               modified={imageFile.modified}
@@ -839,6 +862,7 @@ const RowComponent = ({
               path={imageFile.path}
               rating={imageRatings?.[imageFile.path] || 0}
               tags={imageFile.tags}
+              flag={imageFile.flag ?? null}
               exif={imageFile.exif}
               isEdited={imageFile.is_edited}
               aspectRatio={thumbnailAspectRatio}

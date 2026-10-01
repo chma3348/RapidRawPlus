@@ -148,6 +148,9 @@ pub struct ImageFile {
     derived_from: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     derived_kind: Option<String>,
+    /// Culling flag: "pick" or "reject".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    flag: Option<String>,
 }
 
 /// Fill in each listed file's original: from its sidecar where recorded,
@@ -384,7 +387,7 @@ pub fn list_images_in_dir(path: String, app_handle: AppHandle) -> Result<Vec<Ima
 
                 let sidecar_path = path_buf.with_file_name(sidecar_filename);
 
-                let (is_edited, tags, rating, derived_from, derived_kind) = {
+                let (is_edited, tags, rating, derived_from, derived_kind, flag) = {
                     let mut metadata = crate::exif_processing::load_sidecar(&sidecar_path);
 
                     if enable_xmp_sync
@@ -409,6 +412,7 @@ pub fn list_images_in_dir(path: String, app_handle: AppHandle) -> Result<Vec<Ima
                         metadata.rating,
                         metadata.derived_from,
                         metadata.derived_kind,
+                        metadata.flag,
                     )
                 };
 
@@ -422,6 +426,7 @@ pub fn list_images_in_dir(path: String, app_handle: AppHandle) -> Result<Vec<Ima
                     rating,
                     derived_from,
                     derived_kind,
+                    flag,
                 });
             }
 
@@ -518,7 +523,7 @@ pub fn list_images_recursive(
 
                 let sidecar_path = path_buf.with_file_name(sidecar_filename);
 
-                let (is_edited, tags, rating, derived_from, derived_kind) = {
+                let (is_edited, tags, rating, derived_from, derived_kind, flag) = {
                     let mut metadata = crate::exif_processing::load_sidecar(&sidecar_path);
 
                     if enable_xmp_sync
@@ -543,6 +548,7 @@ pub fn list_images_recursive(
                         metadata.rating,
                         metadata.derived_from,
                         metadata.derived_kind,
+                        metadata.flag,
                     )
                 };
 
@@ -556,6 +562,7 @@ pub fn list_images_recursive(
                     rating,
                     derived_from,
                     derived_kind,
+                    flag,
                 });
             }
 
@@ -793,7 +800,7 @@ pub fn get_album_images(
 
             let is_virtual_copy = virtual_path.contains("?vc=");
 
-            let (is_edited, tags, rating, derived_from, derived_kind) = {
+            let (is_edited, tags, rating, derived_from, derived_kind, flag) = {
                 let mut metadata = crate::exif_processing::load_sidecar(&sidecar_path);
 
                 if enable_xmp_sync
@@ -817,6 +824,7 @@ pub fn get_album_images(
                     metadata.rating,
                     metadata.derived_from,
                     metadata.derived_kind,
+                    metadata.flag,
                 )
             };
 
@@ -830,6 +838,7 @@ pub fn get_album_images(
                 rating,
                 derived_from,
                 derived_kind,
+                flag,
             })
         })
         .collect();
@@ -2406,6 +2415,35 @@ pub fn set_rating_for_paths(
         let mut metadata = crate::exif_processing::load_sidecar(&sidecar_path);
 
         metadata.rating = rating;
+
+        if enable_xmp_sync {
+            crate::xmp::push(path, &mut metadata, create_xmp_if_missing);
+        }
+
+        if let Ok(json_string) = serde_json::to_string_pretty(&metadata) {
+            let _ = std::fs::write(&sidecar_path, json_string);
+        }
+    });
+
+    Ok(())
+}
+
+/// Flag photos while culling: "pick", "reject", or none to clear.
+#[tauri::command]
+pub fn set_flag_for_paths(
+    paths: Vec<String>,
+    flag: Option<String>,
+    app_handle: AppHandle,
+) -> Result<(), String> {
+    let flag = flag.filter(|f| f == "pick" || f == "reject");
+    let settings = load_settings(app_handle.clone()).unwrap_or_default();
+    let enable_xmp_sync = settings.enable_xmp_sync.unwrap_or(true);
+    let create_xmp_if_missing = settings.create_xmp_if_missing.unwrap_or(false);
+
+    paths.par_iter().for_each(|path| {
+        let (_, sidecar_path) = parse_virtual_path(path);
+        let mut metadata = crate::exif_processing::load_sidecar(&sidecar_path);
+        metadata.flag = flag.clone();
 
         if enable_xmp_sync {
             crate::xmp::push(path, &mut metadata, create_xmp_if_missing);

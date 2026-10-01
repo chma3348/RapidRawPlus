@@ -2189,5 +2189,17 @@
     "hiddenSections": "Hidden:",
     "showSection": "Show this section again",
     "presence": "Presence"
+  },
+  "cull": {
+    "title": "Cull",
+    "openTip": "Go through photos one at a time: pick, reject, rate (C)",
+    "autoAdvance": "Auto-advance",
+    "autoAdvanceTip": "Move to the next photo after each decision (A)",
+    "compare": "Compare",
+    "compareTip": "Compare this photo with the next (C)",
+    "done": "Done",
+    "hints": "P pick · X reject · U clear · 1–5 stars · 6–9 labels · ←/→ move · C compare · A auto-advance · Enter edit · Esc done",
+    "picked": "Picked",
+    "rejected": "Rejected"
   }
 }
