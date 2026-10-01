@@ -17,6 +17,9 @@ interface PanelOptions {
   icon: LucideIcon;
   id: Panel;
   title: string;
+  /** The short name shown under the icon when rail labels are on. */
+  label: string;
+  fallback: string;
 }
 
 interface RightPanelSwitcherProps {
@@ -24,20 +27,46 @@ interface RightPanelSwitcherProps {
   onPanelSelect(id: Panel): void;
   isInstantTransition: boolean;
   layout?: 'horizontal' | 'vertical';
+  /** Show each panel's name under its icon (Layout menu). */
+  showLabels?: boolean;
 }
 
 const panelGroups: Array<Array<PanelOptions>> = [
-  [{ id: Panel.Metadata, icon: Info, title: 'editor.switcher.tooltips.info' }],
+  [{ id: Panel.Metadata, icon: Info, title: 'editor.switcher.tooltips.info', label: 'info', fallback: 'Info' }],
   [
-    { id: Panel.Adjustments, icon: SlidersHorizontal, title: 'editor.switcher.tooltips.adjust' },
-    { id: Panel.Crop, icon: Crop, title: 'editor.switcher.tooltips.crop' },
-    { id: Panel.Masks, icon: Layers, title: 'editor.switcher.tooltips.masks' },
-    { id: Panel.Ai, icon: Paintbrush, title: 'editor.switcher.tooltips.inpaint' },
-    { id: Panel.Sky, icon: Cloud, title: 'editor.switcher.tooltips.sky' },
+    {
+      id: Panel.Adjustments,
+      icon: SlidersHorizontal,
+      title: 'editor.switcher.tooltips.adjust',
+      label: 'adjust',
+      fallback: 'Adjust',
+    },
+    { id: Panel.Crop, icon: Crop, title: 'editor.switcher.tooltips.crop', label: 'crop', fallback: 'Crop' },
+    { id: Panel.Masks, icon: Layers, title: 'editor.switcher.tooltips.masks', label: 'masks', fallback: 'Masks' },
+    {
+      id: Panel.Ai,
+      icon: Paintbrush,
+      title: 'editor.switcher.tooltips.inpaint',
+      label: 'retouch',
+      fallback: 'Retouch',
+    },
+    { id: Panel.Sky, icon: Cloud, title: 'editor.switcher.tooltips.sky', label: 'sky', fallback: 'Sky' },
   ],
   [
-    { id: Panel.Presets, icon: SwatchBook, title: 'editor.switcher.tooltips.presets' },
-    { id: Panel.Export, icon: FileInput, title: 'editor.switcher.tooltips.export' },
+    {
+      id: Panel.Presets,
+      icon: SwatchBook,
+      title: 'editor.switcher.tooltips.presets',
+      label: 'presets',
+      fallback: 'Presets',
+    },
+    {
+      id: Panel.Export,
+      icon: FileInput,
+      title: 'editor.switcher.tooltips.export',
+      label: 'export',
+      fallback: 'Export',
+    },
   ],
 ];
 
@@ -46,6 +75,7 @@ export default function RightPanelSwitcher({
   onPanelSelect,
   isInstantTransition,
   layout = 'vertical',
+  showLabels = false,
 }: RightPanelSwitcherProps) {
   const { t } = useTranslation();
   const isHorizontal = layout === 'horizontal';
@@ -59,9 +89,11 @@ export default function RightPanelSwitcher({
               className={isHorizontal ? 'w-px h-6 bg-surface self-stretch my-auto' : 'w-6 h-px bg-surface self-center'}
             />
           )}
-          {group.map(({ id, icon: Icon, title }) => (
+          {group.map(({ id, icon: Icon, title, label, fallback }) => (
             <button
               className={`relative rounded-md transition-colors duration-200 ${isHorizontal ? 'p-2 shrink-0' : 'p-2'} ${
+                showLabels ? 'flex flex-col items-center gap-0.5 min-w-[52px]' : ''
+              } ${
                 activePanel === id
                   ? 'text-text-primary'
                   : 'text-text-secondary hover:bg-surface hover:text-text-primary'
@@ -78,6 +110,11 @@ export default function RightPanelSwitcher({
                 />
               )}
               <Icon size={20} className="relative z-10" />
+              {showLabels && (
+                <span className="relative z-10 text-[10px] leading-none">
+                  {t(`editor.switcher.labels.${label}`, { defaultValue: fallback })}
+                </span>
+              )}
             </button>
           ))}
         </div>

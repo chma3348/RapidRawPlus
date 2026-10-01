@@ -1,7 +1,16 @@
 import { ReactNode, useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useTranslation } from 'react-i18next';
-import { Pipette, Sparkles } from 'lucide-react';
+import { EyeOff, GripVertical, Pipette, Sparkles } from 'lucide-react';
+import {
+  DndContext,
+  PointerSensor,
+  useDraggable,
+  useDroppable,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from '@dnd-kit/core';
 import Slider from '../ui/Slider';
 import Dropdown from '../ui/Dropdown';
 import Switch from '../ui/Switch';
@@ -275,6 +284,78 @@ function BasicLook({
   );
 }
 
+/**
+ * An Advanced section that can be dragged by its grip to a new place, and
+ * hidden. The grip and hide buttons appear when the pointer is over the
+ * header.
+ */
+function MovableSection({
+  id,
+  title,
+  modified,
+  open,
+  onToggle,
+  onHide,
+  children,
+}: {
+  id: string;
+  title: string;
+  modified: boolean;
+  open: boolean;
+  onToggle: () => void;
+  onHide: () => void;
+  children: ReactNode;
+}) {
+  const { t } = useTranslation();
+  const drag = useDraggable({ id });
+  const drop = useDroppable({ id });
+  const style = drag.transform
+    ? {
+        transform: `translate3d(0, ${drag.transform.y}px, 0)`,
+        position: 'relative' as const,
+        zIndex: 20,
+        opacity: 0.9,
+      }
+    : undefined;
+  return (
+    <AdjustmentSection
+      title={title}
+      modified={modified}
+      open={open && !drag.isDragging}
+      onToggle={onToggle}
+      sectionRef={(el) => {
+        drag.setNodeRef(el);
+        drop.setNodeRef(el);
+      }}
+      style={style}
+      highlight={drop.isOver && !drag.isDragging}
+      actions={
+        <>
+          <button
+            type="button"
+            onClick={onHide}
+            className="rounded p-1 text-text-secondary opacity-0 transition-opacity hover:bg-surface hover:text-text-primary group-hover:opacity-100 focus-visible:opacity-100"
+            data-tooltip={t('colorV3.hideSection', { defaultValue: 'Hide this section' })}
+          >
+            <EyeOff size={13} />
+          </button>
+          <button
+            type="button"
+            {...drag.listeners}
+            {...drag.attributes}
+            className="cursor-grab rounded p-1 text-text-secondary opacity-0 transition-opacity hover:bg-surface hover:text-text-primary group-hover:opacity-100 focus-visible:opacity-100 active:cursor-grabbing"
+            data-tooltip={t('colorV3.moveSection', { defaultValue: 'Drag to move this section' })}
+          >
+            <GripVertical size={13} />
+          </button>
+        </>
+      }
+    >
+      {children}
+    </AdjustmentSection>
+  );
+}
+
 export default function ColorV3Controls({
   adjustments,
   setAdjustments,
@@ -306,6 +387,7 @@ export default function ColorV3Controls({
   const renderError = useEditorStore((s) => s.colorV3Error);
   const selectedPath = useEditorStore((s) => s.selectedImage?.path);
   const [layout, updateLayout] = useEditorLayout();
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
   const [band, setBand] = useState(0);
   const [gradingExpanded, setGradingExpanded] = useState(false);
   const update = (key: keyof V3Controls, value: any) =>
@@ -738,20 +820,52 @@ export default function ColorV3Controls({
   };
 
   const shown = layout.sectionOrder.filter((id) => sections[id]?.available && !layout.hiddenSections.includes(id));
+  const hidden = layout.sectionOrder.filter((id) => sections[id]?.available && layout.hiddenSections.includes(id));
+  // Dropping a section on another puts it in that one's place.
+  const onDragEnd = ({ active, over }: DragEndEvent) => {
+    if (!over || active.id === over.id) return;
+    const order = [...layout.sectionOrder];
+    const from = order.indexOf(String(active.id));
+    const to = order.indexOf(String(over.id));
+    if (from < 0 || to < 0) return;
+    order.splice(from, 1);
+    order.splice(to, 0, String(active.id));
+    updateLayout({ sectionOrder: order });
+  };
   return (
     <div className="flex flex-col">
       {errorNotice}
-      {shown.map((id) => (
-        <AdjustmentSection
-          key={id}
-          title={sections[id].title}
-          modified={sections[id].modified}
-          open={layout.openSections[id] ?? false}
-          onToggle={() => updateLayout({ openSections: { ...layout.openSections, [id]: !layout.openSections[id] } })}
-        >
-          {sections[id].body}
-        </AdjustmentSection>
-      ))}
+      <DndContext sensors={sensors} onDragEnd={onDragEnd}>
+        {shown.map((id) => (
+          <MovableSection
+            key={id}
+            id={id}
+            title={sections[id].title}
+            modified={sections[id].modified}
+            open={layout.openSections[id] ?? false}
+            onToggle={() => updateLayout({ openSections: { ...layout.openSections, [id]: !layout.openSections[id] } })}
+            onHide={() => updateLayout({ hiddenSections: [...layout.hiddenSections, id] })}
+          >
+            {sections[id].body}
+          </MovableSection>
+        ))}
+      </DndContext>
+      {hidden.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5 py-3 text-xs text-text-secondary">
+          <span>{t('colorV3.hiddenSections', { defaultValue: 'Hidden:' })}</span>
+          {hidden.map((id) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => updateLayout({ hiddenSections: layout.hiddenSections.filter((h) => h !== id) })}
+              className="rounded-full bg-surface px-2 py-0.5 text-text-primary hover:bg-card-active"
+              data-tooltip={t('colorV3.showSection', { defaultValue: 'Show this section again' })}
+            >
+              + {sections[id].title}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

@@ -1,11 +1,12 @@
 import { memo, useState, useEffect, useRef, useMemo } from 'react';
-import { Eye, EyeOff, ArrowLeft, Maximize, Loader2, Undo, Redo, Waves } from 'lucide-react';
+import { Eye, EyeOff, ArrowLeft, Maximize, Loader2, Undo, Redo, Waves, History } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
 import { SelectedImage } from '../../ui/AppProperties';
 import { IconAperture, IconCalendar, IconClock, IconFocalLength, IconIso, IconShutter } from './ExifIcons';
 import Text from '../../ui/Text';
+import EditorLayoutMenu from './EditorLayoutMenu';
 import { TextColors, TextVariants, TextWeights } from '../../../types/typography';
 
 interface EditorToolbarProps {
@@ -342,20 +343,7 @@ const EditorToolbar = memo(
             <ArrowLeft size={20} />
           </button>
 
-          <div className="hidden 2xl:flex items-center gap-2" aria-hidden="true">
-            <div className="p-2 invisible pointer-events-none">
-              <Undo size={20} />
-            </div>
-            <div className="p-2 invisible pointer-events-none">
-              <Undo size={20} />
-            </div>
-            <div className="p-2 invisible pointer-events-none">
-              <Undo size={20} />
-            </div>
-            <div className="p-2 invisible pointer-events-none">
-              <Undo size={20} />
-            </div>
-          </div>
+          <EditorLayoutMenu />
         </div>
 
         <div className="flex-1 flex justify-center min-w-0 relative h-full">
@@ -526,6 +514,21 @@ const EditorToolbar = memo(
 
         <div className="flex items-center gap-2 shrink-0 z-40">
           <div className="relative flex items-center gap-2" ref={historyButtonRef}>
+            <button
+              className={clsx(
+                'p-2 rounded-full transition-colors disabled:opacity-50 disabled:cursor-not-allowed',
+                isHistoryVisible
+                  ? 'bg-card-active text-text-primary'
+                  : 'bg-surface text-text-primary hover:bg-card-active',
+              )}
+              disabled={!adjustmentsHistory || adjustmentsHistory.length <= 1}
+              onClick={() => setIsHistoryVisible((prev) => !prev)}
+              onKeyDown={handleButtonKeyDown}
+              aria-expanded={isHistoryVisible}
+              data-tooltip={t('editor.toolbar.tooltips.history', { defaultValue: 'Edit history' })}
+            >
+              <History size={20} />
+            </button>
             <button
               className="bg-surface text-text-primary p-2 rounded-full hover:bg-card-active transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               disabled={!canUndo}

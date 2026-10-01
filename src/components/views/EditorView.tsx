@@ -5,6 +5,7 @@ import clsx from 'clsx';
 
 import Editor from '../panel/Editor';
 import VersionStrip from '../panel/editor/VersionStrip';
+import { useEditorLayout } from '../../hooks/useEditorLayout';
 import BottomBar from '../panel/BottomBar';
 import RightPanelSwitcher from '../panel/right/RightPanelSwitcher';
 import Resizer from '../ui/Resizer';
@@ -142,6 +143,10 @@ export default function EditorView({
     })),
   );
 
+  // Where the panel docks and whether its rail shows labels (Layout menu).
+  const [layout] = useEditorLayout();
+  const dockLeft = layout.panelSide === 'left';
+
   const editorNode = (
     <Editor
       onBackToLibrary={handleBackToLibrary}
@@ -246,7 +251,12 @@ export default function EditorView({
   );
 
   return (
-    <div className={clsx('flex grow h-full min-h-0', isCompactPortrait ? 'flex-col gap-2' : 'flex-row')}>
+    <div
+      className={clsx(
+        'flex grow h-full min-h-0',
+        isCompactPortrait ? 'flex-col gap-2' : dockLeft ? 'flex-row-reverse' : 'flex-row',
+      )}
+    >
       <div className={clsx('flex-1 flex flex-col min-w-0', isCompactPortrait && 'min-h-0')}>
         {editorNode}
         {!isFullScreen && (
@@ -262,6 +272,7 @@ export default function EditorView({
         className={clsx(
           'flex overflow-hidden shrink-0',
           isCompactPortrait ? 'flex-col bg-bg-secondary rounded-lg' : 'h-full bg-transparent',
+          !isCompactPortrait && dockLeft && 'flex-row-reverse',
           !isResizing && !isInstantTransition && 'transition-all duration-300 ease-in-out',
         )}
         style={
@@ -293,14 +304,18 @@ export default function EditorView({
                 onPanelSelect={handleRightPanelSelect}
                 isInstantTransition={isInstantTransition}
                 layout="horizontal"
+                showLabels={layout.showRailLabels}
               />
             </div>
             <div className="shrink-0 border-t border-surface">{editorBottomBarComponent}</div>
           </>
         ) : (
           <>
-            <Resizer direction={Orientation.Vertical} onMouseDown={createResizeHandler('right', rightPanelWidth)} />
-            <div className="flex bg-bg-secondary rounded-lg h-full">
+            <Resizer
+              direction={Orientation.Vertical}
+              onMouseDown={createResizeHandler(dockLeft ? 'rightDockedLeft' : 'right', rightPanelWidth)}
+            />
+            <div className={clsx('flex bg-bg-secondary rounded-lg h-full', dockLeft && 'flex-row-reverse')}>
               <div
                 className={clsx(
                   'h-full overflow-hidden',
@@ -314,7 +329,8 @@ export default function EditorView({
               </div>
               <div
                 className={clsx(
-                  'h-full border-l transition-colors',
+                  'h-full transition-colors',
+                  dockLeft ? 'border-r' : 'border-l',
                   activeRightPanel ? 'border-surface' : 'border-transparent',
                 )}
               >
@@ -322,6 +338,7 @@ export default function EditorView({
                   activePanel={activeRightPanel}
                   onPanelSelect={handleRightPanelSelect}
                   isInstantTransition={isInstantTransition}
+                  showLabels={layout.showRailLabels}
                 />
               </div>
             </div>

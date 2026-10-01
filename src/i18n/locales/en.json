@@ -788,10 +788,20 @@
         "crop": "Crop",
         "export": "Export",
         "info": "Info",
-        "inpaint": "Inpaint",
+        "inpaint": "Retouch",
         "masks": "Masks",
         "presets": "Presets",
         "sky": "Sky Replace"
+      },
+      "labels": {
+        "info": "Info",
+        "adjust": "Adjust",
+        "crop": "Crop",
+        "masks": "Masks",
+        "retouch": "Retouch",
+        "sky": "Sky",
+        "presets": "Presets",
+        "export": "Export"
       }
     },
     "toolbar": {
@@ -805,7 +815,8 @@
         "showEdited": "Show Edited (B)",
         "showOriginal": "Show Original (B)",
         "shutterSpeed": "Shutter Speed",
-        "undo": "Undo (Ctrl+Z) or History (Right-click)"
+        "undo": "Undo (Ctrl+Z) or History (Right-click)",
+        "history": "Edit history"
       },
       "vc": "VC"
     },
@@ -837,6 +848,19 @@
         "Copy": "Copy",
         "Version": "Version"
       }
+    },
+    "layout": {
+      "tooltip": "Layout",
+      "adjustments": "Adjustments",
+      "panelSide": "Panel side",
+      "left": "Left",
+      "right": "Right",
+      "panelLabels": "Panel labels",
+      "filmstrip": "Filmstrip",
+      "show": "Show",
+      "hide": "Hide",
+      "showHidden": "Show {{count}} hidden sections",
+      "reset": "Reset layout"
     }
   },
   "export": {
@@ -2158,6 +2182,10 @@
     },
     "whiteBalance": "White Balance",
     "gradingCompact": "Compact wheels",
-    "gradingPrecise": "Precise values"
+    "gradingPrecise": "Precise values",
+    "hideSection": "Hide this section",
+    "moveSection": "Drag to move this section",
+    "hiddenSections": "Hidden:",
+    "showSection": "Show this section again"
   }
 }

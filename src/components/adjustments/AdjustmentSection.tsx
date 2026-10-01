@@ -1,4 +1,4 @@
-import { ReactNode } from 'react';
+import React, { ReactNode } from 'react';
 import { ChevronRight } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -15,7 +15,15 @@ export default function AdjustmentSection({
   modified = false,
   actions,
   children,
+  sectionRef,
+  style,
+  highlight = false,
 }: {
+  /** For drag-and-drop: the element that moves, and how it is styled. */
+  sectionRef?: (el: HTMLElement | null) => void;
+  style?: React.CSSProperties;
+  /** A drop target line above the section while another is dragged over it. */
+  highlight?: boolean;
   title: string;
   open: boolean;
   onToggle: () => void;
@@ -26,7 +34,14 @@ export default function AdjustmentSection({
   children: ReactNode;
 }) {
   return (
-    <section className="border-b border-surface last:border-b-0">
+    <section
+      ref={sectionRef}
+      style={style}
+      className={clsx(
+        'border-b border-surface last:border-b-0 bg-bg-secondary',
+        highlight && 'shadow-[inset_0_2px_0_0_var(--color-accent)]',
+      )}
+    >
       <div className="group flex items-center gap-1">
         <button
           type="button"

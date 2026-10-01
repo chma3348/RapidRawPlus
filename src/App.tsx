@@ -527,6 +527,9 @@ function App() {
         setUI({ leftPanelWidth: Math.round(Math.max(200, Math.min(startSize + (moveEvent.clientX - startX), 500))) });
       } else if (stateKey === 'right') {
         setUI({ rightPanelWidth: Math.round(Math.max(280, Math.min(startSize - (moveEvent.clientX - startX), 600))) });
+      } else if (stateKey === 'rightDockedLeft') {
+        // The editor panel docked on the left grows as the edge moves right.
+        setUI({ rightPanelWidth: Math.round(Math.max(280, Math.min(startSize + (moveEvent.clientX - startX), 600))) });
       } else if (stateKey === 'bottom') {
         setUI({
           bottomPanelHeight: Math.round(Math.max(100, Math.min(startSize - (moveEvent.clientY - startY), 400))),
