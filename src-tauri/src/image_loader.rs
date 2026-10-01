@@ -271,7 +271,7 @@ fn patch_half_float_tiff(bytes: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Decodes a 16-bit half-float TIFF at full precision.
-fn decode_half_float_tiff(bytes: &[u8]) -> Option<DynamicImage> {
+pub(crate) fn decode_half_float_tiff(bytes: &[u8]) -> Option<DynamicImage> {
     let patched = patch_half_float_tiff(bytes)?;
     let mut reader = ImageReader::new(Cursor::new(patched.as_slice()))
         .with_guessed_format()

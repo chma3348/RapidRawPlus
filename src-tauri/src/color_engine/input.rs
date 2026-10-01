@@ -124,6 +124,18 @@ pub fn decode_profiled_photo(bytes: &[u8]) -> Result<DecodedFrame> {
         ),
         "Automatic v3 interpretation supports PNG, JPEG, TIFF, WebP, HEIC, AVIF and PSD; RAW and HDR formats need their dedicated adapters"
     );
+    // 16-bit floating-point TIFFs (frames exported from video and HDR
+    // tools) are refused by the image crate's TIFF decoder; decode them with
+    // the half-float reader, taking the profile and orientation from the file.
+    if format == ImageFormat::Tiff
+        && let Some(image) = crate::image_loader::decode_half_float_tiff(bytes)
+    {
+        let mut image = image;
+        if let Some(orientation) = exif_orientation(bytes) {
+            image.apply_orientation(orientation);
+        }
+        return finish_profiled(image, tiff_icc_profile(bytes), format, bytes);
+    }
     let mut decoder = reader.into_decoder()?;
     let icc = decoder
         .icc_profile()
@@ -163,6 +175,17 @@ pub fn decode_profiled_photo(bytes: &[u8]) -> Result<DecodedFrame> {
     let orientation = decoder.orientation()?;
     let mut image = DynamicImage::from_decoder(decoder)?;
     image.apply_orientation(orientation);
+    finish_profiled(image, icc, format, bytes)
+}
+
+/// Interpret decoded pixels through the file's ICC profile (or the
+/// documented sRGB fallback) into the scene-linear frame v3 works on.
+fn finish_profiled(
+    image: DynamicImage,
+    icc: Option<Vec<u8>>,
+    format: ImageFormat,
+    bytes: &[u8],
+) -> Result<DecodedFrame> {
     let mut warnings = vec![];
     let (profile, interpretation) = if let Some(ref data) = icc {
         (
@@ -341,6 +364,74 @@ pub(crate) fn convert_rgb_profile(
 
 #[cfg(test)]
 mod tests {
+    /// A 16-bit floating-point TIFF, as video and HDR tools export frames:
+    /// a 2×1 RGB image, one half-grey pixel and one white.
+    fn half_float_tiff() -> Vec<u8> {
+        fn f16(v: f32) -> u16 {
+            // Enough for exact values like 0.5 and 1.0.
+            let bits = v.to_bits();
+            let exp = ((bits >> 23) & 0xff) as i32 - 127 + 15;
+            (((bits >> 16) & 0x8000) as u16)
+                | ((exp as u16) << 10)
+                | (((bits >> 13) & 0x3ff) as u16)
+        }
+        let pixels: Vec<u16> = [0.5f32, 0.5, 0.5, 1.0, 1.0, 1.0]
+            .iter()
+            .map(|&v| f16(v))
+            .collect();
+        let data: Vec<u8> = pixels.iter().flat_map(|p| p.to_le_bytes()).collect();
+        let tags: [(u16, u16, u32, u32); 11] = [
+            (256, 3, 1, 2), // width
+            (257, 3, 1, 1), // height
+            (258, 3, 3, 0), // bits per sample -> offset patched below
+            (259, 3, 1, 1), // no compression
+            (262, 3, 1, 2), // RGB
+            (273, 4, 1, 0), // strip offset -> patched
+            (277, 3, 1, 3), // samples per pixel
+            (278, 3, 1, 1), // rows per strip
+            (279, 4, 1, data.len() as u32),
+            (284, 3, 1, 1), // chunky
+            (339, 3, 3, 0), // sample format -> offset patched (3 = float)
+        ];
+        let ifd_at = 8u32;
+        let ifd_len = 2 + tags.len() as u32 * 12 + 4;
+        let bits_at = ifd_at + ifd_len;
+        let format_at = bits_at + 6;
+        let data_at = format_at + 6;
+        let mut out = b"II*\0".to_vec();
+        out.extend_from_slice(&ifd_at.to_le_bytes());
+        out.extend_from_slice(&(tags.len() as u16).to_le_bytes());
+        for (tag, kind, count, value) in tags {
+            let value = match tag {
+                258 => bits_at,
+                273 => data_at,
+                339 => format_at,
+                _ => value,
+            };
+            out.extend_from_slice(&tag.to_le_bytes());
+            out.extend_from_slice(&kind.to_le_bytes());
+            out.extend_from_slice(&count.to_le_bytes());
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        out.extend_from_slice(&0u32.to_le_bytes());
+        for v in [16u16, 16, 16, 3, 3, 3] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out.extend_from_slice(&data);
+        out
+    }
+
+    #[test]
+    fn half_float_tiffs_are_read() {
+        let frame = decode_profiled_photo(&half_float_tiff()).expect("half-float TIFF decodes");
+        assert_eq!(frame.pixels.dimensions(), (2, 1));
+        let grey = frame.pixels.get_pixel(0, 0);
+        let white = frame.pixels.get_pixel(1, 0);
+        // sRGB 0.5 is about 0.214 linear; white stays white.
+        assert!((grey[0] - 0.214).abs() < 0.01, "{grey:?}");
+        assert!((white[1] - 1.0).abs() < 0.01, "{white:?}");
+    }
+
     #[test]
     fn sparse_orientation_matches_full_frame_for_every_orientation() {
         use rawler::decoders::Orientation::*;
