@@ -1,27 +1,26 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import Slider from '../ui/Slider';
+import Dropdown from '../ui/Dropdown';
 import ColorV3Sampler from './ColorV3Sampler';
 import { defaultV3Range, evaluateV3Curve, type V3Controls } from '../../utils/colorV3';
 
-export default function ColorV3Advanced({
-  values,
-  update,
-  onDragStateChange,
-  inspection,
-}: {
+type SectionProps = {
   values: V3Controls;
   update: (key: keyof V3Controls, value: unknown) => void;
   onDragStateChange?: (dragging: boolean) => void;
-  inspection?: { path: string; edits: unknown };
-}) {
+};
+
+const button =
+  'rounded-md px-2 py-1 bg-surface hover:bg-card-active focus-visible:outline-2 focus-visible:outline-accent disabled:opacity-50';
+
+/** The tone curve: luminance or one colour channel, three points, reset. */
+export function ToneCurveControls({ values, update, onDragStateChange }: SectionProps) {
   const { t } = useTranslation();
-  const [selected, setSelected] = useState(0);
   // 0 = luminance, 1-3 = red, green, blue.
   const [curveChannel, setCurveChannel] = useState(0);
   const identity = [0, 0.25, 0.5, 0.75, 1];
-  const activeCurve =
-    curveChannel === 0 ? values.curve : (values.channel_curves?.[curveChannel - 1] ?? identity);
+  const activeCurve = curveChannel === 0 ? values.curve : (values.channel_curves?.[curveChannel - 1] ?? identity);
   const setActiveCurve = (next: number[]) =>
     curveChannel === 0
       ? update('curve', next)
@@ -30,14 +29,86 @@ export default function ColorV3Advanced({
           [0, 1, 2].map((c) => (c === curveChannel - 1 ? next : (values.channel_curves?.[c] ?? identity))),
         );
   const curveColors = ['currentColor', '#e5484d', '#46a758', '#3e63dd'];
-  const index = Math.min(selected, Math.max(0, values.ranges.length - 1));
-  const range = values.ranges[index];
-  const button =
-    'rounded-md px-2 py-1 bg-surface hover:bg-card-active focus-visible:outline-2 focus-visible:outline-accent disabled:opacity-50';
   const curvePath = Array.from(
     { length: 101 },
     (_, i) => `${i === 0 ? 'M' : 'L'} ${i * 2} ${200 - evaluateV3Curve(activeCurve, i / 100) * 200}`,
   ).join(' ');
+  return (
+    <div className="text-text-primary">
+      <div
+        className="mb-2 flex gap-1"
+        role="group"
+        aria-label={t('colorV3.curveChannel', { defaultValue: 'Curve channel' })}
+      >
+        {['Luminance', 'Red', 'Green', 'Blue'].map((name, i) => (
+          <button
+            key={name}
+            type="button"
+            aria-pressed={curveChannel === i}
+            onClick={() => setCurveChannel(i)}
+            className={`${button} flex-1 text-xs ${curveChannel === i ? 'bg-card-active' : ''}`}
+          >
+            {t(`colorV3.curve${name}`, { defaultValue: name })}
+          </button>
+        ))}
+      </div>
+      <p className="mb-2 text-xs text-text-secondary leading-relaxed">
+        {curveChannel === 0
+          ? t('colorV3.curveHelp', {
+              defaultValue:
+                'Adjust brightness without reversing tones. The curve continues above white to preserve highlight headroom.',
+            })
+          : t('colorV3.channelCurveHelp', {
+              defaultValue: 'Bends one colour channel, so unlike the luminance curve it changes colour.',
+            })}
+      </p>
+      <svg
+        viewBox="0 0 200 200"
+        preserveAspectRatio="none"
+        className="w-full max-h-40 bg-surface rounded-md"
+        role="img"
+        aria-label={t('colorV3.curveGraph', {
+          defaultValue: 'Tone curve: input brightness horizontally, output vertically',
+        })}
+      >
+        <path d="M0 200L200 0" fill="none" stroke="currentColor" strokeOpacity="0.3" />
+        <path d={curvePath} fill="none" stroke={curveColors[curveChannel]} strokeWidth="2" />
+      </svg>
+      {[1, 2, 3].map((i) => (
+        <Slider
+          key={`${curveChannel}-${i}`}
+          label={t(`colorV3.curvePoint${i}`, { defaultValue: ['', 'Lower curve', 'Middle curve', 'Upper curve'][i] })}
+          value={activeCurve[i] * 100}
+          min={Math.round((activeCurve[i - 1] + 0.01) * 100)}
+          max={Math.round((activeCurve[i + 1] - 0.01) * 100)}
+          step={1}
+          defaultValue={Math.min(activeCurve[i + 1] - 0.01, Math.max(activeCurve[i - 1] + 0.01, i / 4)) * 100}
+          onDragStateChange={onDragStateChange}
+          onChange={(e: any) => setActiveCurve(activeCurve.map((v, j) => (j === i ? Number(e.target.value) / 100 : v)))}
+        />
+      ))}
+      <button
+        type="button"
+        className={`${button} mt-1 text-xs`}
+        onClick={() => setActiveCurve([0, 0.25, 0.5, 0.75, 1])}
+      >
+        {t('colorV3.resetCurve', { defaultValue: 'Reset curve' })}
+      </button>
+    </div>
+  );
+}
+
+/** Custom colour ranges: up to eight targeted hue/chroma/lightness ranges. */
+export function ColorRangeControls({
+  values,
+  update,
+  onDragStateChange,
+  inspection,
+}: SectionProps & { inspection?: { path: string; edits: unknown } }) {
+  const { t } = useTranslation();
+  const [selected, setSelected] = useState(0);
+  const index = Math.min(selected, Math.max(0, values.ranges.length - 1));
+  const range = values.ranges[index];
   const changeRange = (group: 'center' | 'width' | 'adjustment', column: number, value: number) =>
     update(
       'ranges',
@@ -67,141 +138,76 @@ export default function ColorV3Advanced({
       />
     );
   return (
-    <>
-      <details className="mt-3 text-text-primary" open>
-        <summary className="cursor-pointer text-sm font-medium focus-visible:outline-2 focus-visible:outline-accent">
-          {t('colorV3.curveTitle', { defaultValue: 'Tone curve' })}
-        </summary>
-        <div className="my-2 flex gap-1" role="group" aria-label={t('colorV3.curveChannel', { defaultValue: 'Curve channel' })}>
-          {['Luminance', 'Red', 'Green', 'Blue'].map((name, i) => (
-            <button
-              key={name}
-              type="button"
-              aria-pressed={curveChannel === i}
-              onClick={() => setCurveChannel(i)}
-              className={`${button} flex-1 text-xs ${curveChannel === i ? 'bg-card-active' : ''}`}
-            >
-              {t(`colorV3.curve${name}`, { defaultValue: name })}
-            </button>
-          ))}
-        </div>
-        <p className="my-2 text-sm">
-          {curveChannel === 0
-            ? t('colorV3.curveHelp', {
-                defaultValue:
-                  'Adjust brightness without reversing tones. The curve continues above white to preserve highlight headroom.',
-              })
-            : t('colorV3.channelCurveHelp', {
-                defaultValue:
-                  'Bends one channel, in the same log encoding Resolve’s curves use — so unlike the luminance curve, it changes colour.',
-              })}
-        </p>
-        <svg
-          viewBox="0 0 200 200"
-          preserveAspectRatio="none"
-          className="w-full max-h-40 bg-surface rounded-md"
-          role="img"
-          aria-label={t('colorV3.curveGraph', {
-            defaultValue: 'Tone curve: input brightness horizontally, output vertically',
-          })}
+    <div className="text-text-primary">
+      <p className="mb-2 text-xs text-text-secondary leading-relaxed">
+        {t('colorV3.rangeHelp', {
+          defaultValue: 'Target a hue, chroma and lightness range with soft transitions.',
+        })}
+      </p>
+      <div className="flex gap-2 flex-wrap mb-2">
+        <button
+          type="button"
+          className={`${button} text-xs`}
+          disabled={values.ranges.length >= 8}
+          onClick={() => {
+            setSelected(values.ranges.length);
+            update('ranges', [...values.ranges, defaultV3Range()]);
+          }}
         >
-          <path d="M0 200L200 0" fill="none" stroke="currentColor" strokeOpacity="0.3" />
-          <path d={curvePath} fill="none" stroke={curveColors[curveChannel]} strokeWidth="2" />
-        </svg>
-        {[1, 2, 3].map((i) => (
-          <Slider
-            key={`${curveChannel}-${i}`}
-            label={t(`colorV3.curvePoint${i}`, { defaultValue: ['', 'Lower curve', 'Middle curve', 'Upper curve'][i] })}
-            value={activeCurve[i] * 100}
-            min={Math.round((activeCurve[i - 1] + 0.01) * 100)}
-            max={Math.round((activeCurve[i + 1] - 0.01) * 100)}
-            step={1}
-            defaultValue={Math.min(activeCurve[i + 1] - 0.01, Math.max(activeCurve[i - 1] + 0.01, i / 4)) * 100}
-            onDragStateChange={onDragStateChange}
-            onChange={(e: any) => setActiveCurve(activeCurve.map((v, j) => (j === i ? Number(e.target.value) / 100 : v)))}
-          />
-        ))}
-        <button type="button" className={button} onClick={() => setActiveCurve([0, 0.25, 0.5, 0.75, 1])}>
-          {t('colorV3.resetCurve', { defaultValue: 'Reset curve' })}
+          {t('colorV3.addRange', { defaultValue: 'Add range' })}
         </button>
-      </details>
-      <details className="mt-3 text-text-primary">
-        <summary className="cursor-pointer text-sm font-medium focus-visible:outline-2 focus-visible:outline-accent">
-          {t('colorV3.rangeTitle', { defaultValue: 'Custom color ranges' })}
-        </summary>
-        <p className="my-2 text-sm">
-          {t('colorV3.rangeHelp', {
-            defaultValue:
-              'Target a hue, chroma and lightness range with soft transitions. Centers use Oklab values before selective color adjustments.',
-          })}
-        </p>
-        <div className="flex gap-2 flex-wrap mb-2">
+        {range && (
           <button
             type="button"
-            className={button}
-            disabled={values.ranges.length >= 8}
-            onClick={() => {
-              setSelected(values.ranges.length);
-              update('ranges', [...values.ranges, defaultV3Range()]);
-            }}
+            className={`${button} text-xs`}
+            onClick={() =>
+              update(
+                'ranges',
+                values.ranges.filter((_, i) => i !== index),
+              )
+            }
           >
-            {t('colorV3.addRange', { defaultValue: 'Add range' })}
+            {t('colorV3.removeRange', { defaultValue: 'Remove selected range' })}
           </button>
-          {range && (
-            <button
-              type="button"
-              className={button}
-              onClick={() =>
+        )}
+      </div>
+      {range && (
+        <>
+          {inspection && (
+            <ColorV3Sampler
+              {...inspection}
+              index={index}
+              onCenter={(center) =>
                 update(
                   'ranges',
-                  values.ranges.filter((_, i) => i !== index),
+                  values.ranges.map((r, i) => (i === index ? { ...r, center } : r)),
                 )
               }
-            >
-              {t('colorV3.removeRange', { defaultValue: 'Remove selected range' })}
-            </button>
+            />
           )}
-        </div>
-        {range && (
-          <>
-            {inspection && (
-              <ColorV3Sampler
-                {...inspection}
-                index={index}
-                onCenter={(center) =>
-                  update(
-                    'ranges',
-                    values.ranges.map((r, i) => (i === index ? { ...r, center } : r)),
-                  )
-                }
-              />
-            )}
-            <label className="text-sm">
-              {t('colorV3.selectedRange', { defaultValue: 'Selected range' })}
-              <select
-                className="my-2 w-full bg-surface rounded-md p-2 focus-visible:outline-2 focus-visible:outline-accent"
+          {values.ranges.length > 1 && (
+            <div className="my-2">
+              <Dropdown
+                options={values.ranges.map((_, i) => ({
+                  value: i,
+                  label: t('colorV3.rangeNumber', { defaultValue: 'Range {{number}}', number: i + 1 }),
+                }))}
                 value={index}
-                onChange={(e) => setSelected(Number(e.target.value))}
-              >
-                {values.ranges.map((_, i) => (
-                  <option key={i} value={i}>
-                    {t('colorV3.rangeNumber', { defaultValue: 'Range {{number}}', number: i + 1 })}
-                  </option>
-                ))}
-              </select>
-            </label>
-            {rangeSlider('center', 0, t('colorV3.centerHue', { defaultValue: 'Target hue' }), 0, 360, 1)}
-            {rangeSlider('width', 0, t('colorV3.hueWidth', { defaultValue: 'Hue reach' }), 1, 180, 1)}
-            {rangeSlider('center', 1, t('colorV3.centerChroma', { defaultValue: 'Target chroma' }), 0, 1, 0.01)}
-            {rangeSlider('width', 1, t('colorV3.chromaWidth', { defaultValue: 'Chroma reach' }), 0.01, 1, 0.01)}
-            {rangeSlider('center', 2, t('colorV3.centerLightness', { defaultValue: 'Target lightness' }), 0, 2, 0.01)}
-            {rangeSlider('width', 2, t('colorV3.lightnessWidth', { defaultValue: 'Lightness reach' }), 0.01, 2, 0.01)}
-            {rangeSlider('adjustment', 0, t('colorV3.bandHue', { defaultValue: 'Hue shift' }), -60, 60, 1)}
-            {rangeSlider('adjustment', 1, t('colorV3.bandChroma', { defaultValue: 'Chroma' }), -100, 100, 1)}
-            {rangeSlider('adjustment', 2, t('colorV3.bandLightness', { defaultValue: 'Lightness' }), -100, 100, 1)}
-          </>
-        )}
-      </details>
-    </>
+                onChange={(i: number) => setSelected(i)}
+              />
+            </div>
+          )}
+          {rangeSlider('center', 0, t('colorV3.centerHue', { defaultValue: 'Target hue' }), 0, 360, 1)}
+          {rangeSlider('width', 0, t('colorV3.hueWidth', { defaultValue: 'Hue reach' }), 1, 180, 1)}
+          {rangeSlider('center', 1, t('colorV3.centerChroma', { defaultValue: 'Target chroma' }), 0, 1, 0.01)}
+          {rangeSlider('width', 1, t('colorV3.chromaWidth', { defaultValue: 'Chroma reach' }), 0.01, 1, 0.01)}
+          {rangeSlider('center', 2, t('colorV3.centerLightness', { defaultValue: 'Target lightness' }), 0, 2, 0.01)}
+          {rangeSlider('width', 2, t('colorV3.lightnessWidth', { defaultValue: 'Lightness reach' }), 0.01, 2, 0.01)}
+          {rangeSlider('adjustment', 0, t('colorV3.bandHue', { defaultValue: 'Hue shift' }), -60, 60, 1)}
+          {rangeSlider('adjustment', 1, t('colorV3.bandChroma', { defaultValue: 'Chroma' }), -100, 100, 1)}
+          {rangeSlider('adjustment', 2, t('colorV3.bandLightness', { defaultValue: 'Lightness' }), -100, 100, 1)}
+        </>
+      )}
+    </div>
   );
 }

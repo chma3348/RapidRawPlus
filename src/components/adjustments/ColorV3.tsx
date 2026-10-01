@@ -1,15 +1,18 @@
-import { useEffect, useState } from 'react';
+import { ReactNode, useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useTranslation } from 'react-i18next';
-import { Pipette } from 'lucide-react';
+import { Pipette, Sparkles } from 'lucide-react';
 import Slider from '../ui/Slider';
 import Dropdown from '../ui/Dropdown';
+import Switch from '../ui/Switch';
 import LUTControl from '../ui/LUTControl';
 import FlatFieldControl from './FlatFieldControl';
-import ColorV3Advanced from './ColorV3Advanced';
+import { ColorRangeControls, ToneCurveControls } from './ColorV3Advanced';
 import BasicAdjustments from './Basic';
+import AdjustmentSection, { BasicGroupTitle } from './AdjustmentSection';
 import { useEditorStore } from '../../store/useEditorStore';
 import { useEditorActions } from '../../hooks/useEditorActions';
+import { useEditorLayout } from '../../hooks/useEditorLayout';
 import {
   defaultV3Controls,
   defaultV3Detail,
@@ -22,37 +25,21 @@ import {
   V3PipelineIdentity,
 } from '../../utils/colorV3';
 
-export function ColorV3Status({
-  adjustments,
-  setAdjustments,
-}: {
-  adjustments: any;
-  setAdjustments: (fn: any) => void;
-}) {
+const differs = (a: unknown, b: unknown) => JSON.stringify(a) !== JSON.stringify(b);
+
+/**
+ * RAW interpretation for this photo: highlight recovery, and keeping the
+ * photo's look fixed if the colour engine is later updated.
+ */
+function RawControls({ adjustments, setAdjustments }: { adjustments: any; setAdjustments: (fn: any) => void }) {
   const { t } = useTranslation();
   const selectedImage = useEditorStore((s) => s.selectedImage);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState('');
-  const active = adjustments.processVersion === 3;
   useEffect(() => {
     setError('');
   }, [selectedImage?.path]);
-  const pinCurrent = async () => {
-    if (!selectedImage || pending) return;
-    const path = selectedImage.path;
-    setError('');
-    setPending(true);
-    try {
-      const result = await invoke<{ pipeline: V3PipelineIdentity }>('pin_color_v3', { path, edits: adjustments });
-      if (useEditorStore.getState().selectedImage?.path !== path) return;
-      setAdjustments((prev: any) => ({ ...prev, v3Pipeline: result.pipeline }));
-    } catch (e) {
-      if (useEditorStore.getState().selectedImage?.path === path) setError(String(e));
-    } finally {
-      setPending(false);
-    }
-  };
-  const changeRecovery = async (enabled: boolean) => {
+  const pin = async (recovery?: boolean) => {
     if (!selectedImage || pending) return;
     const path = selectedImage.path;
     setError('');
@@ -65,7 +52,7 @@ export function ColorV3Status({
       setAdjustments((prev: any) => ({
         ...prev,
         v3Pipeline: result.pipeline,
-        v3RawRecovery: enabled ? 'neutral_green_v1' : 'off',
+        ...(recovery === undefined ? {} : { v3RawRecovery: recovery ? 'neutral_green_v1' : 'off' }),
       }));
     } catch (e) {
       if (useEditorStore.getState().selectedImage?.path === path) setError(String(e));
@@ -74,74 +61,64 @@ export function ColorV3Status({
     }
   };
   return (
-    <div className="mb-3 border border-surface rounded-md p-3 text-sm text-text-primary">
-      <div className="flex items-center justify-between gap-2">
-        <span>{t('colorV3.title', { defaultValue: 'Color engine v3' })}</span>
-      </div>
-      {active && (
-        <div className="mt-2 leading-relaxed" aria-live="polite">
-          {adjustments.v3Pipeline ? (
-            <p>
-              {t('colorV3.pipelinePinned', {
-                defaultValue:
-                  'Core rendering version and input/output transforms are locked. Creative LUT files are managed separately.',
-              })}
-            </p>
-          ) : (
-            <>
-              <p>
-                {t('colorV3.currentUnpinned', {
-                  defaultValue:
-                    'Using the installed color transforms. Lock them to keep this edit tied to these captures.',
-                })}
-              </p>
-              <button
-                type="button"
-                disabled={pending || !selectedImage}
-                onClick={pinCurrent}
-                className="mt-2 rounded-md px-2 py-1 bg-surface hover:bg-card-active focus-visible:outline-2 focus-visible:outline-accent disabled:opacity-50"
-              >
-                {pending
-                  ? t('colorV3.locking', { defaultValue: 'Locking rendering…' })
-                  : t('colorV3.lockPipeline', { defaultValue: 'Lock current pipeline' })}
-              </button>
-            </>
-          )}
-        </div>
+    <div className="flex flex-col gap-3 text-sm text-text-primary">
+      <Switch
+        label={t('colorV3.rawRecovery', { defaultValue: 'Neutralize clipped RAW highlights' })}
+        checked={(adjustments.v3RawRecovery ?? 'neutral_green_v1') === 'neutral_green_v1'}
+        disabled={pending || !selectedImage}
+        onChange={(checked: boolean) => void pin(checked)}
+      />
+      <p className="text-xs text-text-secondary leading-relaxed">
+        {t('colorV3.rawRecoveryHelp', {
+          defaultValue:
+            'RAW only. On by default. Turn off to use the unrecovered sensor colours; clipped detail is not restored. This does not change the Highlights slider.',
+        })}
+      </p>
+      {adjustments.v3Pipeline ? (
+        <p className="text-xs text-text-secondary leading-relaxed">
+          {t('colorV3.pipelinePinned', {
+            defaultValue: "This photo's look is kept as it is, even if the colour engine is updated.",
+          })}
+        </p>
+      ) : (
+        <button
+          type="button"
+          disabled={pending || !selectedImage}
+          onClick={() => void pin()}
+          className="self-start rounded-md px-2 py-1 text-xs bg-surface hover:bg-card-active focus-visible:outline-2 focus-visible:outline-accent disabled:opacity-50"
+        >
+          {pending
+            ? t('colorV3.locking', { defaultValue: 'Keeping…' })
+            : t('colorV3.lockPipeline', { defaultValue: "Keep this photo's look if the engine is updated" })}
+        </button>
       )}
       {error && (
-        <p role="alert" className="mt-2">
+        <p role="alert" className="text-xs">
           {error}
         </p>
-      )}
-      {active && (
-        <details className="mt-3">
-          <summary className="cursor-pointer focus-visible:outline-2 focus-visible:outline-accent">
-            {t('colorV3.sourceOptions', { defaultValue: 'RAW source options' })}
-          </summary>
-          <label className="mt-2 flex items-start gap-2">
-            <input
-              type="checkbox"
-              className="mt-1 accent-accent"
-              disabled={pending || !selectedImage}
-              checked={(adjustments.v3RawRecovery ?? 'neutral_green_v1') === 'neutral_green_v1'}
-              onChange={(event) => {
-                void changeRecovery(event.target.checked);
-              }}
-            />
-            <span>{t('colorV3.rawRecovery', { defaultValue: 'Neutralize clipped RAW highlights' })}</span>
-          </label>
-          <p className="mt-2 leading-relaxed">
-            {t('colorV3.rawRecoveryHelp', {
-              defaultValue:
-                'RAW only. Preserves the existing highlight treatment by default. Turn off to use the unrecovered sensor colors; clipped detail is not restored. This does not change the Highlights slider.',
-            })}
-          </p>
-        </details>
       )}
     </div>
   );
 }
+
+function useSimulations() {
+  const [simulations, setSimulations] = useState<Array<any>>([]);
+  useEffect(() => {
+    invoke('list_managed_luts')
+      .then((l: any) => setSimulations(l || []))
+      .catch(() => setSimulations([]));
+  }, []);
+  return simulations;
+}
+
+const clearedLook = {
+  lutPath: null,
+  lutName: null,
+  lutData: null,
+  lutSize: 0,
+  lutIntensity: 100,
+  lutInputSpace: 'display',
+};
 
 /**
  * The creative LUT. The settings are the previous engine's own — film
@@ -159,42 +136,24 @@ function V3LookSection({
 }) {
   const { t } = useTranslation();
   const { handleLutSelect, setLutPreviewOverride } = useEditorActions();
-  const [simulations, setSimulations] = useState<Array<any>>([]);
-  useEffect(() => {
-    invoke('list_managed_luts')
-      .then((l: any) => setSimulations(l || []))
-      .catch(() => setSimulations([]));
-  }, []);
+  const simulations = useSimulations();
   const space = adjustments.lutInputSpace ?? 'display';
   const spaces = [
-    {
-      value: 'display',
-      label: t('colorV3.lutDisplay', { defaultValue: 'Display (sRGB) — most downloaded LUTs' }),
-    },
-    {
-      value: 'intermediate',
-      label: t('colorV3.lutIntermediate', { defaultValue: 'DaVinci Intermediate — a look made in Resolve' }),
-    },
-    {
-      value: 'flog2c',
-      label: t('colorV3.lutFlog2c', { defaultValue: 'F-Log2 C — Fujifilm film simulation' }),
-    },
+    { value: 'display', label: t('colorV3.lutDisplay', { defaultValue: 'Standard (most downloaded looks)' }) },
+    { value: 'intermediate', label: t('colorV3.lutIntermediate', { defaultValue: 'Log (made in DaVinci Resolve)' }) },
+    { value: 'flog2c', label: t('colorV3.lutFlog2c', { defaultValue: 'Log (Fujifilm film simulation)' }) },
   ];
   const explanation: Record<string, string> = {
-    display: t('colorV3.lutDisplayHelp', {
-      defaultValue: 'Applied to the finished picture, after the rendering.',
-    }),
+    display: t('colorV3.lutDisplayHelp', { defaultValue: 'Applied to the finished picture.' }),
     intermediate: t('colorV3.lutIntermediateHelp', {
-      defaultValue:
-        'Applied to the graded scene before the rendering, as a node would in a DaVinci Wide Gamut timeline.',
+      defaultValue: 'Applied to the graded scene before the final rendering, as in a Resolve timeline.',
     }),
     flog2c: t('colorV3.lutFlog2cHelp', {
-      defaultValue: 'Replaces the rendering: the LUT receives the scene as the camera would have encoded it.',
+      defaultValue: 'Replaces the final rendering: the look receives the scene as the camera would have recorded it.',
     }),
   };
   return (
     <>
-      <h3 className="mt-3 text-sm font-medium text-text-primary">{t('colorV3.lut', { defaultValue: 'LUT' })}</h3>
       {simulations.length > 0 && (
         <Dropdown
           options={simulations.map((p) => ({
@@ -217,35 +176,19 @@ function V3LookSection({
         onLutSelect={handleLutSelect}
         onLutHover={setLutPreviewOverride}
         onIntensityChange={(intensity: number) => setAdjustments((prev: any) => ({ ...prev, lutIntensity: intensity }))}
-        onClear={() =>
-          setAdjustments((prev: any) => ({
-            ...prev,
-            lutPath: null,
-            lutName: null,
-            lutData: null,
-            lutSize: 0,
-            lutIntensity: 100,
-            lutInputSpace: 'display',
-          }))
-        }
+        onClear={() => setAdjustments((prev: any) => ({ ...prev, ...clearedLook }))}
         onDragStateChange={onDragStateChange}
       />
       {adjustments.lutPath && (
         <>
-          <label className="text-sm text-text-primary">
-            {t('colorV3.lutSpace', { defaultValue: 'Made for' })}
-            <select
-              className="mt-2 w-full bg-surface text-text-primary rounded-md p-2"
-              value={space}
-              onChange={(e) => setAdjustments((prev: any) => ({ ...prev, lutInputSpace: e.target.value }))}
-            >
-              {spaces.map((s) => (
-                <option value={s.value} key={s.value}>
-                  {s.label}
-                </option>
-              ))}
-            </select>
-          </label>
+          <p className="mt-1 text-xs text-text-secondary">
+            {t('colorV3.lutSpace', { defaultValue: 'This look expects' })}
+          </p>
+          <Dropdown
+            options={spaces}
+            value={space}
+            onChange={(value: string) => setAdjustments((prev: any) => ({ ...prev, lutInputSpace: value }))}
+          />
           <p className="text-xs text-text-secondary leading-relaxed">{explanation[space] ?? explanation.display}</p>
           {space === 'flog2c' && (
             <Slider
@@ -267,6 +210,69 @@ function V3LookSection({
   );
 }
 
+/** Basic mode's look: pick a film simulation and how strong it is. */
+function BasicLook({
+  adjustments,
+  setAdjustments,
+  onDragStateChange,
+}: {
+  adjustments: any;
+  setAdjustments: (fn: any) => void;
+  onDragStateChange?: (v: boolean) => void;
+}) {
+  const { t } = useTranslation();
+  const { handleLutSelect } = useEditorActions();
+  const simulations = useSimulations();
+  const none = '__none__';
+  const custom =
+    adjustments.lutPath && !simulations.some((p) => p.path === adjustments.lutPath)
+      ? [
+          {
+            label: adjustments.lutName || t('colorV3.customLook', { defaultValue: 'Custom look' }),
+            value: adjustments.lutPath,
+          },
+        ]
+      : [];
+  return (
+    <>
+      <Dropdown
+        options={[
+          { label: t('colorV3.noLook', { defaultValue: 'None' }), value: none },
+          ...simulations.map((p) => ({
+            label: p.inputSpace === 'flog2c' ? `${p.name} (Fujifilm)` : p.name,
+            value: p.path,
+          })),
+          ...custom,
+        ]}
+        value={adjustments.lutPath || none}
+        onChange={(path: string) => {
+          if (path === none) {
+            setAdjustments((prev: any) => ({ ...prev, ...clearedLook }));
+            return;
+          }
+          const preset = simulations.find((p) => p.path === path);
+          if (!preset) return;
+          handleLutSelect(preset.path);
+          setAdjustments((prev: any) => ({ ...prev, lutInputSpace: preset.inputSpace }));
+        }}
+      />
+      {adjustments.lutPath && (
+        <Slider
+          label={t('colorV3.lookStrength', { defaultValue: 'Strength' })}
+          min={0}
+          max={100}
+          step={1}
+          defaultValue={100}
+          value={adjustments.lutIntensity ?? 100}
+          fillOrigin="min"
+          onChange={(e: any) => setAdjustments((prev: any) => ({ ...prev, lutIntensity: Number(e.target.value) }))}
+          onDragStateChange={onDragStateChange}
+        />
+      )}
+    </>
+  );
+}
+
 export default function ColorV3Controls({
   adjustments,
   setAdjustments,
@@ -275,6 +281,8 @@ export default function ColorV3Controls({
   showEffects = true,
   isWbPickerActive = false,
   toggleWbPicker,
+  mode = 'advanced',
+  onAuto,
 }: {
   adjustments: any;
   setAdjustments: (fn: any) => void;
@@ -286,11 +294,16 @@ export default function ColorV3Controls({
   /** The canvas white-balance picker; hosts without a canvas omit it. */
   isWbPickerActive?: boolean;
   toggleWbPicker?: () => void;
+  /** Basic: a short set of easy controls. Advanced: everything, in sections. */
+  mode?: 'basic' | 'advanced';
+  /** Basic mode's Auto button. */
+  onAuto?: () => void;
 }) {
   const { t } = useTranslation();
   const values: V3Controls = { ...defaultV3Controls(), ...adjustments.v3 };
   const renderError = useEditorStore((s) => s.colorV3Error);
   const selectedPath = useEditorStore((s) => s.selectedImage?.path);
+  const [layout, updateLayout] = useEditorLayout();
   const [band, setBand] = useState(0);
   const [wheel, setWheel] = useState(0);
   const update = (key: keyof V3Controls, value: any) =>
@@ -377,91 +390,194 @@ export default function ColorV3Controls({
       }
     />
   );
-  return (
-    <div className="flex flex-col gap-2">
-      {renderError && (
-        <p role="alert" className="border border-surface rounded-md p-3 text-sm text-text-primary">
-          {t('colorV3.failed', { defaultValue: 'V3 could not render this edit. The displayed image may be outdated.' })}{' '}
-          {renderError}
+  const wbPicker = toggleWbPicker && (
+    <button
+      type="button"
+      onClick={toggleWbPicker}
+      aria-pressed={isWbPickerActive}
+      className={`self-start rounded-md px-2 py-1 text-xs flex items-center gap-1 transition-colors ${
+        isWbPickerActive ? 'bg-accent text-button-text' : 'bg-surface hover:bg-card-active text-text-primary'
+      }`}
+    >
+      <Pipette size={14} />
+      {t('colorV3.wbPicker', { defaultValue: 'Pick a neutral' })}
+    </button>
+  );
+  const errorNotice = renderError && (
+    <p role="alert" className="mb-3 rounded-md bg-surface p-3 text-xs text-text-primary">
+      {t('colorV3.failed', {
+        defaultValue: 'This edit could not be shown. The picture on screen may be out of date.',
+      })}
+    </p>
+  );
+  const defaults = defaultV3Controls();
+  const top = (k: string) => adjustments[k] ?? 0;
+
+  // ---------------------------------------------------------------- Basic
+  if (mode === 'basic') {
+    return (
+      <div className="flex flex-col gap-6">
+        {errorNotice}
+        {onAuto && (
+          <button
+            type="button"
+            onClick={onAuto}
+            disabled={!selectedPath}
+            className="flex items-center justify-center gap-2 rounded-lg bg-surface py-2 text-sm font-medium text-text-primary hover:bg-card-active disabled:opacity-50"
+          >
+            <Sparkles size={15} className="text-accent" />
+            {t('colorV3.auto', { defaultValue: 'Auto' })}
+          </button>
+        )}
+        <div>
+          <BasicGroupTitle>{t('colorV3.groupLight', { defaultValue: 'Light' })}</BasicGroupTitle>
+          <BasicAdjustments
+            adjustments={adjustments}
+            setAdjustments={setAdjustments}
+            onDragStateChange={onDragStateChange}
+            simple
+          />
+        </div>
+        <div className="flex flex-col">
+          <BasicGroupTitle>{t('colorV3.color', { defaultValue: 'Color' })}</BasicGroupTitle>
+          {wbPicker}
+          {slider('temperature', t('colorV3.temperature', { defaultValue: 'Warmth' }))}
+          {slider('tint', t('colorV3.tint', { defaultValue: 'Tint' }))}
+          {slider('vibrance', t('colorV3.vibrance', { defaultValue: 'Vibrance' }))}
+          {slider('saturation', t('colorV3.saturation', { defaultValue: 'Saturation' }))}
+        </div>
+        {showDetail && (
+          <div>
+            <BasicGroupTitle>{t('colorV3.groupDetailClarity', { defaultValue: 'Detail & Clarity' })}</BasicGroupTitle>
+            {detailSlider('texture', t('colorV3.texture', { defaultValue: 'Texture' }))}
+            {detailSlider('clarity', t('colorV3.clarity', { defaultValue: 'Clarity' }))}
+            {detailSlider('dehaze', t('colorV3.dehaze', { defaultValue: 'Dehaze' }))}
+            {detailSlider('sharpening', t('colorV3.sharpening', { defaultValue: 'Sharpening' }))}
+            {detailSlider('luminance_noise', t('colorV3.luminanceNoise', { defaultValue: 'Noise reduction' }), 0, 100)}
+          </div>
+        )}
+        {showEffects && (
+          <div>
+            <BasicGroupTitle>{t('colorV3.groupEffects', { defaultValue: 'Effects' })}</BasicGroupTitle>
+            {effectSlider('vignette_amount', t('colorV3.vignette', { defaultValue: 'Vignette' }), -100, 100)}
+            {effectSlider('grain_amount', t('colorV3.grain', { defaultValue: 'Grain' }), 0, 100)}
+          </div>
+        )}
+        {showEffects && (
+          <div className="flex flex-col gap-1">
+            <BasicGroupTitle>{t('colorV3.look', { defaultValue: 'Look' })}</BasicGroupTitle>
+            <BasicLook
+              adjustments={adjustments}
+              setAdjustments={setAdjustments}
+              onDragStateChange={onDragStateChange}
+            />
+          </div>
+        )}
+        <p className="text-center text-xs text-text-secondary">
+          {t('colorV3.moreInAdvanced', { defaultValue: 'Curves, color mixing, grading and more are in Advanced.' })}
         </p>
-      )}
-      <h3 className="text-sm font-medium text-text-primary">{t('colorV3.basic', { defaultValue: 'Basic' })}</h3>
-      {/* The previous engine's own Basic panel: same sliders, same saved
-          settings, same behaviour — v3 runs its functions for them. */}
-      <BasicAdjustments
-        adjustments={adjustments}
-        setAdjustments={setAdjustments}
-        onDragStateChange={onDragStateChange}
-      />
-      <h3 className="mt-3 text-sm font-medium text-text-primary">
-        {t('colorV3.whiteBalance', { defaultValue: 'White balance' })}
-      </h3>
-      {toggleWbPicker && (
-        <button
-          type="button"
-          onClick={toggleWbPicker}
-          aria-pressed={isWbPickerActive}
-          className={`self-start rounded-md px-2 py-1 text-xs flex items-center gap-1 transition-colors ${
-            isWbPickerActive ? 'bg-accent text-button-text' : 'bg-surface hover:bg-card-active text-text-primary'
-          }`}
-        >
-          <Pipette size={14} />
-          {t('colorV3.wbPicker', { defaultValue: 'Pick a neutral' })}
-        </button>
-      )}
-      {slider('temperature', t('colorV3.temperature', { defaultValue: 'Warmth' }))}
-      {slider('tint', t('colorV3.tint', { defaultValue: 'Tint' }))}
-      <ColorV3Advanced
-        values={values}
-        update={update}
-        onDragStateChange={onDragStateChange}
-        inspection={
-          adjustments.processVersion === 3 && selectedPath ? { path: selectedPath, edits: adjustments } : undefined
-        }
-      />
-      <h3 className="mt-3 text-sm font-medium text-text-primary">{t('colorV3.color', { defaultValue: 'Color' })}</h3>
-      {slider('saturation', t('colorV3.saturation', { defaultValue: 'Saturation' }))}
-      {slider('vibrance', t('colorV3.vibrance', { defaultValue: 'Vibrance' }))}
-      {slider('hue', t('colorV3.hue', { defaultValue: 'Hue rotation' }), -180, 180)}
-      <label className="mt-3 text-sm text-text-primary">
-        {t('colorV3.selective', { defaultValue: 'Selective color' })}
-        <select
-          className="mt-2 w-full bg-surface text-text-primary rounded-md p-2"
-          value={band}
-          onChange={(e) => setBand(Number(e.target.value))}
-        >
-          {bands.map((b, i) => (
-            <option value={i} key={b}>
-              {t(`colorV3.band.${b}`, { defaultValue: b })}
-            </option>
-          ))}
-        </select>
-      </label>
-      {arraySlider('bands', band, 0, t('colorV3.bandHue', { defaultValue: 'Hue shift' }), -60, 60)}
-      {arraySlider('bands', band, 1, t('colorV3.bandChroma', { defaultValue: 'Chroma' }), -100, 100)}
-      {arraySlider('bands', band, 2, t('colorV3.bandLightness', { defaultValue: 'Lightness' }), -100, 100)}
-      <label className="mt-3 text-sm text-text-primary">
-        {t('colorV3.grading', { defaultValue: 'Color grading' })}
-        <select
-          className="mt-2 w-full bg-surface text-text-primary rounded-md p-2"
-          value={wheel}
-          onChange={(e) => setWheel(Number(e.target.value))}
-        >
-          {wheels.map((w, i) => (
-            <option value={i} key={w}>
-              {t(`colorV3.wheel.${w}`, { defaultValue: w })}
-            </option>
-          ))}
-        </select>
-      </label>
-      {arraySlider('grading', wheel, 0, t('colorV3.gradingHue', { defaultValue: 'Tint hue' }), 0, 360)}
-      {arraySlider('grading', wheel, 1, t('colorV3.gradingAmount', { defaultValue: 'Tint amount' }), 0, 100)}
-      {arraySlider('grading', wheel, 2, t('colorV3.bandLightness', { defaultValue: 'Lightness' }), -100, 100)}
-      {showDetail && (
+      </div>
+    );
+  }
+
+  // ------------------------------------------------------------- Advanced
+  const sections: Record<string, { title: string; modified: boolean; body: ReactNode; available: boolean }> = {
+    light: {
+      title: t('colorV3.groupLight', { defaultValue: 'Light' }),
+      modified: ['exposure', 'brightness', 'contrast', 'highlights', 'shadows', 'whites', 'blacks'].some(
+        (k) => top(k) !== 0,
+      ),
+      available: true,
+      body: (
+        <BasicAdjustments
+          adjustments={adjustments}
+          setAdjustments={setAdjustments}
+          onDragStateChange={onDragStateChange}
+        />
+      ),
+    },
+    whiteBalance: {
+      title: t('colorV3.whiteBalance', { defaultValue: 'White Balance' }),
+      modified: values.temperature !== 0 || values.tint !== 0,
+      available: true,
+      body: (
         <>
-          <h3 className="mt-3 text-sm font-medium text-text-primary">
-            {t('colorV3.detail', { defaultValue: 'Detail' })}
-          </h3>
+          {wbPicker}
+          {slider('temperature', t('colorV3.temperature', { defaultValue: 'Warmth' }))}
+          {slider('tint', t('colorV3.tint', { defaultValue: 'Tint' }))}
+        </>
+      ),
+    },
+    toneCurve: {
+      title: t('colorV3.curveTitle', { defaultValue: 'Tone Curve' }),
+      modified: differs(values.curve, defaults.curve) || differs(values.channel_curves, defaults.channel_curves),
+      available: true,
+      body: <ToneCurveControls values={values} update={update} onDragStateChange={onDragStateChange} />,
+    },
+    color: {
+      title: t('colorV3.color', { defaultValue: 'Color' }),
+      modified: values.saturation !== 0 || values.vibrance !== 0 || values.hue !== 0,
+      available: true,
+      body: (
+        <>
+          {slider('saturation', t('colorV3.saturation', { defaultValue: 'Saturation' }))}
+          {slider('vibrance', t('colorV3.vibrance', { defaultValue: 'Vibrance' }))}
+          {slider('hue', t('colorV3.hue', { defaultValue: 'Hue rotation' }), -180, 180)}
+        </>
+      ),
+    },
+    colorMixer: {
+      title: t('colorV3.colorMixer', { defaultValue: 'Color Mixer' }),
+      modified: differs(values.bands, defaults.bands) || values.ranges.length > 0,
+      available: true,
+      body: (
+        <>
+          <p className="text-xs text-text-secondary">{t('colorV3.selective', { defaultValue: 'Selective color' })}</p>
+          <Dropdown
+            options={bands.map((b, i) => ({ value: i, label: t(`colorV3.band.${b}`, { defaultValue: b }) }))}
+            value={band}
+            onChange={(i: number) => setBand(i)}
+          />
+          {arraySlider('bands', band, 0, t('colorV3.bandHue', { defaultValue: 'Hue shift' }), -60, 60)}
+          {arraySlider('bands', band, 1, t('colorV3.bandChroma', { defaultValue: 'Chroma' }), -100, 100)}
+          {arraySlider('bands', band, 2, t('colorV3.bandLightness', { defaultValue: 'Lightness' }), -100, 100)}
+          <p className="mt-3 text-xs text-text-secondary">
+            {t('colorV3.rangeTitle', { defaultValue: 'Custom color ranges' })}
+          </p>
+          <ColorRangeControls
+            values={values}
+            update={update}
+            onDragStateChange={onDragStateChange}
+            inspection={
+              adjustments.processVersion === 3 && selectedPath ? { path: selectedPath, edits: adjustments } : undefined
+            }
+          />
+        </>
+      ),
+    },
+    colorGrading: {
+      title: t('colorV3.grading', { defaultValue: 'Color Grading' }),
+      modified: differs(values.grading, defaults.grading),
+      available: true,
+      body: (
+        <>
+          <Dropdown
+            options={wheels.map((w, i) => ({ value: i, label: t(`colorV3.wheel.${w}`, { defaultValue: w }) }))}
+            value={wheel}
+            onChange={(i: number) => setWheel(i)}
+          />
+          {arraySlider('grading', wheel, 0, t('colorV3.gradingHue', { defaultValue: 'Tint hue' }), 0, 360)}
+          {arraySlider('grading', wheel, 1, t('colorV3.gradingAmount', { defaultValue: 'Tint amount' }), 0, 100)}
+          {arraySlider('grading', wheel, 2, t('colorV3.bandLightness', { defaultValue: 'Lightness' }), -100, 100)}
+        </>
+      ),
+    },
+    detail: {
+      title: t('colorV3.detail', { defaultValue: 'Detail' }),
+      modified: differs(detail, defaultV3Detail()),
+      available: showDetail,
+      body: (
+        <>
           {detailSlider('dehaze', t('colorV3.dehaze', { defaultValue: 'Dehaze' }))}
           {detailSlider('sharpening', t('colorV3.sharpening', { defaultValue: 'Sharpening' }))}
           {detailSlider('threshold', t('colorV3.threshold', { defaultValue: 'Sharpening threshold' }), 0, 80, 15)}
@@ -476,21 +592,17 @@ export default function ColorV3Controls({
             })}
           </p>
         </>
-      )}
-      {!showEffects && (
+      ),
+    },
+    effects: {
+      title: t('colorV3.groupEffects', { defaultValue: 'Effects' }),
+      modified: differs(
+        { ...effects, ca_red_cyan: 0, ca_blue_yellow: 0 },
+        { ...defaultV3Effects(), ca_red_cyan: 0, ca_blue_yellow: 0 },
+      ),
+      available: true,
+      body: showEffects ? (
         <>
-          <h3 className="mt-3 text-sm font-medium text-text-primary">
-            {t('colorV3.localLight', { defaultValue: 'Glow and halation' })}
-          </h3>
-          {effectSlider('glow_amount', t('colorV3.glow', { defaultValue: 'Glow' }), 0, 100)}
-          {effectSlider('halation_amount', t('colorV3.halation', { defaultValue: 'Halation' }), 0, 100)}
-        </>
-      )}
-      {showEffects && (
-        <>
-          <h3 className="mt-3 text-sm font-medium text-text-primary">
-            {t('colorV3.effects', { defaultValue: 'Vignette and grain' })}
-          </h3>
           {effectSlider('vignette_amount', t('colorV3.vignette', { defaultValue: 'Vignette' }), -100, 100)}
           {effectSlider(
             'vignette_midpoint',
@@ -508,9 +620,9 @@ export default function ColorV3Controls({
           {effectSlider('grain_amount', t('colorV3.grain', { defaultValue: 'Grain' }), 0, 100)}
           {effectSlider('grain_size', t('colorV3.grainSize', { defaultValue: 'Grain size' }), 0, 100)}
           {effectSlider('grain_roughness', t('colorV3.grainRoughness', { defaultValue: 'Grain roughness' }), 0, 100)}
-          <h3 className="mt-3 text-sm font-medium text-text-primary">
+          <p className="mt-2 text-xs text-text-secondary">
             {t('colorV3.light', { defaultValue: 'Film and lens looks' })}
-          </h3>
+          </p>
           {effectSlider('glow_amount', t('colorV3.glow', { defaultValue: 'Glow' }), 0, 100)}
           {effectSlider('halation_amount', t('colorV3.halation', { defaultValue: 'Halation' }), 0, 100)}
           {effectSlider('flare_amount', t('colorV3.flare', { defaultValue: 'Light flares' }), 0, 100)}
@@ -522,9 +634,22 @@ export default function ColorV3Controls({
                 'These respond to how bright highlights are after exposure, so raising exposure makes more of the picture glow.',
             })}
           </p>
-          <h3 className="mt-3 text-sm font-medium text-text-primary">
-            {t('colorV3.lens', { defaultValue: 'Chromatic aberration' })}
-          </h3>
+        </>
+      ) : (
+        // Masks: glow and halation are local light; the rest describe the whole frame.
+        <>
+          {effectSlider('glow_amount', t('colorV3.glow', { defaultValue: 'Glow' }), 0, 100)}
+          {effectSlider('halation_amount', t('colorV3.halation', { defaultValue: 'Halation' }), 0, 100)}
+        </>
+      ),
+    },
+    optics: {
+      title: t('colorV3.optics', { defaultValue: 'Optics' }),
+      modified: effects.ca_red_cyan !== 0 || effects.ca_blue_yellow !== 0 || !!adjustments.flatFieldProfile,
+      available: showEffects,
+      body: (
+        <>
+          <p className="text-xs text-text-secondary">{t('colorV3.lens', { defaultValue: 'Chromatic aberration' })}</p>
           {effectSlider('ca_red_cyan', t('colorV3.caRedCyan', { defaultValue: 'Red / cyan fringe' }), -100, 100)}
           {effectSlider(
             'ca_blue_yellow',
@@ -532,9 +657,22 @@ export default function ColorV3Controls({
             -100,
             100,
           )}
-          <h3 className="mt-3 text-sm font-medium text-text-primary">
-            {t('colorV3.calibration', { defaultValue: 'Camera calibration' })}
-          </h3>
+          <div className="mt-3">
+            <FlatFieldControl
+              adjustments={adjustments}
+              setAdjustments={setAdjustments}
+              onDragStateChange={onDragStateChange}
+            />
+          </div>
+        </>
+      ),
+    },
+    calibration: {
+      title: t('colorV3.calibration', { defaultValue: 'Camera Calibration' }),
+      modified: differs(calibration, defaultV3Calibration()),
+      available: showEffects,
+      body: (
+        <>
           {calibrationSlider('shadows_tint', t('colorV3.calShadowsTint', { defaultValue: 'Shadows tint' }))}
           {calibrationSlider('red_hue', t('colorV3.calRedHue', { defaultValue: 'Red primary hue' }))}
           {calibrationSlider('red_saturation', t('colorV3.calRedSat', { defaultValue: 'Red primary saturation' }))}
@@ -545,20 +683,44 @@ export default function ColorV3Controls({
           )}
           {calibrationSlider('blue_hue', t('colorV3.calBlueHue', { defaultValue: 'Blue primary hue' }))}
           {calibrationSlider('blue_saturation', t('colorV3.calBlueSat', { defaultValue: 'Blue primary saturation' }))}
-          <div className="mt-3">
-            <FlatFieldControl
-              adjustments={adjustments}
-              setAdjustments={setAdjustments}
-              onDragStateChange={onDragStateChange}
-            />
-          </div>
-          <V3LookSection
-            adjustments={adjustments}
-            setAdjustments={setAdjustments}
-            onDragStateChange={onDragStateChange}
-          />
         </>
-      )}
+      ),
+    },
+    look: {
+      title: t('colorV3.look', { defaultValue: 'Look' }),
+      modified: !!adjustments.lutPath,
+      available: showEffects,
+      body: (
+        <V3LookSection
+          adjustments={adjustments}
+          setAdjustments={setAdjustments}
+          onDragStateChange={onDragStateChange}
+        />
+      ),
+    },
+    raw: {
+      title: t('colorV3.raw', { defaultValue: 'RAW' }),
+      modified: !!adjustments.v3Pipeline || adjustments.v3RawRecovery === 'off',
+      available: showEffects && adjustments.processVersion === 3,
+      body: <RawControls adjustments={adjustments} setAdjustments={setAdjustments} />,
+    },
+  };
+
+  const shown = layout.sectionOrder.filter((id) => sections[id]?.available && !layout.hiddenSections.includes(id));
+  return (
+    <div className="flex flex-col">
+      {errorNotice}
+      {shown.map((id) => (
+        <AdjustmentSection
+          key={id}
+          title={sections[id].title}
+          modified={sections[id].modified}
+          open={layout.openSections[id] ?? false}
+          onToggle={() => updateLayout({ openSections: { ...layout.openSections, [id]: !layout.openSections[id] } })}
+        >
+          {sections[id].body}
+        </AdjustmentSection>
+      ))}
     </div>
   );
 }

@@ -6,9 +6,16 @@ interface BasicAdjustmentsProps {
   adjustments: Adjustments;
   setAdjustments(adjustments: Partial<Adjustments>): any;
   onDragStateChange?: (isDragging: boolean) => void;
+  /** Basic mode: the six core sliders, without Contrast pivot and Brightness. */
+  simple?: boolean;
 }
 
-export default function BasicAdjustments({ adjustments, setAdjustments, onDragStateChange }: BasicAdjustmentsProps) {
+export default function BasicAdjustments({
+  adjustments,
+  setAdjustments,
+  onDragStateChange,
+  simple = false,
+}: BasicAdjustmentsProps) {
   const { t } = useTranslation();
 
   const handleAdjustmentChange = (key: BasicAdjustment, value: any) => {
@@ -39,7 +46,7 @@ export default function BasicAdjustments({ adjustments, setAdjustments, onDragSt
         value={adjustments.contrast}
         onDragStateChange={onDragStateChange}
       />
-      {(adjustments.contrast ?? 0) !== 0 && (
+      {!simple && (adjustments.contrast ?? 0) !== 0 && (
         <Slider
           label={t('adjustments.basic.contrastPivot')}
           max={100}
@@ -88,15 +95,17 @@ export default function BasicAdjustments({ adjustments, setAdjustments, onDragSt
         value={adjustments.blacks}
         onDragStateChange={onDragStateChange}
       />
-      <Slider
-        label={t('adjustments.basic.brightness', { defaultValue: 'Brightness' })}
-        max={5}
-        min={-5}
-        onChange={(e: any) => handleAdjustmentChange(BasicAdjustment.Brightness, e.target.value)}
-        step={0.01}
-        value={adjustments.brightness}
-        onDragStateChange={onDragStateChange}
-      />
+      {!simple && (
+        <Slider
+          label={t('adjustments.basic.brightness', { defaultValue: 'Brightness' })}
+          max={5}
+          min={-5}
+          onChange={(e: any) => handleAdjustmentChange(BasicAdjustment.Brightness, e.target.value)}
+          step={0.01}
+          value={adjustments.brightness}
+          onDragStateChange={onDragStateChange}
+        />
+      )}
     </div>
   );
 }

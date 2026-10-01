@@ -3,7 +3,8 @@ import { RotateCcw, Aperture, ChartArea } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
-import ColorV3Controls, { ColorV3Status } from '../../adjustments/ColorV3';
+import ColorV3Controls from '../../adjustments/ColorV3';
+import { useEditorLayout } from '../../../hooks/useEditorLayout';
 import Waveform from '../editor/Waveform';
 import Resizer from '../../ui/Resizer';
 import { Adjustments, SectionVisibility, INITIAL_ADJUSTMENTS, ADJUSTMENT_SECTIONS } from '../../../utils/adjustments';
@@ -56,6 +57,9 @@ export default function Controls() {
       setEditor: state.setEditor,
     })),
   );
+
+  const [layout, updateLayout] = useEditorLayout();
+  const mode = layout.adjustmentsMode;
 
   const toggleWbPicker = useCallback(
     () => setEditor((state) => ({ isWbPickerActive: !state.isWbPickerActive })),
@@ -144,14 +148,40 @@ export default function Controls() {
         )}
       </AnimatePresence>
 
-      <div className="grow overflow-y-scroll p-4 flex flex-col gap-2">
-        <ColorV3Status adjustments={adjustments} setAdjustments={setAdjustments} />
+      {/* Basic: the essentials, airy. Advanced: every control, in sections. */}
+      <div className="shrink-0 px-4 pt-3">
+        <div className="flex rounded-lg bg-surface p-0.5" role="tablist">
+          {(['basic', 'advanced'] as const).map((m) => (
+            <button
+              key={m}
+              type="button"
+              role="tab"
+              aria-selected={mode === m}
+              onClick={() => updateLayout({ adjustmentsMode: m })}
+              className={clsx(
+                'flex-1 rounded-md py-1.5 text-xs font-medium transition-colors',
+                mode === m
+                  ? 'bg-card-active text-text-primary shadow-sm'
+                  : 'text-text-secondary hover:text-text-primary',
+              )}
+            >
+              {m === 'basic'
+                ? t('editor.adjustments.modeBasic', { defaultValue: 'Basic' })
+                : t('editor.adjustments.modeAdvanced', { defaultValue: 'Advanced' })}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className={clsx('grow overflow-y-auto px-4 flex flex-col', mode === 'basic' ? 'py-4' : 'py-1')}>
         <ColorV3Controls
           adjustments={adjustments}
           setAdjustments={setAdjustments}
           onDragStateChange={onDragStateChange}
           isWbPickerActive={isWbPickerActive}
           toggleWbPicker={toggleWbPicker}
+          mode={mode}
+          onAuto={handleAutoAdjustments}
         />
       </div>
     </div>

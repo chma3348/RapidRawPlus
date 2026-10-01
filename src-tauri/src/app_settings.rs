@@ -347,6 +347,11 @@ pub struct AppSettings {
     /// the editor preview and of exported files.
     #[serde(default)]
     pub output_color_space: Option<String>,
+    /// How the editor is arranged: Basic or Advanced adjustments, which
+    /// sections are open, their order, hidden sections, panel side. Kept as
+    /// JSON; the editor owns its shape (`src/utils/editorLayout.ts`).
+    #[serde(default)]
+    pub editor_layout: Option<serde_json::Value>,
     #[serde(default)]
     pub live_preview_quality: Option<String>,
     pub sort_criteria: Option<SortCriteria>,
@@ -459,6 +464,7 @@ impl Default for AppSettings {
             use_full_dpi_rendering: Some(false),
             enable_live_previews: Some(true),
             output_color_space: None,
+            editor_layout: None,
             live_preview_quality: Some("high".to_string()),
             sort_criteria: None,
             filter_criteria: None,
