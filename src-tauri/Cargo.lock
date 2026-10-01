@@ -33,6 +33,7 @@ dependencies = [
  "libc",
  "little_exif",
  "log",
+ "memchr",
  "memmap2",
  "mimalloc",
  "moxcms",

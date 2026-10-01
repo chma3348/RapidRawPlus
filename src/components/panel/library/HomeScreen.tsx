@@ -14,6 +14,7 @@ import {
   FolderPlus,
   Play,
   Settings,
+  Sparkles,
   Star,
   Upload,
 } from 'lucide-react';
@@ -26,6 +27,7 @@ import { useProcessStore } from '../../../store/useProcessStore';
 import { TextColors, TextVariants, TextWeights } from '../../../types/typography';
 import { isVideoPath } from '../../../utils/media';
 import { isRejectsFolder } from '../../../utils/flags';
+import { useAdobeImport } from '../../modals/AdobeImportModal';
 
 /** How many photos a shelf shows before "See all". */
 const SHELF_LENGTH = 40;
@@ -938,6 +940,22 @@ function ImportMenu({
               <Text weight={TextWeights.semibold}>{t('library.home.addFolder')}</Text>
               <Text variant={TextVariants.small} color={TextColors.secondary}>
                 {t('library.home.addFolderDesc')}
+              </Text>
+            </span>
+          </button>
+          <div className="my-1 border-t border-border-color" />
+          <button
+            className={item}
+            onClick={() => {
+              setOpen(false);
+              useAdobeImport.getState().show(defaultFolder);
+            }}
+          >
+            <Sparkles size={16} className="mt-0.5 shrink-0 text-accent" />
+            <span>
+              <Text weight={TextWeights.semibold}>{t('adobeImport.menu')}</Text>
+              <Text variant={TextVariants.small} color={TextColors.secondary}>
+                {t('adobeImport.menuDesc')}
               </Text>
             </span>
           </button>

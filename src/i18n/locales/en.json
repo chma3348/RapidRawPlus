@@ -166,6 +166,60 @@
       "flatFieldDeleteConfirm": "Delete flat-field profile \"{{name}}\"? Its master flat file will be removed."
     }
   },
+  "adobeImport": {
+    "title": "Bring over your Lightroom edits",
+    "lead": "Photos edited in Lightroom, Lightroom Classic or Camera Raw keep their edits in .xmp files beside them, or inside DNG and JPEG files. This reads those edits and sets up the same look here, so you can carry on where you left off. Your Lightroom files aren’t changed.",
+    "exactTitle": "Comes across as is",
+    "exact": [
+      "Crop and straighten",
+      "Rotation",
+      "Star ratings, flags, colour labels and keywords"
+    ],
+    "closeTitle": "Comes across closely",
+    "close_items": [
+      "Exposure, contrast, highlights, shadows, whites and blacks",
+      "Texture, clarity, dehaze, vibrance and saturation",
+      "White balance",
+      "Tone curves",
+      "Colour mixer (HSL) and colour grading",
+      "Sharpening and noise reduction",
+      "Vignette and grain"
+    ],
+    "notTitle": "Doesn’t come across",
+    "not": [
+      "Masks and local adjustments",
+      "Healing, clone and spot removal",
+      "Adobe profiles and Looks (such as Adobe Color)",
+      "The parametric tone curve, and colour grading’s blending and balance",
+      "AI Denoise and Lens Blur"
+    ],
+    "note": "Every editor renders differently, so photos will look close to Lightroom rather than identical — a starting point you can keep adjusting. Very large white-balance changes may be held back a little. Photos you’ve already edited here are left alone. Using Lightroom Classic? Select the photos there and choose Metadata › Save Metadata to Files (⌘S) first, so the edits are written beside them.",
+    "chooseFolder": "Choose a folder",
+    "subfolders": "Include subfolders",
+    "find": "Find Lightroom edits",
+    "scanning": "Looking… {{done}} of {{total}}",
+    "noneFound": "No Lightroom edits were found in this folder.",
+    "noneNew_one": "The {{count}} photo with Lightroom edits is already edited here, so it’s left alone.",
+    "noneNew_other": "The {{count}} photos with Lightroom edits are already edited here, so they’re left alone.",
+    "found_one": "{{count}} photo has Lightroom edits to bring over",
+    "found_other": "{{count}} photos have Lightroom edits to bring over",
+    "alreadyEdited_one": "{{count}} more is already edited here and will be left alone.",
+    "alreadyEdited_other": "{{count}} more are already edited here and will be left alone.",
+    "withLocal_one": "{{count}} has masks or retouching, which won’t come across; its other edits will.",
+    "withLocal_other": "{{count}} have masks or retouching, which won’t come across; their other edits will.",
+    "back": "Back",
+    "bringOver_one": "Bring over {{count}} edit",
+    "bringOver_other": "Bring over {{count}} edits",
+    "importing": "Bringing over edits… {{done}} of {{total}}",
+    "done_one": "{{count}} photo now has its Lightroom edits",
+    "done_other": "{{count}} photos now have their Lightroom edits",
+    "doneNote": "They’re ordinary edits here: adjust them, or reset a photo to start over. Undo takes them all off again.",
+    "undo": "Undo",
+    "finish": "Done",
+    "close": "Close",
+    "menu": "Bring over Lightroom edits…",
+    "menuDesc": "Set up photos edited in Lightroom with the same edits here."
+  },
   "contextMenus": {
     "album": {
       "emptyGroup": "(Empty Group)"

@@ -64,6 +64,7 @@ import { globalImageCache } from '../utils/ImageLRUCache';
 import { getStacks, withVersions } from './useStacks';
 import { undoFileOperation } from '../utils/fileUndo';
 import { useConvertStore } from '../components/modals/ConvertModal';
+import { useAdobeImport } from '../components/modals/AdobeImportModal';
 
 export interface UseAppContextMenusProps {
   handleImageSelect: (path: string) => void;
@@ -1047,6 +1048,11 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
           icon: FileType,
           label: t('contextMenus.folders.convert', { defaultValue: 'Convert files…' }),
           onClick: () => useConvertStore.getState().openConvert([targetPath], targetPath),
+        },
+        {
+          icon: Sparkles,
+          label: t('adobeImport.menu'),
+          onClick: () => useAdobeImport.getState().show(targetPath),
         },
         { type: OPTION_SEPARATOR },
         {

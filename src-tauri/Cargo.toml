@@ -86,6 +86,7 @@ mimalloc = "0.1.50"
 image_hasher = "3.1.1"
 regex = "1.12.3"
 memmap2 = "0.9.10"
+memchr = "2"
 half = { version = "2.7.1", features = ["bytemuck"] }
 glam = "0.32.1"
 quick-xml = { version = "0.40", features = ["serialize"] }

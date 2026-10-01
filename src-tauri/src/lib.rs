@@ -16,6 +16,7 @@ pub mod auto_level;
 mod cache_utils;
 pub mod color_engine;
 pub mod comfy_engine;
+pub mod adobe_develop;
 pub mod convert;
 mod culling;
 mod denoising;
@@ -1800,6 +1801,7 @@ pub fn run() {
             file_management::watch_library_roots,
             file_management::watch_open_folder,
             file_management::set_flag_for_paths,
+            adobe_develop::read_adobe_develop,
             convert::scan_convertible,
             convert::convert_files,
             convert::cancel_conversion,

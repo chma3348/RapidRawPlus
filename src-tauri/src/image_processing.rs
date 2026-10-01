@@ -1959,6 +1959,19 @@ pub fn is_image_edited(
         return true;
     }
 
+    // V3's own settings (white balance, colour, curves, detail, effects).
+    // Its tone is read from the shared sliders below, so it is left out here.
+    if let Some(v3) = adj.get("v3")
+        && let Ok(mut controls) =
+            serde_json::from_value::<crate::color_engine::controls::Controls>(v3.clone())
+    {
+        let neutral = crate::color_engine::controls::Controls::default();
+        controls.tone = neutral.tone.clone();
+        if controls != neutral {
+            return true;
+        }
+    }
+
     let current_render_adj = render_adjustments_for_empty(adj);
     let default_render_adj = default_render_adjustments_json();
     let current_adj =
@@ -3661,5 +3674,22 @@ mod pro_color_tests {
             render.get("processVersion").is_none(),
             "non-empty legacy sidecars must keep their implicit v1 render"
         );
+    }
+}
+
+#[cfg(test)]
+mod edited_tests {
+    use super::is_image_edited;
+    use serde_json::json;
+
+    #[test]
+    fn v3_only_changes_count_as_edited() {
+        let neutral = json!({ "processVersion": 3, "v3": { "revision": 1 } });
+        assert!(!is_image_edited(&neutral, true, None));
+        let warmer = json!({ "processVersion": 3, "v3": { "revision": 1, "temperature": 12.0 } });
+        assert!(is_image_edited(&warmer, true, None));
+        let graded = json!({ "processVersion": 3, "v3": { "revision": 1,
+            "grading": [[0.0, 0.0, 0.0], [210.0, 20.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]] } });
+        assert!(is_image_edited(&graded, false, None));
     }
 }

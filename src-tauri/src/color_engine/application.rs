@@ -1966,3 +1966,26 @@ mod audit_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod adobe_import_tests {
+    /// An edit from the Lightroom importer (src/utils/adobeImport.ts) goes
+    /// through the same conversion every render uses. Run with
+    /// ADOBE_CONVERTED=path/to/converted.json cargo test -- --ignored.
+    #[test]
+    #[ignore]
+    fn converted_lightroom_edit_converts_for_rendering() {
+        let Ok(path) = std::env::var("ADOBE_CONVERTED") else {
+            return;
+        };
+        let edits: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let controls = super::controls_for(&edits, false).expect("renders");
+        println!("tone {:?}", controls.tone);
+        assert!(
+            controls.tone.exposure > 0.0,
+            "Lightroom's +2.5 EV arrives as brighter"
+        );
+        assert!(controls.tone.highlights < 0.0 && controls.tone.shadows > 0.0);
+    }
+}
