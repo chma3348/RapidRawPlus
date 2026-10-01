@@ -13,18 +13,67 @@ import { TextColors, TextVariants, TextWeights } from '../../types/typography';
 import { AdobeDevelop, adobeToAdjustments, hasAdobeEdits } from '../../utils/adobeImport';
 import { LIBRARY_REFRESH_EVENT } from '../../utils/stacks';
 
-/** Open the Lightroom import, optionally starting at a folder. */
+/** Why the window opened by itself, when it did. */
+type Reason = 'imported' | 'folderAdded' | null;
+
+/**
+ * Open the Lightroom import, optionally starting at a folder, or for just the
+ * photos given (those an import brought in).
+ */
 export const useAdobeImport = create<{
   folder: string | null;
+  paths: string[] | null;
+  reason: Reason;
   open: boolean;
-  show: (folder?: string | null) => void;
+  show: (folder?: string | null, paths?: string[] | null, reason?: Reason) => void;
   hide: () => void;
 }>((set) => ({
   folder: null,
+  paths: null,
+  reason: null,
   open: false,
-  show: (folder) => set({ open: true, folder: folder ?? null }),
+  show: (folder, paths, reason) =>
+    set({ open: true, folder: folder ?? null, paths: paths ?? null, reason: reason ?? null }),
   hide: () => set({ open: false }),
 }));
+
+const isPhoto = (path: string) => !path.includes('?vc=') && !/\.(mov|mp4|m4v)$/i.test(path);
+
+/** The photos among `files` that have Lightroom edits not yet brought over. */
+async function photosToBringOver(files: ImageFile[]) {
+  const photos = files.filter((f) => isPhoto(f.path) && !f.is_edited);
+  if (photos.length === 0) return 0;
+  const settings: Record<string, AdobeDevelop> = await invoke(Invokes.ReadAdobeDevelop, {
+    paths: photos.map((f) => f.path),
+  });
+  return Object.values(settings).filter(hasAdobeEdits).length;
+}
+
+/**
+ * After photos come into the app, offer to bring over their Lightroom edits
+ * if any have some: for an import, just the photos it brought in; for a
+ * folder added to the library, the folder (its own photos are checked, and
+ * the window can look through its subfolders).
+ */
+export async function offerAdobeImport(target: { paths: string[] } | { folder: string }) {
+  try {
+    if ('paths' in target) {
+      const paths = target.paths.filter(isPhoto);
+      if (paths.length === 0) return;
+      const folders = [...new Set(paths.map((p) => p.replace(/[\\/][^\\/]*$/, '')))];
+      const wanted = new Set(paths);
+      const files = (await Promise.all(folders.map((f) => invoke<ImageFile[]>(Invokes.ListImagesInDir, { path: f }))))
+        .flat()
+        .filter((f) => wanted.has(f.path));
+      if ((await photosToBringOver(files)) > 0) useAdobeImport.getState().show(folders[0], paths, 'imported');
+    } else {
+      const files = await invoke<ImageFile[]>(Invokes.ListImagesInDir, { path: target.folder });
+      if ((await photosToBringOver(files)) > 0) useAdobeImport.getState().show(target.folder, null, 'folderAdded');
+    }
+  } catch (e) {
+    console.error('Could not check for Lightroom edits:', e);
+  }
+}
 
 interface Found {
   /** Photos to bring over, with their converted edits. */
@@ -68,7 +117,7 @@ function Column({ icon, title, items }: { icon: ReactNode; title: string; items:
  */
 export default function AdobeImportModal() {
   const { t } = useTranslation();
-  const { open, folder: startFolder, hide } = useAdobeImport();
+  const { open, folder: startFolder, paths: givenPaths, reason, hide } = useAdobeImport();
   const [folder, setFolder] = useState<string | null>(null);
   const [subfolders, setSubfolders] = useState(true);
   const [step, setStep] = useState<Step>('intro');
@@ -99,14 +148,22 @@ export default function AdobeImportModal() {
   };
 
   const scan = async () => {
-    if (!folder) return;
+    if (!folder && !givenPaths) return;
     setStep('scanning');
     setError(null);
     try {
-      const files: ImageFile[] = await invoke(subfolders ? Invokes.ListImagesRecursive : Invokes.ListImagesInDir, {
-        path: folder,
-      });
-      const photos = files.filter((f) => !f.path.includes('?vc='));
+      let files: ImageFile[];
+      if (givenPaths) {
+        // Just the photos given: listed from their folders, for whether each is edited here.
+        const folders = [...new Set(givenPaths.map((p) => p.replace(/[\\/][^\\/]*$/, '')))];
+        const wanted = new Set(givenPaths);
+        files = (await Promise.all(folders.map((f) => invoke<ImageFile[]>(Invokes.ListImagesInDir, { path: f }))))
+          .flat()
+          .filter((f) => wanted.has(f.path));
+      } else {
+        files = await invoke(subfolders ? Invokes.ListImagesRecursive : Invokes.ListImagesInDir, { path: folder });
+      }
+      const photos = files.filter((f) => isPhoto(f.path));
       const settings: Record<string, AdobeDevelop> = {};
       setProgress({ done: 0, total: photos.length });
       for (let i = 0; i < photos.length; i += 100) {
@@ -194,6 +251,15 @@ export default function AdobeImportModal() {
 
         {(step === 'intro' || step === 'scanning') && (
           <>
+            {reason && (
+              <div className="rounded-lg bg-accent/15 border border-accent/30 px-3.5 py-2.5 mt-3 mb-3">
+                <Text weight={TextWeights.semibold}>
+                  {reason === 'imported'
+                    ? t('adobeImport.foundOnImport')
+                    : t('adobeImport.foundInFolder', { name: folder ? nameOf(folder) : '' })}
+                </Text>
+              </div>
+            )}
             <Text color={TextColors.secondary} className="mb-5">
               {t('adobeImport.lead')}
             </Text>
@@ -222,17 +288,32 @@ export default function AdobeImportModal() {
             </div>
 
             <div className="flex items-center gap-3 flex-wrap">
-              <Button className="h-10 px-4 bg-bg-primary text-text-primary" onClick={chooseFolder} disabled={busy}>
-                <Folder size={15} className="mr-2" />
-                {folder ? nameOf(folder) : t('adobeImport.chooseFolder')}
-              </Button>
-              <Switch
-                id="adobe-import-subfolders"
-                checked={subfolders}
-                onChange={setSubfolders}
-                label={t('adobeImport.subfolders')}
-              />
-              <Button className="h-10 px-5 ml-auto" onClick={scan} disabled={!folder || busy}>
+              {givenPaths ? (
+                <Text color={TextColors.secondary}>{t('adobeImport.justImported', { count: givenPaths.length })}</Text>
+              ) : (
+                <>
+                  <Button className="h-10 px-4 bg-bg-primary text-text-primary" onClick={chooseFolder} disabled={busy}>
+                    <Folder size={15} className="mr-2" />
+                    {folder ? nameOf(folder) : t('adobeImport.chooseFolder')}
+                  </Button>
+                  <Switch
+                    id="adobe-import-subfolders"
+                    checked={subfolders}
+                    onChange={setSubfolders}
+                    label={t('adobeImport.subfolders')}
+                  />
+                </>
+              )}
+              {reason && !busy && (
+                <Button className="h-10 px-4 ml-auto bg-bg-primary text-text-primary" onClick={hide}>
+                  {t('adobeImport.notNow')}
+                </Button>
+              )}
+              <Button
+                className={`h-10 px-5 ${reason && !busy ? '' : 'ml-auto'}`}
+                onClick={scan}
+                disabled={(!folder && !givenPaths) || busy}
+              >
                 {step === 'scanning'
                   ? t('adobeImport.scanning', { done: progress.done, total: progress.total })
                   : t('adobeImport.find')}

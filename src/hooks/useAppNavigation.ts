@@ -13,6 +13,7 @@ import { isVideoPath } from '../utils/media';
 import { INITIAL_ADJUSTMENTS, normalizeLoadedAdjustments } from '../utils/adjustments';
 import { globalImageCache } from '../utils/ImageLRUCache';
 import { debouncedSave, debouncedSetHistory } from './useEditorActions';
+import { offerAdobeImport } from '../components/modals/AdobeImportModal';
 import { useCullStore } from '../components/panel/library/CullView';
 
 export interface AppNavigationProps {
@@ -511,6 +512,8 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
           }
         }
         await handleSelectSubfolder(selectedPath, true);
+        // A folder of photos edited in Lightroom: offer to bring the edits over.
+        void offerAdobeImport({ folder: selectedPath });
       }
     } catch (err) {
       console.error(isAndroid ? 'Failed to open Android library root:' : 'Failed to open directory dialog:', err);

@@ -11,6 +11,9 @@ import { Invokes } from '../components/ui/AppProperties';
 import { Status } from '../components/ui/ExportImportProperties';
 import { getStacks } from './useStacks';
 
+/** Other editors' settings files, which travel with their photos: Lightroom and darktable (.xmp), RawTherapee (.pp3), DxO (.dop), ON1 (.on1). */
+const SIDECAR_EXTENSIONS = ['xmp', 'pp3', 'dop', 'on1'];
+
 export function useFileOperations(
   refreshImageList: () => Promise<void>,
   refreshAllFolderTrees: () => Promise<void>,
@@ -329,11 +332,14 @@ export function useFileOperations(
         const processedNonRaw = expandExtensions(nonRaw);
         const processedRaw = expandExtensions(raw);
         const allImageExtensions = [...processedNonRaw, ...processedRaw];
+        // Other editors' settings files (Lightroom's .xmp and the like) can be
+        // chosen too; each comes along with its photo.
+        const sidecarExtensions = expandExtensions(SIDECAR_EXTENSIONS);
 
         const typeFilters = isAndroid
           ? []
           : [
-              { name: 'All Supported Images', extensions: allImageExtensions },
+              { name: 'All Supported Images', extensions: [...allImageExtensions, ...sidecarExtensions] },
               { name: 'RAW Images', extensions: processedRaw },
               { name: 'Standard Images (JPEG, PNG, etc.)', extensions: processedNonRaw },
               { name: 'All Files', extensions: ['*'] },
@@ -363,16 +369,27 @@ export function useFileOperations(
             }),
           );
 
+          const sidecars = new Set(SIDECAR_EXTENSIONS);
+          let sidecarCount = 0;
           const validFiles = selected.filter((originalPath, index) => {
             const resolvedName = resolvedFiles[index];
             const ext = resolvedName.split('.').pop()?.toLowerCase() || 'unknown';
 
+            // A settings file travels with its photo rather than being imported itself.
+            if (sidecars.has(ext)) {
+              sidecarCount++;
+              return false;
+            }
             if (!allowedExtensions.has(ext)) {
               invalidExtensions.add(`.${ext}`);
               return false;
             }
             return true;
           });
+          if (sidecarCount > 0 && validFiles.length === 0) {
+            toast.info('Choose the photos too — their settings files (.xmp and the like) come along with them.');
+            return;
+          }
 
           if (invalidExtensions.size > 0) {
             const extList = Array.from(invalidExtensions).join(', ');

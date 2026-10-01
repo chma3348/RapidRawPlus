@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react';
+import { offerAdobeImport } from '../components/modals/AdobeImportModal';
 import { listen } from '@tauri-apps/api/event';
 import { toast } from 'react-toastify';
 import { Status } from '../components/ui/ExportImportProperties';
@@ -178,7 +179,14 @@ export function useTauriListeners({
       listen('import-complete', (event: any) => {
         if (isEffectActive) {
           useProcessStore.getState().setImportState({ status: Status.Success });
-          const summary = event.payload as { imported: number; skipped: number; failed: string[] } | null;
+          const summary = event.payload as {
+            imported: number;
+            skipped: number;
+            failed: string[];
+            paths?: string[];
+          } | null;
+          // Photos brought in with Lightroom edits beside them: offer to bring those over too.
+          if (summary?.paths?.length) void offerAdobeImport({ paths: summary.paths });
           if (summary && (summary.skipped > 0 || summary.failed.length > 0)) {
             const parts = [`Imported ${summary.imported}`];
             if (summary.skipped > 0) parts.push(`skipped ${summary.skipped} already imported`);

@@ -1751,6 +1751,34 @@ pub fn companion_files(image: &Path) -> Vec<PathBuf> {
     if let Some((xmp, true)) = crate::xmp::sidecar_for(image) {
         found.push(xmp);
     }
+    // Other editors' settings beside the photo: darktable's `IMG.CR3.xmp`
+    // (when Lightroom's `IMG.xmp` is there too), RawTherapee's `.pp3`,
+    // DxO's `.dop` and ON1's `.on1`, so they travel with it as well. Matched
+    // against the folder's real names, ignoring case, so a drive that ignores
+    // case never yields one file twice.
+    let stem = image.file_stem().unwrap_or_default().to_string_lossy();
+    let wanted: Vec<String> = [
+        format!("{name}.xmp"),
+        format!("{name}.pp3"),
+        format!("{name}.dop"),
+        format!("{name}.on1"),
+        format!("{stem}.on1"),
+    ]
+    .iter()
+    .map(|n| n.to_lowercase())
+    .collect();
+    let have: Vec<String> = found
+        .iter()
+        .filter_map(|f| f.file_name().map(|n| n.to_string_lossy().to_lowercase()))
+        .collect();
+    if let Ok(entries) = fs::read_dir(parent) {
+        for entry in entries.filter_map(Result::ok) {
+            let lower = entry.file_name().to_string_lossy().to_lowercase();
+            if wanted.contains(&lower) && !have.contains(&lower) && entry.path().is_file() {
+                found.push(entry.path());
+            }
+        }
+    }
     found
 }
 
@@ -3018,6 +3046,7 @@ pub async fn import_files(
         let mut skipped = 0usize;
         let mut failed: Vec<String> = Vec::new();
         let mut actions = Vec::new();
+        let mut imported_paths: Vec<String> = Vec::new();
         for (i, source_path_str) in source_paths.iter().enumerate() {
             let _ = app_handle.emit(
                 "import-progress",
@@ -3082,7 +3111,7 @@ pub async fn import_files(
                     return Ok(Some(dest_file_path));
                 }
 
-                let (source_path, source_sidecar) = parse_virtual_path(source_path_str);
+                let (source_path, _) = parse_virtual_path(source_path_str);
                 if !source_path.exists() {
                     return Err(format!("Source file not found: {}", source_path_str));
                 }
@@ -3133,22 +3162,15 @@ pub async fn import_files(
                 }
 
                 fs::copy(&source_path, &dest_file_path).map_err(|e| e.to_string())?;
-                if source_sidecar.exists()
-                    && let Some(dest_str) = dest_file_path.to_str()
-                {
-                    let (_, dest_sidecar) = parse_virtual_path(dest_str);
-                    fs::copy(&source_sidecar, &dest_sidecar).map_err(|e| e.to_string())?;
-                }
-
-                let mut source_rrexif_name = source_path.file_name().unwrap().to_os_string();
-                source_rrexif_name.push(".rrexif");
-                let source_rrexif = source_path.with_file_name(source_rrexif_name);
-
-                if source_rrexif.exists() {
-                    let mut dest_rrexif_name = dest_file_path.file_name().unwrap().to_os_string();
-                    dest_rrexif_name.push(".rrexif");
-                    let dest_rrexif = dest_file_path.with_file_name(dest_rrexif_name);
-                    let _ = fs::copy(&source_rrexif, &dest_rrexif);
+                // Everything that travels with the photo comes too, renamed to
+                // match: this app's sidecars, and Lightroom's (or another
+                // editor's) settings, so its edits can be brought over.
+                let companions = companion_files(&source_path);
+                for companion in &companions {
+                    let target = companion_target(companion, &source_path, &dest_file_path);
+                    if !target.exists() {
+                        fs::copy(companion, &target).map_err(|e| e.to_string())?;
+                    }
                 }
 
                 if settings.delete_after_import {
@@ -3162,15 +3184,15 @@ pub async fn import_files(
                             );
                             fs::remove_file(&source_path).map_err(|e| e.to_string())?;
                         }
-                        if source_sidecar.exists()
-                            && let Err(trash_error) = trash::delete(&source_sidecar)
-                        {
-                            log::warn!(
-                                "Failed to trash source sidecar {}: {}. Deleting permanently.",
-                                source_sidecar.display(),
-                                trash_error
-                            );
-                            fs::remove_file(&source_sidecar).map_err(|e| e.to_string())?;
+                        for companion in companions.iter().filter(|c| c.exists()) {
+                            if let Err(trash_error) = trash::delete(companion) {
+                                log::warn!(
+                                    "Failed to trash source sidecar {}: {}. Deleting permanently.",
+                                    companion.display(),
+                                    trash_error
+                                );
+                                fs::remove_file(companion).map_err(|e| e.to_string())?;
+                            }
                         }
                     }
 
@@ -3181,11 +3203,8 @@ pub async fn import_files(
                     )))]
                     {
                         fs::remove_file(&source_path).map_err(|e| e.to_string())?;
-                        if source_sidecar.exists() {
-                            fs::remove_file(&source_sidecar).map_err(|e| e.to_string())?;
-                        }
-                        if source_rrexif.exists() {
-                            let _ = fs::remove_file(&source_rrexif);
+                        for companion in companions.iter().filter(|c| c.exists()) {
+                            fs::remove_file(companion).map_err(|e| e.to_string())?;
                         }
                     }
                 }
@@ -3196,6 +3215,7 @@ pub async fn import_files(
             match import_result {
                 Ok(Some(dest)) => {
                     imported += 1;
+                    imported_paths.push(dest.to_string_lossy().into_owned());
                     actions.push(crate::journal::Action::Created { path: dest });
                 }
                 Ok(None) => skipped += 1,
@@ -3220,7 +3240,12 @@ pub async fn import_files(
         } else {
             let _ = app_handle.emit(
                 "import-complete",
-                serde_json::json!({ "imported": imported, "skipped": skipped, "failed": failed }),
+                serde_json::json!({
+                    "imported": imported,
+                    "skipped": skipped,
+                    "failed": failed,
+                    "paths": imported_paths,
+                }),
             );
         }
     });
@@ -3484,6 +3509,55 @@ mod companion_tests {
             companion_target(&d.join("DSC1.xmp"), &old, &elsewhere),
             PathBuf::from("/q/DSC1.xmp")
         );
+    }
+
+    #[test]
+    fn other_editors_sidecars_travel_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = |n: &str| dir.path().join(n);
+        for n in [
+            "DSC2.ARW",
+            "DSC2.xmp",
+            "DSC2.ARW.xmp",
+            "DSC2.ARW.pp3",
+            "DSC2.ARW.dop",
+            "DSC2.on1",
+            "DSC20.ARW.pp3",
+        ] {
+            touch(&p(n));
+        }
+        let mut found = companion_files(&p("DSC2.ARW"));
+        found.sort();
+        let mut expected = vec![
+            p("DSC2.xmp"),
+            p("DSC2.ARW.xmp"),
+            p("DSC2.ARW.pp3"),
+            p("DSC2.ARW.dop"),
+            p("DSC2.on1"),
+        ];
+        expected.sort();
+        assert_eq!(found, expected);
+        // Renamed on import, each keeps its tie to the photo.
+        let new = p("Tahiti_001.ARW");
+        let names: Vec<_> = expected
+            .iter()
+            .map(|c| {
+                companion_target(c, &p("DSC2.ARW"), &new)
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        for n in [
+            "Tahiti_001.xmp",
+            "Tahiti_001.ARW.xmp",
+            "Tahiti_001.ARW.pp3",
+            "Tahiti_001.ARW.dop",
+            "Tahiti_001.on1",
+        ] {
+            assert!(names.contains(&n.to_string()), "{n} in {names:?}");
+        }
     }
 
     #[test]

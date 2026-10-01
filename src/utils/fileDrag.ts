@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { offerAdobeImport } from '../components/modals/AdobeImportModal';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWebview, type DragDropEvent } from '@tauri-apps/api/webview';
 import type { Event as TauriEvent } from '@tauri-apps/api/event';
@@ -189,6 +190,8 @@ async function dropFromFinder(paths: string[], target: DropTarget | null) {
     } else {
       await invoke(Invokes.CopyFiles, { sourcePaths: files, destinationFolder: where.path });
       toast.success(`Copied ${photos(files.length)} into ${where.name} — ⌘Z to undo`);
+      // Their Lightroom settings came with them: offer to bring those edits over.
+      void offerAdobeImport({ folder: where.path });
     }
   } catch (err) {
     toast.error(`Could not add the files: ${err}`);

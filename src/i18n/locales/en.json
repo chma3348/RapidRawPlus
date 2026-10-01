@@ -218,7 +218,12 @@
     "finish": "Done",
     "close": "Close",
     "menu": "Bring over Lightroom edits…",
-    "menuDesc": "Set up photos edited in Lightroom with the same edits here."
+    "menuDesc": "Set up photos edited in Lightroom with the same edits here.",
+    "foundOnImport": "Some of the photos you just imported were edited in Lightroom.",
+    "foundInFolder": "Some photos in {{name}} were edited in Lightroom.",
+    "justImported_one": "Looking at the {{count}} photo you just imported.",
+    "justImported_other": "Looking at the {{count}} photos you just imported.",
+    "notNow": "Not now"
   },
   "contextMenus": {
     "album": {
