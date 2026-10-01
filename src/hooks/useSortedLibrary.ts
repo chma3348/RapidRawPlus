@@ -3,6 +3,7 @@ import { useLibraryStore } from '../store/useLibraryStore';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { RawStatus, EditedStatus, SortDirection, ImageFile } from '../components/ui/AppProperties';
 import { getStacks } from './useStacks';
+import { isRejectsFolder } from '../utils/flags';
 
 export const ADVANCED_QUERY_REGEX =
   /^(iso|aperture|f|shutter|s|focal|mm|rating|color|camera|make|model|lens)\s*(?::)?\s*(>=|<=|>|<|=)?\s*(.+)$/i;
@@ -37,6 +38,12 @@ export const parseFocalLength = (val: string | undefined): number => {
 
 export function computeSortedLibrary(libraryState: any, settingsState: any): ImageFile[] {
   const { imageList, imageRatings, filterCriteria, searchCriteria, sortCriteria } = libraryState;
+  // Rejects stay out of sight unless asked for, or you're looking in a rejects folder.
+  const hideRejects =
+    !libraryState.showRejected &&
+    filterCriteria.flag !== 'rejected' &&
+    !isRejectsFolder(libraryState.currentFolderPath);
+  const justRejected = new Set<string>(libraryState.justRejected || []);
   const { appSettings, supportedTypes } = settingsState;
 
   const getParentDir = (filePath: string): string => {
@@ -111,6 +118,8 @@ export function computeSortedLibrary(libraryState: any, settingsState: any): Ima
       if (filterCriteria.rawStatus === RawStatus.RawOnly && !isRaw) return false;
       if (filterCriteria.rawStatus === RawStatus.NonRawOnly && isRaw) return false;
     }
+
+    if (hideRejects && image.flag === 'reject' && !justRejected.has(image.path)) return false;
 
     if (filterCriteria.flag && filterCriteria.flag !== 'all') {
       const flag = image.flag ?? null;
@@ -325,16 +334,39 @@ export function useSortedLibrary() {
   const filterCriteria = useLibraryStore((state) => state.filterCriteria);
   const searchCriteria = useLibraryStore((state) => state.searchCriteria);
   const sortCriteria = useLibraryStore((state) => state.sortCriteria);
+  const showRejected = useLibraryStore((state) => state.showRejected);
+  const justRejected = useLibraryStore((state) => state.justRejected);
+  const currentFolderPath = useLibraryStore((state) => state.currentFolderPath);
 
   const appSettings = useSettingsStore((state) => state.appSettings);
   const supportedTypes = useSettingsStore((state) => state.supportedTypes);
 
   const sortedImageList = useMemo(() => {
     return computeSortedLibrary(
-      { imageList, imageRatings, filterCriteria, searchCriteria, sortCriteria },
+      {
+        imageList,
+        imageRatings,
+        filterCriteria,
+        searchCriteria,
+        sortCriteria,
+        showRejected,
+        justRejected,
+        currentFolderPath,
+      },
       { appSettings, supportedTypes },
     );
-  }, [imageList, sortCriteria, imageRatings, filterCriteria, supportedTypes, searchCriteria, appSettings]);
+  }, [
+    imageList,
+    sortCriteria,
+    imageRatings,
+    filterCriteria,
+    supportedTypes,
+    searchCriteria,
+    appSettings,
+    showRejected,
+    justRejected,
+    currentFolderPath,
+  ]);
 
   return sortedImageList;
 }

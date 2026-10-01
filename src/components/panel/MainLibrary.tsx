@@ -42,6 +42,7 @@ import LibraryGrid from './library/LibraryGrid';
 import { SearchInput, ViewOptionsDropdown } from './library/LibraryHeader';
 import { startCulling } from './library/CullView';
 import LibraryFilterBar from './library/LibraryFilterBar';
+import RejectsNotice from './library/RejectsNotice';
 import { useUIStore } from '../../store/useUIStore';
 import { getStacks } from '../../hooks/useStacks';
 
@@ -555,6 +556,7 @@ export default function MainLibrary(props: MainLibraryProps) {
       </header>
 
       {isFilterBarVisible && <LibraryFilterBar shown={props.imageList.length} total={libraryPhotoCount} />}
+      <RejectsNotice />
 
       {props.imageList.length > 0 ? (
         <LibraryGrid {...props} thumbnailSizeOptions={translatedThumbnailSizeOptions} />

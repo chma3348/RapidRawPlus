@@ -1157,6 +1157,18 @@
       "tooltipVirtualCopy": "Virtual Copy",
       "tooltipVersions": "{{count}} versions — open to switch between them"
     },
+    "rejects": {
+      "folders": "rejects folders",
+      "hidden_one": "{{count}} rejected hidden",
+      "hidden_other": "{{count}} rejected hidden",
+      "hide": "Hide",
+      "move_one": "Move {{count}} to “{{target}}”",
+      "move_other": "Move {{count}} to “{{target}}”",
+      "moveTip": "Move them, with their sidecars and copies, into a subfolder. ⌘Z undoes it.",
+      "show": "Show",
+      "showing_one": "Showing {{count}} rejected",
+      "showing_other": "Showing {{count}} rejected"
+    },
     "search": {
       "noResults": "No Results Found",
       "noResultsAiHint": " For a more comprehensive search, enable automatic tagging in Settings.",

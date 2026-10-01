@@ -35,6 +35,10 @@ interface LibraryState {
   multiSelectedPaths: Array<string>;
   selectionAnchorPath: string | null;
   libraryActivePath: string | null;
+  /** Rejected photos are hidden from the library unless this is on. */
+  showRejected: boolean;
+  /** Photos rejected while in this folder, kept in view (faded) until you leave it. */
+  justRejected: string[];
   libraryActiveAdjustments: Adjustments;
 
   // Sorting & Filtering
@@ -72,6 +76,8 @@ export const useLibraryStore = create<LibraryState>((set) => ({
   multiSelectedPaths: [],
   selectionAnchorPath: null,
   libraryActivePath: null,
+  showRejected: false,
+  justRejected: [],
   libraryActiveAdjustments: INITIAL_ADJUSTMENTS,
 
   sortCriteria: { key: 'name', order: SortDirection.Ascending },

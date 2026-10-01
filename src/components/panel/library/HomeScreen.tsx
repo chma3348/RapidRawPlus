@@ -25,6 +25,7 @@ import { FolderTree } from '../FolderTree';
 import { useProcessStore } from '../../../store/useProcessStore';
 import { TextColors, TextVariants, TextWeights } from '../../../types/typography';
 import { isVideoPath } from '../../../utils/media';
+import { isRejectsFolder } from '../../../utils/flags';
 
 /** How many photos a shelf shows before "See all". */
 const SHELF_LENGTH = 40;
@@ -93,8 +94,9 @@ const folderRows = (trees: FolderTree[], hidden: string[], collapsed: string[]):
   const tops = trees.filter((t) => !trees.some((o) => o.path !== t.path && isWithin(t.path, o.path)));
   const rows: Omit<FolderRow, 'linesContinue' | 'startsLine'>[] = [];
   const walk = (node: FolderTree, depth: number) => {
-    if (hidden.some((h) => isWithin(node.path, h))) return;
-    const children = (node.children || []).filter((c) => c.isDir).sort(byName);
+    // Hidden folders, and rejects folders, which are set aside on purpose.
+    if (hidden.some((h) => isWithin(node.path, h)) || isRejectsFolder(node.path)) return;
+    const children = (node.children || []).filter((c) => c.isDir && !isRejectsFolder(c.path)).sort(byName);
     rows.push({
       path: node.path,
       name: node.name,
@@ -119,9 +121,14 @@ const folderRows = (trees: FolderTree[], hidden: string[], collapsed: string[]):
   }));
 };
 
-/** Newest photos first; copies are left to the library. */
+/** Every real photo, without virtual copies (those are left to the library). */
+const realPhotos = (files: ImageFile[]) => files.filter((f) => !f.is_virtual_copy && !f.path.includes('?vc='));
+
+/** Newest photos first, leaving out copies and rejects. */
 const shelfPhotos = (files: ImageFile[]) =>
-  files.filter((f) => !f.is_virtual_copy && !f.path.includes('?vc=')).sort((a, b) => b.modified - a.modified);
+  realPhotos(files)
+    .filter((f) => f.flag !== 'reject')
+    .sort((a, b) => b.modified - a.modified);
 
 const useThumbnail = (path: string | undefined, requestThumbnails: (paths: string[]) => void) => {
   const url = useProcessStore((state) => (path ? state.thumbnails[path] : undefined));
@@ -472,19 +479,21 @@ function ContinueBanner({
   requestThumbnails(paths: string[]): void;
 }) {
   const { t } = useTranslation();
-  const [files, setFiles] = useState<ImageFile[] | null>(null);
+  const [all, setAll] = useState<ImageFile[] | null>(null);
   const [exif, setExif] = useState<Record<string, string> | null>(null);
 
   useEffect(() => {
-    setFiles(null);
+    setAll(null);
     invoke<ImageFile[]>(Invokes.ListImagesInDir, { path: folder })
-      .then((list) => setFiles(shelfPhotos(list)))
-      .catch(() => setFiles([]));
+      .then((list) => setAll(realPhotos(list)))
+      .catch(() => setAll([]));
   }, [folder]);
+  // Progress counts every photo; the filmstrip leaves rejects out.
+  const files = useMemo(() => (all ? shelfPhotos(all) : null), [all]);
 
   // Without a remembered photo, the folder's newest one stands in.
   const cover = image || files?.find((f) => !isVideoPath(f.path))?.path;
-  const info = files?.find((f) => f.path === cover);
+  const info = all?.find((f) => f.path === cover);
 
   useEffect(() => {
     setExif(null);
@@ -507,10 +516,10 @@ function ContinueBanner({
     return [...paths.slice(start), ...paths.slice(0, start)];
   }, [files, cover, showPicture]);
 
-  const total = files?.length ?? 0;
-  const edited = files?.filter((f) => f.is_edited).length ?? 0;
-  const picked = files?.filter((f) => f.flag === 'pick').length ?? 0;
-  const rejected = files?.filter((f) => f.flag === 'reject').length ?? 0;
+  const total = all?.length ?? 0;
+  const edited = all?.filter((f) => f.is_edited).length ?? 0;
+  const picked = all?.filter((f) => f.flag === 'pick').length ?? 0;
+  const rejected = all?.filter((f) => f.flag === 'reject').length ?? 0;
 
   const fNumber =
     exif?.FNumber && (String(exif.FNumber).toLowerCase().startsWith('f') ? exif.FNumber : `f/${exif.FNumber}`);

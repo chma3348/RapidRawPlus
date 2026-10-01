@@ -348,6 +348,7 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
 
         setLibrary({
           currentFolderPath: path,
+          ...(path !== useLibraryStore.getState().currentFolderPath ? { justRejected: [] } : {}),
           expandedFolders: newExpandedFolders,
           ...(preserveEditor ? {} : { imageList: [], multiSelectedPaths: [], libraryActivePath: null }),
         });
@@ -442,6 +443,7 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
       setLibrary({
         isViewLoading: true,
         currentFolderPath: `Album: ${albumName}`,
+        ...(`Album: ${albumName}` !== useLibraryStore.getState().currentFolderPath ? { justRejected: [] } : {}),
         activeAlbumId: albumId,
       });
 
