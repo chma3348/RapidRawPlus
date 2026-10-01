@@ -6,6 +6,7 @@ import { useLibraryStore } from '../store/useLibraryStore';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { Invokes } from '../components/ui/AppProperties';
 import { INITIAL_ADJUSTMENTS, normalizeLoadedAdjustments } from '../utils/adjustments';
+import { calculateCenteredCrop } from '../utils/cropUtils';
 
 export function useImageLoader(cachedEditStateRef: React.RefObject<any>) {
   const selectedImage = useEditorStore((s) => s.selectedImage);
@@ -95,13 +96,28 @@ export function useImageLoader(cachedEditStateRef: React.RefObject<any>) {
             return state;
           });
 
+          // Free crop is the default; a ratio is locked only when chosen.
+          // Photos opened before this were locked to their own ratio
+          // automatically. Where that lock was never used (no crop, or the
+          // untouched full-frame crop), release it.
           setEditor((state) => {
-            if (!state.adjustments.aspectRatio && !state.adjustments.crop) {
-              return {
-                adjustments: { ...state.adjustments, aspectRatio: loadImageResult.width / loadImageResult.height },
-              };
+            const adj = state.adjustments;
+            if (!adj.aspectRatio) return state;
+            const { width: w, height: h } = loadImageResult;
+            const steps = adj.orientationSteps || 0;
+            const ownRatio = steps === 1 || steps === 3 ? h / w : w / h;
+            if (Math.abs(adj.aspectRatio - ownRatio) > 0.01) return state;
+            if (adj.crop) {
+              const full = calculateCenteredCrop(w, h, steps, ownRatio, adj.rotation || 0);
+              const untouched =
+                !!full &&
+                Math.abs(adj.crop.x - full.x) <= 2 &&
+                Math.abs(adj.crop.y - full.y) <= 2 &&
+                Math.abs(adj.crop.width - full.width) <= 2 &&
+                Math.abs(adj.crop.height - full.height) <= 2;
+              if (!untouched) return state;
             }
-            return state;
+            return { adjustments: { ...adj, aspectRatio: null } };
           });
         } catch (err) {
           if (isEffectActive) {

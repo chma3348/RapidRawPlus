@@ -367,9 +367,6 @@ export default function CropPanel() {
   }, [aspectRatio, setAdjustments]);
 
   const handleReset = () => {
-    const originalAspectRatio =
-      selectedImage?.width && selectedImage?.height ? selectedImage.width / selectedImage.height : null;
-
     setPreferPortrait(false);
     setIsEditingCustom(false);
     lastSyncedRatio.current = null;
@@ -379,7 +376,8 @@ export default function CropPanel() {
 
     setAdjustments((prev: Adjustments) => ({
       ...prev,
-      aspectRatio: originalAspectRatio,
+      // Reset returns to free cropping, the default.
+      aspectRatio: null,
       crop: INITIAL_ADJUSTMENTS.crop,
       flipHorizontal: INITIAL_ADJUSTMENTS.flipHorizontal ?? false,
       flipVertical: INITIAL_ADJUSTMENTS.flipVertical ?? false,
