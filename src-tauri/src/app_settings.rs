@@ -68,6 +68,10 @@ pub struct LastFolderState {
     pub active_album_id: Option<String>,
     #[serde(default)]
     pub expanded_album_groups: Vec<String>,
+    /// The photo last opened in the editor, for the home screen's
+    /// "continue where you left off".
+    #[serde(default)]
+    pub last_edited_image: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -377,6 +381,9 @@ pub struct AppSettings {
     pub theme: Option<String>,
     #[serde(default)]
     pub accent_color: Option<String>,
+    /// Folders left off the home screen's shelves.
+    #[serde(default)]
+    pub home_hidden_folders: Option<Vec<String>>,
     #[serde(default)]
     pub font_family: Option<String>,
     pub decorations: Option<bool>,
@@ -490,6 +497,7 @@ impl Default for AppSettings {
             filter_criteria: None,
             theme: Some("graphite".to_string()),
             accent_color: None,
+            home_hidden_folders: None,
             font_family: None,
             decorations: Some(false),
             ai_connector_address: None,

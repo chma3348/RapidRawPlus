@@ -28,6 +28,7 @@ interface LibraryViewProps {
   handleThumbnailContextMenu: (...args: any) => void;
   handleMainLibraryContextMenu: (...args: any) => void;
   handleContinueSession: (...args: any) => void;
+  openLibrary: (target: { folder?: string; image?: string }) => void;
   handleGoHome: (...args: any) => void;
   handleOpenFolder: (...args: any) => void;
   handleImportClick: (path: string) => void;
@@ -54,6 +55,7 @@ export default function LibraryView({
   handleThumbnailContextMenu,
   handleMainLibraryContextMenu,
   handleContinueSession,
+  openLibrary,
   handleGoHome,
   handleOpenFolder,
   handleImportClick,
@@ -143,6 +145,7 @@ export default function LibraryView({
             onClearSelection={handleClearSelection}
             onContextMenu={handleThumbnailContextMenu}
             onContinueSession={handleContinueSession}
+            onOpenLibrary={openLibrary}
             onEmptyAreaContextMenu={handleMainLibraryContextMenu}
             onGoHome={handleGoHome}
             onImageClick={handleLibraryImageSingleClick}

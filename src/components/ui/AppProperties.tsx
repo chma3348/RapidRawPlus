@@ -210,6 +210,10 @@ export interface AppSettings {
   lastFolderState?: any;
   pinnedFolders?: any;
   lastRootPath: string | null;
+  /** The folders shown in the library tree. */
+  rootFolders?: string[];
+  /** Folders left off the home screen's shelves. */
+  homeHiddenFolders?: string[];
   libraryViewMode?: LibraryViewMode;
   sortCriteria?: SortCriteria;
   theme: Theme;

@@ -991,6 +991,16 @@
         "name": "Name (A-Z)"
       }
     },
+    "filterBar": {
+      "flag": "Flag",
+      "all": "All",
+      "unflagged": "Unflagged",
+      "rating": "Stars",
+      "label": "Label",
+      "showingOf": "{{shown}} of {{total}}",
+      "count": "{{count}} photos",
+      "clear": "Clear filters"
+    },
     "filters": {
       "edited": {
         "all": "All Images",
@@ -1090,6 +1100,21 @@
         "title": "View Options"
       }
     },
+    "home": {
+      "continueEditing": "Continue editing",
+      "continueTitle": "Continue where you left off",
+      "hiddenCount_one": "{{count}} folder hidden from Home",
+      "hiddenCount_other": "{{count}} folders hidden from Home",
+      "hide": "Hide from Home",
+      "inFolder": "in {{name}}",
+      "openFolder": "Open {{name}}",
+      "photoCount_one": "{{count}} photo",
+      "photoCount_other": "{{count}} photos",
+      "scrollBack": "Scroll back",
+      "scrollForward": "Scroll forward",
+      "seeAll": "See all",
+      "unhide": "Show again"
+    },
     "import": {
       "complete": "Import Complete!",
       "failed": "Import Failed!",
@@ -1165,16 +1190,6 @@
       "communityPresets": "Community Presets",
       "goHome": "Go to Home",
       "importImages": "Import Images"
-    },
-    "filterBar": {
-      "flag": "Flag",
-      "all": "All",
-      "unflagged": "Unflagged",
-      "rating": "Stars",
-      "label": "Label",
-      "showingOf": "{{shown}} of {{total}}",
-      "count": "{{count}} photos",
-      "clear": "Clear filters"
     }
   },
   "masks": {

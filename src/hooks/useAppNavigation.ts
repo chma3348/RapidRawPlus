@@ -515,7 +515,12 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
     }
   };
 
-  const handleContinueSession = () => {
+  /**
+   * Reopen the library with the saved folders. With a `folder` it lands there
+   * instead of where the last session left off, and with an `image` it then
+   * opens that photo in the editor — the home screen's shelves and banner.
+   */
+  const openLibrary = (target?: { folder?: string; image?: string }) => {
     const restore = async () => {
       const { appSettings } = useSettingsStore.getState();
       const { setLibrary } = useLibraryStore.getState();
@@ -529,27 +534,38 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
       if (rootFolders.length === 0) return;
 
       const folderState = appSettings?.lastFolderState;
-      const pathToSelect = folderState?.currentFolderPath || rootFolders[0];
+      const pathToSelect = target?.folder || folderState?.currentFolderPath || rootFolders[0];
 
       setLibrary({ rootPaths: rootFolders });
 
-      if (folderState?.expandedFolders) {
-        const newExpandedFolders = new Set<string>(folderState.expandedFolders);
-        setLibrary({ expandedFolders: newExpandedFolders });
-      } else {
-        setLibrary({ expandedFolders: new Set(rootFolders) });
+      const expanded = new Set<string>(folderState?.expandedFolders || rootFolders);
+      if (target?.folder) {
+        // Open the tree down to the chosen folder.
+        const sep = target.folder.includes('\\') && !target.folder.includes('/') ? '\\' : '/';
+        const root = rootFolders.find((r: string) => target.folder === r || target.folder!.startsWith(r + sep));
+        if (root) {
+          let p = target.folder;
+          while (p.length > root.length) {
+            p = p.slice(0, p.lastIndexOf(sep));
+            expanded.add(p);
+          }
+          expanded.add(root);
+        }
       }
+      setLibrary({ expandedFolders: expanded });
 
       setLibrary({ isTreeLoading: true });
       try {
         let treesData;
-        if (preloadedDataRef.current?.rootPaths?.join() === rootFolders.join() && preloadedDataRef.current.trees) {
+        if (
+          !target?.folder &&
+          preloadedDataRef.current?.rootPaths?.join() === rootFolders.join() &&
+          preloadedDataRef.current.trees
+        ) {
           treesData = await preloadedDataRef.current.trees;
           preloadedDataRef.current.trees = undefined;
         } else {
-          const expandedArr = folderState?.expandedFolders
-            ? Array.from(new Set(folderState.expandedFolders))
-            : rootFolders;
+          const expandedArr = Array.from(expanded);
           treesData = await invoke(Invokes.GetPinnedFolderTrees, {
             paths: rootFolders,
             expandedFolders: expandedArr,
@@ -606,6 +622,15 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
         }
       } else {
         await handleSelectSubfolder(pathToSelect, false, preloadedImages, false);
+        if (target?.image) {
+          const listed = useLibraryStore.getState().imageList.some((f: ImageFile) => f.path === target.image);
+          if (listed) {
+            useLibraryStore
+              .getState()
+              .setLibrary({ libraryActivePath: target.image, multiSelectedPaths: [target.image] });
+            await handleImageSelect(target.image);
+          }
+        }
       }
     };
 
@@ -617,7 +642,10 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
     });
   };
 
+  const handleContinueSession = () => openLibrary();
+
   return {
+    openLibrary,
     handleGoHome,
     handleBackToLibrary,
     handleImageSelect,

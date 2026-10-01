@@ -20,6 +20,9 @@ import { useTranslation } from 'react-i18next';
 import Button from '../ui/Button';
 import SettingsPanel from './SettingsPanel';
 import { getTheme } from '../../utils/themes';
+import HomeScreen, { HomeTarget } from './library/HomeScreen';
+
+const noThumbnails = () => {};
 import {
   AppSettings,
   ImageFile,
@@ -60,6 +63,7 @@ interface MainLibraryProps {
   onClearSelection(): void;
   onContextMenu(event: any, path: string): void;
   onContinueSession(): void;
+  onOpenLibrary(target: HomeTarget): void;
   onEmptyAreaContextMenu(event: any): void;
   onGoHome(): void;
   onImageClick(path: string, event: any): void;
@@ -236,6 +240,85 @@ export default function MainLibrary(props: MainLibraryProps) {
     }
     const hasLastPath = !!props.appSettings.lastRootPath || !!props.appSettings.rootFolders?.length;
     const splashImage = getTheme(props.theme).splashImage;
+    const versionInfo = appVersion && (
+      <div className="flex items-center space-x-2">
+        <p>
+          <span
+            className={`group transition-all duration-300 ease-in-out rounded-md py-1 ${
+              isUpdateAvailable ? 'cursor-pointer border border-yellow-500 px-2 hover:bg-yellow-500/20' : ''
+            }`}
+            onClick={() => {
+              if (isUpdateAvailable) {
+                open('https://github.com/CyberTimon/RapidRAW/releases/latest');
+              }
+            }}
+            data-tooltip={
+              isUpdateAvailable
+                ? t('library.splash.downloadVersion', { version: latestVersion })
+                : t('library.splash.latestVersion')
+            }
+          >
+            <span className={isUpdateAvailable ? 'group-hover:hidden' : ''}>
+              {t('library.splash.version', { version: appVersion })}
+            </span>
+            {isUpdateAvailable && (
+              <span className="hidden group-hover:inline text-yellow-400">
+                {t('library.splash.newVersionAvailable')}
+              </span>
+            )}
+          </span>
+        </p>
+        <span>-</span>
+        <p>
+          <a href="https://ko-fi.com/cybertimon" className="hover:underline" target="_blank" rel="noopener noreferrer">
+            {t('library.splash.donate')}
+          </a>
+          <span className="mx-1">{t('library.splash.or')}</span>
+          <a
+            href="https://github.com/CyberTimon/RapidRAW"
+            className="hover:underline"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            {t('library.splash.contribute')}
+          </a>
+        </p>
+      </div>
+    );
+
+    if (hasLastPath && !props.isAndroid) {
+      if (showSettings) {
+        return (
+          <div className="flex-1 flex h-full p-2 bg-transparent min-w-0">
+            <div className="w-full h-full bg-bg-secondary rounded-lg border border-border-color/25 p-8 lg:p-16 overflow-y-auto custom-scrollbar">
+              <SettingsPanel
+                appSettings={props.appSettings}
+                onBack={() => setShowSettings(false)}
+                onLibraryRefresh={props.onLibraryRefresh}
+                onSettingsChange={props.onSettingsChange}
+                rootPaths={props.rootPaths}
+              />
+            </div>
+          </div>
+        );
+      }
+      return (
+        <HomeScreen
+          appSettings={props.appSettings}
+          brand={<Text variant={TextVariants.display}>{t('library.splash.brand')}</Text>}
+          footer={
+            <Text variant={TextVariants.small} as="div">
+              {versionInfo}
+            </Text>
+          }
+          onAddFolder={props.onOpenFolder}
+          onOpen={props.onOpenLibrary}
+          onOpenSettings={() => setShowSettings(true)}
+          onSettingsChange={props.onSettingsChange}
+          requestThumbnails={props.onRequestThumbnails ?? noThumbnails}
+        />
+      );
+    }
 
     return (
       <div className="flex-1 flex h-full p-2 bg-transparent">
@@ -351,58 +434,7 @@ export default function MainLibrary(props: MainLibraryProps) {
                         Timon Käch
                       </a>
                     </p>
-                    {appVersion && (
-                      <div className="flex items-center space-x-2">
-                        <p>
-                          <span
-                            className={`group transition-all duration-300 ease-in-out rounded-md py-1 ${
-                              isUpdateAvailable
-                                ? 'cursor-pointer border border-yellow-500 px-2 hover:bg-yellow-500/20'
-                                : ''
-                            }`}
-                            onClick={() => {
-                              if (isUpdateAvailable) {
-                                open('https://github.com/CyberTimon/RapidRAW/releases/latest');
-                              }
-                            }}
-                            data-tooltip={
-                              isUpdateAvailable
-                                ? t('library.splash.downloadVersion', { version: latestVersion })
-                                : t('library.splash.latestVersion')
-                            }
-                          >
-                            <span className={isUpdateAvailable ? 'group-hover:hidden' : ''}>
-                              {t('library.splash.version', { version: appVersion })}
-                            </span>
-                            {isUpdateAvailable && (
-                              <span className="hidden group-hover:inline text-yellow-400">
-                                {t('library.splash.newVersionAvailable')}
-                              </span>
-                            )}
-                          </span>
-                        </p>
-                        <span>-</span>
-                        <p>
-                          <a
-                            href="https://ko-fi.com/cybertimon"
-                            className="hover:underline"
-                            target="_blank"
-                            rel="noopener noreferrer"
-                          >
-                            {t('library.splash.donate')}
-                          </a>
-                          <span className="mx-1">{t('library.splash.or')}</span>
-                          <a
-                            href="https://github.com/CyberTimon/RapidRAW"
-                            className="hover:underline"
-                            target="_blank"
-                            rel="noopener noreferrer"
-                          >
-                            {t('library.splash.contribute')}
-                          </a>
-                        </p>
-                      </div>
-                    )}
+                    {versionInfo}
                   </Text>
                 </>
               )}

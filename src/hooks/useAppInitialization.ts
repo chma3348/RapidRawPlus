@@ -325,6 +325,7 @@ export const useAppInitialization = ({
       handleSettingsChange({
         ...appSettings,
         lastFolderState: {
+          ...prevFolderState,
           currentFolderPath,
           expandedFolders: currentExpanded,
           activeAlbumId,
@@ -333,6 +334,19 @@ export const useAppInitialization = ({
       });
     }
   }, [currentFolderPath, expandedFolders, activeAlbumId, expandedAlbumGroups, appSettings, handleSettingsChange]);
+
+  // Remember the photo last opened in the editor, for the home screen's
+  // "continue where you left off".
+  const editedPath = useEditorStore((state) => state.selectedImage?.path);
+  useEffect(() => {
+    if (isInitialMount.current || !editedPath) return;
+    const settings = useSettingsStore.getState().appSettings;
+    if (!settings || settings.lastFolderState?.lastEditedImage === editedPath) return;
+    handleSettingsChange({
+      ...settings,
+      lastFolderState: { ...(settings.lastFolderState || {}), lastEditedImage: editedPath },
+    });
+  }, [editedPath, handleSettingsChange]);
 
   useEffect(() => {
     if (!appSettings) return;
