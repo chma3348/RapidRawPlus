@@ -215,6 +215,10 @@ export default function ExportPanel({
     setPreserveTimestamps,
     stripGps,
     setStripGps,
+    outputSharpening,
+    setOutputSharpening,
+    outputSharpeningAmount,
+    setOutputSharpeningAmount,
     exportMasks,
     setExportMasks,
     filenameTemplate,
@@ -379,6 +383,8 @@ export default function ExportPanel({
       preserveFolders,
       resize: enableResize ? { mode: resizeMode, value: resizeValue, dontEnlarge } : null,
       stripGps,
+      outputSharpening:
+        outputSharpening === 'off' ? null : { medium: outputSharpening, amount: outputSharpeningAmount },
       exportMasks: false,
       watermark:
         enableWatermark && watermarkPath
@@ -407,6 +413,8 @@ export default function ExportPanel({
     keepMetadata,
     preserveTimestamps,
     stripGps,
+    outputSharpening,
+    outputSharpeningAmount,
     filenameTemplate,
     enableWatermark,
     watermarkPath,
@@ -455,6 +463,8 @@ export default function ExportPanel({
       preserveFolders,
       resize: enableResize ? { mode: resizeMode, value: resizeValue, dontEnlarge } : null,
       stripGps,
+      outputSharpening:
+        outputSharpening === 'off' ? null : { medium: outputSharpening, amount: outputSharpeningAmount },
       exportMasks: false,
       watermark:
         enableWatermark && watermarkPath
@@ -714,6 +724,49 @@ export default function ExportPanel({
                       />
                     </div>
                   )}
+                  {/* Lightroom's Output Sharpening: a light pass at the final
+                      size, tuned to where the file will be seen. */}
+                  <div className="space-y-2">
+                    <Text variant={TextVariants.label}>
+                      {t('export.sharpening.title', { defaultValue: 'Output sharpening' })}
+                    </Text>
+                    <div className="flex items-center gap-2">
+                      <Dropdown
+                        options={[
+                          { value: 'off', label: t('export.sharpening.off', { defaultValue: 'Off' }) },
+                          { value: 'screen', label: t('export.sharpening.screen', { defaultValue: 'Screen' }) },
+                          {
+                            value: 'glossyPaper',
+                            label: t('export.sharpening.glossy', { defaultValue: 'Glossy paper' }),
+                          },
+                          {
+                            value: 'mattePaper',
+                            label: t('export.sharpening.matte', { defaultValue: 'Matte paper' }),
+                          },
+                        ]}
+                        value={outputSharpening}
+                        onChange={setOutputSharpening}
+                        disabled={isExporting}
+                        className="w-full"
+                      />
+                      {outputSharpening !== 'off' && (
+                        <Dropdown
+                          options={[
+                            { value: 'low', label: t('export.sharpening.low', { defaultValue: 'Low' }) },
+                            {
+                              value: 'standard',
+                              label: t('export.sharpening.standard', { defaultValue: 'Standard' }),
+                            },
+                            { value: 'high', label: t('export.sharpening.high', { defaultValue: 'High' }) },
+                          ]}
+                          value={outputSharpeningAmount}
+                          onChange={setOutputSharpeningAmount}
+                          disabled={isExporting}
+                          className="w-full"
+                        />
+                      )}
+                    </div>
+                  </div>
                 </Section>
 
                 {fileFormat == FileFormats.Jpeg && (

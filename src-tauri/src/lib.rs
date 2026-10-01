@@ -41,6 +41,7 @@ pub mod merge_discovery;
 pub mod model_library;
 pub mod model_registry;
 mod negative_conversion;
+pub mod output_sharpening;
 mod panorama_stitching;
 mod panorama_utils;
 mod preset_converter;

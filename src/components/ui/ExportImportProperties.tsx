@@ -46,7 +46,12 @@ export interface ExportSettings {
   watermark: WatermarkSettings | null;
   exportMasks?: boolean;
   preserveFolders?: boolean;
+  /** A last sharpening pass for where the file will be seen, after resizing. */
+  outputSharpening?: { medium: OutputSharpeningMedium; amount: OutputSharpeningAmount } | null;
 }
+
+export type OutputSharpeningMedium = 'screen' | 'glossyPaper' | 'mattePaper';
+export type OutputSharpeningAmount = 'low' | 'standard' | 'high';
 
 export enum WatermarkAnchor {
   TopLeft = 'topLeft',
@@ -117,5 +122,7 @@ export interface ExportPreset {
   watermarkScale: number;
   watermarkSpacing: number;
   watermarkOpacity: number;
+  outputSharpening?: 'off' | OutputSharpeningMedium;
+  outputSharpeningAmount?: OutputSharpeningAmount;
   lastExportPath?: string;
 }

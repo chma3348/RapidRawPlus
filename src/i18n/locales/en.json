@@ -962,6 +962,16 @@
       "scale": "Scale",
       "spacing": "Spacing",
       "watermarkImage": "Watermark Image"
+    },
+    "sharpening": {
+      "title": "Output sharpening",
+      "off": "Off",
+      "screen": "Screen",
+      "glossy": "Glossy paper",
+      "matte": "Matte paper",
+      "low": "Low",
+      "standard": "Standard",
+      "high": "High"
     }
   },
   "library": {

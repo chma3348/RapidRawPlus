@@ -225,6 +225,10 @@ pub struct ExportSettings {
     pub export_masks: bool,
     #[serde(default)]
     pub preserve_folders: bool,
+    /// A final sharpening pass for where the file will be seen, after
+    /// resizing (Screen, Glossy or Matte paper). None leaves it as rendered.
+    #[serde(default)]
+    pub output_sharpening: Option<crate::output_sharpening::OutputSharpening>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -363,6 +367,11 @@ fn apply_export_resize_and_watermark(
         if target_w != current_w || target_h != current_h {
             image = image.resize(target_w, target_h, imageops::FilterType::Lanczos3);
         }
+    }
+
+    // At the final size, before the watermark, so the mark is not sharpened.
+    if let Some(sharpening) = export_settings.output_sharpening {
+        image = crate::output_sharpening::sharpen(image, sharpening);
     }
 
     if let Some(watermark_settings) = &export_settings.watermark {

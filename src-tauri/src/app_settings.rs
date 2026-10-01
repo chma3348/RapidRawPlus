@@ -242,6 +242,14 @@ pub struct ExportPreset {
     #[serde(default)]
     pub preserve_folders: Option<bool>,
     #[serde(default)]
+    pub preserve_timestamps: Option<bool>,
+    /// "off", "screen", "glossyPaper" or "mattePaper".
+    #[serde(default)]
+    pub output_sharpening: Option<String>,
+    /// "low", "standard" or "high".
+    #[serde(default)]
+    pub output_sharpening_amount: Option<String>,
+    #[serde(default)]
     pub last_export_path: Option<String>,
 }
 
@@ -267,6 +275,9 @@ pub fn default_export_presets() -> Vec<ExportPreset> {
             watermark_opacity: 75,
             export_masks: Some(false),
             preserve_folders: Some(false),
+            preserve_timestamps: Some(false),
+            output_sharpening: None,
+            output_sharpening_amount: None,
             last_export_path: None,
         },
         ExportPreset {
@@ -289,6 +300,9 @@ pub fn default_export_presets() -> Vec<ExportPreset> {
             watermark_opacity: 75,
             export_masks: Some(false),
             preserve_folders: Some(false),
+            preserve_timestamps: Some(false),
+            output_sharpening: None,
+            output_sharpening_amount: None,
             last_export_path: None,
         },
     ]

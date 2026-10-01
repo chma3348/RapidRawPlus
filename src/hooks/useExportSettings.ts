@@ -1,5 +1,10 @@
 import { useState, useMemo, useCallback } from 'react';
-import { ExportPreset, WatermarkAnchor } from '../components/ui/ExportImportProperties';
+import {
+  ExportPreset,
+  OutputSharpeningAmount,
+  OutputSharpeningMedium,
+  WatermarkAnchor,
+} from '../components/ui/ExportImportProperties';
 
 export function useExportSettings() {
   const [fileFormat, setFileFormat] = useState('jpeg');
@@ -20,6 +25,8 @@ export function useExportSettings() {
   const [watermarkScale, setWatermarkScale] = useState(10);
   const [watermarkSpacing, setWatermarkSpacing] = useState(5);
   const [watermarkOpacity, setWatermarkOpacity] = useState(75);
+  const [outputSharpening, setOutputSharpening] = useState<'off' | OutputSharpeningMedium>('off');
+  const [outputSharpeningAmount, setOutputSharpeningAmount] = useState<OutputSharpeningAmount>('standard');
 
   const handleApplyPreset = useCallback((preset: ExportPreset) => {
     // CUBE export belonged to the retired engine; every picture format still exports.
@@ -41,6 +48,8 @@ export function useExportSettings() {
     setWatermarkScale(preset.watermarkScale);
     setWatermarkSpacing(preset.watermarkSpacing);
     setWatermarkOpacity(preset.watermarkOpacity);
+    setOutputSharpening(preset.outputSharpening ?? 'off');
+    setOutputSharpeningAmount(preset.outputSharpeningAmount ?? 'standard');
   }, []);
 
   const currentSettingsObject = useMemo(
@@ -63,6 +72,8 @@ export function useExportSettings() {
       watermarkScale,
       watermarkSpacing,
       watermarkOpacity,
+      outputSharpening,
+      outputSharpeningAmount,
     }),
     [
       fileFormat,
@@ -83,10 +94,16 @@ export function useExportSettings() {
       watermarkScale,
       watermarkSpacing,
       watermarkOpacity,
+      outputSharpening,
+      outputSharpeningAmount,
     ],
   );
 
   return {
+    outputSharpening,
+    setOutputSharpening,
+    outputSharpeningAmount,
+    setOutputSharpeningAmount,
     fileFormat,
     setFileFormat,
     jpegQuality,
