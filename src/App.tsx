@@ -35,6 +35,7 @@ import { LIBRARY_REFRESH_EVENT } from './utils/stacks';
 import { listenForFinderDrops } from './utils/fileDrag';
 import FileDragGhost from './components/ui/FileDragGhost';
 import CullView from './components/panel/library/CullView';
+import ConvertModal from './components/modals/ConvertModal';
 import { useAppNavigation } from './hooks/useAppNavigation';
 
 import { useEditorActions } from './hooks/useEditorActions';
@@ -799,6 +800,7 @@ function App() {
         />
         <FileDragGhost />
         <CullView onEdit={handleImageSelect} />
+        <ConvertModal />
         <ToastContainer
           position="bottom-right"
           autoClose={5000}

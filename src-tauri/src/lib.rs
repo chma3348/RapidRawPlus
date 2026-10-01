@@ -16,6 +16,7 @@ pub mod auto_level;
 mod cache_utils;
 pub mod color_engine;
 pub mod comfy_engine;
+pub mod convert;
 mod culling;
 mod denoising;
 pub mod enhancement;
@@ -1798,6 +1799,9 @@ pub fn run() {
             file_management::watch_library_roots,
             file_management::watch_open_folder,
             file_management::set_flag_for_paths,
+            convert::scan_convertible,
+            convert::convert_files,
+            convert::cancel_conversion,
             file_management::save_video_frame,
             sky_commands::list_sky_plates,
             sky_commands::prepare_sky_replacement,

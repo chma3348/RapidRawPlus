@@ -487,7 +487,7 @@ fn to_rgb8_dithered(image: &DynamicImage) -> image::RgbImage {
 
 /// `space` is the colour space the pixels are in; the formats that carry a
 /// profile embed the matching one.
-fn encode_image_to_bytes(
+pub(crate) fn encode_image_to_bytes(
     image: &DynamicImage,
     output_format: &str,
     jpeg_quality: u8,

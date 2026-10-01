@@ -256,7 +256,8 @@
       "removeRoot": "Remove Root Folder",
       "renameFolder": "Rename Folder",
       "showExplorer": "Show in File Explorer",
-      "unpin": "Unpin Folder"
+      "unpin": "Unpin Folder",
+      "convert": "Convert files…"
     },
     "library": {
       "addCopiedToAlbum_one": "Add copied image to album",
@@ -304,7 +305,8 @@
       "resetAdjustments_one": "Reset Adjustments",
       "resetAdjustments_other": "Reset Adjustments on {{count}} Images",
       "showExplorer": "Show in File Explorer",
-      "virtualCopy": "Virtual Copy"
+      "virtualCopy": "Virtual Copy",
+      "convert": "Convert…"
     },
     "toasts": {
       "couldNotShowExplorer": "Could not show file in explorer: {{err}}",
@@ -846,7 +848,8 @@
         "Expanded": "Expanded",
         "Positive": "Positive",
         "Copy": "Copy",
-        "Version": "Version"
+        "Version": "Version",
+        "Converted": "Converted"
       }
     },
     "layout": {
@@ -2217,5 +2220,32 @@
     "hints": "P pick · X reject · U clear · 1–5 stars · 6–9 labels · ←/→ move · C compare · A auto-advance · Enter edit · Esc done",
     "picked": "Picked",
     "rejected": "Rejected"
+  },
+  "convert": {
+    "title": "Convert {{count}} photos",
+    "looking": "Looking for photos…",
+    "from": "From",
+    "to": "To",
+    "save": "Save",
+    "nothing": "No photos found here.",
+    "quality": "Quality",
+    "optBeside": "Next to the originals",
+    "optSubfolder": "In a subfolder",
+    "optFolder": "In a folder you choose",
+    "chooseFolder": "Choose a folder…",
+    "moreOptions": "More options",
+    "includeSubfolders": "Include subfolders",
+    "limitSize": "Limit size",
+    "longEdge": "Long edge",
+    "stripLocation": "Remove location",
+    "stripLocationNot": "TIFF and HEIC files keep their location",
+    "trashOriginals": "Move originals to the Trash",
+    "editedNote": "{{count}} of these have edits. Converting keeps them as shot; use Export to include edits.",
+    "summary": "{{count}} photos → {{format}}, {{where}}.",
+    "whereBeside": "next to the originals",
+    "whereSubfolder": "in a “{{name}}” folder",
+    "whereFolder": "in {{name}}",
+    "whereChoose": "in a folder you choose",
+    "convert": "Convert"
   }
 }

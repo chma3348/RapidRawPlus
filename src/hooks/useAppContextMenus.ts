@@ -16,6 +16,7 @@ import {
   LayoutTemplate,
   Redo,
   RefreshCw,
+  FileType,
   RotateCcw,
   Star,
   SquaresUnite,
@@ -62,6 +63,7 @@ import { useLibraryActions } from './useLibraryActions';
 import { globalImageCache } from '../utils/ImageLRUCache';
 import { getStacks, withVersions } from './useStacks';
 import { undoFileOperation } from '../utils/fileUndo';
+import { useConvertStore } from '../components/modals/ConvertModal';
 
 export interface UseAppContextMenusProps {
   handleImageSelect: (path: string) => void;
@@ -824,6 +826,11 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
               },
             ]
           : []),
+        {
+          icon: FileType,
+          label: t('contextMenus.thumbnail.convert', { defaultValue: 'Convert…' }),
+          onClick: () => useConvertStore.getState().openConvert(finalSelection, null),
+        },
         { type: OPTION_SEPARATOR },
         {
           disabled: !isSingleSelection,
@@ -1035,6 +1042,11 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
           icon: FolderInput,
           label: t('contextMenus.folders.importImages'),
           onClick: () => props.handleImportClick(targetPath),
+        },
+        {
+          icon: FileType,
+          label: t('contextMenus.folders.convert', { defaultValue: 'Convert files…' }),
+          onClick: () => useConvertStore.getState().openConvert([targetPath], targetPath),
         },
         { type: OPTION_SEPARATOR },
         {

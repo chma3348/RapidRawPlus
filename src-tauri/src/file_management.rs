@@ -1786,7 +1786,7 @@ fn folder_name(path: &Path) -> String {
 }
 
 /// A photo plus everything that travels with it.
-fn find_all_associated_files(source_image_path: &Path) -> Result<Vec<PathBuf>, String> {
+pub(crate) fn find_all_associated_files(source_image_path: &Path) -> Result<Vec<PathBuf>, String> {
     let mut files = vec![source_image_path.to_path_buf()];
     files.extend(companion_files(source_image_path));
     Ok(files)
