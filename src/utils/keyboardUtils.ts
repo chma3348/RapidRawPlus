@@ -184,7 +184,7 @@ export const KEYBIND_DEFINITIONS: KeybindDefinition[] = [
   {
     action: 'toggle_presets',
     description: 'settings.keybinds.actions.toggle_presets',
-    defaultCombo: ['KeyP'],
+    defaultCombo: ['shift', 'KeyP'],
     section: 'panels',
   },
   {
@@ -254,6 +254,43 @@ export const KEYBIND_DEFINITIONS: KeybindDefinition[] = [
     description: 'settings.keybinds.actions.brush_size_down',
     defaultCombo: ['ctrl', 'ArrowDown'],
     section: 'editing',
+  },
+  // Culling and the library, with Lightroom's keys.
+  {
+    action: 'flag_pick',
+    description: 'settings.keybinds.actions.flag_pick',
+    defaultCombo: ['KeyP'],
+    section: 'rating',
+  },
+  {
+    action: 'flag_reject',
+    description: 'settings.keybinds.actions.flag_reject',
+    defaultCombo: ['KeyX'],
+    section: 'rating',
+  },
+  {
+    action: 'flag_clear',
+    description: 'settings.keybinds.actions.flag_clear',
+    defaultCombo: ['KeyU'],
+    section: 'rating',
+  },
+  {
+    action: 'open_cull',
+    description: 'settings.keybinds.actions.open_cull',
+    defaultCombo: ['KeyC'],
+    section: 'library',
+  },
+  {
+    action: 'toggle_filter_bar',
+    description: 'settings.keybinds.actions.toggle_filter_bar',
+    defaultCombo: ['Backslash'],
+    section: 'library',
+  },
+  {
+    action: 'back_to_grid',
+    description: 'settings.keybinds.actions.back_to_grid',
+    defaultCombo: ['KeyG'],
+    section: 'view',
   },
 ];
 

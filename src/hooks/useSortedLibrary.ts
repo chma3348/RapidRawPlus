@@ -112,6 +112,13 @@ export function computeSortedLibrary(libraryState: any, settingsState: any): Ima
       if (filterCriteria.rawStatus === RawStatus.NonRawOnly && isRaw) return false;
     }
 
+    if (filterCriteria.flag && filterCriteria.flag !== 'all') {
+      const flag = image.flag ?? null;
+      if (filterCriteria.flag === 'picked' && flag !== 'pick') return false;
+      if (filterCriteria.flag === 'rejected' && flag !== 'reject') return false;
+      if (filterCriteria.flag === 'unflagged' && flag !== null) return false;
+    }
+
     if (filterCriteria.editedStatus && filterCriteria.editedStatus !== EditedStatus.All) {
       if (filterCriteria.editedStatus === EditedStatus.EditedOnly && !image.is_edited) return false;
       if (filterCriteria.editedStatus === EditedStatus.UneditedOnly && image.is_edited) return false;

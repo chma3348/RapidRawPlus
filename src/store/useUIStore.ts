@@ -118,6 +118,8 @@ interface UIState {
   isInstantTransition: boolean;
   isLayoutReady: boolean;
   uiVisibility: UiVisibility;
+  /** The library's filter bar (toggled with \). */
+  isFilterBarVisible: boolean;
   isLibraryExportPanelVisible: boolean;
 
   // Dimensions
@@ -175,6 +177,7 @@ export const useUIStore = create<UIState>((set, get) => ({
   isInstantTransition: false,
   isLayoutReady: false,
   uiVisibility: { folderTree: true, filmstrip: true },
+  isFilterBarVisible: true,
   isLibraryExportPanelVisible: false,
 
   leftPanelWidth: 256,

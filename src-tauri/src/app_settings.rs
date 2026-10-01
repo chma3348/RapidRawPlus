@@ -24,6 +24,9 @@ pub struct FilterCriteria {
     pub edited_status: Option<String>,
     #[serde(default)]
     pub colors: Vec<String>,
+    /// Culling flag filter: "all", "picked", "rejected" or "unflagged".
+    #[serde(default)]
+    pub flag: Option<String>,
 }
 
 impl Default for FilterCriteria {
@@ -33,6 +36,7 @@ impl Default for FilterCriteria {
             raw_status: "all".to_string(),
             edited_status: Some("all".to_string()),
             colors: Vec::new(),
+            flag: None,
         }
     }
 }

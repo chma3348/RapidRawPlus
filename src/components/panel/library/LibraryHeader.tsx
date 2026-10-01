@@ -379,14 +379,13 @@ export function ViewOptionsDropdown({
       buttonContent={
         <>
           <SlidersHorizontal className="w-8 h-8" />
-          {isFilterActive && <div className="absolute -top-1 -right-1 bg-accent rounded-full w-3 h-3" />}
         </>
       }
       buttonTitle={t('library.header.viewOptions.title')}
-      contentClassName="library-view-options-menu w-[720px]"
+      contentClassName="library-view-options-menu w-[440px]"
     >
       <div className="library-view-options-content flex">
-        <div className="library-view-options-section w-1/4 p-2 border-r border-border-color">
+        <div className="library-view-options-section w-1/2 p-2 border-r border-border-color">
           <>
             <Text as="div" variant={TextVariants.small} weight={TextWeights.semibold} className="px-3 py-2 uppercase">
               {t('library.header.viewOptions.thumbnailSize')}
@@ -517,185 +516,7 @@ export function ViewOptionsDropdown({
           </div>
         </div>
 
-        <div className="library-view-options-section w-2/4 p-2 border-r border-border-color">
-          <div className="space-y-4">
-            <div>
-              <Text as="div" variant={TextVariants.small} weight={TextWeights.semibold} className="px-3 py-2 uppercase">
-                {t('library.header.viewOptions.filterByRating')}
-              </Text>
-
-              {ratingFilterOptions
-                .filter((option: any) => option.value <= 0)
-                .map((option: any) => {
-                  const isSelected = filterCriteria.rating === option.value;
-                  return (
-                    <button
-                      className={`w-full text-left px-3 py-2 rounded-md flex items-center justify-between transition-colors duration-150 ${
-                        isSelected ? 'bg-card-active' : 'hover:bg-bg-primary'
-                      }`}
-                      key={option.value}
-                      onClick={() =>
-                        setFilterCriteria((prev: Partial<FilterCriteria>) => ({ ...prev, rating: option.value }))
-                      }
-                      role="menuitem"
-                    >
-                      <Text
-                        variant={TextVariants.label}
-                        color={TextColors.primary}
-                        weight={isSelected ? TextWeights.semibold : TextWeights.normal}
-                      >
-                        {option.label}
-                      </Text>
-                      {isSelected && <Check size={16} className={TEXT_COLOR_KEYS[TextColors.primary]} />}
-                    </button>
-                  );
-                })}
-
-              <div
-                className={`w-full px-3 py-2 rounded-md flex items-center justify-between transition-colors duration-150 ${
-                  filterCriteria.rating > 0 ? 'bg-card-active' : 'hover:bg-bg-primary'
-                }`}
-              >
-                <div className="flex items-center gap-3">
-                  <div className="flex items-center gap-1.5">
-                    {[...Array(5)].map((_, index: number) => {
-                      const starValue = index + 1;
-                      const isFilled = filterCriteria.rating > 0 && starValue <= filterCriteria.rating;
-                      const optionLabel = ratingFilterOptions.find((o: any) => o.value === starValue)?.label;
-
-                      return (
-                        <button
-                          key={starValue}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setFilterCriteria((prev: Partial<FilterCriteria>) => ({
-                              ...prev,
-                              rating: prev.rating === starValue ? 0 : starValue,
-                            }));
-                          }}
-                          className="focus:outline-hidden transition-transform hover:scale-110 flex items-center justify-center p-0.5"
-                          data-tooltip={optionLabel}
-                        >
-                          <StarIcon
-                            size={18}
-                            className={`transition-colors duration-150 ${
-                              isFilled ? 'text-accent fill-accent' : 'text-text-secondary hover:text-accent'
-                            }`}
-                          />
-                        </button>
-                      );
-                    })}
-                  </div>
-                  <Text variant={TextVariants.label} color={TextColors.secondary}>
-                    {filterCriteria.rating === 5
-                      ? t('library.filters.rating.onlySuffix')
-                      : t('library.filters.rating.andUpSuffix')}
-                  </Text>
-                </div>
-                {filterCriteria.rating > 0 && <Check size={16} className={TEXT_COLOR_KEYS[TextColors.primary]} />}
-              </div>
-            </div>
-
-            <div>
-              <Text as="div" variant={TextVariants.small} weight={TextWeights.semibold} className="px-3 py-2 uppercase">
-                {t('library.header.viewOptions.filterByFileType')}
-              </Text>
-              {rawStatusOptions.map((option: any) => {
-                const isSelected = (filterCriteria.rawStatus || RawStatus.All) === option.key;
-                return (
-                  <button
-                    className={`w-full text-left px-3 py-2 rounded-md flex items-center justify-between transition-colors duration-150 ${
-                      isSelected ? 'bg-card-active' : 'hover:bg-bg-primary'
-                    }`}
-                    key={option.key}
-                    onClick={() =>
-                      setFilterCriteria((prev: Partial<FilterCriteria>) => ({ ...prev, rawStatus: option.key }))
-                    }
-                    role="menuitem"
-                  >
-                    <Text
-                      variant={TextVariants.label}
-                      color={TextColors.primary}
-                      weight={isSelected ? TextWeights.semibold : TextWeights.normal}
-                    >
-                      {option.label}
-                    </Text>
-                    {isSelected && <Check size={16} className={TEXT_COLOR_KEYS[TextColors.primary]} />}
-                  </button>
-                );
-              })}
-            </div>
-
-            <div>
-              <Text as="div" variant={TextVariants.small} weight={TextWeights.semibold} className="px-3 py-2 uppercase">
-                {t('library.header.viewOptions.filterByEdited', 'Filter by Edit Status')}
-              </Text>
-              {editedStatusOptions.map((option: any) => {
-                const isSelected = (filterCriteria.editedStatus || EditedStatus.All) === option.key;
-                return (
-                  <button
-                    className={`w-full text-left px-3 py-2 rounded-md flex items-center justify-between transition-colors duration-150 ${
-                      isSelected ? 'bg-card-active' : 'hover:bg-bg-primary'
-                    }`}
-                    key={option.key}
-                    onClick={() =>
-                      setFilterCriteria((prev: Partial<FilterCriteria>) => ({ ...prev, editedStatus: option.key }))
-                    }
-                    role="menuitem"
-                  >
-                    <Text
-                      variant={TextVariants.label}
-                      color={TextColors.primary}
-                      weight={isSelected ? TextWeights.semibold : TextWeights.normal}
-                    >
-                      {option.label}
-                    </Text>
-                    {isSelected && <Check size={16} className={TEXT_COLOR_KEYS[TextColors.primary]} />}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          <div className="py-2"></div>
-
-          <div>
-            <Text as="div" variant={TextVariants.small} weight={TextWeights.semibold} className="px-3 py-2 uppercase">
-              {t('library.header.viewOptions.filterByColorLabel')}
-            </Text>
-            <div className="flex flex-wrap gap-3 px-3 py-2">
-              {allColors.map((color: Color) => {
-                const isSelected = (filterCriteria.colors || []).includes(color.name);
-                const title =
-                  color.name === 'none'
-                    ? t('library.header.viewOptions.noLabel')
-                    : t(`contextMenus.colors.${color.name}`, {
-                        defaultValue: color.name.charAt(0).toUpperCase() + color.name.slice(1),
-                      });
-                return (
-                  <button
-                    key={color.name}
-                    data-tooltip={title}
-                    onClick={(e: any) => handleColorClick(color.name, e)}
-                    className="w-6 h-6 rounded-full focus:outline-hidden focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-surface transition-transform hover:scale-110"
-                    role="menuitem"
-                  >
-                    <div className="relative w-full h-full">
-                      <div className="w-full h-full rounded-full" style={{ backgroundColor: color.color }}></div>
-                      {isSelected && (
-                        <div className="absolute inset-0 flex items-center justify-center bg-black/30 rounded-full">
-                          <Check size={14} className={TEXT_COLOR_KEYS[TextColors.white]} />
-                        </div>
-                      )}
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        </div>
-
-        <div className="library-view-options-section w-1/4 p-2">
+        <div className="library-view-options-section w-1/2 p-2">
           <>
             <div className="px-3 py-2 relative flex items-center">
               <Text as="div" variant={TextVariants.small} weight={TextWeights.semibold} className="uppercase">

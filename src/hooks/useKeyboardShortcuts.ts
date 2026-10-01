@@ -11,6 +11,8 @@ import { useLibraryActions } from './useLibraryActions';
 import { getStacks, withVersions } from './useStacks';
 import { stackRootOf } from '../utils/stacks';
 import { undoFileOperation } from '../utils/fileUndo';
+import { flagTargets, setFlagForPaths } from '../utils/flags';
+import { startCulling } from '../components/panel/library/CullView';
 
 interface KeyboardShortcutsProps {
   sortedImageList: Array<ImageFile>;
@@ -299,6 +301,48 @@ export const useKeyboardShortcuts = ({
         execute: (e: any, s: any) => {
           e.preventDefault();
           s.ui.setRightPanel(Panel.Ai);
+        },
+      },
+      flag_pick: {
+        shouldFire: () => flagTargets().length > 0,
+        execute: (e: any) => {
+          e.preventDefault();
+          setFlagForPaths(flagTargets(), 'pick');
+        },
+      },
+      flag_reject: {
+        shouldFire: () => flagTargets().length > 0,
+        execute: (e: any) => {
+          e.preventDefault();
+          setFlagForPaths(flagTargets(), 'reject');
+        },
+      },
+      flag_clear: {
+        shouldFire: () => flagTargets().length > 0,
+        execute: (e: any) => {
+          e.preventDefault();
+          setFlagForPaths(flagTargets(), null);
+        },
+      },
+      open_cull: {
+        shouldFire: (s: any) => !s.editor.selectedImage && sortedListRef.current.length > 0,
+        execute: (e: any) => {
+          e.preventDefault();
+          startCulling(sortedListRef.current);
+        },
+      },
+      toggle_filter_bar: {
+        shouldFire: (s: any) => !s.editor.selectedImage,
+        execute: (e: any, s: any) => {
+          e.preventDefault();
+          s.ui.setUI((state: any) => ({ isFilterBarVisible: !state.isFilterBarVisible }));
+        },
+      },
+      back_to_grid: {
+        shouldFire: (s: any) => !!s.editor.selectedImage,
+        execute: (e: any) => {
+          e.preventDefault();
+          handleBackToLibrary();
         },
       },
       toggle_presets: {

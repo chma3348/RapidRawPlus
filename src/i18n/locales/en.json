@@ -1152,6 +1152,16 @@
       "communityPresets": "Community Presets",
       "goHome": "Go to Home",
       "importImages": "Import Images"
+    },
+    "filterBar": {
+      "flag": "Flag",
+      "all": "All",
+      "unflagged": "Unflagged",
+      "rating": "Stars",
+      "label": "Label",
+      "showingOf": "{{shown}} of {{total}}",
+      "count": "{{count}} photos",
+      "clear": "Clear filters"
     }
   },
   "masks": {
@@ -1733,7 +1743,13 @@
         "zoom_in": "Zoom in",
         "zoom_in_step": "Zoom in (by step)",
         "zoom_out": "Zoom out",
-        "zoom_out_step": "Zoom out (by step)"
+        "zoom_out_step": "Zoom out (by step)",
+        "flag_pick": "Pick (flag as a keeper)",
+        "flag_reject": "Reject",
+        "flag_clear": "Clear flag",
+        "open_cull": "Cull photos one at a time",
+        "toggle_filter_bar": "Show or hide the filter bar",
+        "back_to_grid": "Back to the grid"
       },
       "sections": {
         "editing": "Editing",

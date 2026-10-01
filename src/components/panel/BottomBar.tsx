@@ -371,104 +371,111 @@ export default function BottomBar({
             </button>
           </div>
 
-          <div className="h-5 w-px bg-surface"></div>
+          {/* In the library the filter bar does this; here it filters the filmstrip. */}
+          {!isLibraryView && (
+            <>
+              <div className="h-5 w-px bg-surface"></div>
 
-          <div
-            className={clsx(
-              'flex items-center transition-all duration-300',
-              isFilterExpanded ? 'bg-surface rounded-md' : 'bg-transparent',
-            )}
-          >
-            <button
-              className={clsx(
-                'relative w-8 h-8 flex items-center justify-center rounded-md transition-colors shrink-0',
-                isFilterExpanded ? 'text-text-primary' : 'text-text-secondary hover:bg-surface hover:text-text-primary',
-              )}
-              onClick={() => setIsFilterExpanded(!isFilterExpanded)}
-              data-tooltip={t('ui.bottomBar.tooltips.quickFilter', 'Quick Filter')}
-            >
-              <Filter size={18} />
-              {/* A filter is narrowing the filmstrip even while this is folded. */}
-              {(filterCriteria.rating > 0 || (filterCriteria.colors || []).length > 0) && (
-                <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-accent" />
-              )}
-            </button>
+              <div
+                className={clsx(
+                  'flex items-center transition-all duration-300',
+                  isFilterExpanded ? 'bg-surface rounded-md' : 'bg-transparent',
+                )}
+              >
+                <button
+                  className={clsx(
+                    'relative w-8 h-8 flex items-center justify-center rounded-md transition-colors shrink-0',
+                    isFilterExpanded
+                      ? 'text-text-primary'
+                      : 'text-text-secondary hover:bg-surface hover:text-text-primary',
+                  )}
+                  onClick={() => setIsFilterExpanded(!isFilterExpanded)}
+                  data-tooltip={t('ui.bottomBar.tooltips.quickFilter', 'Quick Filter')}
+                >
+                  <Filter size={18} />
+                  {/* A filter is narrowing the filmstrip even while this is folded. */}
+                  {(filterCriteria.rating > 0 || (filterCriteria.colors || []).length > 0) && (
+                    <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-accent" />
+                  )}
+                </button>
 
-            <div
-              className={clsx(
-                'flex items-center transition-all duration-300 ease-in-out overflow-hidden',
-                isFilterExpanded ? 'max-w-100 opacity-100 pr-2 ml-1' : 'max-w-0 opacity-0 pr-0 ml-0',
-              )}
-            >
-              <div className="flex items-center gap-3 whitespace-nowrap">
-                <div className="flex items-center gap-0.5">
-                  {[1, 2, 3, 4, 5].map((starValue) => {
-                    const isFilled = filterCriteria.rating > 0 && starValue <= filterCriteria.rating;
-                    return (
-                      <button
-                        key={`qf-star-${starValue}`}
-                        onClick={() =>
-                          setFilterCriteria((prev) => ({
-                            ...prev,
-                            rating: prev.rating === starValue ? 0 : starValue,
-                          }))
-                        }
-                        className="p-0.5 focus:outline-none"
-                        data-tooltip={t('ui.bottomBar.tooltips.filterRating', {
-                          defaultValue: 'Show {{count}}+ stars',
-                          count: starValue,
-                        })}
-                      >
-                        <Star
-                          size={16}
-                          className={clsx(
-                            'transition-colors duration-150',
-                            isFilled ? 'text-accent fill-accent' : 'text-text-secondary hover:text-accent',
-                          )}
-                        />
-                      </button>
-                    );
-                  })}
-                </div>
+                <div
+                  className={clsx(
+                    'flex items-center transition-all duration-300 ease-in-out overflow-hidden',
+                    isFilterExpanded ? 'max-w-100 opacity-100 pr-2 ml-1' : 'max-w-0 opacity-0 pr-0 ml-0',
+                  )}
+                >
+                  <div className="flex items-center gap-3 whitespace-nowrap">
+                    <div className="flex items-center gap-0.5">
+                      {[1, 2, 3, 4, 5].map((starValue) => {
+                        const isFilled = filterCriteria.rating > 0 && starValue <= filterCriteria.rating;
+                        return (
+                          <button
+                            key={`qf-star-${starValue}`}
+                            onClick={() =>
+                              setFilterCriteria((prev) => ({
+                                ...prev,
+                                rating: prev.rating === starValue ? 0 : starValue,
+                              }))
+                            }
+                            className="p-0.5 focus:outline-none"
+                            data-tooltip={t('ui.bottomBar.tooltips.filterRating', {
+                              defaultValue: 'Show {{count}}+ stars',
+                              count: starValue,
+                            })}
+                          >
+                            <Star
+                              size={16}
+                              className={clsx(
+                                'transition-colors duration-150',
+                                isFilled ? 'text-accent fill-accent' : 'text-text-secondary hover:text-accent',
+                              )}
+                            />
+                          </button>
+                        );
+                      })}
+                    </div>
 
-                <div className="h-4 w-px bg-border-color"></div>
+                    <div className="h-4 w-px bg-border-color"></div>
 
-                <div className="flex items-center gap-1.5">
-                  {allColors.map((color) => {
-                    const isSelected = (filterCriteria.colors || []).includes(color.name);
+                    <div className="flex items-center gap-1.5">
+                      {allColors.map((color) => {
+                        const isSelected = (filterCriteria.colors || []).includes(color.name);
 
-                    const tooltipTitle =
-                      color.name === 'none'
-                        ? t('library.header.viewOptions.noLabel')
-                        : t(`contextMenus.colors.${color.name}`, {
-                            defaultValue: color.name.charAt(0).toUpperCase() + color.name.slice(1),
-                          });
+                        const tooltipTitle =
+                          color.name === 'none'
+                            ? t('library.header.viewOptions.noLabel')
+                            : t(`contextMenus.colors.${color.name}`, {
+                                defaultValue: color.name.charAt(0).toUpperCase() + color.name.slice(1),
+                              });
 
-                    return (
-                      <button
-                        key={`qf-color-${color.name}`}
-                        onClick={() => {
-                          const currentColors = filterCriteria.colors || [];
-                          const newColors = currentColors.includes(color.name)
-                            ? currentColors.filter((c) => c !== color.name)
-                            : [...currentColors, color.name];
-                          setFilterCriteria((prev) => ({ ...prev, colors: newColors }));
-                        }}
-                        className={clsx(
-                          'w-4 h-4 rounded-full transition-transform hover:scale-105 flex items-center justify-center focus:outline-none',
-                          isSelected ? 'ring-2 ring-accent ring-offset-1 ring-offset-bg-primary' : '',
-                        )}
-                        style={{ backgroundColor: color.color }}
-                        data-tooltip={tooltipTitle}
-                      >
-                        {isSelected && <Check size={10} className="text-white drop-shadow-md" />}
-                      </button>
-                    );
-                  })}
+                        return (
+                          <button
+                            key={`qf-color-${color.name}`}
+                            onClick={() => {
+                              const currentColors = filterCriteria.colors || [];
+                              const newColors = currentColors.includes(color.name)
+                                ? currentColors.filter((c) => c !== color.name)
+                                : [...currentColors, color.name];
+                              setFilterCriteria((prev) => ({ ...prev, colors: newColors }));
+                            }}
+                            className={clsx(
+                              'w-4 h-4 rounded-full transition-transform hover:scale-105 flex items-center justify-center focus:outline-none',
+                              isSelected ? 'ring-2 ring-accent ring-offset-1 ring-offset-bg-primary' : '',
+                            )}
+                            style={{ backgroundColor: color.color }}
+                            data-tooltip={tooltipTitle}
+                          >
+                            {isSelected && <Check size={10} className="text-white drop-shadow-md" />}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
                 </div>
               </div>
-            </div>
-          </div>
+            </>
+          )}
 
           <div
             className={clsx(

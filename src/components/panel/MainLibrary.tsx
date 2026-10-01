@@ -38,6 +38,9 @@ import { useLibraryStore } from '../../store/useLibraryStore';
 import LibraryGrid from './library/LibraryGrid';
 import { SearchInput, ViewOptionsDropdown } from './library/LibraryHeader';
 import { startCulling } from './library/CullView';
+import LibraryFilterBar from './library/LibraryFilterBar';
+import { useUIStore } from '../../store/useUIStore';
+import { getStacks } from '../../hooks/useStacks';
 
 interface MainLibraryProps {
   activePath: string | null;
@@ -91,6 +94,9 @@ export interface ColumnWidths {
 
 export default function MainLibrary(props: MainLibraryProps) {
   const { t } = useTranslation();
+  const isFilterBarVisible = useUIStore((s) => s.isFilterBarVisible);
+  // Photos in the folder, counting a stack (a photo and its versions) once.
+  const libraryPhotoCount = useLibraryStore((s) => s.imageList.length - getStacks(s.imageList).rootOf.size);
   const [showSettings, setShowSettings] = useState(false);
   const [appVersion, setAppVersion] = useState('');
   const [isUpdateAvailable, setIsUpdateAvailable] = useState(false);
@@ -517,6 +523,8 @@ export default function MainLibrary(props: MainLibraryProps) {
           </Button>
         </div>
       </header>
+
+      {isFilterBarVisible && <LibraryFilterBar shown={props.imageList.length} total={libraryPhotoCount} />}
 
       {props.imageList.length > 0 ? (
         <LibraryGrid {...props} thumbnailSizeOptions={translatedThumbnailSizeOptions} />

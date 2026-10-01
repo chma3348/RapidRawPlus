@@ -74,3 +74,26 @@ test('a stack is shown when only one of its versions passes the filters', () => 
   ).map((f) => f.path.slice(D.length));
   assert.deepEqual(sorted, ['DSC1.ARW']);
 });
+
+test('the flag filter keeps picks, rejects or unflagged photos', () => {
+  const flagged = [
+    file(`${D}a.ARW`, { flag: 'pick' }),
+    file(`${D}b.ARW`, { flag: 'reject' }),
+    file(`${D}c.ARW`),
+  ];
+  const run = (flag: string) =>
+    computeSortedLibrary(
+      {
+        imageList: flagged,
+        imageRatings: {},
+        filterCriteria: { rating: 0, rawStatus: 'all', editedStatus: 'all', colors: [], flag },
+        searchCriteria: { tags: [], text: '', mode: 'AND' },
+        sortCriteria: { key: 'name', order: 'asc' },
+      },
+      { appSettings: {}, supportedTypes: null },
+    ).map((f) => f.path.slice(D.length));
+  assert.deepEqual(run('all'), ['a.ARW', 'b.ARW', 'c.ARW']);
+  assert.deepEqual(run('picked'), ['a.ARW']);
+  assert.deepEqual(run('rejected'), ['b.ARW']);
+  assert.deepEqual(run('unflagged'), ['c.ARW']);
+});

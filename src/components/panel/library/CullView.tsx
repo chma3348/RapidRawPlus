@@ -10,6 +10,7 @@ import { useLibraryStore } from '../../../store/useLibraryStore';
 import { useProcessStore } from '../../../store/useProcessStore';
 import { isVideoPath } from '../../../utils/media';
 import { COLOR_LABELS } from '../../../utils/adjustments';
+import { setFlagForPaths } from '../../../utils/flags';
 
 /**
  * Culling: going through a shoot quickly, one big photo at a time,
@@ -153,10 +154,7 @@ export default function CullView({ onEdit }: { onEdit: (path: string) => void })
   const setFlag = useCallback(
     (flag: 'pick' | 'reject' | null) => {
       if (!targetPath) return;
-      useLibraryStore.getState().setLibrary((s) => ({
-        imageList: s.imageList.map((f) => (f.path === targetPath ? { ...f, flag } : f)),
-      }));
-      invoke('set_flag_for_paths', { paths: [targetPath], flag }).catch((e) => toast.error(`Could not flag: ${e}`));
+      setFlagForPaths([targetPath], flag);
       advance();
     },
     [targetPath, advance],

@@ -271,11 +271,15 @@ export const EditedStatus = {
 
 export type EditedStatus = (typeof EditedStatus)[keyof typeof EditedStatus];
 
+/** Culling flag filter. */
+export type FlagFilter = 'all' | 'picked' | 'rejected' | 'unflagged';
+
 export interface FilterCriteria {
   colors: Array<string>;
   rating: number;
   rawStatus: RawStatus;
   editedStatus?: EditedStatus;
+  flag?: FlagFilter;
 }
 
 export interface Folder {
