@@ -86,6 +86,18 @@ pub(crate) struct GpuParameters {
     pub zone_style: [[f32; 4]; 4],
     /// Exposure's colour (`EXPOSURE_COLOUR`).
     pub exposure_colour: [f32; 4],
+    /// Dehaze's tone: offsets per key knot at -50, -100, +50 and +100
+    /// (dehaze_table.rs): the veil for negative values, and for positive ones
+    /// what Lightroom's does beyond the detail stage's haze removal.
+    pub haze_veil: [[f32; 4]; super::dehaze_table::KNOTS],
+    /// [haze colour in the source's primaries (any brightness), the slider
+    /// in -1..1 (0: off)].
+    pub haze: [f32; 4],
+    /// [colour kept at -50, at -100, how strongly the veil takes the haze
+    /// colour, 0].
+    pub haze_style: [f32; 4],
+    /// [colour scale at +50, at +100, 0, 0].
+    pub haze_up: [f32; 4],
 }
 
 /// How each tone zone moves a pixel, per zone [blacks, shadows, highlights,
@@ -426,6 +438,20 @@ impl RenderPlan {
             zone_adapt: [[0.; 4], [1.; 4], [1.; 4]],
             zone_style: ZONE_STYLE,
             exposure_colour: EXPOSURE_COLOUR,
+            haze_veil: super::dehaze_table::VEIL,
+            haze: [0., 0., 0., (c.detail.dehaze / 100.).clamp(-1., 1.)],
+            haze_style: [
+                super::dehaze_table::KEEP[0],
+                super::dehaze_table::KEEP[1],
+                super::dehaze_table::TINT,
+                0.,
+            ],
+            haze_up: [
+                super::dehaze_table::KEEP[2],
+                super::dehaze_table::KEEP[3],
+                0.,
+                0.,
+            ],
             look: [0.; 4],
             look_flags: [0; 4],
             work_to_look: packed(
@@ -443,8 +469,8 @@ impl RenderPlan {
                     c.effects.vignette_feather / 100.,
                 ],
                 [
-                    c.effects.grain_amount / 200. * 0.5,
-                    c.effects.grain_size / 50.,
+                    c.effects.grain_amount / 100.,
+                    c.effects.grain_size / 25.,
                     c.effects.grain_roughness / 100.,
                     1.0,
                 ],
@@ -554,6 +580,12 @@ impl RenderPlan {
 
     /// How much smaller than the full-resolution photograph the image being
     /// rendered is, so grain keeps its size relative to the photograph.
+    /// The photo's haze colour, for negative Dehaze's veil (in the source's
+    /// primaries; its brightness does not matter).
+    pub fn set_haze(&mut self, colour: [f32; 3]) {
+        self.parameters.haze[..3].copy_from_slice(&colour);
+    }
+
     pub fn set_render_scale(&mut self, scale: f32) {
         self.parameters.effects[1][3] = scale.max(1e-4);
     }

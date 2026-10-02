@@ -1398,27 +1398,63 @@ fn effects_contracts(engine: &ColorEngine) {
         mean.abs() < spread * 0.5,
         "grain shifted the brightness: mean {mean} spread {spread}"
     );
-    // Grain keeps its size relative to the photograph: rendering at half
-    // scale must sample the same pattern at half the pixel spacing.
-    let mut half = RenderPlan::build({
+    // Grain is colourless: the same change on every channel.
+    let worst = g
+        .pixels()
+        .zip(base.pixels())
+        .map(|(a, b)| ((a[0] - b[0]) - (a[2] - b[2])).abs())
+        .fold(0f32, f32::max);
+    assert!(worst < 1e-3, "grain is coloured: {worst}");
+    // Grain is sized by the photograph (Lightroom's: a fraction of the short
+    // edge), so a half-scale preview shows the same pattern at half the
+    // pixel spacing, and, like a full-size picture shrunk, weaker per pixel.
+    let grain_at = |scale: f32| {
+        let (w, h) = ((2400. * scale) as u32, (1600. * scale) as u32);
+        let frame = ImageBuffer::from_pixel(w, h, Rgba([0.3f32, 0.3, 0.3, 1.0]));
         let mut c = config();
         c.controls.effects.grain_amount = 80.0;
-        c
-    })
-    .unwrap();
-    half.set_render_scale(0.5);
-    let small = ImageBuffer::from_pixel(100, 50, Rgba([0.3f32, 0.3, 0.3, 1.0]));
-    let half_frame = engine.render(&small, &half, false).unwrap().encoded_srgb;
-    // Pixel (x, y) at half scale is centred on full-resolution (2x+1, 2y+1).
-    let mut agree = 0;
-    for (x, y) in [(10, 10), (40, 20), (70, 35), (25, 40)] {
-        let a = half_frame.get_pixel(x, y)[0] - base.get_pixel(0, 0)[0];
-        let b = g.get_pixel(2 * x + 1, 2 * y + 1)[0] - base.get_pixel(0, 0)[0];
-        if (a - b).abs() < 0.02 {
-            agree += 1;
+        c.controls.effects.grain_size = 100.0;
+        let mut plan = RenderPlan::build(c).unwrap();
+        plan.set_render_scale(scale);
+        let grainy = engine.render(&frame, &plan, false).unwrap().encoded_srgb;
+        let mut plan = RenderPlan::build(config()).unwrap();
+        plan.set_render_scale(scale);
+        let plain = engine.render(&frame, &plan, false).unwrap().encoded_srgb;
+        let level = plain.get_pixel(0, 0)[0];
+        (
+            w,
+            grainy.pixels().map(|p| p[0] - level).collect::<Vec<f32>>(),
+        )
+    };
+    let ((fw, full), (hw, half)) = (grain_at(1.0), grain_at(0.5));
+    // Half-scale pixel (x, y) covers full-resolution (2x..2x+1, 2y..2y+1).
+    let (mut pairs, mut sxy, mut sxx, mut syy) = (0, 0f64, 0f64, 0f64);
+    for y in (100..700).step_by(7) {
+        for x in (100..1100).step_by(7) {
+            let at = |x: usize, y: usize| full[y * fw as usize + x] as f64;
+            let a = half[y * hw as usize + x] as f64;
+            let b = (at(2 * x, 2 * y)
+                + at(2 * x + 1, 2 * y)
+                + at(2 * x, 2 * y + 1)
+                + at(2 * x + 1, 2 * y + 1))
+                / 4.;
+            sxy += a * b;
+            sxx += a * a;
+            syy += b * b;
+            pairs += 1;
         }
     }
-    assert!(agree >= 3, "grain pattern does not follow the render scale");
+    let correlation = sxy / (sxx * syy).sqrt();
+    assert!(
+        correlation > 0.8,
+        "grain pattern does not follow the render scale: correlation {correlation} over {pairs}"
+    );
+    let std = |v: &[f32]| (v.iter().map(|d| d * d).sum::<f32>() / v.len() as f32).sqrt();
+    let ratio = std(&half) / std(&full);
+    assert!(
+        (0.5..0.8).contains(&ratio),
+        "grain at half scale should be about 0.65 of full strength: {ratio}"
+    );
 }
 
 /// A transform captured from Resolve is only worth having if what runs on the

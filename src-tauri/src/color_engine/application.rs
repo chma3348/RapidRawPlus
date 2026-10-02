@@ -1406,6 +1406,7 @@ fn render(
     } else {
         pair.output.clone()
     };
+    let controls_dehaze = controls.detail.dehaze;
     let initial_blurs = neighbourhood_for(&controls.tone);
     let initial_native = native_p3 && source.color.reference == ReferenceDomain::Scene;
     let mut initial_plan = plan(
@@ -1419,6 +1420,11 @@ fn render(
     let photo_tones = initial_blurs.as_ref().map(|(_, tones)| *tones);
     if let Some((blurs, tones)) = initial_blurs {
         initial_plan.set_neighbourhood(blurs, tones);
+    }
+    // Negative Dehaze's veil takes the photo's haze colour, a statistic of
+    // the whole unedited picture.
+    if controls_dehaze < 0.0 {
+        initial_plan.set_haze(super::detail::airlight(float_pixels(&unedited).as_raw()));
     }
     if active.is_empty() {
         if let Some(look) = &look {

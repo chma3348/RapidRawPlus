@@ -53,6 +53,27 @@ fn installed_state() -> Result<AppState> {
     Ok(state)
 }
 
+/// The edits for one control at one value: the lighting and colour
+/// controls as the reference package defines them, and the detail and
+/// effect controls Lightroom exports were made for (Clarity, Texture,
+/// Dehaze; Grain at Lightroom's default size 25 and roughness 50, which are
+/// RapidRAW's defaults too).
+fn edits_for(control: &str, value: f64) -> Result<serde_json::Value> {
+    match control {
+        "clarity" | "texture" | "dehaze" => {
+            let mut edits = reference::edits_for("neutral", 0.0)?;
+            edits["v3"]["detail"][control] = serde_json::json!(value);
+            Ok(edits)
+        }
+        "grain" => {
+            let mut edits = reference::edits_for("neutral", 0.0)?;
+            edits["v3"]["effects"]["grain_amount"] = serde_json::json!(value);
+            Ok(edits)
+        }
+        _ => reference::edits_for(control, value),
+    }
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     ensure!(
@@ -87,7 +108,7 @@ fn main() -> Result<()> {
                 continue;
             }
             let started = Instant::now();
-            let edits = reference::edits_for(control, *value)?;
+            let edits = edits_for(control, *value)?;
             let frame = application::render_file(&context, &state, path, &edits, Some(max))?;
             let image = &frame.encoded_srgb;
             let mut bytes =

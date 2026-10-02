@@ -354,7 +354,11 @@ impl Controls {
     }
 
     pub fn is_neutral(&self) -> bool {
-        self.ranges.iter().all(|r| r.adjustment == [0.; 3])
+        // Dehaze's tone and colour are applied in the grading pass (the veil,
+        // and Lightroom's tone beyond haze removal); the rest of the detail
+        // controls run in their own stage.
+        self.detail.dehaze == 0.
+            && self.ranges.iter().all(|r| r.adjustment == [0.; 3])
             && self
                 == &Self {
                     tone: Tone {

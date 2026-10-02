@@ -296,6 +296,56 @@ fn basic_v2(rgb: vec3<f32>, tonal: vec3<f32>, structure: vec3<f32>) -> vec3<f32>
     return parameters.srgb_to_work * max(c, vec3<f32>(0.0));
 }
 
+// Dehaze's tone and colour, as Lightroom's (measured; dehaze_table.rs).
+// Negative: a veil curve on the tonal key, one gain on all channels, then
+// colour pulled toward the veil, which takes the photo's haze colour — much
+// the same on every photo, the scattering being the detail stage's.
+// Positive: the detail stage removes haze where it reads it; this adds the
+// tone and colour Lightroom's does beyond that.
+fn haze_veil(rgb: vec3<f32>) -> vec3<f32> {
+    let amount = parameters.haze.w;
+    if amount == 0.0 { return rgb; }
+    let a = abs(amount);
+    let k = shadow_key(rgb);
+    let p = clamp(k, 0.0, 1.0) * 64.0;
+    let i = min(u32(floor(p)), 63u);
+    let row = mix(parameters.haze_veil[i], parameters.haze_veil[i + 1u], p - f32(i));
+    var half = row.x;
+    var full = row.y;
+    var keep_half = parameters.haze_style.x;
+    var keep_full = parameters.haze_style.y;
+    if amount > 0.0 {
+        half = row.z;
+        full = row.w;
+        keep_half = parameters.haze_up.x;
+        keep_full = parameters.haze_up.y;
+    }
+    var d: f32;
+    var keep: f32;
+    if a <= 0.5 {
+        d = a * 2.0 * half;
+        keep = mix(1.0, keep_half, a * 2.0);
+    } else {
+        d = mix(half, full, a * 2.0 - 1.0);
+        keep = mix(keep_half, keep_full, a * 2.0 - 1.0);
+    }
+    let from_lin = max(decode_intermediate_soft(k), 0.0);
+    let to_lin = max(decode_intermediate_soft(max(k + d, 0.0)), 0.0);
+    var gain = 1.0;
+    if from_lin > 1e-6 { gain = min(to_lin / from_lin, 64.0); }
+    let veiled = rgb * gain + vec3<f32>(max(to_lin - from_lin * gain, 0.0));
+    // The veil's colour: the haze colour's, at a fixed brightness.
+    var veil_ab = vec2<f32>(0.0);
+    let haze = parameters.source_to_work * parameters.haze.xyz;
+    let y = dot(max(haze, vec3<f32>(0.0)), vec3<f32>(0.2126, 0.7152, 0.0722));
+    if amount < 0.0 && y > 1e-6 {
+        veil_ab = to_lab_work(max(haze, vec3<f32>(0.0)) * (0.5 / y)).yz * parameters.haze_style.z;
+    }
+    let lab = to_lab_work(veiled);
+    let ab = lab.yz * keep + veil_ab * (1.0 - keep);
+    return max(from_lab_work(vec3<f32>(lab.x, ab)), vec3<f32>(0.0));
+}
+
 fn grade(input:vec3<f32>, tonal:vec3<f32>, structure:vec3<f32>, key:f32, detail_base:f32) -> vec3<f32> {
     if parameters.flags.x == 0u {return input;}
     let balanced=parameters.white_balance*input;
@@ -341,6 +391,7 @@ fn grade(input:vec3<f32>, tonal:vec3<f32>, structure:vec3<f32>, key:f32, detail_
         let y1=dot(max(toned,vec3<f32>(0.0)),vec3<f32>(0.2126,0.7152,0.0722));
         if y0 > 1e-6 && y1 > 1e-6 { seen=log2(clamp(y1/y0, 1e-4, 64.0)); }
     }
+    toned=haze_veil(toned);
     // The previous engine's controls see the picture as the zones left it.
     var rgb=basic_v2(toned, lifted_neighbourhood(tonal, seen), lifted_neighbourhood(structure, seen));
     rgb=apply_exposure_shape(rgb, toned);

@@ -37,6 +37,10 @@ struct Parameters {
     zone_adapt: array<vec4<f32>,3>,
     zone_style: array<vec4<f32>,4>,
     exposure_colour: vec4<f32>,
+    haze_veil: array<vec4<f32>,65>,
+    haze: vec4<f32>,
+    haze_style: vec4<f32>,
+    haze_up: vec4<f32>,
 }
 @group(0) @binding(0) var<storage, read> source: array<vec4<f32>>;
 @group(0) @binding(1) var<storage, read_write> results: array<vec4<f32>>;
@@ -160,7 +164,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         encoded = vec3<f32>(encode_srgb(display.r), encode_srgb(display.g), encode_srgb(display.b));
     }
     encoded = look_display(encoded, graded);
-    encoded = film_grain(encoded, position);
+    encoded = film_grain(encoded, position, dims);
     if parameters.modes.w == 1u {
         results[id.x*3u] = vec4<f32>(working, pixel.a);
         results[id.x*3u+1u] = vec4<f32>(graded, pixel.a);
@@ -297,17 +301,42 @@ fn grain_noise(p: vec2<f32>) -> f32 {
     return mix(bottom, top, u.y);
 }
 
-// Grain on the finished, display-encoded image, as film grain is seen: in
-// full-resolution coordinates so it keeps its size relative to the
-// photograph at any preview scale, strongest in the midtones.
-fn film_grain(encoded: vec3<f32>, position: vec2<f32>) -> vec3<f32> {
+// Grain's measured model (see film_grain): the noise lattice's spacing as a
+// fraction of the short edge at Size 25, and the strength numerator (encoded
+// units at Amount 100), calibrated so the grain's size and per-pixel
+// strength match Lightroom's at full resolution.
+const GRAIN_CELL: f32 = 0.00054;
+const GRAIN_STRENGTH: f32 = 35.2;
+
+// Grain on the finished, display-encoded image, as Lightroom's is, measured
+// on its exports (tools/adobe_detail.py): sized relative to the photograph,
+// like film — a grain about 0.1% of the short edge across at Size 25 — and
+// as strong per pixel as 424 / sqrt(short edge) L* at Amount 100, so a small
+// photo's grain is coarser and stronger than a large one's. Nearly even
+// across tones (an eighth lighter in the brightest), and colourless: on a
+// grey sky Lightroom's grain changes colour by a tenth of a unit. The field
+// lives in full-resolution
+// coordinates; a smaller preview shows it averaged, as Lightroom's does.
+fn film_grain(encoded: vec3<f32>, position: vec2<f32>, dims: vec2<f32>) -> vec3<f32> {
     let g = parameters.effects[1];
     if g.x <= 0.0 { return encoded; }
-    let coord = position / g.w;
-    let frequency = 1.0 / max(g.y, 0.1);
+    let scale = max(g.w, 1e-4);
+    let short_full = min(dims.x, dims.y) / scale;
+    // Cell size in full-resolution pixels, and on screen.
+    let cell = max(GRAIN_CELL * short_full * g.y, 0.25);
+    let cell_here = cell * scale;
+    let shown = max(cell_here, 1.0);
+    // A preview smaller than the photograph shows the grain averaged, as
+    // Lightroom's full-size grain is when shrunk (measured: about 0.6 of
+    // its per-pixel strength at 0.43 of the size, i.e. scale^0.62).
+    let averaged = pow(min(scale, 1.0), 0.62);
+    let coord = position / shown;
+    let strength = g.x * GRAIN_STRENGTH / sqrt(short_full) * averaged;
     let luma = max(dot(encoded, vec3<f32>(0.2126, 0.7152, 0.0722)), 0.0);
-    let midtones = smoothstep(0.0, 0.15, luma) * (1.0 - smoothstep(0.6, 1.0, luma));
-    let fine = grain_noise(coord * frequency);
-    let rough = grain_noise(coord * frequency * 0.6 + vec2<f32>(5.2, 1.3));
-    return encoded + vec3<f32>(mix(fine, rough, g.z) * g.x * midtones);
+    let tones = smoothstep(0.0, 0.03, luma) * (1.0 - 0.12 * smoothstep(0.75, 1.0, luma));
+    let fine = grain_noise(coord);
+    let rough = grain_noise(coord * 0.6 + vec2<f32>(5.2, 1.3));
+    let n = mix(fine, rough, g.z);
+    return encoded + vec3<f32>(n * strength * tones);
 }
+

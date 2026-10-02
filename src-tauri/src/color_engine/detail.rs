@@ -32,9 +32,10 @@ use serde::{Deserialize, Serialize};
 
 /// Radii, in full-resolution pixels, matching the previous engine's.
 const SHARPEN_SIGMA: f32 = 1.0;
-const TEXTURE_SIGMA: f32 = 3.5;
-const CLARITY_SIGMA: f32 = 8.0;
 const STRUCTURE_SIGMA: f32 = 40.0;
+/// Negative Dehaze's scattering blurs, as the texture and structure radii.
+const HAZE_FINE_SIGMA: f32 = 3.5;
+const HAZE_BROAD_SIGMA: f32 = 120.0;
 /// The smallest blur that still does something at preview scale.
 const MIN_SIGMA: f32 = 0.6;
 /// Offset before the logarithm, so black is a finite number of stops down
@@ -118,14 +119,23 @@ impl Detail {
 /// halo can be computed from exactly what will run.
 struct Plan {
     sharpen: Option<Gaussian>,
-    texture: Option<Gaussian>,
-    clarity: Option<Gaussian>,
+    /// Texture and Clarity: local contrast at several sizes, each band with
+    /// its own amount (detail_table.rs, fitted to Lightroom's).
+    texture: Vec<(Gaussian, f32)>,
+    clarity: Vec<(Gaussian, f32)>,
+    /// Positive Dehaze's local contrast beyond its haze removal (Lightroom's
+    /// raises contrast at every scale, the broadest included).
+    dehaze_bands: Vec<(Gaussian, f32)>,
     structure: Option<Gaussian>,
     luminance_radius: Option<usize>,
     color_radius: Option<usize>,
     /// Dehaze: the dark channel's minimum-filter radius and the guided
     /// filter's radius that refines the transmission map.
     dehaze: Option<(usize, usize)>,
+    /// Negative Dehaze's scattering: the fine and broad blurs light is mixed
+    /// toward, and how much of each (its veil curve and colour are the
+    /// grading pass's).
+    haze: Option<(Gaussian, Gaussian, [f32; 2])>,
 }
 
 impl Plan {
@@ -135,18 +145,48 @@ impl Plan {
         };
         Self {
             sharpen: band(detail.sharpening, SHARPEN_SIGMA),
-            texture: band(detail.texture, TEXTURE_SIGMA),
-            clarity: band(detail.clarity, CLARITY_SIGMA),
+            texture: bands(
+                detail.texture,
+                &super::detail_table::TEXTURE_SIGMAS,
+                &super::detail_table::TEXTURE,
+                scale,
+            ),
+            clarity: bands(
+                detail.clarity,
+                &super::detail_table::CLARITY_SIGMAS,
+                &super::detail_table::CLARITY,
+                scale,
+            ),
+            dehaze_bands: bands(
+                detail.dehaze.max(0.),
+                &super::detail_table::DEHAZE_SIGMAS,
+                &super::detail_table::DEHAZE,
+                scale,
+            ),
             structure: band(detail.structure, STRUCTURE_SIGMA),
             luminance_radius: (detail.luminance_noise > 0.)
                 .then(|| ((3.0 * scale).round() as usize).max(1)),
             color_radius: (detail.color_noise > 0.).then(|| {
                 (((2.0 + 8.0 * detail.color_noise / 100.) * scale).round() as usize).max(1)
             }),
-            dehaze: (detail.dehaze != 0.).then(|| {
+            dehaze: (detail.dehaze > 0.).then(|| {
                 (
                     ((15.0 * scale).round() as usize).max(1),
                     ((30.0 * scale).round() as usize).max(1),
+                )
+            }),
+            haze: (detail.dehaze < 0.).then(|| {
+                let a = (-detail.dehaze / 100.).min(1.0);
+                let [half, full] = super::dehaze_table::SCATTER;
+                let mix: [f32; 2] = if a <= 0.5 {
+                    std::array::from_fn(|i| half[i] * a * 2.0)
+                } else {
+                    std::array::from_fn(|i| half[i] + (full[i] - half[i]) * (a * 2.0 - 1.0))
+                };
+                (
+                    Gaussian::new((HAZE_FINE_SIGMA * scale).max(MIN_SIGMA)),
+                    Gaussian::new((HAZE_BROAD_SIGMA * scale).max(MIN_SIGMA)),
+                    mix,
                 )
             }),
         }
@@ -156,9 +196,16 @@ impl Plan {
     /// their reaches add: the bands read the denoised luminance, which read
     /// its own neighbourhood first. A guided filter reads twice its radius.
     fn halo(&self) -> usize {
-        let bands = [&self.sharpen, &self.texture, &self.clarity, &self.structure]
+        let bands = [&self.sharpen, &self.structure]
             .into_iter()
             .flatten()
+            .chain(
+                self.texture
+                    .iter()
+                    .chain(&self.clarity)
+                    .chain(&self.dehaze_bands)
+                    .map(|(g, _)| g),
+            )
             .map(|g| g.support())
             .max()
             .unwrap_or(0);
@@ -166,8 +213,35 @@ impl Plan {
         let color = self.color_radius.map_or(0, |r| 2 * r);
         // Dehaze runs first and everything after reads its result.
         let dehaze = self.dehaze.map_or(0, |(min, guide)| min + 2 * guide);
-        dehaze + luminance + color.max(bands)
+        let haze = self.haze.map_or(0, |(_, broad, _)| broad.support());
+        haze + dehaze + luminance + color.max(bands)
     }
+}
+
+/// A control's bands at slider `value` (-100..100): each band's amount from
+/// the table's +50, +100, -50 and -100 columns, straight between them and
+/// toward zero (Lightroom's 50 is not half its 100).
+fn bands<const N: usize>(
+    value: f32,
+    sigmas: &[f32; N],
+    table: &[[f32; 4]; N],
+    scale: f32,
+) -> Vec<(Gaussian, f32)> {
+    if value == 0. {
+        return Vec::new();
+    }
+    let a = (value.abs() / 100.).min(1.0);
+    let (half, full) = if value > 0. { (0, 1) } else { (2, 3) };
+    (0..N)
+        .map(|b| {
+            let amount = if a <= 0.5 {
+                table[b][half] * a * 2.0
+            } else {
+                table[b][half] + (table[b][full] - table[b][half]) * (a * 2.0 - 1.0)
+            };
+            (Gaussian::new((sigmas[b] * scale).max(MIN_SIGMA)), amount)
+        })
+        .collect()
 }
 
 /// A Gaussian approximated by three box passes, which costs the same at any
@@ -273,6 +347,37 @@ fn process(
     airlight: Option<[f32; 3]>,
 ) -> Vec<f32> {
     let pixels = width * height;
+    // Negative Dehaze scatters light: a share mixed toward a fine and a broad
+    // blur, in linear light, so bright areas glow into their surroundings and
+    // fine detail goes soft first, as Lightroom's does (measured: at -100 it
+    // keeps 40% of the finest detail and 55% of the broadest).
+    let scattered;
+    let rgba = match plan.haze {
+        Some((fine, broad, [f_fine, f_broad])) => {
+            let channels: Vec<Vec<f32>> = (0..4)
+                .map(|c| (0..pixels).map(|i| rgba[i * 4 + c]).collect())
+                .collect();
+            let blurred_fine: Vec<Vec<f32>> = channels[..3]
+                .iter()
+                .map(|p| blur(p, width, height, fine))
+                .collect();
+            let blurred_broad: Vec<Vec<f32>> = channels[..3]
+                .iter()
+                .map(|p| blur(p, width, height, broad))
+                .collect();
+            let mut out = rgba.to_vec();
+            out.par_chunks_mut(4).enumerate().for_each(|(i, px)| {
+                for c in 0..3 {
+                    px[c] = px[c] * (1.0 - f_fine - f_broad)
+                        + blurred_fine[c][i] * f_fine
+                        + blurred_broad[c][i] * f_broad;
+                }
+            });
+            scattered = out;
+            &scattered[..]
+        }
+        None => rgba,
+    };
     // Dehaze first: it changes colour as well as brightness, and every later
     // stage should act on the clearer image.
     let dehazed;
@@ -345,8 +450,15 @@ fn process(
         false,
         detail.threshold * 0.004,
     );
-    add_band(plan.texture, detail.texture / 100., 0.5, false, 0.0);
-    add_band(plan.clarity, detail.clarity / 100. * 0.8, 1.0, true, 0.0);
+    for &(g, amount) in &plan.texture {
+        add_band(Some(g), amount, 0.5, false, 0.0);
+    }
+    for &(g, amount) in &plan.clarity {
+        add_band(Some(g), amount, 1.0, true, 0.0);
+    }
+    for &(g, amount) in &plan.dehaze_bands {
+        add_band(Some(g), amount, 1.0, false, 0.0);
+    }
     add_band(
         plan.structure,
         detail.structure / 100. * 0.6,
@@ -407,7 +519,7 @@ fn process(
 /// The haze colour: the mean of the pixels whose darkest channel is
 /// brightest — the top 0.1% of the dark channel, from He, Sun and Tang.
 /// Estimated from a subsample, since it is a statistic of the whole frame.
-fn airlight(rgba: &[f32]) -> [f32; 3] {
+pub(crate) fn airlight(rgba: &[f32]) -> [f32; 3] {
     let pixels = rgba.len() / 4;
     let stride = (pixels / 1_000_000).max(1);
     let samples: Vec<(f32, usize)> = (0..pixels)
@@ -439,7 +551,8 @@ fn airlight(rgba: &[f32]) -> [f32; 3] {
 /// `t` estimated from how bright the darkest channel is locally, the clear
 /// scene `J` can be solved for. The transmission map is refined with a
 /// guided filter so it follows the photograph's edges instead of the blocks
-/// of the minimum filter. A negative amount adds even haze instead.
+/// of the minimum filter. Only removes haze: adding it (negative Dehaze) is
+/// the grading pass's veil (`haze_veil` in the shader), as Lightroom's is.
 #[allow(clippy::too_many_arguments)]
 fn dehaze(
     rgba: &[f32],
@@ -453,15 +566,6 @@ fn dehaze(
 ) -> Vec<f32> {
     let pixels = width * height;
     let mut out = rgba.to_vec();
-    if amount < 0.0 {
-        let t = 1.0 - amount.abs() * 0.6;
-        out.par_chunks_mut(4).for_each(|p| {
-            for c in 0..3 {
-                p[c] = p[c] * t + a[c] * (1.0 - t);
-            }
-        });
-        return out;
-    }
     let dark_min: Vec<f32> = (0..pixels)
         .into_par_iter()
         .map(|i| {
