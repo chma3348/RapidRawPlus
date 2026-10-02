@@ -79,7 +79,7 @@ fn channel_curve(v: f32, channel: u32) -> f32 {
 // The four tone zones: Blacks, Shadows, Highlights, Whites, with Lightroom's
 // measured strength (tone_zones_table.rs, fitted by tools/fit_lighting.py;
 // docs/tone-zones.md). Each slider moves its part of the tonal range, judged
-// on the tonal key: the working-space luminance in DaVinci Intermediate, a
+// on the tonal key: the working values' brightness in DaVinci Intermediate, a
 // mix of the pixel's own and an edge-aware regional average of the unedited
 // picture (so texture rides along and a dark subject against a bright sky
 // lifts without a halo), per zone (ZONE_STYLE in plan.rs). The zones apply
@@ -88,8 +88,12 @@ fn channel_curve(v: f32, channel: u32) -> f32 {
 // on all three channels (hues stay put; where no gain can reach, pure black
 // under a Blacks lift, the rest is filled in neutral), or, where Lightroom's
 // colour calls for it, each channel along the zone's curve on its own.
+// Brightness here weighs the channels with weights that are all positive
+// (Rec.709's, on the working values): the working space's own luminance
+// weighs blue negatively, so a deep blue or violet read as nearly black and
+// Shadows crushed or lifted it as one, in blotches. Greys read the same.
 fn shadow_key(working: vec3<f32>) -> f32 {
-    let y = max(dot(working, vec3<f32>(0.27411851, 0.87363190, -0.14775041)), 0.0);
+    let y = dot(max(working, vec3<f32>(0.0)), vec3<f32>(0.2126, 0.7152, 0.0722));
     if y <= 0.00262409 { return y * 10.44426855; }
     return (log2(y + 0.0075) + 7.0) * 0.07329248;
 }
@@ -333,8 +337,8 @@ fn grade(input:vec3<f32>, tonal:vec3<f32>, structure:vec3<f32>, key:f32, detail_
         let own_luma=log_luma709(balanced);
         toned=shadows_finish(toned, parts.y*parameters.zone_style[3][1], own_luma, detail_base);
         toned=highlights_finish(toned, parts.z*parameters.zone_style[3][2], own_luma, detail_base);
-        let y0=dot(balanced,vec3<f32>(0.27411851,0.87363190,-0.14775041));
-        let y1=dot(toned,vec3<f32>(0.27411851,0.87363190,-0.14775041));
+        let y0=dot(max(balanced,vec3<f32>(0.0)),vec3<f32>(0.2126,0.7152,0.0722));
+        let y1=dot(max(toned,vec3<f32>(0.0)),vec3<f32>(0.2126,0.7152,0.0722));
         if y0 > 1e-6 && y1 > 1e-6 { seen=log2(clamp(y1/y0, 1e-4, 64.0)); }
     }
     // The previous engine's controls see the picture as the zones left it.

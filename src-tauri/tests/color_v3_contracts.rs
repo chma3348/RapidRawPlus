@@ -2113,7 +2113,9 @@ fn tone_zones_on_colour() {
     let engine = ColorEngine::new(gpu()).unwrap();
     let enc = |v: f64| spaces::encode_intermediate(v.max(0.0));
     let dec = |v: f64| spaces::decode(v, Transfer::DavinciIntermediate).max(0.0);
-    let luminance = |p: &[f64]| 0.274_118_5 * p[0] + 0.873_631_9 * p[1] - 0.147_750_4 * p[2];
+    // The zones' brightness: positive weights on the working values.
+    let luminance =
+        |p: &[f64]| 0.2126 * p[0].max(0.0) + 0.7152 * p[1].max(0.0) + 0.0722 * p[2].max(0.0);
     let luma = |l: &[f64]| 0.2126 * l[0] + 0.7152 * l[1] + 0.0722 * l[2];
     let colour = ImageBuffer::from_fn(96, 1, |x, _| {
         let v = 0.004 * 1.07f32.powi(x as i32);

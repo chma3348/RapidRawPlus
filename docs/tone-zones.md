@@ -65,6 +65,15 @@ sliders at ±50 and ±100: colour miss 0.37 → 0.27, blotchiness added beyond
 Lightroom's 2.76 → about 0.9. `ZONE_STYLE` and `EXPOSURE_COLOUR` in plan.rs
 hold the choices.
 
+## How bright is a colour
+
+Every zone, and Exposure, judges a pixel's brightness with weights that are
+all positive (Rec.709's, on the working values). The working space's own
+luminance weighs blue negatively, so a deep blue or violet read as nearly
+black: Shadows −100 crushed it to a black blob and +100 lifted it in a pale
+patch, shaped by the regional key. Greys read the same either way, so the
+tables carry over.
+
 ## Strength isn't even along the slider
 
 Lightroom's ±50 does about 30–45% of its ±100, not half. Every slider has

@@ -629,13 +629,15 @@ fn neighbourhood(
             1.055 * v.powf(1. / 2.4) - 0.055
         }
     };
-    // The tone zones' key: the working-space luminance in DaVinci
+    // The tone zones' key: the working values' brightness in DaVinci
     // Intermediate, whatever the previous engine's planes are encoded as.
     let to_working = spaces::conversion(source.color.primaries, Primaries::DavinciWideGamut)
         .transpose()
         .to_cols_array_2d()
         .map(|r| r.map(|v| v as f32));
-    let luminance = [0.274_118_5f32, 0.873_631_9, -0.147_750_4];
+    // Brightness by positive weights (see `shadow_key` in the shader): the
+    // working space's luminance reads deep blues as nearly black.
+    let luminance = [0.2126f32, 0.7152, 0.0722];
     let rec709 = [0.2126f32, 0.7152, 0.0722];
     let mut planes = vec![vec![0f32; w * h]; 3];
     let mut zone_key = vec![0f32; w * h];
@@ -666,7 +668,7 @@ fn neighbourhood(
                         to_working[c][0] * p[0] + to_working[c][1] * p[1] + to_working[c][2] * p[2]
                     });
                     let y: f32 = (0..3)
-                        .map(|c| luminance[c] * working[c])
+                        .map(|c| luminance[c] * working[c].max(0.))
                         .sum::<f32>()
                         .max(0.);
                     keys[j] = spaces::encode_intermediate(y as f64) as f32;
