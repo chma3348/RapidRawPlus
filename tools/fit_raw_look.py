@@ -143,6 +143,9 @@ def write(state):
         lines.append("    [" + ", ".join(f"[{s:.4f}, {h:.4f}]" for s, h in band) + "],")
     lines.append("];")
     open(TABLE, "w").write("\n".join(lines) + "\n")
+    # CI checks formatting (cargo fmt --check); write what rustfmt would.
+    import subprocess
+    subprocess.run(["rustfmt", "--edition", "2024", TABLE], check=False)
     json.dump(state, open(TARGETS, "w"), indent=1)
     print("wrote", os.path.normpath(TABLE))
 

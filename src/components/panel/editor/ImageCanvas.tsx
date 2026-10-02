@@ -61,6 +61,8 @@ interface ImageCanvasProps {
   uncroppedAdjustedPreviewUrl: string | null;
   updateSubMask(id: string | null, subMask: Partial<SubMask>): void;
   interactivePatch?: { url: string; normX: number; normY: number; normW: number; normH: number } | null;
+  /** Zoomed in: the region on screen at full detail, over the preview. */
+  zoomTile?: { url: string; normX: number; normY: number; normW: number; normH: number } | null;
   isWbPickerActive?: boolean;
   onWbPicked?: () => void;
   isMixerPickerActive?: boolean;
@@ -1045,6 +1047,7 @@ const ImageCanvas = memo(
     handleCropComplete,
     imageRenderSize,
     interactivePatch,
+    zoomTile,
     isAiEditing,
     isCropping,
     isMaskControlHovered,
@@ -2661,6 +2664,17 @@ const ImageCanvas = memo(
                   />
                 )}
 
+                {zoomTile && !isWgpuActive && !interactivePatch && (
+                  <image
+                    href={zoomTile.url}
+                    x={`${zoomTile.normX * 100}%`}
+                    y={`${zoomTile.normY * 100}%`}
+                    width={`${zoomTile.normW * 100}%`}
+                    height={`${zoomTile.normH * 100}%`}
+                    preserveAspectRatio="none"
+                    style={{ imageRendering: isMaxZoom ? 'pixelated' : 'auto' }}
+                  />
+                )}
                 {visiblePatch && !isWgpuActive && (
                   <image
                     href={visiblePatch.url}

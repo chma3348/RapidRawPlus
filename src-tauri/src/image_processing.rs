@@ -2114,7 +2114,7 @@ pub fn is_image_edited(
             serde_json::from_value::<crate::color_engine::controls::Controls>(v3.clone())
     {
         let neutral = crate::color_engine::controls::Controls::default();
-        controls.tone = neutral.tone.clone();
+        controls.tone = neutral.tone;
         if controls != neutral {
             return true;
         }

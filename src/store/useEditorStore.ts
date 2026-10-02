@@ -33,6 +33,11 @@ interface EditorState {
   uncroppedAdjustedPreviewUrl: string | null;
   transformedOriginalUrl: string | null;
   interactivePatch: InteractivePatch | null;
+  /** Zoomed in: the visible region rendered at the size it is shown at,
+   * drawn over the whole-picture preview (placed like a patch). */
+  zoomTile: InteractivePatch | null;
+  /** When panning or zooming last came to rest (the zoom tile follows it). */
+  viewSettledAt: number;
   showOriginal: boolean;
 
   // Analytics
@@ -110,6 +115,8 @@ export const useEditorStore = create<EditorState>((set) => ({
 
   isSliderDragging: false,
   interactivePatch: null,
+  zoomTile: null,
+  viewSettledAt: 0,
   activeMaskContainerId: null,
   activeMaskId: null,
   activeAiPatchContainerId: null,

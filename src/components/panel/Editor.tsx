@@ -96,6 +96,7 @@ export default function Editor({ onBackToLibrary, onContextMenu, transformWrappe
   const uncroppedAdjustedPreviewUrl = useEditorStore((s) => s.uncroppedAdjustedPreviewUrl);
   const transformedOriginalUrl = useEditorStore((s) => s.transformedOriginalUrl);
   const interactivePatch = useEditorStore((s) => s.interactivePatch);
+  const zoomTile = useEditorStore((s) => s.zoomTile);
   const showOriginal = useEditorStore((s) => s.showOriginal);
   const isSliderDragging = useEditorStore((s) => s.isSliderDragging);
   const targetZoom = useEditorStore((s) => s.zoom);
@@ -384,10 +385,19 @@ export default function Editor({ onBackToLibrary, onContextMenu, transformWrappe
     [getTransformBounds],
   );
 
+  // Tell the preview when panning or zooming comes to rest, so a zoomed-in
+  // view can fetch the region now on screen at full detail.
+  const markViewSettled = useMemo(
+    () => debounce(() => setEditor({ viewSettledAt: Date.now() }), 150),
+    [setEditor],
+  );
+  useEffect(() => () => markViewSettled.cancel(), [markViewSettled]);
+
   const applyTransform = useCallback(
     (x: number, y: number, scale: number) => {
       transformStateRef.current = { positionX: x, positionY: y, scale };
       setTransformState({ scale, positionX: x, positionY: y });
+      markViewSettled();
 
       if (contentRef.current) {
         contentRef.current.style.transform = `translate(${x}px, ${y}px) scale(${scale})`;
@@ -414,7 +424,7 @@ export default function Editor({ onBackToLibrary, onContextMenu, transformWrappe
         handleZoomed({ scale, positionX: x, positionY: y });
       }, 100);
     },
-    [handleZoomed],
+    [handleZoomed, markViewSettled],
   );
 
   const animateTransform = useCallback(
@@ -2053,6 +2063,7 @@ export default function Editor({ onBackToLibrary, onContextMenu, transformWrappe
               handleCropComplete={handleCropComplete}
               imageRenderSize={imageRenderSize}
               interactivePatch={interactivePatch}
+              zoomTile={zoomTile}
               isAiEditing={isAiEditing}
               isCropping={isCropping}
               isMaskControlHovered={isMaskControlHovered}

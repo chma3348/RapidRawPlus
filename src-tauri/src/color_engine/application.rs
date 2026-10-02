@@ -42,12 +42,48 @@ pub enum Quality {
 /// editor's set lives in `AppState`; thumbnails, size estimates and other
 /// side jobs get a fresh set, so browsing the library cannot evict the
 /// decoded photo the editor is working on.
+/// A cache keeping its two most recently used entries. The editor alternates
+/// sizes — a fast one while a slider moves, the full one when it stops, and
+/// zoomed in, the size the visible region is shown at — and with one slot
+/// each switch rebuilt the prepared image and its neighbourhood (a second at
+/// full size).
+pub struct Slots<T>(Vec<T>);
+
+impl<T> Default for Slots<T> {
+    fn default() -> Self {
+        Self(Vec::new())
+    }
+}
+
+impl<T> Slots<T> {
+    const KEEP: usize = 2;
+
+    /// The entry `hit` accepts, now the most recently used.
+    pub fn find(&mut self, hit: impl Fn(&T) -> bool) -> Option<&T> {
+        let i = self.0.iter().position(hit)?;
+        let entry = self.0.remove(i);
+        self.0.push(entry);
+        self.0.last()
+    }
+
+    pub fn put(&mut self, entry: T) {
+        self.0.push(entry);
+        while self.0.len() > Self::KEEP {
+            self.0.remove(0);
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+}
+
 #[derive(Default)]
 pub struct V3Caches {
     pub source: Mutex<Option<SourceCache>>,
-    pub prepared: Mutex<Option<PreparedCache>>,
-    pub detail: Mutex<Option<DetailCache>>,
-    pub neighbourhood: Mutex<Option<NeighbourhoodCache>>,
+    pub prepared: Mutex<Slots<PreparedCache>>,
+    pub detail: Mutex<Slots<DetailCache>>,
+    pub neighbourhood: Mutex<Slots<NeighbourhoodCache>>,
     pub sampling: Mutex<Option<(u64, Arc<DynamicImage>)>>,
     pub masks: Mutex<std::collections::HashMap<u64, Arc<image::GrayImage>>>,
 }
@@ -59,13 +95,13 @@ impl V3Caches {
             *c = None;
         }
         if let Ok(mut c) = self.prepared.lock() {
-            *c = None;
+            c.clear();
         }
         if let Ok(mut c) = self.detail.lock() {
-            *c = None;
+            c.clear();
         }
         if let Ok(mut c) = self.neighbourhood.lock() {
-            *c = None;
+            c.clear();
         }
         if let Ok(mut c) = self.sampling.lock() {
             *c = None;
@@ -568,10 +604,8 @@ fn spatial(
     dimension.hash(&mut hasher);
     scale.to_bits().hash(&mut hasher);
     let key = hasher.finish();
-    if let Ok(cache) = caches.detail.lock()
-        && let Some(c) = cache.as_ref()
-        && Arc::ptr_eq(&c.source, source)
-        && c.key == key
+    if let Ok(mut cache) = caches.detail.lock()
+        && let Some(c) = cache.find(|c| Arc::ptr_eq(&c.source, source) && c.key == key)
     {
         return Ok(c.image.clone());
     }
@@ -595,7 +629,7 @@ fn spatial(
     );
     let result = Arc::new(DynamicImage::ImageRgba32F(pixels));
     if let Ok(mut cache) = caches.detail.lock() {
-        *cache = Some(DetailCache {
+        cache.put(DetailCache {
             source: source.clone(),
             key,
             image: result.clone(),
@@ -618,10 +652,8 @@ fn neighbourhood(
     key: u64,
     display: Option<&super::cube::CubeLut>,
 ) -> (Arc<Vec<[f32; 4]>>, super::plan::PhotoTones) {
-    if let Ok(cache) = caches.neighbourhood.lock()
-        && let Some(c) = cache.as_ref()
-        && Arc::ptr_eq(&c.source, source)
-        && c.key == key
+    if let Ok(mut cache) = caches.neighbourhood.lock()
+        && let Some(c) = cache.find(|c| Arc::ptr_eq(&c.source, source) && c.key == key)
     {
         return (c.blurs.clone(), c.tones);
     }
@@ -769,7 +801,7 @@ fn neighbourhood(
     }
     let blurs = Arc::new(blurs);
     if let Ok(mut cache) = caches.neighbourhood.lock() {
-        *cache = Some(NeighbourhoodCache {
+        cache.put(NeighbourhoodCache {
             source: source.clone(),
             key,
             blurs: blurs.clone(),
@@ -967,7 +999,11 @@ fn sampling_image(
     // The sampling render goes through the same prepared-image cache as the
     // preview. Put the preview's entry back afterwards, or the next slider
     // move pays to rebuild it from the full-resolution source.
-    let preview = caches.prepared.lock().ok().and_then(|mut c| c.take());
+    let preview = caches
+        .prepared
+        .lock()
+        .ok()
+        .map(|mut c| std::mem::take(&mut *c));
     // Masks sample colours in sRGB, whatever the output space.
     let frame = render(
         context,
@@ -980,8 +1016,8 @@ fn sampling_image(
         false,
         OutputSpace::Srgb,
     );
-    if let (Some(entry), Ok(mut cache)) = (preview, caches.prepared.lock()) {
-        *cache = Some(entry);
+    if let (Some(entries), Ok(mut cache)) = (preview, caches.prepared.lock()) {
+        *cache = entries;
     }
     let image = Arc::new(DynamicImage::ImageRgba8(frame?.preview_rgba8()));
     if let Ok(mut cache) = caches.sampling.lock() {
@@ -1172,13 +1208,17 @@ fn render(
         .prepared
         .lock()
         .map_err(|_| anyhow::anyhow!("V3 preview cache unavailable"))?;
-    let hit = prepared.as_ref().is_some_and(|p| {
-        Arc::ptr_eq(&p.source, &source)
-            && p.transform == transform
-            && p.patches == patches
-            && p.dimension == max_dimension
-    });
-    if !hit {
+    let found = prepared
+        .find(|p| {
+            Arc::ptr_eq(&p.source, &source)
+                && p.transform == transform
+                && p.patches == patches
+                && p.dimension == max_dimension
+        })
+        .map(|p| (p.image.clone(), p.offset, p.scale, p.full));
+    let (image, offset, scale, full) = if let Some(found) = found {
+        found
+    } else {
         // Patches join at the decoded-source stage, before geometry, because
         // the mask stored with a patch is in those coordinates.
         let patched = if super::patches::visible(edits).is_empty() {
@@ -1238,19 +1278,19 @@ fn render(
             transformed.into_owned()
         };
         let scale = image.width() as f32 / full_width as f32;
-        *prepared = Some(PreparedCache {
+        let image = Arc::new(image);
+        prepared.put(PreparedCache {
             full,
             source: source.clone(),
             transform,
             patches,
             dimension: max_dimension,
-            image: Arc::new(image),
+            image: image.clone(),
             offset,
             scale,
         });
-    }
-    let p = prepared.as_ref().unwrap();
-    let (image, offset, scale, full) = (p.image.clone(), p.offset, p.scale, p.full);
+        (image, offset, scale, full)
+    };
     drop(prepared);
     // Built lazily: only a pass whose tone controls move needs it.
     let domain = display_domain(&pair, &source)?;
@@ -1724,9 +1764,11 @@ pub fn preview_bytes(
 ) -> Result<Vec<u8>, String> {
     let frame = render_for_output(context, state, path, edits, Some(dimension))
         .map_err(|e| e.to_string())?;
+    // Every caller shows it on screen (before/after, the crop view, preset
+    // and LUT previews): the on-screen encoding, quick to make.
     let mut bytes = Vec::new();
     frame
-        .write_srgb_png(&mut bytes, false)
+        .write_display_png(&mut bytes)
         .map_err(|e| e.to_string())?;
     Ok(bytes)
 }

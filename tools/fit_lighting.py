@@ -320,6 +320,9 @@ def write(targets):
         lines.append("    [" + ", ".join(f"{tables[('exposure', n)][i]:.6f}" for n in ("lift_half", "lift", "cut_half", "cut")) + "],")
     lines.append("];")
     open(TABLE, "w").write("\n".join(lines) + "\n")
+    # CI checks formatting (cargo fmt --check); write what rustfmt would.
+    import subprocess
+    subprocess.run(["rustfmt", "--edition", "2024", TABLE], check=False)
     # Keep each target where its table actually takes the tone: smoothing,
     # the slope limits and "a lift only lifts" can stop a table following
     # its targets, and a correction would otherwise keep pushing a target

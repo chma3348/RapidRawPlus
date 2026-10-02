@@ -31,6 +31,7 @@ export function useImageProcessing(
   const originalSize = useEditorStore((state) => state.originalSize);
   const showOriginal = useEditorStore((state) => state.showOriginal);
   const isSliderDragging = useEditorStore((state) => state.isSliderDragging);
+  const viewSettledAt = useEditorStore((state) => state.viewSettledAt);
   const transformedOriginalUrl = useEditorStore((state) => state.transformedOriginalUrl);
   const setEditor = useEditorStore((state) => state.setEditor);
 
@@ -42,6 +43,10 @@ export function useImageProcessing(
   const pendingApplyRef = useRef<{ adjustments: Adjustments; targetRes?: number } | null>(null);
   const currentOriginalResRef = useRef<number>(0);
   const dragIdleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The zoom tile: which request is the latest, and the resolution of the
+  // one on screen.
+  const tileJobRef = useRef(0);
+  const tileResRef = useRef(0);
   const activeWaveformChannelRef = useRef(activeWaveformChannel);
   activeWaveformChannelRef.current = activeWaveformChannel;
 
@@ -119,7 +124,12 @@ export function useImageProcessing(
   }, [baseRenderSize, transformWrapperRef]);
 
   const executeApplyAdjustments = useCallback(
-    async (currentAdjustments: Adjustments, dragging: boolean = false, targetRes?: number) => {
+    async (
+      currentAdjustments: Adjustments,
+      dragging: boolean = false,
+      targetRes?: number,
+      tileRegion: [number, number, number, number] | null = null,
+    ) => {
       const currentPath = selectedImage?.path;
       if (!currentPath) return;
 
@@ -168,15 +178,17 @@ export function useImageProcessing(
         });
       }
 
-      const jobId = ++previewJobIdRef.current;
-      const roi = calculateROI();
+      // A zoom tile has its own sequence: it must not make a whole-picture
+      // preview in flight look stale, nor be judged against one.
+      const jobId = tileRegion ? previewJobIdRef.current : ++previewJobIdRef.current;
+      const tileJob = tileRegion ? ++tileJobRef.current : 0;
 
       try {
         const buffer: ArrayBuffer = await invoke(Invokes.ApplyAdjustments, {
           jsAdjustments: payload,
           isInteractive: dragging,
           targetResolution: targetRes || null,
-          roi: roi || null,
+          roi: tileRegion,
           computeWaveform: !!isWaveformVisible,
           activeWaveformChannel: activeWaveformChannelRef.current || null,
         });
@@ -186,6 +198,21 @@ export function useImageProcessing(
         }
 
         if (currentPath !== selectedImagePathRef.current) return;
+
+        if (tileRegion) {
+          if (!buffer || buffer.byteLength < 28 || tileJob !== tileJobRef.current) return;
+          if (new TextDecoder().decode(buffer.slice(0, 4)) !== 'TILE') return;
+          const view = new DataView(buffer, 4);
+          const [x, y, w, h, fullW, fullH] = [0, 4, 8, 12, 16, 20].map((o) => view.getUint32(o, true));
+          const url = URL.createObjectURL(new Blob([buffer.slice(28)], { type: 'image/png' }));
+          tileResRef.current = targetRes || 0;
+          setEditor((state) => {
+            const previous = state.zoomTile?.url;
+            if (previous) setTimeout(() => URL.revokeObjectURL(previous), 250);
+            return { zoomTile: { url, normX: x / fullW, normY: y / fullH, normW: w / fullW, normH: h / fullH } };
+          });
+          return;
+        }
 
         if (buffer && buffer.byteLength > 0 && jobId >= latestRenderedJobIdRef.current) {
           setEditor({ colorV3Error: null });
@@ -257,6 +284,7 @@ export function useImageProcessing(
           }
         }
       } catch (err) {
+        if (tileRegion) return;
         if (
           payload.processVersion === 3 &&
           currentPath === selectedImagePathRef.current &&
@@ -320,7 +348,11 @@ export function useImageProcessing(
     [selectedImage?.isReady, selectedImage?.isVideo],
   );
 
-  const calculateTargetRes = useCallback(() => {
+  // The resolution to render at: by default for the view as zoomed (a zoom
+  // tile, the before/after image); `wholePicture` for the preview of the
+  // whole picture, which stays at the size it is shown unzoomed — when
+  // zoomed in, the tile carries the detail.
+  const calculateTargetRes = useCallback((wholePicture: boolean = false) => {
     const baseTargetRes = appSettings?.editorPreviewResolution || 1920;
     if (!(appSettings?.enableZoomHifi ?? true) || displaySize.width === 0) {
       return baseTargetRes;
@@ -336,7 +368,9 @@ export function useImageProcessing(
     // screen otherwise shows a half-resolution preview stretched twice over.
     const effectiveDpr = (appSettings?.useFullDpiRendering ?? true) ? dpr : 1;
 
-    let targetRes = Math.max(displaySize.width, displaySize.height) * effectiveDpr * sharpnessFactor * zoomMultiplier;
+    const zoom = wholePicture ? Math.max(1, transformWrapperRef.current?.instance?.transformState?.scale ?? 1) : 1;
+    let targetRes =
+      (Math.max(displaySize.width, displaySize.height) / zoom) * effectiveDpr * sharpnessFactor * zoomMultiplier;
     targetRes = Math.max(targetRes, 512);
 
     if (originalSize && originalSize.width > 0 && originalSize.height > 0) {
@@ -361,7 +395,45 @@ export function useImageProcessing(
     displaySize.width,
     displaySize.height,
     originalSize,
+    transformWrapperRef,
   ]);
+
+  const isZoomedIn = useCallback(
+    () => (transformWrapperRef.current?.instance?.transformState?.scale ?? 1) > 1.01,
+    [transformWrapperRef],
+  );
+
+  const clearZoomTile = useCallback(() => {
+    tileJobRef.current += 1;
+    tileResRef.current = 0;
+    setEditor((state) => {
+      const previous = state.zoomTile?.url;
+      if (previous) setTimeout(() => URL.revokeObjectURL(previous), 250);
+      return { zoomTile: null };
+    });
+  }, [setEditor]);
+
+  // Zoomed in: render what is on screen, plus half a screen around it so a
+  // short pan needs nothing new, at the size it is shown.
+  const requestZoomTile = useCallback(
+    async (currentAdjustments: Adjustments) => {
+      if (!selectedImage?.isReady || selectedImage.isVideo || !isZoomedIn()) {
+        clearZoomTile();
+        return;
+      }
+      const visible = calculateROI();
+      if (!visible) {
+        clearZoomTile();
+        return;
+      }
+      const [x, y, w, h] = visible;
+      const rx = Math.max(0, x - w / 2);
+      const ry = Math.max(0, y - h / 2);
+      const region: [number, number, number, number] = [rx, ry, Math.min(1 - rx, w * 2), Math.min(1 - ry, h * 2)];
+      await executeApplyAdjustments(currentAdjustments, false, calculateTargetRes(), region);
+    },
+    [selectedImage?.isReady, selectedImage?.isVideo, isZoomedIn, calculateROI, clearZoomTile, executeApplyAdjustments, calculateTargetRes],
+  );
 
   const requestHiFiZoom = useMemo(
     () =>
@@ -417,7 +489,7 @@ export function useImageProcessing(
 
   useEffect(() => {
     if (selectedImage?.isReady && !selectedImage.isVideo && displaySize.width > 0 && !isSliderDragging) {
-      let baseRes = calculateTargetRes();
+      let baseRes = calculateTargetRes(true);
       if (originalSize.width > 0 && originalSize.height > 0) {
         const maxRes = Math.max(originalSize.width, originalSize.height);
         if (baseRes > maxRes) baseRes = maxRes;
@@ -452,9 +524,10 @@ export function useImageProcessing(
     if (!selectedImage?.isReady || selectedImage.isVideo) return;
     currentOriginalResRef.current = 0;
     setEditor({ transformedOriginalUrl: null });
-    const targetRes = calculateTargetRes();
+    const targetRes = calculateTargetRes(true);
     currentResRef.current = targetRes;
     applyAdjustments(previewOverride ?? adjustments, false, targetRes);
+    if (isZoomedIn()) requestZoomTile(previewOverride ?? adjustments);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [outputColorSpace]);
 
@@ -463,7 +536,7 @@ export function useImageProcessing(
 
     if (dragIdleTimer.current) clearTimeout(dragIdleTimer.current);
 
-    const targetRes = calculateTargetRes();
+    const targetRes = calculateTargetRes(true);
     const renderAdjustments = previewOverride ?? adjustments;
 
     if (isSliderDragging) {
@@ -474,7 +547,14 @@ export function useImageProcessing(
       dragIdleTimer.current = setTimeout(() => {
         currentResRef.current = targetRes;
 
-        applyAdjustments(renderAdjustments, false, targetRes);
+        // Zoomed in, the region on screen first (it is what is being looked
+        // at), then the whole picture; one after the other, as the preview
+        // worker keeps only the newest request.
+        if (isZoomedIn()) {
+          requestZoomTile(renderAdjustments).finally(() => applyAdjustments(renderAdjustments, false, targetRes));
+        } else {
+          applyAdjustments(renderAdjustments, false, targetRes);
+        }
 
         if (previewOverride) return;
 
@@ -524,7 +604,31 @@ export function useImageProcessing(
   useEffect(() => {
     setEditor({ transformedOriginalUrl: null });
     currentOriginalResRef.current = 0;
-  }, [geometricAdjustmentsKey, selectedImage?.path, setEditor]);
+    // A tile is placed by the old crop and rotation, or is of another photo.
+    clearZoomTile();
+  }, [geometricAdjustmentsKey, selectedImage?.path, setEditor, clearZoomTile]);
+
+  // Panning or zooming came to rest: zoomed out, drop the tile; zoomed in,
+  // fetch one unless the one shown already covers the view at full detail.
+  useEffect(() => {
+    if (!viewSettledAt || !selectedImage?.isReady || selectedImage.isVideo || isSliderDragging) return;
+    if (!isZoomedIn()) {
+      if (useEditorStore.getState().zoomTile) clearZoomTile();
+      return;
+    }
+    const tile = useEditorStore.getState().zoomTile;
+    const visible = calculateROI();
+    const covered =
+      tile &&
+      visible &&
+      visible[0] >= tile.normX - 1e-4 &&
+      visible[1] >= tile.normY - 1e-4 &&
+      visible[0] + visible[2] <= tile.normX + tile.normW + 1e-4 &&
+      visible[1] + visible[3] <= tile.normY + tile.normH + 1e-4;
+    if (covered && tileResRef.current >= calculateTargetRes()) return;
+    requestZoomTile(previewOverride ?? adjustments);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewSettledAt]);
 
   useEffect(() => {
     if (showOriginal && selectedImage?.isReady && displaySize.width > 0 && !isSliderDragging) {

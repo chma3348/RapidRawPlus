@@ -6,6 +6,7 @@ use mimalloc::MiMalloc;
 static GLOBAL: MiMalloc = MiMalloc;
 
 mod adjustment_utils;
+pub mod adobe_develop;
 mod ai_commands;
 mod ai_connector;
 pub mod ai_processing;
@@ -16,7 +17,6 @@ pub mod auto_level;
 mod cache_utils;
 pub mod color_engine;
 pub mod comfy_engine;
-pub mod adobe_develop;
 pub mod convert;
 mod culling;
 mod denoising;
@@ -263,7 +263,7 @@ fn process_preview_job(
     mut adjustments_json: serde_json::Value,
     is_interactive: bool,
     target_resolution: Option<u32>,
-    _roi: Option<(f32, f32, f32, f32)>,
+    roi: Option<(f32, f32, f32, f32)>,
     compute_waveform: bool,
     active_waveform_channel: Option<&str>,
 ) -> Result<Vec<u8>, String> {
@@ -296,6 +296,27 @@ fn process_preview_job(
     )
     .map_err(|e| e.to_string())?;
     let (width, height) = frame.encoded_srgb.dimensions();
+    // Zoomed in and settled: the picture was rendered at the size the
+    // visible region is shown at, and only that region (with the margin the
+    // editor adds) is sent, as Lightroom and Capture One draw what is on
+    // screen. It is cut from the same render, so it matches it exactly.
+    // Histogram and waveform keep coming from whole-picture renders.
+    let tile = roi.filter(|r| !is_interactive && (r.2 < 0.999 || r.3 < 0.999));
+    if let Some(region) = tile {
+        let mut frame = frame;
+        let (x, y, w, h) = frame.crop_to_region(region);
+        if adjustments_clone["showClipping"].as_bool() == Some(true) {
+            frame.mark_clipping();
+        }
+        let mut response = b"TILE".to_vec();
+        for v in [x, y, w, h, width, height] {
+            response.extend_from_slice(&v.to_le_bytes());
+        }
+        frame
+            .write_display_png(&mut response)
+            .map_err(|e| e.to_string())?;
+        return Ok(response);
+    }
     if let Some(sender) = state.analytics_worker_tx.lock().unwrap().clone() {
         let _ = sender.send(AnalyticsJob {
             path: loaded_image.path.clone(),
