@@ -1547,7 +1547,8 @@ struct AdjustmentScales {
 }
 
 const SCALES: AdjustmentScales = AdjustmentScales {
-    exposure: 0.8,
+    // Exposure reads in stops, as in Lightroom.
+    exposure: 1.0,
     brightness: 0.8,
     contrast: 100.0,
     highlights: 120.0,

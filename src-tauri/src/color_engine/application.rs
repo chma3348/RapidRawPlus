@@ -88,6 +88,7 @@ pub struct NeighbourhoodCache {
     source: Arc<DecodedFrame>,
     key: u64,
     blurs: Arc<Vec<[f32; 4]>>,
+    tones: super::plan::PhotoTones,
 }
 pub struct PreparedCache {
     /// The photograph's size after geometry, before any preview downscale.
@@ -606,13 +607,13 @@ fn neighbourhood(
     image: &DynamicImage,
     key: u64,
     display: Option<&super::cube::CubeLut>,
-) -> Arc<Vec<[f32; 4]>> {
+) -> (Arc<Vec<[f32; 4]>>, super::plan::PhotoTones) {
     if let Ok(cache) = caches.neighbourhood.lock()
         && let Some(c) = cache.as_ref()
         && Arc::ptr_eq(&c.source, source)
         && c.key == key
     {
-        return c.blurs.clone();
+        return (c.blurs.clone(), c.tones);
     }
     let pixels = float_pixels(image);
     let (w, h) = (pixels.width() as usize, pixels.height() as usize);
@@ -716,6 +717,9 @@ fn neighbourhood(
             .collect()
     };
     let (tonal, structure) = (blurred(3.5), blurred(40.));
+    // Where the photo's tones sit, for the sliders that adapt to it as
+    // Lightroom's do (Highlights to its middle, Whites to its brightest).
+    let tones = super::plan::PhotoTones::of(&zone_key);
     // The tone zones judge a region, not a pixel, so texture inside a
     // shadow lifts with it; an edge-aware average, so a dark subject against
     // a bright sky is its own region and lifts without a halo. Differences
@@ -757,9 +761,10 @@ fn neighbourhood(
             source: source.clone(),
             key,
             blurs: blurs.clone(),
+            tones,
         });
     }
-    blurs
+    (blurs, tones)
 }
 
 /// The zone key's region size, as a fraction of the short edge, and how big a
@@ -1359,8 +1364,9 @@ fn render(
     )?;
     initial_plan.set_render_scale(scale);
     in_domain(&mut initial_plan);
-    if let Some(blurs) = initial_blurs {
-        initial_plan.set_neighbourhood(blurs);
+    let photo_tones = initial_blurs.as_ref().map(|(_, tones)| *tones);
+    if let Some((blurs, tones)) = initial_blurs {
+        initial_plan.set_neighbourhood(blurs, tones);
     }
     if active.is_empty() {
         if let Some(look) = &look {
@@ -1368,6 +1374,7 @@ fn render(
         }
         let mut frame = engine.render(&float_pixels(&image), &initial_plan, capture)?;
         frame.full_size = full;
+        frame.tones = photo_tones;
         finish_space(&mut frame, space, initial_native);
         return Ok(frame);
     }
@@ -1459,8 +1466,8 @@ fn render(
             let blurs = neighbourhood_for(&local.tone);
             let mut local_plan = plan(working_color.clone(), local, None, None)?;
             in_domain(&mut local_plan);
-            if let Some(blurs) = blurs {
-                local_plan.set_neighbourhood(blurs);
+            if let Some((blurs, tones)) = blurs {
+                local_plan.set_neighbourhood(blurs, tones);
             }
             engine.render_graded(input, &local_plan)?
         };
@@ -1498,6 +1505,7 @@ fn render(
     }
     let mut frame = engine.render(&working, &final_plan, capture)?;
     frame.full_size = full;
+    frame.tones = photo_tones;
     finish_space(&mut frame, space, final_native);
     if let (Some(stages), Some(original)) = (&mut frame.stages, original_working) {
         stages.working = original;
@@ -1621,9 +1629,8 @@ pub fn auto_controls(
         (0., 0.)
     };
 
-    // What clips or crushes once exposed. The shared EV shift slider is the
-    // previous engine's, which divides by 0.8.
-    let ev_shift = exposure * 0.8;
+    // What clips or crushes once exposed. The Exposure slider reads in stops.
+    let ev_shift = exposure;
     let mut exposed = neutral.clone();
     exposed["exposure"] = serde_json::json!(ev_shift);
     exposed["v3"] = serde_json::json!({"temperature": temperature, "tint": tint});

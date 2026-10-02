@@ -169,10 +169,16 @@ fn render_fingerprint_includes_bound_data_and_scale() {
         3,
         "plan must retain shared lattices, not copy entries"
     );
-    plan.set_neighbourhood(Arc::new(vec![[0.1; 4]; 2]));
+    plan.set_neighbourhood(
+        Arc::new(vec![[0.1; 4]; 2]),
+        rapidraw_lib::color_engine::plan::PhotoTones::neutral(),
+    );
     let blurred = plan.fingerprint("source");
     assert_ne!(domain, blurred);
-    plan.set_neighbourhood(Arc::new(vec![[0.2; 4]; 2]));
+    plan.set_neighbourhood(
+        Arc::new(vec![[0.2; 4]; 2]),
+        rapidraw_lib::color_engine::plan::PhotoTones::neutral(),
+    );
     assert_ne!(blurred, plan.fingerprint("source"));
 }
 
@@ -403,18 +409,38 @@ fn gpu_color_pipeline_contracts() {
         .render(&ramp, &RenderPlan::build(scene.clone()).unwrap(), true)
         .unwrap();
     let stages = rendered.stages.as_ref().unwrap();
+    // Exposure is an exact gain, then Lightroom's shaping from its table, as
+    // one gain on all three channels (greys stay grey).
+    let enc = |v: f32| spaces::encode_intermediate(v.max(0.0) as f64) as f32;
+    let dec = |v: f32| spaces::decode(v as f64, Transfer::DavinciIntermediate) as f32;
+    let shaped = |v: f32| {
+        use rapidraw_lib::color_engine::tone_zones_table::{EXPOSURE, KNOTS};
+        let y = v * 2.0;
+        if y <= 1e-6 {
+            return y;
+        }
+        let x = enc(y).clamp(0.0, 1.0) * (KNOTS - 1) as f32;
+        let i = (x.floor() as usize).min(KNOTS - 2);
+        let f = x - i as f32;
+        let d = EXPOSURE[i][0] * (1.0 - f) + EXPOSURE[i + 1][0] * f;
+        dec(enc(y) + d).max(0.0)
+    };
     for (working, graded) in stages.working.pixels().zip(stages.graded.pixels()) {
         for c in 0..3 {
+            let want = shaped(working[c]);
             assert!(
-                (graded[c] - working[c] * 2.0).abs() < 1e-6,
-                "exposure not exact: {} -> {} (want {})",
+                (graded[c] - want).abs() < 2e-4 * want.max(1.0),
+                "exposure: {} -> {} (want {})",
                 working[c],
                 graded[c],
-                working[c] * 2.0
+                want
             );
         }
     }
-    assert!(stages.graded.get_pixel(1024, 0)[0] > 15.9);
+    // Far above display white stays above it (Lightroom's highlight
+    // protection holds the top back, but never clips it).
+    let top = stages.graded.get_pixel(1024, 0)[0];
+    assert!(top > 2.0, "far above white came out at {top}");
     let mut previous = 0.0;
     for p in rendered.encoded_srgb.pixels() {
         assert!(p[0] + 1e-6 >= previous && (0.0..=1.0).contains(&p[0]));
@@ -512,9 +538,22 @@ fn gpu_color_pipeline_contracts() {
         .render(&input, &RenderPlan::build(exposure).unwrap(), true)
         .unwrap();
     let stages = exposed.stages.unwrap();
+    // A gain and its shaping: one factor on all three channels of a pixel,
+    // so colours keep their hue as they brighten.
     for (working, graded) in stages.working.pixels().zip(stages.graded.pixels()) {
-        for c in 0..3 {
-            assert!((graded[c] - 2.0 * working[c]).abs() < 3e-6);
+        let lit: Vec<usize> = (0..3).filter(|&c| working[c].abs() > 1e-3).collect();
+        if let Some(&first) = lit.first() {
+            let factor = graded[first] / working[first];
+            assert!(
+                factor > 1.0,
+                "exposure +1 brightened {working:?} to {graded:?}"
+            );
+            for &c in &lit {
+                assert!(
+                    (graded[c] / working[c] - factor).abs() < 1e-3 * factor,
+                    "exposure changed a colour's balance: {working:?} -> {graded:?}"
+                );
+            }
         }
     }
     let mut display = config();
@@ -717,6 +756,20 @@ fn detail_contracts(context: &GpuContext) {
         g.encoded_srgb.get_pixel(32, 16)[1] > plain.encoded_srgb.get_pixel(32, 16)[1] + 0.005,
         "global glow did nothing"
     );
+    // Both respond to the picture as exposed.
+    assert!(
+        l.encoded_srgb.get_pixel(32, 16)[1] > plain.encoded_srgb.get_pixel(32, 16)[1] + 0.005,
+        "full-mask glow did nothing"
+    );
+    // Global glow is light in the scene, so it also passes through
+    // Exposure's highlight shaping, while a mask's glow is added to the
+    // exposed picture; they are the same light where exposure is untouched.
+    let mut global_flat = global_glow.clone();
+    global_flat["exposure"] = json!(0);
+    let mut local_flat = local_glow.clone();
+    local_flat["exposure"] = json!(0);
+    let g = render_file(context, &state, path, &global_flat, None).unwrap();
+    let l = render_file(context, &state, path, &local_flat, None).unwrap();
     for (a, b) in g.encoded_srgb.as_raw().iter().zip(l.encoded_srgb.as_raw()) {
         assert!(
             (a - b).abs() < 2e-3,
@@ -1910,15 +1963,26 @@ fn zone_config(amounts: [f32; 4]) -> PipelineConfig {
 }
 
 fn zone_table_offset(key: f32, zone: usize, amount: f32) -> f32 {
-    use rapidraw_lib::color_engine::tone_zones_table::{CUT, KNOTS, LIFT};
+    use rapidraw_lib::color_engine::tone_zones_table::{CUT, CUT_HALF, KNOTS, LIFT, LIFT_HALF};
     if amount == 0.0 {
         return 0.0;
     }
-    let table = if amount > 0.0 { &LIFT } else { &CUT };
+    let (full, half) = if amount > 0.0 {
+        (&LIFT, &LIFT_HALF)
+    } else {
+        (&CUT, &CUT_HALF)
+    };
     let x = key.clamp(0.0, 1.0) * (KNOTS - 1) as f32;
     let i = (x.floor() as usize).min(KNOTS - 2);
     let f = x - i as f32;
-    amount.abs() * (table[i][zone] * (1.0 - f) + table[i + 1][zone] * f)
+    let at = |t: &[[f32; 4]; KNOTS]| t[i][zone] * (1.0 - f) + t[i + 1][zone] * f;
+    // The tables at 50 and 100, straight between them and toward zero.
+    let a = amount.abs();
+    if a <= 0.5 {
+        a * 2.0 * at(half)
+    } else {
+        at(half) + (at(full) - at(half)) * (a * 2.0 - 1.0)
+    }
 }
 
 /// The target key and each zone's own offset, as the engine applies them.
@@ -1965,26 +2029,19 @@ fn tone_zones_on_greys() {
                     (after[0] - after[1]).abs() < 1e-5 && (after[2] - after[1]).abs() < 1e-5,
                     "greys stay grey"
                 );
-                // Nothing moves outside a zone. Middle grey (key 0.39, display
-                // level ~118) moves only under Shadows, by at most ~9 levels.
-                let untouched = match z {
-                    0 => key > 0.34,
-                    1 => key > 0.52,
-                    2 => key < 0.34,
-                    _ => key < 0.47,
+                // Each slider reaches as far as Lightroom's does (Whites lifts
+                // the midtones too, Blacks reaches into them), but the far end
+                // of the range stays almost where it was.
+                let far = match z {
+                    0 => key > 0.75,
+                    1 => key > 0.85,
+                    2 => key < 0.15,
+                    _ => key < 0.15,
                 };
-                if untouched {
+                if far {
                     assert!(
-                        (got - key).abs() < 0.0015,
-                        "{} {amount} moved key {key:.3} outside its zone (to {got:.4})",
-                        ZONE_NAMES[z]
-                    );
-                }
-                if (key - 0.39).abs() < 0.002 {
-                    let limit = if z == 1 { 0.02 } else { 0.0015 };
-                    assert!(
-                        (got - key).abs() < limit,
-                        "{} {amount} moved middle grey to {got:.4}",
+                        (got - key).abs() < 0.03,
+                        "{} {amount} moved key {key:.3}, at the far end of the range, to {got:.4}",
                         ZONE_NAMES[z]
                     );
                 }
@@ -2006,8 +2063,14 @@ fn tone_zones_on_greys() {
             std::array::from_fn(|z| [-1.0, 0.0, 1.0][((combo / 3u32.pow(z as u32)) % 3) as usize]);
         let stages = render(amounts);
         let mut previous = -1.0f32;
-        for p in stages.graded.pixels() {
-            assert!(p[1] + 1e-6 >= previous, "tones reversed at {amounts:?}");
+        for (i, p) in stages.graded.pixels().enumerate() {
+            assert!(
+                p[1] + 1e-6 >= previous,
+                "tones reversed at {amounts:?}: key {:.4} gives {:.6} after {:.6}",
+                i as f32 / 1024.0,
+                p[1],
+                previous
+            );
             previous = previous.max(p[1]);
         }
     }

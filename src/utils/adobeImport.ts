@@ -25,8 +25,8 @@ export interface AdobeDevelop {
 
 /** How far each Adobe slider moves ours. A first pass, to refine against Lightroom exports. */
 export const ADOBE_TUNING = {
-  /** Our exposure per Adobe stop: the engine applies 2^(value / 0.8). */
-  exposure: 0.8,
+  /** Our exposure per Adobe stop: both read in stops, shaped alike (tools/fit_lighting.py). */
+  exposure: 1,
   contrast: 1,
   highlights: 1,
   shadows: 1,

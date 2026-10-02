@@ -66,9 +66,76 @@ pub(crate) struct GpuParameters {
     /// return through the captured input transform.
     pub domain: [u32; 4],
     /// The tone zones' offsets per key knot, [blacks, shadows, highlights,
-    /// whites], at slider +100 and at -100 (see `tone_zones_table`).
+    /// whites], at slider +100 and at -100, and at +50 and -50 (see
+    /// `tone_zones_table`): strength doesn't grow evenly with the slider.
     pub zone_lift: [[f32; 4]; super::tone_zones_table::KNOTS],
     pub zone_cut: [[f32; 4]; super::tone_zones_table::KNOTS],
+    pub zone_lift_half: [[f32; 4]; super::tone_zones_table::KNOTS],
+    pub zone_cut_half: [[f32; 4]; super::tone_zones_table::KNOTS],
+    /// Contrast's offsets per knot of each channel's Intermediate value:
+    /// [+50, +100, -50, -100].
+    pub contrast: [[f32; 4]; super::tone_zones_table::KNOTS],
+    /// Exposure's shaping beyond its gain, per knot of the exposed tonal
+    /// key: [+1, +2.5, -1, -2.5] stops.
+    pub exposure_shape: [[f32; 4]; super::tone_zones_table::KNOTS],
+    /// How the zones adapt to this photo, per zone [blacks, shadows,
+    /// highlights, whites]: a shift of where each reads its table, and the
+    /// strength of a lift and of a cut (see `PhotoTones`).
+    pub zone_adapt: [[f32; 4]; 3],
+}
+
+/// Where a photo's tones sit, on the tonal key, from its unedited picture:
+/// its median and its brightest (99th percentile). Lightroom's Highlights
+/// works relative to a photo's middle tones, and its Whites lifts a photo
+/// whose brightest tones fall short of white more than one already there;
+/// these let the zones do the same (fitted by tools/fit_lighting.py).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PhotoTones {
+    pub median: f32,
+    pub brightest: f32,
+}
+
+impl PhotoTones {
+    pub fn of(keys: &[f32]) -> Self {
+        let mut sample: Vec<f32> = keys
+            .iter()
+            .step_by(3)
+            .copied()
+            .filter(|k| k.is_finite())
+            .collect();
+        if sample.is_empty() {
+            return Self {
+                median: 0.5,
+                brightest: 0.9,
+            };
+        }
+        let mut at = |q: f32| {
+            let i = ((sample.len() - 1) as f32 * q).round() as usize;
+            *sample.select_nth_unstable_by(i, |a, b| a.total_cmp(b)).1
+        };
+        Self {
+            median: at(0.5),
+            brightest: at(0.99),
+        }
+    }
+
+    /// A photo the zones don't need to adapt to: their tables as fitted.
+    pub fn neutral() -> Self {
+        let [a, b, _, _] = super::tone_zones_table::WHITES_LIFT;
+        Self {
+            median: super::tone_zones_table::HIGHLIGHTS_CENTRE,
+            brightest: if b == 0. { 0.9 } else { (1. - a) / b },
+        }
+    }
+
+    /// [shift per zone], [lift strength per zone], [cut strength per zone].
+    pub fn zone_adapt(&self) -> [[f32; 4]; 3] {
+        use super::tone_zones_table::{HIGHLIGHTS_CENTRE, WHITES_LIFT};
+        let shift = (HIGHLIGHTS_CENTRE - self.median).clamp(-0.3, 0.3);
+        let [a, b, lo, hi] = WHITES_LIFT;
+        let whites = (a + b * self.brightest).clamp(lo, hi);
+        [[0., 0., shift, 0.], [1., 1., 1., whites], [1.; 4]]
+    }
 }
 
 /// What a creative LUT expects to be fed, and therefore where in the
@@ -230,7 +297,7 @@ impl RenderPlan {
                 u32::from(!c.color_is_neutral()),
                 cube.as_ref().map_or(0, |c| c.size),
             ],
-            tone: [0., 0., c.tone.exposure.exp2(), 0.],
+            tone: [c.tone.exposure, 0., c.tone.exposure.exp2(), 0.],
             basic: [
                 [
                     c.tone.brightness,
@@ -325,6 +392,11 @@ impl RenderPlan {
             domain: [0; 4],
             zone_lift: super::tone_zones_table::LIFT,
             zone_cut: super::tone_zones_table::CUT,
+            zone_lift_half: super::tone_zones_table::LIFT_HALF,
+            zone_cut_half: super::tone_zones_table::CUT_HALF,
+            contrast: super::tone_zones_table::CONTRAST,
+            exposure_shape: super::tone_zones_table::EXPOSURE,
+            zone_adapt: [[0.; 4], [1.; 4], [1.; 4]],
             look: [0.; 4],
             look_flags: [0; 4],
             work_to_look: packed(
@@ -420,9 +492,10 @@ impl RenderPlan {
     /// Bind the neighbourhood the Basic tone controls read: two entries per
     /// pixel, tonal blur then structure blur, in the encoding the previous
     /// engine blurred in (see `neighbourhood` in application.rs).
-    pub fn set_neighbourhood(&mut self, blurs: std::sync::Arc<Vec<[f32; 4]>>) {
+    pub fn set_neighbourhood(&mut self, blurs: std::sync::Arc<Vec<[f32; 4]>>, tones: PhotoTones) {
         self.neighbourhood = Some(blurs);
         self.parameters.basic_flags[2] = 1;
+        self.parameters.zone_adapt = tones.zone_adapt();
     }
 
     /// Run the shared controls on display values: `input` is the captured

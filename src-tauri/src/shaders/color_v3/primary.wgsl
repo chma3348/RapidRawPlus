@@ -76,9 +76,10 @@ fn channel_curve(v: f32, channel: u32) -> f32 {
 // given values past white for such a picture — its brightness curve, handed
 // one, breaks into bands — and at neutral the round trip is skipped, so an
 // unedited picture is untouched.
-// The four tone zones: Blacks, Shadows, Highlights, Whites (tone_zones.rs,
-// tables from tools/design_tone_zones.py). Each slider moves only its own
-// part of the tonal range, judged on the tonal key: the working-space
+// The four tone zones: Blacks, Shadows, Highlights, Whites, with Lightroom's
+// measured strength (tone_zones_table.rs, fitted by tools/fit_lighting.py;
+// docs/tone-zones.md). Each slider moves its part of the tonal range, judged
+// on the tonal key: the working-space
 // luminance in DaVinci Intermediate, taken from an edge-aware regional
 // average of the unedited picture, so a region moves as one (texture rides
 // along) and a dark subject against a bright sky lifts without a halo. The
@@ -92,20 +93,30 @@ fn shadow_key(working: vec3<f32>) -> f32 {
     if y <= 0.00262409 { return y * 10.44426855; }
     return (log2(y + 0.0075) + 7.0) * 0.07329248;
 }
-// One zone's offset at key `k`, for a slider in -1..1.
+// One zone's offset at key `k`, for a slider in -1..1. Strength follows the
+// tables at 50 and 100 (it doesn't grow evenly with the slider, as in
+// Lightroom), straight between them and toward zero.
 fn zone_offset(k: f32, zone: u32, amount: f32) -> f32 {
     if amount == 0.0 { return 0.0; }
-    let x = clamp(k, 0.0, 1.0) * 64.0;
+    // Read where this photo's tones put it (PhotoTones in plan.rs).
+    let x = clamp(k + parameters.zone_adapt[0][zone], 0.0, 1.0) * 64.0;
     // At the top knot i stays 63 and the fraction reaches one.
     let i = min(u32(floor(x)), 63u);
     let f = x - f32(i);
-    var row: vec4<f32>;
+    var full: vec4<f32>;
+    var half: vec4<f32>;
     if amount > 0.0 {
-        row = mix(parameters.zone_lift[i], parameters.zone_lift[i + 1u], f);
+        full = mix(parameters.zone_lift[i], parameters.zone_lift[i + 1u], f);
+        half = mix(parameters.zone_lift_half[i], parameters.zone_lift_half[i + 1u], f);
     } else {
-        row = mix(parameters.zone_cut[i], parameters.zone_cut[i + 1u], f);
+        full = mix(parameters.zone_cut[i], parameters.zone_cut[i + 1u], f);
+        half = mix(parameters.zone_cut_half[i], parameters.zone_cut_half[i + 1u], f);
     }
-    return abs(amount) * row[zone];
+    let a = abs(amount);
+    var strength = parameters.zone_adapt[2][zone];
+    if amount > 0.0 { strength = parameters.zone_adapt[1][zone]; }
+    if a <= 0.5 { return a * 2.0 * half[zone] * strength; }
+    return mix(half[zone], full[zone], a * 2.0 - 1.0) * strength;
 }
 // The sliders in -1..1. The shared parser hands them over divided by 120
 // (Shadows, Highlights), 30 (Whites) and 40 (Blacks).
@@ -130,6 +141,57 @@ fn tone_zones(key: f32) -> Zones {
     }
     return Zones(k, parts);
 }
+// Contrast: a curve on each channel's DaVinci Intermediate value, the way
+// Resolve applies contrast (one curve per channel, so colours gain or lose
+// saturation with it, as there), with the strength and shape of
+// Lightroom's, measured (tools/adobe_lighting.py). Tables at 50 and 100 on
+// both sides; the pivot slides the curve along the tonal range.
+fn contrast_offset(x: f32, amount: f32) -> f32 {
+    let p = clamp(x - (parameters.basic[0].z - 0.5) * 0.5, 0.0, 1.0) * 64.0;
+    let i = min(u32(floor(p)), 63u);
+    let row = mix(parameters.contrast[i], parameters.contrast[i + 1u], p - f32(i));
+    let a = abs(amount);
+    var half = row.x;
+    var full = row.y;
+    if amount < 0.0 { half = row.z; full = row.w; }
+    if a <= 0.5 { return a * 2.0 * half; }
+    return mix(half, full, a * 2.0 - 1.0);
+}
+// Exposure: an exact gain (in basic_v2), then shaped the way Lightroom's
+// is, measured: shadows and midtones move more than a plain gain moves them
+// and highlights less, so brightening doesn't wash out the top and
+// darkening doesn't sink it. One gain on all three channels, keyed on the
+// exposed pixel's own tone (Lightroom's Exposure isn't local); tables at
+// 1 and 2.5 stops, held beyond 2.5 where the gain alone carries on.
+fn apply_exposure_shape(rgb: vec3<f32>) -> vec3<f32> {
+    let stops = parameters.tone.x;
+    if stops == 0.0 { return rgb; }
+    let y = dot(rgb, vec3<f32>(0.27411851, 0.87363190, -0.14775041));
+    if y <= 1e-6 { return rgb; }
+    let k = encode_intermediate(y);
+    let p = clamp(k, 0.0, 1.0) * 64.0;
+    let i = min(u32(floor(p)), 63u);
+    let row = mix(parameters.exposure_shape[i], parameters.exposure_shape[i + 1u], p - f32(i));
+    let a = abs(stops);
+    var one = row.x;
+    var more = row.y;
+    if stops < 0.0 { one = row.z; more = row.w; }
+    var d: f32;
+    if a <= 1.0 { d = a * one; } else { d = mix(one, more, min((a - 1.0) / 1.5, 1.0)); }
+    let aim = max(decode_intermediate_soft(k + d), 0.0);
+    return rgb * (aim / y);
+}
+fn apply_contrast(rgb: vec3<f32>) -> vec3<f32> {
+    let amount = clamp(parameters.basic[0].y, -1.0, 1.0);
+    if amount == 0.0 { return rgb; }
+    var out = rgb;
+    for (var c = 0u; c < 3u; c++) {
+        let x = encode_intermediate(rgb[c]);
+        out[c] = decode_intermediate_soft(x + contrast_offset(x, amount));
+    }
+    return out;
+}
+
 // Resolve's Saturation, measured: a mix toward Rec.709 luma of the DaVinci
 // Intermediate log values, by exactly 1 + slider/100 (fitted 0.005, 0.503,
 // 1.499, 1.995 at -100, -50, +50, +100 on the chart; 0.3 level residual).
@@ -216,7 +278,9 @@ fn basic_v2(rgb: vec3<f32>, tonal: vec3<f32>, structure: vec3<f32>) -> vec3<f32>
     c = apply_filmic_exposure(c, a.x);
     // Shadows, Whites and Blacks are the tone zones now (tone_zones); the
     // previous engine's only supplies Contrast here.
-    c = apply_tonal_adjustments_v2(c, structure, raw, a.y, 0.0, 0.0, 0.0, a.z);
+    // Contrast is v3's own now (apply_contrast); none of the previous
+    // engine's tonal controls remain here.
+    c = apply_tonal_adjustments_v2(c, structure, raw, 0.0, 0.0, 0.0, 0.0, a.z);
     // Highlights is a tone zone now too.
     c = apply_highlights_adjustment_v2(c, tonal, structure, raw, 0.0);
     if display { return from_display_domain(c); }
@@ -247,6 +311,9 @@ fn grade(input:vec3<f32>, tonal:vec3<f32>, structure:vec3<f32>, key:f32, detail_
     }
     // The previous engine's controls see the picture as the zones left it.
     var rgb=basic_v2(toned, lifted_neighbourhood(tonal, seen), lifted_neighbourhood(structure, seen));
+    rgb=apply_exposure_shape(rgb);
+    // After Exposure, as in Lightroom, so the pivot follows the exposed picture.
+    rgb=apply_contrast(rgb);
     let y=dot(rgb,vec3<f32>(0.27411851,0.87363190,-0.14775041));
     // DWG's blue coefficient is negative, so a non-physical pixel can land at
     // or below zero luminance. Fade the curve out across the bottom of the

@@ -176,11 +176,12 @@ impl Tone {
             && self.blacks == 0.
     }
 
-    /// The controls still run through the previous engine's functions:
-    /// Exposure (brightness) and Contrast. Blacks, Shadows, Highlights and
-    /// Whites are v3's tone zones (see `tone_zones` in the shader).
+    /// The control still run through the previous engine's functions:
+    /// Brightness. Blacks, Shadows, Highlights and Whites are v3's tone
+    /// zones, and Contrast v3's own curve (see `tone_zones` and `contrast`
+    /// in the shader).
     pub fn previous_engine_neutral(&self) -> bool {
-        self.brightness == 0. && self.contrast == 0.
+        self.brightness == 0.
     }
 
     pub fn validate(&self) -> Result<()> {

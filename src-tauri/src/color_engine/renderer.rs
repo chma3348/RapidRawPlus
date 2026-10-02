@@ -22,6 +22,9 @@ pub struct RenderedFrame {
     /// The full-resolution size this render stands for; equal to the image's
     /// own size unless a preview was rendered from a downscaled picture.
     pub full_size: (u32, u32),
+    /// Where the photo's tones sat when the tone sliders adapted to it, if
+    /// they were in use (for calibration tools).
+    pub tones: Option<super::plan::PhotoTones>,
 }
 
 impl RenderedFrame {
@@ -212,6 +215,7 @@ impl ColorEngine {
             encoded_srgb: output,
             space: super::config::OutputSpace::Srgb,
             stages,
+            tones: None,
         })
     }
 

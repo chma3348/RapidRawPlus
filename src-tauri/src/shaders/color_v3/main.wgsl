@@ -30,6 +30,11 @@ struct Parameters {
     domain: vec4<u32>,
     zone_lift: array<vec4<f32>,65>,
     zone_cut: array<vec4<f32>,65>,
+    zone_lift_half: array<vec4<f32>,65>,
+    zone_cut_half: array<vec4<f32>,65>,
+    contrast: array<vec4<f32>,65>,
+    exposure_shape: array<vec4<f32>,65>,
+    zone_adapt: array<vec4<f32>,3>,
 }
 @group(0) @binding(0) var<storage, read> source: array<vec4<f32>>;
 @group(0) @binding(1) var<storage, read_write> results: array<vec4<f32>>;

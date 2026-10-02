@@ -139,7 +139,7 @@ test('a full Lightroom edit comes across in the engine’s terms', () => {
       { asShotXy: planckXy(4500) },
     ),
   );
-  assert.equal(adj.exposure, 0.8);
+  assert.equal(adj.exposure, 1);
   assert.equal(adj.highlights, -40);
   assert.equal(adj.processVersion, 3);
   assert.equal(adj.lensCorrectionMode, 'auto');
