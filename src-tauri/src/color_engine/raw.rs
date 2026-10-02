@@ -17,6 +17,25 @@ use rawler::{
     rawsource::RawSource,
 };
 
+/// RCD over the sensor's active area, then the dependency's own default
+/// crop, exactly as its develop steps place them (Demosaic, CropActiveArea,
+/// CropDefault), so framing and pixel positions are unchanged.
+fn develop_rcd(raw: &RawImage, cfa: &rawler::cfa::CFA) -> rawler::pixarray::Color2D<f32, 3> {
+    let mosaic =
+        rawler::pixarray::PixF32::new_with(raw.data.as_f32().into_owned(), raw.width, raw.height);
+    let roi = raw.active_area.unwrap_or(mosaic.rect());
+    let mut rgb = super::rcd::demosaic(&mosaic, cfa, roi);
+    if let Some(mut crop) = raw.crop_area {
+        if let Some(active) = raw.active_area {
+            crop = crop.intersection(&active).adapt(&active);
+        }
+        if !crop.is_empty() && crop.d != rgb.dim() {
+            rgb = rgb.crop(crop);
+        }
+    }
+    rgb
+}
+
 /// Cancellation is checked between expensive stages. The dependency's decoder
 /// and demosaicer themselves are not interruptible.
 pub fn decode_raw(
@@ -191,12 +210,18 @@ fn develop(
     let transform = calibration(matrix, &raw.wb_coeffs)?;
     let black = raw.blacklevel.as_bayer_array();
     let white = raw.whitelevel.as_bayer_array();
+    let rcd_cfa = match &raw.photometric {
+        RawPhotometricInterpretation::Cfa(config) if !fast && super::rcd::supports(&config.cfa) => {
+            Some(config.cfa.clone())
+        }
+        _ => None,
+    };
     let record = serde_json::json!({
         "camera_make": raw.clean_make, "camera_model": raw.clean_model,
         "xyz_to_camera_d65": matrix, "white_balance_rgb": &raw.wb_coeffs[..3],
         "camera_to_linear_srgb": transform.to_cols_array(), "matrix_layout": "column_major",
         "black_levels": black, "white_levels": white,
-        "demosaic": if fast {"speed"} else {"quality"},
+        "demosaic": if fast {"speed"} else if rcd_cfa.is_some() {"rcd"} else {"quality"},
         "sensor_floor": "zero_after_black_subtraction", "upper_clamp": false,
         "clipped_highlights": "neutral_where_green_clips_v1",
         "calibration_revision": "row_normalized_d65_green_normalized_wb_v1"
@@ -228,11 +253,19 @@ fn develop(
     } else {
         DemosaicAlgorithm::Quality
     };
-    let intermediate = developer.develop_intermediate(&raw)?;
-    check_cancel()?;
-    let Intermediate::ThreeColor(camera) = intermediate else {
-        anyhow::bail!("Demosaicing did not produce three camera channels");
+    // A 2x2 RGB Bayer sensor is demosaiced with RCD (rcd.rs) at full quality;
+    // anything else (X-Trans, four colours) and the fast thumbnail path keep
+    // the dependency's own.
+    let camera = if let Some(cfa) = rcd_cfa {
+        develop_rcd(&raw, &cfa)
+    } else {
+        let intermediate = developer.develop_intermediate(&raw)?;
+        let Intermediate::ThreeColor(camera) = intermediate else {
+            anyhow::bail!("Demosaicing did not produce three camera channels");
+        };
+        camera
     };
+    check_cancel()?;
     // Clipped highlights. Where the sensor's green saturated, the pixel's
     // colour is gone: white balance then lifts red and blue past the clipped
     // green, and a white sun or window renders magenta (measured on a Sony

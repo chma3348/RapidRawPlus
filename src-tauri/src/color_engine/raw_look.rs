@@ -1,5 +1,5 @@
 //! How a RAW opens before any edit: Lightroom's default rendering of it
-//! (its Adobe Color profile), measured on pairs of the same RAWs developed
+//! (its Adobe Standard profile), measured on pairs of the same RAWs developed
 //! by both (tools/fit_raw_look.py; docs/raw-look.md). RapidRAW develops a
 //! RAW at the camera's metered exposure through Resolve's gentle rendering,
 //! which left RAWs about a stop and a third darker, flatter and a third less

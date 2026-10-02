@@ -1,7 +1,8 @@
 # How a RAW opens: Lightroom's default look
 
-1 October 2026. A RAW now opens as Lightroom's default rendering (its
-Adobe Color profile) shows it, measured on pairs of the same RAWs developed
+1 October 2026. A RAW now opens as Lightroom's default rendering shows it (its Adobe
+Standard profile, sharpening and noise reduction at 0, as the reference
+exports were made), measured on pairs of the same RAWs developed
 by both. Rendered photographs (JPEGs and the like) are untouched: they
 already opened alike in RapidRAW, Resolve and Lightroom (median L* 56.4 /
 56.3 / 56.4 over the test set).
@@ -71,3 +72,21 @@ hand-edit it.
 - A Resolve-matched RAW look could replace this later: it is one stage with
   its own table, separate from the lighting sliders' (re-run their check if
   it changes).
+
+## Demosaic: RCD
+
+Since 2 October a 2x2 RGB Bayer RAW is demosaiced with RCD (Ratio
+Corrected Demosaicing, color_engine/rcd.rs), the default of darktable and
+RawTherapee, instead of the dependency's PPG; X-Trans, four-colour sensors
+and the fast thumbnail path keep the dependency's own. The frame, its size
+and the sensor's crops are unchanged.
+
+- On a photo-like test scene RCD reconstructs with about a third of PPG's
+  error, on all four Bayer layouts (rcd.rs tests).
+- At full size against Lightroom's export of the same RAW, real detail is
+  level with Lightroom's (0.97-1.11 of its amplitude below 0.4 cycles per
+  pixel) while the false grain at the finest scale fell from 1.45-1.68x
+  Lightroom's to 1.19-1.36x; the coloured speckle in dark fur is gone.
+- The unedited look still matches (colour + tone difference from Lightroom
+  1.39, was 1.41), and a 24 MP RAW decodes in 0.40 s, a little faster than
+  with PPG.
