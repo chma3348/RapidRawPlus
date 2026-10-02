@@ -35,6 +35,8 @@ struct Parameters {
     contrast: array<vec4<f32>,65>,
     exposure_shape: array<vec4<f32>,65>,
     zone_adapt: array<vec4<f32>,3>,
+    zone_style: array<vec4<f32>,4>,
+    exposure_colour: vec4<f32>,
 }
 @group(0) @binding(0) var<storage, read> source: array<vec4<f32>>;
 @group(0) @binding(1) var<storage, read_write> results: array<vec4<f32>>;

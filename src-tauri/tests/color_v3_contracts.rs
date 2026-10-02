@@ -409,21 +409,21 @@ fn gpu_color_pipeline_contracts() {
         .render(&ramp, &RenderPlan::build(scene.clone()).unwrap(), true)
         .unwrap();
     let stages = rendered.stages.as_ref().unwrap();
-    // Exposure is an exact gain, then Lightroom's shaping from its table, as
-    // one gain on all three channels (greys stay grey).
+    // Exposure takes each tone where Lightroom's does: its table, read by
+    // the tone before exposure, gives the exposed tone, on all three
+    // channels alike (greys stay grey).
     let enc = |v: f32| spaces::encode_intermediate(v.max(0.0) as f64) as f32;
     let dec = |v: f32| spaces::decode(v as f64, Transfer::DavinciIntermediate) as f32;
     let shaped = |v: f32| {
         use rapidraw_lib::color_engine::tone_zones_table::{EXPOSURE, KNOTS};
-        let y = v * 2.0;
-        if y <= 1e-6 {
-            return y;
+        if v * 2.0 <= 1e-6 {
+            return v * 2.0;
         }
-        let x = enc(y).clamp(0.0, 1.0) * (KNOTS - 1) as f32;
+        let x = enc(v).clamp(0.0, 1.0) * (KNOTS - 1) as f32;
         let i = (x.floor() as usize).min(KNOTS - 2);
         let f = x - i as f32;
         let d = EXPOSURE[i][0] * (1.0 - f) + EXPOSURE[i + 1][0] * f;
-        dec(enc(y) + d).max(0.0)
+        dec(enc(v) + d).max(0.0)
     };
     for (working, graded) in stages.working.pixels().zip(stages.graded.pixels()) {
         for c in 0..3 {
@@ -441,9 +441,14 @@ fn gpu_color_pipeline_contracts() {
     // protection holds the top back, but never clips it).
     let top = stages.graded.get_pixel(1024, 0)[0];
     assert!(top > 2.0, "far above white came out at {top}");
+    // (Within float rounding: the shoulder settles on white to about 1e-6.)
     let mut previous = 0.0;
     for p in rendered.encoded_srgb.pixels() {
-        assert!(p[0] + 1e-6 >= previous && (0.0..=1.0).contains(&p[0]));
+        assert!(
+            p[0] + 1e-5 >= previous && (0.0..=1.0).contains(&p[0]),
+            "exposed ramp: {} after {previous}",
+            p[0]
+        );
         previous = p[0];
     }
     // Equivalent scene colors, encoded as DWG/Intermediate versus linear sRGB.
@@ -538,24 +543,50 @@ fn gpu_color_pipeline_contracts() {
         .render(&input, &RenderPlan::build(exposure).unwrap(), true)
         .unwrap();
     let stages = exposed.stages.unwrap();
-    // A gain and its shaping: one factor on all three channels of a pixel,
-    // so colours keep their hue as they brighten.
+    // A gain and its shaping on all three channels of a pixel, then
+    // Lightroom's colour for it: a mix toward luma of the Intermediate log
+    // values, by EXPOSURE_COLOUR per stop. So each pixel is some factor f
+    // on all three channels followed by that mix: hues hold as colours
+    // brighten, and only their strength follows Lightroom's.
+    let enc = |v: f32| spaces::encode_intermediate(v.max(0.0) as f64);
+    let dec = |v: f64| spaces::decode(v, Transfer::DavinciIntermediate) as f32;
+    let per_stop = rapidraw_lib::color_engine::plan::EXPOSURE_COLOUR[0] as f64;
+    let model = |p: &Rgba<f32>, f: f32| -> [f32; 3] {
+        let logged: Vec<f64> = (0..3).map(|c| enc(p[c] * f)).collect();
+        let l = 0.2126 * logged[0] + 0.7152 * logged[1] + 0.0722 * logged[2];
+        std::array::from_fn(|c| dec(l + (logged[c] - l) * (1.0 + per_stop)).max(0.0))
+    };
+    let mut checked = 0;
     for (working, graded) in stages.working.pixels().zip(stages.graded.pixels()) {
-        let lit: Vec<usize> = (0..3).filter(|&c| working[c].abs() > 1e-3).collect();
-        if let Some(&first) = lit.first() {
-            let factor = graded[first] / working[first];
-            assert!(
-                factor > 1.0,
-                "exposure +1 brightened {working:?} to {graded:?}"
-            );
-            for &c in &lit {
-                assert!(
-                    (graded[c] / working[c] - factor).abs() < 1e-3 * factor,
-                    "exposure changed a colour's balance: {working:?} -> {graded:?}"
-                );
+        if (0..3).all(|c| working[c] < 1e-3) {
+            continue;
+        }
+        let y = |p: [f32; 3]| 0.274_118_5 * p[0] + 0.873_631_9 * p[1] - 0.147_750_4 * p[2];
+        let out = [graded[0], graded[1], graded[2]];
+        assert!(
+            y(out) > y([working[0], working[1], working[2]]),
+            "exposure +1 brightened {working:?} to {graded:?}"
+        );
+        // The factor that lands on the pixel's luminance.
+        let (mut lo, mut hi) = (1.0f32, 16.0f32);
+        for _ in 0..60 {
+            let mid = (lo + hi) / 2.0;
+            if y(model(working, mid)) < y(out) {
+                lo = mid
+            } else {
+                hi = mid
             }
         }
+        let want = model(working, lo);
+        for c in 0..3 {
+            assert!(
+                (out[c] - want[c]).abs() < 2e-3 * want[c].max(0.05),
+                "exposure changed a colour's balance: {working:?} -> {graded:?}, wanted {want:?}"
+            );
+        }
+        checked += 1;
     }
+    assert!(checked > 0);
     let mut display = config();
     display.output_rendering = OutputRendering::DisplayGamutV1;
     let identity = engine
@@ -1932,9 +1963,10 @@ fn a_patch_of_the_photo_itself_is_invisible_on_a_p3_file() {
 
 /// The four tone zones (Blacks, Shadows, Highlights, Whites): each moves only
 /// its own part of the tonal range, exactly as tone_zones_table says, applied
-/// in order; middle grey never moves; hues are kept by one gain on all
-/// channels (with a neutral fill where no gain can reach, pure black under a
-/// Blacks lift); lifting shadows or highlights carries its colour finish; and
+/// in order; middle grey never moves; a zone moves a colour by one gain on
+/// all channels (hues kept; a neutral fill where no gain can reach, pure
+/// black under a Blacks lift), or, where Lightroom's colour calls for it
+/// (ZONE_STYLE), each channel along the zone's curve on its own; and
 /// no combination of sliders reverses tones. Without a neighbourhood the key
 /// is the pixel's own luminance, so a grey ramp reads the tables back.
 #[test]
@@ -2077,9 +2109,12 @@ fn tone_zones_on_greys() {
 }
 
 fn tone_zones_on_colour() {
+    use rapidraw_lib::color_engine::plan::ZONE_STYLE;
     let engine = ColorEngine::new(gpu()).unwrap();
-    let enc = |v: f32| spaces::encode_intermediate(v.max(0.0) as f64);
-    let dec = |v: f64| spaces::decode(v, Transfer::DavinciIntermediate) as f32;
+    let enc = |v: f64| spaces::encode_intermediate(v.max(0.0));
+    let dec = |v: f64| spaces::decode(v, Transfer::DavinciIntermediate).max(0.0);
+    let luminance = |p: &[f64]| 0.274_118_5 * p[0] + 0.873_631_9 * p[1] - 0.147_750_4 * p[2];
+    let luma = |l: &[f64]| 0.2126 * l[0] + 0.7152 * l[1] + 0.0722 * l[2];
     let colour = ImageBuffer::from_fn(96, 1, |x, _| {
         let v = 0.004 * 1.07f32.powi(x as i32);
         Rgba([v * 2.2, v, v * 0.35, 1.0])
@@ -2091,34 +2126,47 @@ fn tone_zones_on_colour() {
             let plan = RenderPlan::build(zone_config(amounts)).unwrap();
             let stages = engine.render(&colour, &plan, true).unwrap().stages.unwrap();
             for (before, after) in stages.working.pixels().zip(stages.graded.pixels()) {
-                let y = 0.274_118_5 * before[0] + 0.873_631_9 * before[1] - 0.147_750_4 * before[2];
-                let key = enc(y) as f32;
-                let (target, parts) = zone_target(key, amounts);
-                let (from, to) = (dec(key as f64).max(0.0), dec(target as f64).max(0.0));
+                let own: Vec<f64> = (0..3).map(|c| enc(before[c] as f64)).collect();
+                let own_luma = luma(&own);
+                let key = enc(luminance(&[
+                    before[0] as f64,
+                    before[1] as f64,
+                    before[2] as f64,
+                ])) as f32;
+                let d = zone_table_offset(key, z, amount) as f64;
+                // One gain on all channels, taking the key to key + d ...
+                let (from, to) = (dec(key as f64), dec(key as f64 + d));
                 let gain = if from > 1e-6 {
                     (to / from).min(64.0)
                 } else {
                     1.0
                 };
                 let fill = (to - from * gain).max(0.0);
-                let mut logged: Vec<f64> = (0..3).map(|c| enc(before[c] * gain + fill)).collect();
-                let own: Vec<f64> = (0..3).map(|c| enc(before[c])).collect();
-                let own_luma = 0.2126 * own[0] + 0.7152 * own[1] + 0.0722 * own[2];
-                let luma = |l: &[f64]| 0.2126 * l[0] + 0.7152 * l[1] + 0.0722 * l[2];
-                if parts[1] > 0.0 {
-                    let w = parts[1] as f64 / 0.169;
+                let together: Vec<f64> = (0..3).map(|c| before[c] as f64 * gain + fill).collect();
+                // ... or each channel along the zone's curve on its own.
+                let each: Vec<f64> = (0..3)
+                    .map(|c| dec(own[c] + zone_table_offset(own[c] as f32, z, amount) as f64))
+                    .collect();
+                let per_channel = ZONE_STYLE[if amount > 0.0 { 1 } else { 2 }][z] as f64;
+                let toned: Vec<f64> = (0..3)
+                    .map(|c| together[c] + (each[c] - together[c]) * per_channel)
+                    .collect();
+                let mut logged: Vec<f64> = toned.iter().map(|&v| enc(v)).collect();
+                let finish = ZONE_STYLE[3][z] as f64;
+                if z == 1 && d > 0.0 && finish > 0.0 {
+                    let w = finish * d / 0.169;
                     let colour = 0.48 * (1.0 + 2.09 * (0.4 - own_luma)).max(0.0);
                     let l = luma(&logged);
                     logged = logged.iter().map(|v| v + w * colour * (v - l)).collect();
                 }
-                if parts[2] != 0.0 {
-                    let w = parts[2].abs() as f64 / 0.2;
-                    let colour = if parts[2] > 0.0 { -0.258 } else { -0.045 };
+                if z == 2 && d != 0.0 && finish > 0.0 {
+                    let w = finish * d.abs() / 0.2;
+                    let colour = if d > 0.0 { -0.258 } else { -0.045 };
                     let l = luma(&logged);
                     logged = logged.iter().map(|v| v + w * colour * (v - l)).collect();
                 }
                 for c in 0..3 {
-                    let want = dec(logged[c]).max(0.0);
+                    let want = dec(logged[c]) as f32;
                     assert!(
                         (after[c] - want).abs() < 2e-3 * want.max(0.01),
                         "{} {amount} channel {c}: {before:?} -> {after:?}, wanted {want}",

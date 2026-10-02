@@ -79,15 +79,15 @@ fn channel_curve(v: f32, channel: u32) -> f32 {
 // The four tone zones: Blacks, Shadows, Highlights, Whites, with Lightroom's
 // measured strength (tone_zones_table.rs, fitted by tools/fit_lighting.py;
 // docs/tone-zones.md). Each slider moves its part of the tonal range, judged
-// on the tonal key: the working-space
-// luminance in DaVinci Intermediate, taken from an edge-aware regional
-// average of the unedited picture, so a region moves as one (texture rides
-// along) and a dark subject against a bright sky lifts without a halo. The
-// zones apply in order, each on the previous result; every step is monotone,
-// so no combination of sliders can reverse tones. The result is a target
-// key, reached with one gain on all three channels (hues stay put); where
-// the region is too dark for any gain to reach it (pure black under a
-// Blacks lift), the rest is filled in neutral.
+// on the tonal key: the working-space luminance in DaVinci Intermediate, a
+// mix of the pixel's own and an edge-aware regional average of the unedited
+// picture (so texture rides along and a dark subject against a bright sky
+// lifts without a halo), per zone (ZONE_STYLE in plan.rs). The zones apply
+// in order, each on the previous result; every step is monotone, so no
+// combination of sliders can reverse tones. A zone moves a pixel by one gain
+// on all three channels (hues stay put; where no gain can reach, pure black
+// under a Blacks lift, the rest is filled in neutral), or, where Lightroom's
+// colour calls for it, each channel along the zone's curve on its own.
 fn shadow_key(working: vec3<f32>) -> f32 {
     let y = max(dot(working, vec3<f32>(0.27411851, 0.87363190, -0.14775041)), 0.0);
     if y <= 0.00262409 { return y * 10.44426855; }
@@ -124,23 +124,6 @@ fn zone_amounts() -> vec4<f32> {
     return clamp(vec4<f32>(parameters.basic[1].z * 0.4, parameters.basic[1].x * 1.2,
         parameters.basic[0].w * 1.2, parameters.basic[1].y * 0.3), vec4<f32>(-1.0), vec4<f32>(1.0));
 }
-struct Zones {
-    // The target key.
-    key: f32,
-    // Each zone's own offset, in Intermediate: [blacks, shadows, highlights, whites].
-    parts: vec4<f32>,
-}
-fn tone_zones(key: f32) -> Zones {
-    let amounts = zone_amounts();
-    var k = key;
-    var parts = vec4<f32>(0.0);
-    for (var z = 0u; z < 4u; z++) {
-        let d = zone_offset(k, z, amounts[z]);
-        parts[z] = d;
-        k = max(k + d, 0.0);
-    }
-    return Zones(k, parts);
-}
 // Contrast: a curve on each channel's DaVinci Intermediate value, the way
 // Resolve applies contrast (one curve per channel, so colours gain or lose
 // saturation with it, as there), with the strength and shape of
@@ -157,18 +140,26 @@ fn contrast_offset(x: f32, amount: f32) -> f32 {
     if a <= 0.5 { return a * 2.0 * half; }
     return mix(half, full, a * 2.0 - 1.0);
 }
-// Exposure: an exact gain (in basic_v2), then shaped the way Lightroom's
-// is, measured: shadows and midtones move more than a plain gain moves them
-// and highlights less, so brightening doesn't wash out the top and
-// darkening doesn't sink it. One gain on all three channels, keyed on the
-// exposed pixel's own tone (Lightroom's Exposure isn't local); tables at
-// 1 and 2.5 stops, held beyond 2.5 where the gain alone carries on.
-fn apply_exposure_shape(rgb: vec3<f32>) -> vec3<f32> {
+// Exposure: Lightroom's, measured. Its change for a tone is much the same
+// curve on every photo, judged by the tone before exposure: shadows and
+// midtones move more than a plain gain would move them, the brightest tones
+// less (brightening doesn't wash out the top; darkening holds white near
+// white). So the table takes each pixel's unexposed tonal key straight to
+// its exposed one (tables at 1 and 2.5 stops; beyond 2.5 a plain gain
+// carries on), reached by scaling the exposed pixel: the gain in basic_v2
+// supplies only its colour, whatever domain it ran in. Not local, as
+// Lightroom's isn't. Then Lightroom's colour: a little less saturation per
+// stop brightening, a little more darkening (EXPOSURE_COLOUR in plan.rs).
+fn apply_exposure_shape(rgb: vec3<f32>, unexposed: vec3<f32>) -> vec3<f32> {
     let stops = parameters.tone.x;
     if stops == 0.0 { return rgb; }
-    let y = dot(rgb, vec3<f32>(0.27411851, 0.87363190, -0.14775041));
+    // Brightness by weights that are all positive: the working space's own
+    // luminance weighs blue negatively, so a saturated blue reads near zero
+    // and the scaling below would jump there. Greys read the same either way.
+    let weights = vec3<f32>(0.2126, 0.7152, 0.0722);
+    let y = dot(max(rgb, vec3<f32>(0.0)), weights);
     if y <= 1e-6 { return rgb; }
-    let k = encode_intermediate(y);
+    let k = encode_intermediate(dot(max(unexposed, vec3<f32>(0.0)), weights));
     let p = clamp(k, 0.0, 1.0) * 64.0;
     let i = min(u32(floor(p)), 63u);
     let row = mix(parameters.exposure_shape[i], parameters.exposure_shape[i + 1u], p - f32(i));
@@ -178,8 +169,18 @@ fn apply_exposure_shape(rgb: vec3<f32>) -> vec3<f32> {
     if stops < 0.0 { one = row.z; more = row.w; }
     var d: f32;
     if a <= 1.0 { d = a * one; } else { d = mix(one, more, min((a - 1.0) / 1.5, 1.0)); }
-    let aim = max(decode_intermediate_soft(k + d), 0.0);
-    return rgb * (aim / y);
+    var aim = max(decode_intermediate_soft(k + d), 0.0);
+    if a > 2.5 { aim = aim * exp2(sign(stops) * (a - 2.5)); }
+    let exposed = rgb * (aim / y);
+    var per_stop = parameters.exposure_colour.x;
+    if stops < 0.0 { per_stop = parameters.exposure_colour.y; }
+    if per_stop == 0.0 { return exposed; }
+    // Lightroom's colour change levels off: what one stop does, more does too.
+    let s = max(1.0 + per_stop * min(a, 1.0), 0.0);
+    let logged = vec3<f32>(channel_key(exposed.r), channel_key(exposed.g), channel_key(exposed.b));
+    let l = dot(logged, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let mixed = vec3<f32>(l) + (logged - vec3<f32>(l)) * s;
+    return max(vec3<f32>(decode_intermediate_soft(mixed.r), decode_intermediate_soft(mixed.g), decode_intermediate_soft(mixed.b)), vec3<f32>(0.0));
 }
 fn apply_contrast(rgb: vec3<f32>) -> vec3<f32> {
     let amount = clamp(parameters.basic[0].y, -1.0, 1.0);
@@ -296,22 +297,49 @@ fn grade(input:vec3<f32>, tonal:vec3<f32>, structure:vec3<f32>, key:f32, detail_
     let balanced=parameters.white_balance*input;
     var toned=balanced;
     var seen=0.0;
-    let zones=tone_zones(key);
-    if zones.key != key {
-        let from_lin=max(decode_intermediate_soft(key),0.0);
-        let to_lin=max(decode_intermediate_soft(zones.key),0.0);
-        var gain=1.0;
-        if from_lin > 1e-6 { gain=min(to_lin/from_lin, 64.0); }
-        let fill=max(to_lin-from_lin*gain,0.0);
-        toned=balanced*gain+vec3<f32>(fill);
+    let amounts=zone_amounts();
+    if any(amounts != vec4<f32>(0.0)) {
+        // The regional key, carried along as each zone moves it.
+        var regional=key;
+        var parts=vec4<f32>(0.0);
+        for (var z=0u; z<4u; z++) {
+            let a=amounts[z];
+            if a == 0.0 { continue; }
+            let own=shadow_key(toned);
+            let k=mix(regional, own, parameters.zone_style[0][z]);
+            let d=zone_offset(k, z, a);
+            parts[z]=d;
+            regional=max(regional+d, 0.0);
+            // One gain on all channels, taking k to k+d.
+            let from_lin=max(decode_intermediate_soft(k),0.0);
+            let to_lin=max(decode_intermediate_soft(max(k+d,0.0)),0.0);
+            var gain=1.0;
+            if from_lin > 1e-6 { gain=min(to_lin/from_lin, 64.0); }
+            let together=toned*gain+vec3<f32>(max(to_lin-from_lin*gain,0.0));
+            // Each channel on its own, read where the key reads it (shifted
+            // by the region's difference from the pixel).
+            var each=toned;
+            var per_channel=parameters.zone_style[2][z];
+            if a > 0.0 { per_channel=parameters.zone_style[1][z]; }
+            if per_channel > 0.0 {
+                for (var c=0u; c<3u; c++) {
+                    let x=channel_key(toned[c]);
+                    let dc=zone_offset(x+(k-own), z, a);
+                    each[c]=max(decode_intermediate_soft(max(x+dc,0.0)),0.0);
+                }
+            }
+            toned=mix(together, each, per_channel);
+        }
         let own_luma=log_luma709(balanced);
-        toned=shadows_finish(toned, zones.parts.y, own_luma, detail_base);
-        toned=highlights_finish(toned, zones.parts.z, own_luma, detail_base);
-        seen=log2(max(gain,1e-4));
+        toned=shadows_finish(toned, parts.y*parameters.zone_style[3][1], own_luma, detail_base);
+        toned=highlights_finish(toned, parts.z*parameters.zone_style[3][2], own_luma, detail_base);
+        let y0=dot(balanced,vec3<f32>(0.27411851,0.87363190,-0.14775041));
+        let y1=dot(toned,vec3<f32>(0.27411851,0.87363190,-0.14775041));
+        if y0 > 1e-6 && y1 > 1e-6 { seen=log2(clamp(y1/y0, 1e-4, 64.0)); }
     }
     // The previous engine's controls see the picture as the zones left it.
     var rgb=basic_v2(toned, lifted_neighbourhood(tonal, seen), lifted_neighbourhood(structure, seen));
-    rgb=apply_exposure_shape(rgb);
+    rgb=apply_exposure_shape(rgb, toned);
     // After Exposure, as in Lightroom, so the pivot follows the exposed picture.
     rgb=apply_contrast(rgb);
     let y=dot(rgb,vec3<f32>(0.27411851,0.87363190,-0.14775041));

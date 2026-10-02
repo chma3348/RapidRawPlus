@@ -33,10 +33,20 @@ TARGETS = os.path.join(HERE, "tone_zones_targets.json")
 SUP = os.path.expanduser("~/Library/Application Support/io.github.CyberTimon.RapidRAW")
 KNOTS = 65
 MIN_SLOPE = 0.1
+# Lightroom's curves are smooth; a table fitted knot by knot picks up the
+# measurement's noise, and a kink in a tone curve shows as a band, or (on the
+# regional key) as a puddle. Every curve is smoothed, and its slope (output
+# key per input key) held between these, before it is written.
+SMOOTHING = 100.0
+SLOPE_RANGE = (0.3, 2.2)
+# Exposure's shaping is steep near white: darkening, Lightroom holds the
+# brightest tones back (at -1 stop white moves 3 L*, a tone at L* 90 14).
+EXPOSURE_SLOPE_RANGE = (0.1, 8.0)
 ZONES = ["blacks", "shadows", "highlights", "whites"]
 SLIDERS = ZONES + ["contrast", "exposure"]
 STRENGTHS = [("lift_half", 50), ("lift", 100), ("cut_half", -50), ("cut", -100)]
-# Exposure's tables are at 1 and 2.5 stops, and shape what its gain leaves.
+# Exposure's tables are at 1 and 2.5 stops, by the unexposed tone, like the
+# zones' (its gain supplies only colour, and what lies beyond 2.5 stops).
 EXPOSURE_STRENGTHS = [("lift_half", 1), ("lift", 2.5), ("cut_half", -1), ("cut", -2.5)]
 
 
@@ -67,6 +77,15 @@ _n = _odt.shape[0]
 _diag = np.array([_odt[i, i, i].mean() for i in range(_n)])
 KEYS = np.linspace(0, 1, 8193)
 _display = np.interp(KEYS, np.linspace(0, 1, _n), _diag)
+
+
+def encode_di(y):
+    y = np.maximum(y, 0.0)
+    return np.where(y <= 0.00262409, y * 10.44426855, (np.log2(y + 0.0075) + 7.0) * 0.07329248)
+
+
+def decode_di(v):
+    return np.where(v <= 0.02740668, v / 10.44426855, np.exp2(v / 0.07329248 - 7.0) - 0.0075)
 
 
 def lightness(display):
@@ -200,16 +219,38 @@ def adapt_seed(path):
     write(targets)
 
 
+def smooth_curve(k_out, slope_range=SLOPE_RANGE):
+    """The smooth curve nearest the fitted one (a Whittaker smoother: least
+    squares plus a penalty on its bending), with its slope held in
+    SLOPE_RANGE, kept as close to the fitted curve as that allows."""
+    n = len(k_out)
+    D = np.diff(np.eye(n), 2, axis=0)
+    lam = SMOOTHING
+    y = np.linalg.solve(np.eye(n) + lam * D.T @ D, np.asarray(k_out, float))
+    x = np.linspace(0, 1, n)
+    lo, hi = slope_range
+    for _ in range(4):
+        slope = np.clip(np.diff(y) / np.diff(x), lo, hi)
+        z = np.concatenate([[0.0], np.cumsum(slope * np.diff(x))])
+        # Anchored where it best matches the fitted curve.
+        y = z + np.mean(np.asarray(k_out) - z)
+        y = np.linalg.solve(np.eye(n) + 0.25 * lam * D.T @ D, y)
+    slope = np.clip(np.diff(y) / np.diff(x), lo, hi)
+    z = np.concatenate([[0.0], np.cumsum(slope * np.diff(x))])
+    return z + np.mean(np.asarray(k_out) - z)
+
+
 def keyed_table(offsets):
     k_out = np.maximum.accumulate(KN + np.array(offsets))
     for i in range(1, KNOTS):
         k_out[i] = max(k_out[i], k_out[i - 1] + MIN_SLOPE * (KN[i] - KN[i - 1]))
-    return k_out - KN
+    return smooth_curve(k_out) - KN
 
 
-def table_from_targets(targets):
+def table_from_targets(targets, slope_range=SLOPE_RANGE):
     """Offsets per key knot from grey targets (L* in -> L* out)."""
     kn = np.linspace(0, 1, KNOTS)
+    base = kn
     L_in = np.interp(kn, KEYS, L_OF_KEY)
     out = np.interp(L_in, GRID, targets)
     k_out = key_of(out)
@@ -218,18 +259,24 @@ def table_from_targets(targets):
     flat = np.nonzero(L_in >= TOP - 0.05)[0]
     if len(flat) and flat[0] > 0:
         w = flat[0]
-        k_out[w:] = kn[w:] + (k_out[w - 1] - kn[w - 1])
+        k_out[w:] = base[w:] + (k_out[w - 1] - base[w - 1])
     # Never reverse or merge tones: each knot lands above the one before by
     # at least a tenth of the step, so even every slider at its extreme at
     # once keeps neighbouring tones apart.
     k_out = np.maximum.accumulate(k_out)
     for i in range(1, KNOTS):
         k_out[i] = max(k_out[i], k_out[i - 1] + MIN_SLOPE * (kn[i] - kn[i - 1]))
-    return k_out - kn
+    return smooth_curve(k_out, slope_range) - base
 
 
 def write(targets):
-    tables = {(s, name): table_from_targets(np.array(targets[s][name])) for s in SLIDERS for name, _ in strengths(s)}
+    tables = {}
+    for s in SLIDERS:
+        for name, v in strengths(s):
+            if s == "exposure":
+                tables[(s, name)] = table_from_targets(np.array(targets[s][name]), EXPOSURE_SLOPE_RANGE)
+            else:
+                tables[(s, name)] = table_from_targets(np.array(targets[s][name]))
     for slot, offsets in targets.get("_keyed", {}).items():
         s, name = slot.split("/")
         tables[(s, name)] = keyed_table(offsets)
@@ -283,31 +330,19 @@ def write(targets):
     print("wrote", os.path.normpath(TABLE))
 
 
-def gained(r, stops):
-    """Where a tone of lightness GRID lands under Exposure's plain gain: the
-    measured change before any shaping (from the first sweep, whose slider
-    read 0.8 per stop)."""
-    d = pooled(r, "ours", "exposure", round(stops * 0.8, 2))
-    return np.maximum.accumulate(GRID + d)
-
-
-def seed(path):
+def seed(path, only=None):
     r = json.load(open(path))
-    targets = {"_gain": {}}
+    targets = json.load(open(TARGETS)) if only else {}
     for s in SLIDERS:
+        if only and s != only:
+            continue
         targets[s] = {}
         for name, v in strengths(s):
             d = pooled(r, "adobe", s, v)
             if d is None:
                 raise SystemExit(f"no Lightroom measurement for {s} {v}")
-            if s == "exposure":
-                # Targets for the exposed tone: where the plain gain put it,
-                # to where Lightroom puts it.
-                g = gained(r, v)
-                targets["_gain"][name] = g.tolist()
-                targets[s][name] = np.clip(np.interp(GRID, g, GRID + d), 0, TOP).tolist()
-            else:
-                targets[s][name] = np.clip(GRID + d, 0, TOP).tolist()
+            targets[s][name] = np.clip(GRID + d, 0, TOP).tolist()
+    targets.pop("_gain", None)
     write(targets)
 
 
@@ -327,12 +362,7 @@ def correct(path, damping=0.8):
                 got_k = adapted_pool(r, "ours", s, name, v, targets["_adapt"])
                 targets["_keyed"][f"{s}/{name}"] = (np.array(targets["_keyed"][f"{s}/{name}"]) + damping * (want_k - got_k)).tolist()
                 continue
-            if s == "exposure":
-                # The miss for each original tone, moved to where the gain put it.
-                miss_at = np.interp(GRID, np.array(targets["_gain"][name]), miss)
-                t = np.array(targets[s][name]) + damping * miss_at
-            else:
-                t = np.array(targets[s][name]) + damping * miss
+            t = np.array(targets[s][name]) + damping * miss
             # Keep the targets ordered (no reversal) and inside the display range.
             t = np.clip(np.maximum.accumulate(t), 0, TOP)
             targets[s][name] = t.tolist()
@@ -342,7 +372,7 @@ def correct(path, damping=0.8):
 
 if __name__ == "__main__":
     if len(sys.argv) >= 3 and sys.argv[1] == "seed":
-        seed(sys.argv[2])
+        seed(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None)
     elif len(sys.argv) >= 3 and sys.argv[1] == "adapt":
         adapt_seed(sys.argv[2])
     elif len(sys.argv) >= 3 and sys.argv[1] == "correct":

@@ -82,7 +82,34 @@ pub(crate) struct GpuParameters {
     /// highlights, whites]: a shift of where each reads its table, and the
     /// strength of a lift and of a cut (see `PhotoTones`).
     pub zone_adapt: [[f32; 4]; 3],
+    /// How each zone moves a pixel (`ZONE_STYLE`).
+    pub zone_style: [[f32; 4]; 4],
+    /// Exposure's colour (`EXPOSURE_COLOUR`).
+    pub exposure_colour: [f32; 4],
 }
+
+/// How each tone zone moves a pixel, per zone [blacks, shadows, highlights,
+/// whites], chosen by scoring candidates against Lightroom's exports for
+/// colour and smoothness (docs/tone-zones.md):
+/// - locality: 0 judges a pixel by its region's tone (the edge-aware
+///   regional key), 1 by its own;
+/// - per-channel when lifting, and when cutting: 0 moves all three channels
+///   by one gain (hues kept), 1 moves each channel along the zone's curve on
+///   its own (Blacks sinking, Whites lifting: Lightroom keeps deep colours'
+///   saturation and doesn't pale lifted ones);
+/// - finish: Resolve's colour and texture finishes on Shadows and
+///   Highlights, off (they rendered less like Lightroom).
+pub const ZONE_STYLE: [[f32; 4]; 4] = [
+    [1.0, 0.5, 0.5, 1.0],
+    [0.0, 0.0, 0.0, 1.0],
+    [1.0, 0.0, 0.0, 0.0],
+    [0.0, 0.0, 0.0, 0.0],
+];
+
+/// Exposure's colour, measured against Lightroom: the change in saturation
+/// (a mix toward luma of the Intermediate log values) for the first stop
+/// brightening and darkening, [up, down, 0, 0], held beyond one stop.
+pub const EXPOSURE_COLOUR: [f32; 4] = [-0.25, 0.1, 0.0, 0.0];
 
 /// Where a photo's tones sit, on the tonal key, from its unedited picture:
 /// its median and its brightest (99th percentile). Lightroom's Highlights
@@ -397,6 +424,8 @@ impl RenderPlan {
             contrast: super::tone_zones_table::CONTRAST,
             exposure_shape: super::tone_zones_table::EXPOSURE,
             zone_adapt: [[0.; 4], [1.; 4], [1.; 4]],
+            zone_style: ZONE_STYLE,
+            exposure_colour: EXPOSURE_COLOUR,
             look: [0.; 4],
             look_flags: [0; 4],
             work_to_look: packed(
