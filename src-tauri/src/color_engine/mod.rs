@@ -15,6 +15,8 @@ pub mod optics;
 pub mod patches;
 pub mod plan;
 pub mod raw;
+pub mod raw_look;
+pub mod raw_look_table;
 pub mod reference;
 mod renderer;
 pub mod selection;

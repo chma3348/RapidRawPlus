@@ -498,6 +498,8 @@ mod tests {
             .as_ref()
             .unwrap()
             .restore(&mut expected_off);
+        // The app develops a RAW with its starting look after recovery.
+        super::super::raw_look::apply(&mut expected_off);
         assert_eq!(off.pixels, expected_off);
         assert_ne!(off.pixels, on.pixels);
         assert_eq!(restored.pixels, on.pixels);

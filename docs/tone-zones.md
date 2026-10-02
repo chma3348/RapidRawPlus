@@ -81,8 +81,10 @@ tables at 50 and at 100 on both sides, straight between them and toward 0.
 
 ## Two sliders adapt to the photo
 
-Lightroom's tone controls look at the picture. Measured on the photos both
-engines render alike (JPEGs and the chart):
+Lightroom's tone controls look at the picture. Measured on every photo: since
+RAWs open as Lightroom's default does (docs/raw-look.md), RAWs start alike in
+both engines too and count alongside the JPEGs and the chart (before, they
+were left out):
 
 - **Highlights** works relative to the photo's median tone: a bright, high-key
   picture's highlights are pulled much harder than a dark one's. The zone
@@ -94,32 +96,30 @@ engines render alike (JPEGs and the chart):
 
 The photo's median and brightest tones (`PhotoTones` in plan.rs) are taken
 from the unedited picture's tonal key, computed with the zones' regional key.
-They are RapidRAW's own rendering's tones: a RAW, which RapidRAW renders at the
-camera's exposure where Lightroom's default lifts it near white, gets the
-strength its own rendering calls for.
 
 ## Fit (16 photos: 7 RAWs, 8 JPEGs, the chart)
 
 Typical per-photo error against Lightroom (median over photos of each
 photo's rms L* difference along the tonal range), JPEGs and chart / RAWs:
-before calibration → the first fit → now (both 1 October).
+before calibration → the first fit → now (all 1 October; "now" with RAWs
+opening as Lightroom's default, docs/raw-look.md).
 
 | slider | before | first fit | now |
 |---|---|---|---|
-| Whites +100 | 17.1 / 11.7 | 3.1 / 11.2 | 3.2 / 12.2 |
-| Whites −100 | 3.7 / 3.5 | 0.8 / 0.8 | 0.3 / 0.2 |
-| Blacks −100 | 14.4 / 14.5 | 0.8 / 1.7 | 0.8 / 1.0 |
-| Blacks +100 | 6.2 / 9.1 | 0.5 / 1.9 | 0.5 / 2.0 |
-| Shadows +100 | 6.0 / 9.0 | 2.3 / 3.7 | 2.9 / 3.8 |
-| Shadows −100 | 3.9 / 5.2 | 1.9 / 1.9 | 1.9 / 1.6 |
-| Highlights +100 | 3.0 / 9.2 | 1.2 / 5.9 | 1.2 / 4.8 |
-| Highlights −100 | 4.4 / 9.7 | 3.5 / 5.1 | 4.1 / 5.7 |
-| Contrast +100 | 7.0 / 8.0 | 1.7 / 2.9 | 1.8 / 3.0 |
-| Contrast −100 | 7.0 / 6.6 | 1.4 / 2.1 | 1.4 / 2.0 |
-| Exposure +1 | | 1.3 / 4.0 | 0.6 / 2.0 |
-| Exposure +2.5 | | 2.8 / 6.0 | 0.9 / 4.1 |
-| Exposure −1 | | 0.4 / 8.0 | 0.4 / 1.7 |
-| Exposure −2.5 | | 0.3 / 10.8 | 0.5 / 2.3 |
+| Whites +100 | 17.1 / 11.7 | 3.1 / 11.2 | 2.5 / 4.9 |
+| Whites −100 | 3.7 / 3.5 | 0.8 / 0.8 | 0.4 / 0.6 |
+| Blacks −100 | 14.4 / 14.5 | 0.8 / 1.7 | 1.1 / 1.3 |
+| Blacks +100 | 6.2 / 9.1 | 0.5 / 1.9 | 0.5 / 1.9 |
+| Shadows +100 | 6.0 / 9.0 | 2.3 / 3.7 | 2.5 / 2.8 |
+| Shadows −100 | 3.9 / 5.2 | 1.9 / 1.9 | 1.8 / 1.6 |
+| Highlights +100 | 3.0 / 9.2 | 1.2 / 5.9 | 1.7 / 3.1 |
+| Highlights −100 | 4.4 / 9.7 | 3.5 / 5.1 | 3.6 / 5.7 |
+| Contrast +100 | 7.0 / 8.0 | 1.7 / 2.9 | 2.0 / 3.1 |
+| Contrast −100 | 7.0 / 6.6 | 1.4 / 2.1 | 1.5 / 2.5 |
+| Exposure +1 | | 1.3 / 4.0 | 0.7 / 2.1 |
+| Exposure +2.5 | | 2.8 / 6.0 | 0.8 / 3.6 |
+| Exposure −1 | | 0.4 / 8.0 | 0.5 / 1.8 |
+| Exposure −2.5 | | 0.3 / 10.8 | 0.5 / 2.9 |
 
 The smoothing costs a little lightness accuracy here and there (a curve
 can't follow every wiggle of the measurement) for no kinks. Exposure's RAW
@@ -128,9 +128,8 @@ error fell because its shaping was read by the exposed tone, which on a RAW
 past the range the table was learnt on: darkening a RAW brightened its
 L* 80–90 tones.
 
-Known gaps: Whites +100 on RAWs (Lightroom's default lifts a RAW's
-highlights near white where ours keeps the camera's exposure, so the two
-start apart and the adaptation, learnt on JPEGs, doesn't carry over); one
+RAWs open as Lightroom's default now (docs/raw-look.md), which closed most
+of the RAW gap (Whites +100 on RAWs 12.2 → 4.9). Known gaps: one
 bright JPEG's Highlights −100 (Lightroom pulls it 53 L*); Lightroom pulls
 the brightest pastels and whites a little further under Highlights −100.
 Exposure +1 and +2.5 colour still differ a little beyond chroma (about 1.1
@@ -148,6 +147,12 @@ it, so with exposure set they differ slightly.
    re-renders, re-measures and moves each table by what is still missing.
    Targets live in `tools/tone_zones_targets.json`; the tables in
    `color_engine/tone_zones_table.rs` are generated, never hand-edited.
+
+`correct` keeps each target where its table actually takes the tone. The
+smoothing, the slope limits and "a lift only lifts" can stop a table from
+following its targets; a correction would otherwise keep pushing a target
+the table never reaches until the curve built from it went wrong elsewhere
+(Shadows +100 crept to over-lifting the lower midtones that way).
 
 The tables never reverse tones: every knot lands above the one before by at
 least a tenth of the step (so every slider at its extreme at once still keeps

@@ -145,18 +145,13 @@ def key_offsets(curve, bins):
 
 
 def photo_curves(result, engine, s, v):
-    """Per photo, for the photos both engines render alike: pictures already
-    rendered (JPEGs, the chart). A RAW's unedited rendering differs between
-    them (Lightroom's default puts its brightest tones near white; ours keeps
-    the camera's exposure), and these sliders adapt to the photo as rendered,
-    so their rules are learnt where the renderings agree and then applied to
-    every photo as RapidRAW renders it."""
+    """Per photo, for the photos both engines start alike. Every photo now:
+    rendered photographs always did, and RAWs have opened as Lightroom's
+    default since the RAW look (raw_look.rs). Before it, RAWs were left out
+    (ours kept the camera's exposure where Lightroom's lifted it)."""
     bins = np.array(result["bins"])
-    raw = set(result.get("raw", []))
     out = []
     for photo, data in result[engine].items():
-        if photo in raw:
-            continue
         m = data.get(s, {}).get(f"{v:g}")
         tones = result["ours"].get(photo, {}).get("_tones")
         if m and tones:
@@ -188,8 +183,7 @@ def adapted_pool(result, engine, s, name, v, adapt):
 
 def fit_adaptation(result):
     """The centre for Highlights and Whites' strength law, from Lightroom."""
-    raw = set(result.get("raw", []))
-    tones = [d["_tones"] for p, d in result["ours"].items() if "_tones" in d and p not in raw]
+    tones = [d["_tones"] for p, d in result["ours"].items() if "_tones" in d]
     centre = float(np.median([t["median"] for t in tones]))
     # Whites +100's strength per photo relative to the typical photo, against
     # where its brightest tones sit.
@@ -326,6 +320,18 @@ def write(targets):
         lines.append("    [" + ", ".join(f"{tables[('exposure', n)][i]:.6f}" for n in ("lift_half", "lift", "cut_half", "cut")) + "],")
     lines.append("];")
     open(TABLE, "w").write("\n".join(lines) + "\n")
+    # Keep each target where its table actually takes the tone: smoothing,
+    # the slope limits and "a lift only lifts" can stop a table following
+    # its targets, and a correction would otherwise keep pushing a target
+    # the table never reaches (wind-up), until the curve built from it goes
+    # wrong elsewhere.
+    for s in SLIDERS:
+        for name, _ in strengths(s):
+            if f"{s}/{name}" in targets.get("_keyed", {}):
+                continue
+            k = key_of(GRID)
+            reached = L_of_key(k + np.interp(k, KN, tables[(s, name)]))
+            targets[s][name] = np.where(GRID >= TOP - 0.05, targets[s][name], reached).tolist()
     json.dump(targets, open(TARGETS, "w"), indent=1)
     print("wrote", os.path.normpath(TABLE))
 

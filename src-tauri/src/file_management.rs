@@ -64,7 +64,7 @@ fn compute_thumbnail_cache_hash(path_str: &str, adjustments_bytes: &[u8]) -> Opt
         .as_secs();
 
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"v3-only-thumbnails-2026-09-28\0");
+    hasher.update(b"v3-only-thumbnails-2026-10-01-raw-look\0");
     hasher.update(path_str.as_bytes());
     hasher.update(&img_mod_time.to_le_bytes());
     hasher.update(adjustments_bytes);

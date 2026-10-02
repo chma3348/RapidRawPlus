@@ -176,12 +176,22 @@ fn source_for(
         Some(bytes) => bytes,
         None => std::fs::read(&path)?,
     };
-    let mut frame = if crate::formats::is_raw_file(&path) {
+    let is_raw = crate::formats::is_raw_file(&path);
+    let mut frame = if is_raw {
         super::raw::decode_raw(&bytes, quality == Quality::Thumbnail, || Ok(()))?
     } else {
         super::input::decode_profiled_photo(&bytes)?
     };
     pair.recovery.apply(&mut frame);
+    // A RAW opens as Lightroom's default rendering shows it (raw_look.rs);
+    // a rendered photograph already does.
+    if is_raw {
+        super::raw_look::apply(&mut frame.pixels);
+        frame
+            .provenance
+            .interpretation
+            .push_str(" + raw_look_lightroom_default_1");
+    }
     // A captured input transform turns a rendered photograph into scene data,
     // undoing whatever rendering it already carries, exactly as Resolve does
     // on import. After it the source is indistinguishable from a RAW's, so

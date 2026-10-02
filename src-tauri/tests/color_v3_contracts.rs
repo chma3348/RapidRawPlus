@@ -2080,12 +2080,14 @@ fn tone_zones_on_greys() {
             }
         }
     }
-    // Blacks +100 lifts pure black to a soft matte, filled in neutral.
+    // Blacks +100 lifts pure black to a soft matte (as far as Lightroom's
+    // does, from the table), filled in neutral.
     let lifted = render([1.0, 0.0, 0.0, 0.0]);
     let black = lifted.graded.get_pixel(0, 0);
+    let matte = dec(zone_target(0.0, [1.0, 0.0, 0.0, 0.0]).0);
     assert!(
-        black[1] > 0.004 && (black[0] - black[1]).abs() < 1e-6,
-        "pure black under Blacks +100: {black:?}"
+        matte > 0.002 && (black[1] - matte).abs() < 2e-4 && (black[0] - black[1]).abs() < 1e-6,
+        "pure black under Blacks +100: {black:?}, the table says {matte}"
     );
     // Slider 0 is the identity.
     assert_eq!(neutral.working, neutral.graded);
