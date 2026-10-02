@@ -327,9 +327,14 @@ export function useImageProcessing(
     }
 
     const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
-    const sharpnessFactor = 1.25;
+    const native = appSettings?.useFullDpiRendering ?? true;
+    // At the screen's real pixels the preview is drawn 1:1; any oversize
+    // only makes the browser shrink it again, which softens it.
+    const sharpnessFactor = native ? 1.0 : 1.25;
     const zoomMultiplier = appSettings?.highResZoomMultiplier || 1.0;
-    const effectiveDpr = appSettings?.useFullDpiRendering ? dpr : 1;
+    // The screen's real pixels by default, as Lightroom renders: a Retina
+    // screen otherwise shows a half-resolution preview stretched twice over.
+    const effectiveDpr = (appSettings?.useFullDpiRendering ?? true) ? dpr : 1;
 
     let targetRes = Math.max(displaySize.width, displaySize.height) * effectiveDpr * sharpnessFactor * zoomMultiplier;
     targetRes = Math.max(targetRes, 512);
@@ -343,7 +348,8 @@ export function useImageProcessing(
     }
 
     if (originalSize && targetRes !== Math.max(originalSize.width, originalSize.height)) {
-      targetRes = Math.ceil(targetRes / 256) * 256;
+      const step = native ? 64 : 256;
+      targetRes = Math.ceil(targetRes / step) * step;
     }
 
     return Math.round(targetRes);

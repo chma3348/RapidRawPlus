@@ -1233,7 +1233,7 @@ fn render(
         let full_width = full.0;
         let image = if let Some(dim) = max_dimension {
             ensure!((16..=16384).contains(&dim), "Invalid v3 preview dimensions");
-            crate::image_processing::downscale_f32_image(&transformed, dim, dim)
+            crate::image_processing::resample_f32_image(&transformed, dim, dim)
         } else {
             transformed.into_owned()
         };

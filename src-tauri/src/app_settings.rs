@@ -361,6 +361,11 @@ pub struct AppSettings {
     pub enable_zoom_hifi: Option<bool>,
     #[serde(default)]
     pub use_full_dpi_rendering: Option<bool>,
+    /// Set once native-resolution previews became the default, so a choice
+    /// saved before (when the default was off) is turned on once, and a
+    /// later choice to turn it off is kept.
+    #[serde(default)]
+    pub native_dpi_default_applied: bool,
     #[serde(default)]
     pub high_res_zoom_multiplier: Option<f32>,
     #[serde(default)]
@@ -497,7 +502,8 @@ impl Default for AppSettings {
             #[cfg(not(target_os = "android"))]
             editor_preview_resolution: Some(1920),
             enable_zoom_hifi: Some(true),
-            use_full_dpi_rendering: Some(false),
+            use_full_dpi_rendering: Some(true),
+            native_dpi_default_applied: true,
             enable_live_previews: Some(true),
             output_color_space: None,
             editor_layout: None,
@@ -614,6 +620,15 @@ pub fn load_settings(app_handle: AppHandle) -> Result<AppSettings, String> {
         && let Some(last) = &settings.last_root_path
     {
         settings.root_folders.push(last.clone());
+        settings_modified = true;
+    }
+
+    // Previews render at the screen's real pixel count by default (as
+    // Lightroom's do): a Retina screen otherwise gets a half-resolution
+    // preview stretched twice over.
+    if !settings.native_dpi_default_applied {
+        settings.use_full_dpi_rendering = Some(true);
+        settings.native_dpi_default_applied = true;
         settings_modified = true;
     }
 

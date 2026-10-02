@@ -199,6 +199,8 @@ export interface AppSettings {
   aiProvider?: string;
   decorations?: any;
   editorPreviewResolution?: number;
+  /** Set once native-resolution previews became the default (app_settings.rs). */
+  nativeDpiDefaultApplied?: boolean;
   enableZoomHifi?: boolean;
   useFullDpiRendering?: boolean;
   highResZoomMultiplier?: number;
