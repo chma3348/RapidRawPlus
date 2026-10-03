@@ -71,10 +71,11 @@ impl<T: Weigh> Slots<T> {
         }
     }
 
-    const KEEP: usize = 2;
-    /// Two entries are kept (a zoomed-in editor alternates between the
-    /// whole picture on screen and the full-size region), but never more than
-    /// this between them unless one alone is larger.
+    /// A zoomed-in editor moves between up to five sizes of the same picture:
+    /// the whole on screen, the whole while a slider moves (two sizes), the
+    /// region at its zoom size and the region while a slider moves.
+    const KEEP: usize = 5;
+    /// Never more than this between them unless one alone is larger.
     const BUDGET: usize = 768 << 20;
 
     /// The entry `hit` accepts, now the most recently used.
@@ -123,6 +124,33 @@ impl HalfImage {
         }
     }
 
+    /// The part at pixel rectangle `(x, y, w, h)`, as 32-bit floats: a
+    /// zoomed-in region needs no more of the picture than that.
+    fn crop(&self, (x, y, w, h): (u32, u32, u32, u32)) -> Arc<DynamicImage> {
+        use rayon::prelude::*;
+        let stride = self.width as usize * 4;
+        let data: Vec<f32> = (y as usize..(y + h) as usize)
+            .into_par_iter()
+            .flat_map_iter(|row| {
+                let start = row * stride + x as usize * 4;
+                self.data[start..start + w as usize * 4]
+                    .iter()
+                    .map(|v| v.to_f32())
+            })
+            .collect();
+        Arc::new(DynamicImage::ImageRgba32F(
+            image::Rgba32FImage::from_raw(w, h, data).expect("a crop keeps its own size"),
+        ))
+    }
+
+    /// The haze colour of the whole picture (`detail::airlight`), read
+    /// straight from the stored values.
+    fn airlight(&self) -> [f32; 3] {
+        super::detail::airlight_of(self.data.len() / 4, |i| {
+            std::array::from_fn(|c| self.data[i * 4 + c].to_f32())
+        })
+    }
+
     fn picture(&self) -> Arc<DynamicImage> {
         use rayon::prelude::*;
         let data: Vec<f32> = self.data.par_iter().map(|v| v.to_f32()).collect();
@@ -161,6 +189,9 @@ pub struct V3Caches {
     /// measured once so every render of it, preview, zoomed region or
     /// export, reduces it alike.
     pub noise: Mutex<Option<(Arc<DecodedFrame>, f32)>>,
+    /// Where the whole prepared picture's tones sit, for renders of part of
+    /// it (the tone sliders adapt to the whole photo, not the part shown).
+    tones: Mutex<Option<(std::sync::Weak<HalfImage>, super::plan::PhotoTones)>>,
 }
 
 impl V3Caches {
@@ -236,6 +267,16 @@ pub struct DetailCache {
     key: u64,
     image: HalfImage,
 }
+
+/// A render of part of the picture: the part asked for, and the larger part
+/// actually processed (the margin every filter in use needs, so the part
+/// asked for comes out exactly as in a render of the whole), as pixel
+/// rectangles `(x, y, w, h)` of the whole picture at this size.
+#[derive(Clone, Copy)]
+struct Window {
+    rect: (u32, u32, u32, u32),
+    ext: (u32, u32, u32, u32),
+}
 pub struct NeighbourhoodCache {
     source: Arc<DecodedFrame>,
     key: u64,
@@ -249,7 +290,7 @@ pub struct PreparedCache {
     transform: u64,
     patches: u64,
     dimension: Option<u32>,
-    image: HalfImage,
+    image: Arc<HalfImage>,
     offset: (f32, f32),
     scale: f32,
 }
@@ -686,15 +727,16 @@ fn mask_bitmap(
 /// against everything that determines them, so dragging any other slider does
 /// not redo a spatial pass.
 #[allow(clippy::too_many_arguments)]
+/// `picture`: the prepared picture's key (geometry, patches, size, and the
+/// window of it when only part is rendered).
 fn spatial(
     caches: &V3Caches,
     source: &Arc<DecodedFrame>,
     image: Arc<DynamicImage>,
     controls: &Controls,
-    transform: u64,
-    patches: u64,
-    dimension: Option<u32>,
+    picture: (u64, u64, Option<u32>, Option<super::renderer::Rect>),
     scale: f32,
+    whole_airlight: Option<[f32; 3]>,
 ) -> Result<Arc<DynamicImage>> {
     use std::hash::{Hash, Hasher};
     let effects = &controls.effects;
@@ -715,9 +757,7 @@ fn spatial(
         .map(f32::to_bits)
         .hash(&mut hasher);
     }
-    transform.hash(&mut hasher);
-    patches.hash(&mut hasher);
-    dimension.hash(&mut hasher);
+    picture.hash(&mut hasher);
     scale.to_bits().hash(&mut hasher);
     let key = hasher.finish();
     if let Ok(mut cache) = caches.detail.lock()
@@ -730,13 +770,17 @@ fn spatial(
     let y = super::spaces::rgb_to_xyz(source.color.primaries).row(1);
     let weights = [y.x as f32, y.y as f32, y.z as f32];
     let noise = (controls.detail.color_noise > 0.).then(|| photo_noise(caches, source));
+    let whole = super::detail::Whole {
+        noise,
+        airlight: whole_airlight,
+    };
     let mut pixels = image.to_rgba32f();
     drop(image);
     super::optics::correct_chromatic_aberration(&mut pixels, effects);
-    super::detail::apply(&mut pixels, &controls.detail, weights, scale, noise);
+    super::detail::apply(&mut pixels, &controls.detail, weights, scale, whole);
     if let Some(clarity) = super::optics::centre_clarity(effects) {
         let mut clarified = pixels.clone();
-        super::detail::apply(&mut clarified, &clarity, weights, scale, noise);
+        super::detail::apply(&mut clarified, &clarity, weights, scale, whole);
         super::optics::blend_centre(&mut pixels, &clarified);
     }
     super::optics::add_light(
@@ -785,6 +829,7 @@ fn neighbourhood(
     image: &DynamicImage,
     key: u64,
     display: Option<&super::cube::CubeLut>,
+    short_edge: usize,
 ) -> (Arc<Vec<[f32; 4]>>, super::plan::PhotoTones) {
     if let Ok(mut cache) = caches.neighbourhood.lock()
         && let Some(c) = cache.find(|c| Arc::ptr_eq(&c.source, source) && c.key == key)
@@ -811,9 +856,6 @@ fn neighbourhood(
         .transpose()
         .to_cols_array_2d()
         .map(|r| r.map(|v| v as f32));
-    // Brightness by positive weights (see `shadow_key` in the shader): the
-    // working space's luminance reads deep blues as nearly black.
-    let luminance = [0.2126f32, 0.7152, 0.0722];
     let rec709 = [0.2126f32, 0.7152, 0.0722];
     let mut planes = vec![vec![0f32; w * h]; 3];
     let mut zone_key = vec![0f32; w * h];
@@ -843,11 +885,7 @@ fn neighbourhood(
                     let working: [f32; 3] = std::array::from_fn(|c| {
                         to_working[c][0] * p[0] + to_working[c][1] * p[1] + to_working[c][2] * p[2]
                     });
-                    let y: f32 = (0..3)
-                        .map(|c| luminance[c] * working[c].max(0.))
-                        .sum::<f32>()
-                        .max(0.);
-                    keys[j] = spaces::encode_intermediate(y as f64) as f32;
+                    keys[j] = zone_key_of(working);
                     details[j] = (0..3)
                         .map(|c| {
                             rec709[c]
@@ -874,7 +912,8 @@ fn neighbourhood(
                 }
             });
     }
-    let scale = w.min(h) as f32 / 1080.;
+    // Sized by the whole picture, also when this is only part of it.
+    let scale = short_edge as f32 / 1080.;
     let blurred = |base: f32| -> Vec<Vec<f32>> {
         let radius = (base * scale).ceil().max(1.) as usize;
         planes
@@ -906,7 +945,7 @@ fn neighbourhood(
         &zone_key,
         w,
         h,
-        (ZONE_KEY_RADIUS * w.min(h) as f32).round().max(1.) as usize,
+        (ZONE_KEY_RADIUS * short_edge as f32).round().max(1.) as usize,
         ZONE_KEY_EPS,
     );
     // Sigma 0.8% of the short edge, fitted on Resolve's Shadows exports.
@@ -943,6 +982,153 @@ fn neighbourhood(
         });
     }
     (blurs, tones)
+}
+
+/// The tone zones' key of a pixel's working values: their brightness by
+/// positive weights (see `shadow_key` in the shader: the working space's
+/// luminance reads deep blues as nearly black), in DaVinci Intermediate.
+fn zone_key_of(working: [f32; 3]) -> f32 {
+    let luminance = [0.2126f32, 0.7152, 0.0722];
+    let y: f32 = (0..3)
+        .map(|c| luminance[c] * working[c].max(0.))
+        .sum::<f32>()
+        .max(0.);
+    spaces::encode_intermediate(y as f64) as f32
+}
+
+/// Where the whole prepared picture's tones sit (`PhotoTones`), from the
+/// stored values, for a render of only part of it: exactly what a render of
+/// the whole computes.
+fn whole_tones(
+    caches: &V3Caches,
+    source: &Arc<DecodedFrame>,
+    stored: &Arc<HalfImage>,
+) -> super::plan::PhotoTones {
+    use rayon::prelude::*;
+    if let Ok(cache) = caches.tones.lock()
+        && let Some((picture, tones)) = cache.as_ref()
+        && picture.upgrade().is_some_and(|p| Arc::ptr_eq(&p, stored))
+    {
+        return *tones;
+    }
+    let to_working = spaces::conversion(source.color.primaries, Primaries::DavinciWideGamut)
+        .transpose()
+        .to_cols_array_2d()
+        .map(|r| r.map(|v| v as f32));
+    let keys: Vec<f32> = stored
+        .data
+        .par_chunks(4)
+        .map(|p| {
+            let p = [p[0].to_f32(), p[1].to_f32(), p[2].to_f32()];
+            zone_key_of(std::array::from_fn(|c| {
+                to_working[c][0] * p[0] + to_working[c][1] * p[1] + to_working[c][2] * p[2]
+            }))
+        })
+        .collect();
+    let tones = super::plan::PhotoTones::of(&keys);
+    if let Ok(mut cache) = caches.tones.lock() {
+        *cache = Some((Arc::downgrade(stored), tones));
+    }
+    tones
+}
+
+/// How far the tone controls' neighbourhood reaches, in pixels, for a
+/// picture whose short edge is `short_edge`: its widest blur or its zone
+/// key's guided filter (which reads twice its radius).
+fn neighbourhood_reach(short_edge: usize) -> usize {
+    let scale = short_edge as f32 / 1080.;
+    let blur = |base: f32| {
+        let radius = (base * scale).ceil().max(1.) as usize;
+        if radius <= 24 {
+            radius
+        } else {
+            super::detail::Gaussian::new(radius as f32 / 2.).support()
+        }
+    };
+    let zone = 2 * (ZONE_KEY_RADIUS * short_edge as f32).round().max(1.) as usize;
+    blur(3.5)
+        .max(blur(40.))
+        .max(blur(DETAIL_BLUR_BASE))
+        .max(zone)
+}
+
+/// Whether, and how, to render only part of the picture: the region at
+/// normalised `roi` with the margin every filter in use needs. `None` when
+/// something in use is a statistic of the whole frame that a part cannot
+/// reproduce (glow, halation and flare; chromatic aberration and Centre,
+/// which work from the frame's centre; Dehaze inside a mask), or when the
+/// region with its margin is most of the picture anyway.
+fn region_window(
+    roi: (f32, f32, f32, f32),
+    canvas: (u32, u32),
+    controls: &Controls,
+    active: &[&crate::mask_generation::MaskDefinition],
+    scale: f32,
+    capture: bool,
+) -> Result<Option<Window>> {
+    if capture || !super::optics::is_neutral(&controls.effects) {
+        return Ok(None);
+    }
+    let mut local_reach = 0;
+    let mut local_tone = false;
+    for mask in active {
+        let local = controls_for(&mask.adjustments, true)?;
+        if local.detail.dehaze != 0. || !super::optics::light_is_neutral(&local.effects) {
+            return Ok(None);
+        }
+        local_reach = local_reach.max(super::detail::reach(&local.detail, scale));
+        local_tone |= !local.tone.is_neutral();
+    }
+    let neighbourhood = if !controls.tone.is_neutral() || local_tone {
+        neighbourhood_reach(canvas.0.min(canvas.1) as usize)
+    } else {
+        0
+    };
+    // The global detail's output is what a mask's detail reads, so their
+    // reaches add; the neighbourhood is of the unedited picture.
+    let margin =
+        neighbourhood.max(super::detail::reach(&controls.detail, scale) + local_reach) as u32 + 2;
+    let rect = super::renderer::region_rect(roi, canvas);
+    let (x0, y0) = (rect.0.saturating_sub(margin), rect.1.saturating_sub(margin));
+    let x1 = (rect.0 + rect.2 + margin).min(canvas.0);
+    let y1 = (rect.1 + rect.3 + margin).min(canvas.1);
+    let area = |w: u32, h: u32| w as u64 * h as u64;
+    if area(x1 - x0, y1 - y0) * 10 > area(canvas.0, canvas.1) * 8 {
+        return Ok(None);
+    }
+    Ok(Some(Window {
+        rect,
+        ext: (x0, y0, x1 - x0, y1 - y0),
+    }))
+}
+
+/// Cut a render down to the region asked for: from the window processed
+/// (its margin trimmed) or, when the whole was rendered, from the whole.
+fn place(
+    frame: &mut RenderedFrame,
+    window: Option<Window>,
+    roi: Option<(f32, f32, f32, f32)>,
+    canvas: (u32, u32),
+) {
+    match (window, roi) {
+        (Some(w), _) => {
+            let (x, y, width, height) = w.rect;
+            frame.encoded_srgb = image::imageops::crop_imm(
+                &frame.encoded_srgb,
+                x - w.ext.0,
+                y - w.ext.1,
+                width,
+                height,
+            )
+            .to_image();
+            frame.stages = None;
+            frame.region = Some((w.rect, canvas));
+        }
+        (None, Some(roi)) => {
+            frame.crop_to_region(roi);
+        }
+        (None, None) => {}
+    }
 }
 
 /// The zone key's region size, as a fraction of the short edge, and how big a
@@ -1149,6 +1335,7 @@ fn sampling_image(
         None,
         false,
         OutputSpace::Srgb,
+        None,
     );
     if let (Some(entries), Ok(mut cache)) = (preview, caches.prepared.lock()) {
         *cache = entries;
@@ -1179,6 +1366,7 @@ pub fn render_file(
         max_dimension,
         false,
         OutputSpace::Srgb,
+        None,
     )
 }
 
@@ -1202,6 +1390,7 @@ pub fn render_thumbnail(
         Some(max_dimension),
         false,
         OutputSpace::Srgb,
+        None,
     )
 }
 
@@ -1225,6 +1414,7 @@ pub fn render_aside(
         max_dimension,
         false,
         OutputSpace::Srgb,
+        None,
     )
 }
 
@@ -1282,6 +1472,32 @@ pub fn render_for_output(
         max_dimension,
         false,
         output_space(state),
+        None,
+    )
+}
+
+/// The part of the picture at normalised `roi`, at the size the whole would
+/// be rendered at, exactly as it is in that whole: a zoomed-in editor's view.
+/// `frame.region` says where it sits.
+pub fn render_region_for_output(
+    context: &GpuContext,
+    state: &AppState,
+    path: &str,
+    edits: &Value,
+    max_dimension: Option<u32>,
+    roi: (f32, f32, f32, f32),
+) -> Result<RenderedFrame> {
+    render(
+        context,
+        state,
+        &state.v3,
+        Quality::Full,
+        path,
+        edits,
+        max_dimension,
+        false,
+        output_space(state),
+        Some(roi),
     )
 }
 
@@ -1303,6 +1519,7 @@ pub fn render_file_with_capture(
         max_dimension,
         capture,
         OutputSpace::Srgb,
+        None,
     )
 }
 
@@ -1317,6 +1534,7 @@ fn render(
     max_dimension: Option<u32>,
     capture: bool,
     space: OutputSpace,
+    roi: Option<(f32, f32, f32, f32)>,
 ) -> Result<RenderedFrame> {
     let normalized = super::migration::normalize(edits)?;
     let edits = normalized.as_ref();
@@ -1352,8 +1570,8 @@ fn render(
                 && p.patches == patches
                 && p.dimension == max_dimension
         })
-        .map(|p| (p.image.picture(), p.offset, p.scale, p.full));
-    let (image, offset, scale, full) = if let Some(found) = found {
+        .map(|p| (p.image.clone(), p.offset, p.scale, p.full));
+    let (stored, offset, scale, full) = if let Some(found) = found {
         found
     } else {
         // Patches join at the decoded-source stage, before geometry, because
@@ -1416,22 +1634,45 @@ fn render(
             transformed.into_owned()
         };
         let scale = image.width() as f32 / full_width as f32;
-        let stored = HalfImage::new(&image);
+        let stored = Arc::new(HalfImage::new(&image));
         drop(image);
-        let image = stored.picture();
         prepared.put(PreparedCache {
             full,
             source: source.clone(),
             transform,
             patches,
             dimension: max_dimension,
-            image: stored,
+            image: stored.clone(),
             offset,
             scale,
         });
-        (image, offset, scale, full)
+        (stored, offset, scale, full)
     };
     drop(prepared);
+    let canvas = (stored.width, stored.height);
+    let masks: Vec<crate::mask_generation::MaskDefinition> =
+        serde_json::from_value(edits.get("masks").cloned().unwrap_or(serde_json::json!([])))
+            .context("Invalid mask definitions")?;
+    let active: Vec<_> = masks
+        .iter()
+        .filter(|m| m.visible && m.opacity > 0. && !m.sub_masks.is_empty())
+        .collect();
+    // Part of the picture (a zoomed-in editor's view): only that part, with
+    // the margin its filters need, when that gives exactly what the whole
+    // would; otherwise the whole, cut down at the end.
+    let window = match roi {
+        Some(roi) => region_window(roi, canvas, &controls, &active, scale, capture)?,
+        None => None,
+    };
+    let image = match &window {
+        Some(w) => stored.crop(w.ext),
+        None => stored.picture(),
+    };
+    // Statistics of the whole photo, which a part cannot give.
+    let whole_airlight = window
+        .filter(|_| controls.detail.dehaze != 0.)
+        .map(|_| stored.airlight());
+    let whole_tones = window.map(|_| whole_tones(caches, &source, &stored));
     // Built lazily: only a pass whose tone controls move needs it.
     let domain = display_domain(&pair, &source)?;
     let neighbourhood_key = {
@@ -1443,6 +1684,7 @@ fn render(
             max_dimension,
             image.width(),
             image.height(),
+            window.map(|w| w.ext),
         )
             .hash(&mut hasher);
         domain
@@ -1454,13 +1696,15 @@ fn render(
     let unedited = image.clone();
     let neighbourhood_for = |tone: &super::controls::Tone| {
         (!tone.is_neutral()).then(|| {
-            neighbourhood(
+            let (blurs, tones) = neighbourhood(
                 caches,
                 &source,
                 &unedited,
                 neighbourhood_key,
                 domain.as_ref().map(|(_, output)| output.as_ref()),
-            )
+                canvas.0.min(canvas.1) as usize,
+            );
+            (blurs, whole_tones.unwrap_or(tones))
         })
     };
     let in_domain = |plan: &mut RenderPlan| {
@@ -1476,20 +1720,12 @@ fn render(
             &source,
             image,
             &controls,
-            transform,
-            patches,
-            max_dimension,
+            (transform, patches, max_dimension, window.map(|w| w.ext)),
             scale,
+            whole_airlight,
         )?
     };
     watch.lap("prepare + detail");
-    let masks: Vec<crate::mask_generation::MaskDefinition> =
-        serde_json::from_value(edits.get("masks").cloned().unwrap_or(serde_json::json!([])))
-            .context("Invalid mask definitions")?;
-    let active: Vec<_> = masks
-        .iter()
-        .filter(|m| m.visible && m.opacity > 0. && !m.sub_masks.is_empty())
-        .collect();
     // Colour and luminance range masks need something to sample. The
     // previous engine hands them the geometrically-warped source before any
     // adjustment, so the mask does not move as you grade; v3 honours the same
@@ -1556,6 +1792,9 @@ fn render(
         tone_mapper(edits),
     )?;
     initial_plan.set_render_scale(scale);
+    if let Some(w) = &window {
+        initial_plan.set_region(w.ext.0, w.ext.1, canvas.0, canvas.1);
+    }
     in_domain(&mut initial_plan);
     let photo_tones = initial_blurs.as_ref().map(|(_, tones)| *tones);
     if let Some((blurs, tones)) = initial_blurs {
@@ -1564,7 +1803,10 @@ fn render(
     // Negative Dehaze's veil takes the photo's haze colour, a statistic of
     // the whole unedited picture.
     if controls_dehaze < 0.0 {
-        initial_plan.set_haze(super::detail::airlight(float_pixels(&unedited).as_raw()));
+        initial_plan.set_haze(
+            whole_airlight
+                .unwrap_or_else(|| super::detail::airlight(float_pixels(&unedited).as_raw())),
+        );
     }
     if active.is_empty() {
         if let Some(look) = &look {
@@ -1573,6 +1815,7 @@ fn render(
         let mut frame = engine.render(&float_pixels(&image), &initial_plan, capture)?;
         frame.full_size = full;
         frame.tones = photo_tones;
+        place(&mut frame, window, roi, canvas);
         finish_space(&mut frame, space, initial_native);
         return Ok(frame);
     }
@@ -1629,8 +1872,8 @@ fn render(
         let bitmap = mask_bitmap(
             caches,
             mask,
-            image.width(),
-            image.height(),
+            canvas.0,
+            canvas.1,
             scale,
             (offset.0 * scale, offset.1 * scale),
             sampled.as_ref().map(|(_, image)| image),
@@ -1641,6 +1884,13 @@ fn render(
                 sampled.as_ref().map(|(key, _)| *key),
             ),
         )?;
+        let bitmap = match &window {
+            Some(w) => Arc::new(
+                image::imageops::crop_imm(bitmap.as_ref(), w.ext.0, w.ext.1, w.ext.2, w.ext.3)
+                    .to_image(),
+            ),
+            None => bitmap,
+        };
         watch.lap("mask bitmap");
         // Local detail runs on the working image as it stands at this mask —
         // after the global grade and any earlier masks — like every other
@@ -1653,7 +1903,11 @@ fn render(
         } else {
             let mut copy = working.clone();
             let noise = (local.detail.color_noise > 0.).then(|| photo_noise(caches, &source));
-            super::detail::apply(&mut copy, &local.detail, working_luminance, scale, noise);
+            let whole = super::detail::Whole {
+                noise,
+                airlight: None,
+            };
+            super::detail::apply(&mut copy, &local.detail, working_luminance, scale, whole);
             // The working image is already exposed, so no further gain.
             super::optics::add_light(&mut copy, &local_light, 0., Primaries::DavinciWideGamut);
             detailed = copy;
@@ -1664,6 +1918,9 @@ fn render(
         } else {
             let blurs = neighbourhood_for(&local.tone);
             let mut local_plan = plan(working_color.clone(), local, None, None)?;
+            if let Some(w) = &window {
+                local_plan.set_region(w.ext.0, w.ext.1, canvas.0, canvas.1);
+            }
             in_domain(&mut local_plan);
             if let Some((blurs, tones)) = blurs {
                 local_plan.set_neighbourhood(blurs, tones);
@@ -1698,6 +1955,9 @@ fn render(
         tone_mapper(edits),
     )?;
     final_plan.set_render_scale(scale);
+    if let Some(w) = &window {
+        final_plan.set_region(w.ext.0, w.ext.1, canvas.0, canvas.1);
+    }
     in_domain(&mut final_plan);
     if let Some(look) = &look {
         final_plan.set_look(look)?;
@@ -1705,6 +1965,7 @@ fn render(
     let mut frame = engine.render(&working, &final_plan, capture)?;
     frame.full_size = full;
     frame.tones = photo_tones;
+    place(&mut frame, window, roi, canvas);
     finish_space(&mut frame, space, final_native);
     if let (Some(stages), Some(original)) = (&mut frame.stages, original_working) {
         stages.working = original;
@@ -2154,17 +2415,24 @@ mod audit_tests {
             let mut controls = Controls::default();
             controls.detail.texture = 10.; // spatial stage stays active at Centre=0
             controls.effects.centre = amount;
-            let cached =
-                spatial(&warm.v3, &source, image.clone(), &controls, 0, 0, None, 1.).unwrap();
+            let cached = spatial(
+                &warm.v3,
+                &source,
+                image.clone(),
+                &controls,
+                (0, 0, None, None),
+                1.,
+                None,
+            )
+            .unwrap();
             let fresh = spatial(
                 &V3Caches::default(),
                 &source,
                 image.clone(),
                 &controls,
-                0,
-                0,
-                None,
+                (0, 0, None, None),
                 1.,
+                None,
             )
             .unwrap();
             assert!(

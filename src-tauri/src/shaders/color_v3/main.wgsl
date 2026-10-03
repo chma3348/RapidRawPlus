@@ -41,6 +41,7 @@ struct Parameters {
     haze: vec4<f32>,
     haze_style: vec4<f32>,
     haze_up: vec4<f32>,
+    region: vec4<u32>,
 }
 @group(0) @binding(0) var<storage, read> source: array<vec4<f32>>;
 @group(0) @binding(1) var<storage, read_write> results: array<vec4<f32>>;
@@ -121,8 +122,14 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     // Where this pixel is: the pass walks the image as a flat list.
     let index = parameters.frame.z + id.x;
     let width = max(parameters.frame.x, 1u);
-    let position = vec2<f32>(f32(index % width), f32(index / width)) + vec2<f32>(0.5);
-    let dims = vec2<f32>(f32(width), f32(max(parameters.frame.y, 1u)));
+    var position = vec2<f32>(f32(index % width), f32(index / width)) + vec2<f32>(0.5);
+    var dims = vec2<f32>(f32(width), f32(max(parameters.frame.y, 1u)));
+    // Part of a larger picture: where it sits in the whole, so the vignette
+    // and grain land where they would on the whole picture.
+    if parameters.region.z > 0u {
+        position += vec2<f32>(f32(parameters.region.x), f32(parameters.region.y));
+        dims = vec2<f32>(f32(parameters.region.z), f32(max(parameters.region.w, 1u)));
+    }
     // The unedited neighbourhood the Basic tone controls read; without one
     // bound they see the pixel itself, in the encoding they expect.
     var tonal: vec3<f32>;

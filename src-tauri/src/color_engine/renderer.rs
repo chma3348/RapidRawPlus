@@ -11,6 +11,9 @@ pub struct StageCapture {
     pub graded: Rgba32FImage,
 }
 
+/// A pixel rectangle `(x, y, w, h)`.
+pub type Rect = (u32, u32, u32, u32);
+
 pub struct RenderedFrame {
     /// Encoded values in `space` (sRGB unless a render asked for Display P3;
     /// both use the sRGB transfer curve and D65), bounded to [0,1], straight
@@ -25,6 +28,25 @@ pub struct RenderedFrame {
     /// Where the photo's tones sat when the tone sliders adapted to it, if
     /// they were in use (for calibration tools).
     pub tones: Option<super::plan::PhotoTones>,
+    /// For a render of part of the picture: that part's pixel rectangle
+    /// `(x, y, w, h)` in the whole picture at this size, and the whole
+    /// picture's `(width, height)`.
+    pub region: Option<(Rect, (u32, u32))>,
+}
+
+/// The pixel rectangle `(x, y, w, h)` of the region at normalised
+/// `(x, y, w, h)` of a `width` x `height` picture: whole pixels covering it,
+/// never past the edge and never empty.
+pub fn region_rect(
+    region: (f32, f32, f32, f32),
+    (width, height): (u32, u32),
+) -> (u32, u32, u32, u32) {
+    let (rx, ry, rw, rh) = region;
+    let x0 = ((rx.clamp(0.0, 1.0) * width as f32).floor() as u32).min(width - 1);
+    let y0 = ((ry.clamp(0.0, 1.0) * height as f32).floor() as u32).min(height - 1);
+    let x1 = (((rx + rw).clamp(0.0, 1.0) * width as f32).ceil() as u32).clamp(x0 + 1, width);
+    let y1 = (((ry + rh).clamp(0.0, 1.0) * height as f32).ceil() as u32).clamp(y0 + 1, height);
+    (x0, y0, x1 - x0, y1 - y0)
 }
 
 impl RenderedFrame {
@@ -32,16 +54,13 @@ impl RenderedFrame {
     /// zoomed-in editor is sent what is on screen, not all of it. Returns
     /// the region's pixel rectangle `(x, y, w, h)` in the full render.
     pub fn crop_to_region(&mut self, region: (f32, f32, f32, f32)) -> (u32, u32, u32, u32) {
-        let (width, height) = self.encoded_srgb.dimensions();
-        let (rx, ry, rw, rh) = region;
-        let x0 = ((rx.clamp(0.0, 1.0) * width as f32).floor() as u32).min(width - 1);
-        let y0 = ((ry.clamp(0.0, 1.0) * height as f32).floor() as u32).min(height - 1);
-        let x1 = (((rx + rw).clamp(0.0, 1.0) * width as f32).ceil() as u32).clamp(x0 + 1, width);
-        let y1 = (((ry + rh).clamp(0.0, 1.0) * height as f32).ceil() as u32).clamp(y0 + 1, height);
-        self.encoded_srgb =
-            image::imageops::crop_imm(&self.encoded_srgb, x0, y0, x1 - x0, y1 - y0).to_image();
+        let canvas = self.encoded_srgb.dimensions();
+        let rect = region_rect(region, canvas);
+        let (x0, y0, w, h) = rect;
+        self.encoded_srgb = image::imageops::crop_imm(&self.encoded_srgb, x0, y0, w, h).to_image();
         self.stages = None;
-        (x0, y0, x1 - x0, y1 - y0)
+        self.region = Some((rect, canvas));
+        rect
     }
 
     /// The previous engine's clipping warning: red where any channel is at
@@ -243,6 +262,7 @@ impl ColorEngine {
             space: super::config::OutputSpace::Srgb,
             stages,
             tones: None,
+            region: None,
         })
     }
 
@@ -508,6 +528,7 @@ mod region_tests {
             stages: None,
             full_size: (300, 200),
             tones: None,
+            region: None,
         };
         let (x, y, w, h) = frame.crop_to_region((0.25, 0.1, 0.5, 0.3));
         assert_eq!((x, y, w, h), (75, 20, 150, 60));

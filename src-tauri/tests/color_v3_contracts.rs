@@ -2407,3 +2407,98 @@ fn output_space_contracts() {
         &s[8..11]
     );
 }
+
+/// A zoomed-in editor is sent only the region on screen, rendered on its own
+/// with the margin its filters need. It must be exactly that part of the
+/// whole picture rendered at the same size: tone controls (which read a
+/// neighbourhood and the whole photo's tones), every detail control (Dehaze
+/// both ways, which reads the whole photo's haze colour, and colour noise
+/// reduction, which reads its noise), vignette and grain (which read where
+/// the pixel is in the whole), masks, and whole-frame effects (which make it
+/// render the whole and cut the region out).
+#[test]
+fn a_zoomed_region_is_exactly_that_part_of_the_whole() {
+    use rapidraw_lib::color_engine::application::{render_for_output, render_region_for_output};
+    use serde_json::json;
+    let context = gpu();
+    let directory = tempfile::tempdir().unwrap();
+    let photo = directory.path().join("region.png");
+    let noise = |x: u32, y: u32, k: u32| {
+        let mut h = x.wrapping_mul(0x9E37_79B9) ^ y.wrapping_mul(0x85EB_CA6B) ^ k;
+        h ^= h >> 15;
+        h = h.wrapping_mul(0x2545_F491);
+        ((h >> 8) & 0xff) as f32 / 255.0 - 0.5
+    };
+    ImageBuffer::from_fn(3600, 2400, |x, y| {
+        let (fx, fy) = (x as f32, y as f32);
+        let base = 0.4
+            + 0.25 * (fx / 61.0).sin() * (fy / 47.0).cos()
+            + 0.12 * (fx / 9.0).sin() * (fy / 13.0).sin()
+            + if (x / 120 + y / 90) % 2 == 0 {
+                0.1
+            } else {
+                -0.15
+            };
+        let c = |k: u32, tint: f32| {
+            (((base * tint + 0.04 * noise(x, y, k)).clamp(0.0, 1.0)) * 255.0) as u8
+        };
+        Rgba([c(1, 1.0), c(2, 0.85), c(3, 0.7), 255])
+    })
+    .save(&photo)
+    .unwrap();
+    let path = photo.to_str().unwrap();
+    let mask = json!([{
+        "id":"m","name":"m","visible":true,"invert":false,"opacity":100,
+        "adjustments":{"exposure":0.5,"v3":{"detail":{"clarity":40,"color_noise":30}}},
+        "subMasks":[{"id":"l","type":"linear","visible":true,"mode":"additive",
+            "parameters":{"startX":0,"startY":0,"endX":3600,"endY":2400,"range":600}}]
+    }]);
+    let cases = [
+        (
+            "tone, detail, vignette, grain and a mask",
+            json!({"processVersion":3,"shadows":40,"highlights":-30,"contrast":20,"whites":10,
+                "v3":{"detail":{"sharpening":60,"sharpen_masking":20,"clarity":30,"texture":20,
+                    "color_noise":40,"luminance_noise":20,"dehaze":25},
+                    "effects":{"vignette_amount":-40,"grain_amount":30}},
+                "masks":mask}),
+        ),
+        (
+            "negative Dehaze",
+            json!({"processVersion":3,"blacks":-20,
+                "v3":{"detail":{"dehaze":-40,"sharpening":40}},"masks":[]}),
+        ),
+        (
+            "a whole-frame effect (glow)",
+            json!({"processVersion":3,"v3":{"detail":{"sharpening":40},
+                "effects":{"glow_amount":60}},"masks":[]}),
+        ),
+    ];
+    for (name, edits) in cases {
+        for size in [None, Some(1800)] {
+            let state = rapidraw_lib::AppState::default();
+            let whole = render_for_output(&context, &state, path, &edits, size).unwrap();
+            for roi in [
+                (0.4, 0.45, 0.12, 0.1),
+                (0.0, 0.0, 0.1, 0.15),
+                (0.9, 0.88, 0.2, 0.2),
+            ] {
+                let part =
+                    render_region_for_output(&context, &state, path, &edits, size, roi).unwrap();
+                let ((x, y, w, h), canvas) = part.region.expect("a region says where it sits");
+                assert_eq!(canvas, whole.encoded_srgb.dimensions(), "{name}");
+                assert_eq!(part.encoded_srgb.dimensions(), (w, h), "{name}");
+                let mut worst = 0f32;
+                for (dx, dy, p) in part.encoded_srgb.enumerate_pixels() {
+                    let q = whole.encoded_srgb.get_pixel(x + dx, y + dy);
+                    for c in 0..3 {
+                        worst = worst.max((p[c] - q[c]).abs());
+                    }
+                }
+                assert!(
+                    worst < 2e-3,
+                    "{name} at {size:?}, region {roi:?}: differs from the whole by {worst}"
+                );
+            }
+        }
+    }
+}

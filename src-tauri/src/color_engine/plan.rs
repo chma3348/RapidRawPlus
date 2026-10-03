@@ -98,6 +98,11 @@ pub(crate) struct GpuParameters {
     pub haze_style: [f32; 4],
     /// [colour scale at +50, at +100, 0, 0].
     pub haze_up: [f32; 4],
+    /// A render of part of the picture: [x, y] of its top-left corner in
+    /// the whole picture, and the whole picture's [width, height], so the
+    /// vignette and grain fall where they would on the whole. All zero for
+    /// a whole picture.
+    pub region: [u32; 4],
 }
 
 /// How each tone zone moves a pixel, per zone [blacks, shadows, highlights,
@@ -452,6 +457,7 @@ impl RenderPlan {
                 0.,
                 0.,
             ],
+            region: [0; 4],
             look: [0.; 4],
             look_flags: [0; 4],
             work_to_look: packed(
@@ -588,6 +594,12 @@ impl RenderPlan {
 
     pub fn set_render_scale(&mut self, scale: f32) {
         self.parameters.effects[1][3] = scale.max(1e-4);
+    }
+
+    /// This pass renders the part of a `width` x `height` picture whose
+    /// top-left corner is at (`x`, `y`).
+    pub fn set_region(&mut self, x: u32, y: u32, width: u32, height: u32) {
+        self.parameters.region = [x, y, width, height];
     }
 
     pub fn config(&self) -> &PipelineConfig {

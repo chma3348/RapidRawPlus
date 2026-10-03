@@ -10,6 +10,35 @@ import { Invokes, Panel } from '../components/ui/AppProperties';
 import { debouncedSave } from './useEditorActions';
 import { globalImageCache } from '../utils/ImageLRUCache';
 
+/** Decode a picture before it is put on screen: swapped in only once it can
+ *  be painted, it never leaves a gap (a "blink") while it decodes. */
+async function decoded(url: string) {
+  const img = new Image();
+  img.src = url;
+  try {
+    await img.decode();
+  } catch {
+    // Shown as it loads, as before.
+  }
+}
+
+/** The region to render around the visible part `[x, y, w, h]`: a margin of
+ *  `margin` of its size on every side, for a short pan. */
+function aroundView([x, y, w, h]: number[], margin: number): [number, number, number, number] {
+  const rx = Math.max(0, x - w * margin);
+  const ry = Math.max(0, y - h * margin);
+  return [rx, ry, Math.min(1 - rx, w * (1 + 2 * margin)), Math.min(1 - ry, h * (1 + 2 * margin))];
+}
+
+/** While a slider moves: the whole picture no larger than this, and zoomed
+ *  in, the view at this fraction of its size; smaller still for the rest of
+ *  a drag whose frames come back slower than `DRAG_SLOW_MS`. */
+const DRAG_WHOLE_RES = 2048;
+const DRAG_WHOLE_RES_SLOW = 1280;
+const DRAG_REGION_FRACTION = 0.5;
+const DRAG_REGION_FRACTION_SLOW = 0.33;
+const DRAG_SLOW_MS = 150;
+
 export function useImageProcessing(
   transformWrapperRef: any,
   prevAdjustmentsRef: React.RefObject<any>,
@@ -40,7 +69,17 @@ export function useImageProcessing(
   const multiSelectedPaths = useLibraryStore((state) => state.multiSelectedPaths);
 
   const inFlightCountRef = useRef(0);
-  const pendingApplyRef = useRef<{ adjustments: Adjustments; targetRes?: number } | null>(null);
+  const pendingApplyRef = useRef<{
+    adjustments: Adjustments;
+    targetRes?: number;
+    region?: [number, number, number, number] | null;
+  } | null>(null);
+  // This drag's frames have been slow (a detail slider at a large size):
+  // render the rest of it smaller.
+  const dragSlowRef = useRef(false);
+  // Frames rendered in this drag: the first ones also size the picture for
+  // dragging (once, then cached), so they do not count as slow.
+  const dragFramesRef = useRef(0);
   const currentOriginalResRef = useRef<number>(0);
   const dragIdleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // The zoom tile: which request is the latest, and the resolution of the
@@ -208,12 +247,24 @@ export function useImageProcessing(
           const view = new DataView(buffer, 4);
           const [x, y, w, h, fullW, fullH] = [0, 4, 8, 12, 16, 20].map((o) => view.getUint32(o, true));
           const url = URL.createObjectURL(new Blob([buffer.slice(28)], { type: 'image/png' }));
-          tileResRef.current = targetRes || 0;
+          await decoded(url);
+          if (tileJob !== tileJobRef.current || currentPath !== selectedImagePathRef.current) {
+            URL.revokeObjectURL(url);
+            return;
+          }
+          // A tile made while a slider moves is a quick, smaller one: the
+          // sharp one replaces it when the slider stops.
+          tileResRef.current = dragging ? 0 : targetRes || 0;
           tileAdjustmentsRef.current = currentAdjustments;
           setEditor((state) => {
             const previous = state.zoomTile?.url;
             if (previous) setTimeout(() => URL.revokeObjectURL(previous), 250);
-            return { zoomTile: { url, normX: x / fullW, normY: y / fullH, normW: w / fullW, normH: h / fullH } };
+            const patch = state.interactivePatch?.url;
+            if (patch) setTimeout(() => URL.revokeObjectURL(patch), 250);
+            return {
+              zoomTile: { url, normX: x / fullW, normY: y / fullH, normW: w / fullW, normH: h / fullH },
+              interactivePatch: null,
+            };
           });
           return;
         }
@@ -244,6 +295,11 @@ export function useImageProcessing(
             const imageBuffer = buffer.slice(24);
             const blob = new Blob([imageBuffer], { type: payload.processVersion === 3 ? 'image/png' : 'image/jpeg' });
             const url = URL.createObjectURL(blob);
+            await decoded(url);
+            if (jobId < latestRenderedJobIdRef.current) {
+              URL.revokeObjectURL(url);
+              return;
+            }
 
             setEditor((state) => {
               if (state.interactivePatch && state.interactivePatch.url)
@@ -261,6 +317,7 @@ export function useImageProcessing(
           } else {
             const blob = new Blob([buffer], { type: payload.processVersion === 3 ? 'image/png' : 'image/jpeg' });
             const url = URL.createObjectURL(blob);
+            await decoded(url);
 
             if (currentPath !== selectedImagePathRef.current || jobId < latestRenderedJobIdRef.current) {
               URL.revokeObjectURL(url);
@@ -323,12 +380,15 @@ export function useImageProcessing(
     if (inFlightCountRef.current >= 3) return;
     if (!pendingApplyRef.current) return;
 
-    const { adjustments, targetRes } = pendingApplyRef.current;
+    const { adjustments, targetRes, region } = pendingApplyRef.current;
     pendingApplyRef.current = null;
 
     inFlightCountRef.current += 1;
 
-    executeApplyAdjustments(adjustments, true, targetRes).finally(() => {
+    const started = performance.now();
+    executeApplyAdjustments(adjustments, true, targetRes, region ?? null).finally(() => {
+      dragFramesRef.current += 1;
+      if (dragFramesRef.current > 2 && performance.now() - started > DRAG_SLOW_MS) dragSlowRef.current = true;
       inFlightCountRef.current -= 1;
       if (pendingApplyRef.current) {
         requestAnimationFrame(() => flushPipeline());
@@ -443,11 +503,9 @@ export function useImageProcessing(
         clearZoomTile();
         return;
       }
-      const [x, y, w, h] = visible;
-      const rx = Math.max(0, x - w / 2);
-      const ry = Math.max(0, y - h / 2);
-      const region: [number, number, number, number] = [rx, ry, Math.min(1 - rx, w * 2), Math.min(1 - ry, h * 2)];
-      await executeApplyAdjustments(currentAdjustments, false, calculateTargetRes(), region);
+      // A small margin for a short pan: rendering only the region is quick,
+      // so a longer pan simply asks for the next one.
+      await executeApplyAdjustments(currentAdjustments, false, calculateTargetRes(), aroundView(visible, 0.15));
     },
     [selectedImage?.isReady, selectedImage?.isVideo, isZoomedIn, calculateROI, clearZoomTile, executeApplyAdjustments, calculateTargetRes],
   );
@@ -557,20 +615,34 @@ export function useImageProcessing(
     const renderAdjustments = previewOverride ?? adjustments;
 
     if (isSliderDragging) {
-      if (appSettings?.enableLivePreviews !== false) {
-        applyAdjustments(renderAdjustments, true, targetRes);
+      if (appSettings?.enableLivePreviews !== false && selectedImage?.isReady && !selectedImage.isVideo) {
+        const visible = isZoomedIn() ? calculateROI() : null;
+        if (visible) {
+          // Zoomed in: just the view, at a fraction of its size (sharper than
+          // the whole picture blown up, and quick).
+          const fraction = dragSlowRef.current ? DRAG_REGION_FRACTION_SLOW : DRAG_REGION_FRACTION;
+          const res = Math.max(512, Math.round((calculateTargetRes() * fraction) / 64) * 64);
+          pendingApplyRef.current = { adjustments: renderAdjustments, targetRes: res, region: aroundView(visible, 0.05) };
+        } else {
+          const cap = dragSlowRef.current ? DRAG_WHOLE_RES_SLOW : DRAG_WHOLE_RES;
+          pendingApplyRef.current = { adjustments: renderAdjustments, targetRes: Math.min(targetRes, cap) };
+        }
+        flushPipeline();
       }
     } else {
+      dragSlowRef.current = false;
+      dragFramesRef.current = 0;
       dragIdleTimer.current = setTimeout(() => {
         currentResRef.current = targetRes;
 
-        // Zoomed in, the whole picture first (it is quick, and replaces a
-        // stale tile at once), then the sharp region on screen; one after the
-        // other, as the preview worker keeps only the newest request.
+        // Zoomed in, the sharp region on screen first (it is what is being
+        // looked at, and only that region is rendered), swapped in at once;
+        // then the whole picture behind it. One after the other, as the
+        // preview worker keeps only the newest request.
         if (isZoomedIn()) {
           pendingApplyRef.current = null;
-          executeApplyAdjustments(renderAdjustments, false, targetRes).finally(() =>
-            requestZoomTile(renderAdjustments),
+          requestZoomTile(renderAdjustments).finally(() =>
+            executeApplyAdjustments(renderAdjustments, false, targetRes),
           );
         } else {
           applyAdjustments(renderAdjustments, false, targetRes);

@@ -281,8 +281,44 @@ fn process_preview_job(
 
     let settings = load_settings(app_handle.clone()).unwrap_or_default();
     let dimension = target_resolution.unwrap_or(settings.editor_preview_resolution.unwrap_or(1920));
+    // Zoomed in: only the region on screen (with the margin the editor
+    // adds), rendered at the size it is shown at, as Lightroom and Capture
+    // One draw what is on screen. Exactly as it is in a render of the whole
+    // (the engine renders the region with the margin its filters need, or
+    // the whole and cuts it out when a whole-frame effect is in use). While
+    // a slider moves, the editor asks for it smaller, for speed. Histogram
+    // and waveform keep coming from whole-picture renders.
+    let tile = roi.filter(|r| r.2 < 0.999 || r.3 < 0.999);
+    if let Some(region) = tile {
+        let mut frame = color_engine::application::render_region_for_output(
+            &context,
+            &state,
+            &loaded_image.path,
+            &adjustments_clone,
+            Some(dimension),
+            region,
+        )
+        .map_err(|e| e.to_string())?;
+        let ((x, y, w, h), (width, height)) = frame
+            .region
+            .ok_or("A region render did not say where it sits")?;
+        if adjustments_clone["showClipping"].as_bool() == Some(true) {
+            frame.mark_clipping();
+        }
+        let mut response = b"TILE".to_vec();
+        for v in [x, y, w, h, width, height] {
+            response.extend_from_slice(&v.to_le_bytes());
+        }
+        frame
+            .write_display_png(&mut response)
+            .map_err(|e| e.to_string())?;
+        return Ok(response);
+    }
+    // While a slider moves the editor asks for the size it can keep up
+    // with (up to 2048 pixels, less for a slow drag); this only guards
+    // against a request far beyond that.
     let dimension = if is_interactive {
-        dimension.min(1280)
+        dimension.min(4096)
     } else {
         dimension
     };
@@ -296,27 +332,6 @@ fn process_preview_job(
     )
     .map_err(|e| e.to_string())?;
     let (width, height) = frame.encoded_srgb.dimensions();
-    // Zoomed in and settled: the picture was rendered at the size the
-    // visible region is shown at, and only that region (with the margin the
-    // editor adds) is sent, as Lightroom and Capture One draw what is on
-    // screen. It is cut from the same render, so it matches it exactly.
-    // Histogram and waveform keep coming from whole-picture renders.
-    let tile = roi.filter(|r| !is_interactive && (r.2 < 0.999 || r.3 < 0.999));
-    if let Some(region) = tile {
-        let mut frame = frame;
-        let (x, y, w, h) = frame.crop_to_region(region);
-        if adjustments_clone["showClipping"].as_bool() == Some(true) {
-            frame.mark_clipping();
-        }
-        let mut response = b"TILE".to_vec();
-        for v in [x, y, w, h, width, height] {
-            response.extend_from_slice(&v.to_le_bytes());
-        }
-        frame
-            .write_display_png(&mut response)
-            .map_err(|e| e.to_string())?;
-        return Ok(response);
-    }
     if let Some(sender) = state.analytics_worker_tx.lock().unwrap().clone() {
         let _ = sender.send(AnalyticsJob {
             path: loaded_image.path.clone(),

@@ -558,22 +558,40 @@ impl Gaussian {
         }
     }
 
-    fn support(&self) -> usize {
+    pub(super) fn support(&self) -> usize {
         self.radii.iter().sum()
     }
 }
 
 /// Apply `detail` to an image in `primaries`, whose longer edge is `scale`
 /// times the full-resolution photograph's.
-/// `photo_noise` is the photograph's own colour noise
-/// (`photo_colour_noise`, at full resolution), so every render of it reduces
-/// it alike whatever its size; measured on `image` when not given.
+/// What the detail stage needs to know about the whole photograph when it
+/// is handed only part of it (a zoomed-in region): its colour noise
+/// (`photo_colour_noise`, at full resolution, so every render of it reduces
+/// it alike whatever its size) and its haze colour (`airlight`). Measured
+/// on the image itself when not given.
+#[derive(Clone, Copy, Default)]
+pub struct Whole {
+    pub noise: Option<f32>,
+    pub airlight: Option<[f32; 3]>,
+}
+
+/// How far, in pixels at `scale`, any output pixel of `detail` can see: a
+/// part of a picture processed with this much more around it gives the same
+/// pixels as the whole picture would.
+pub fn reach(detail: &Detail, scale: f32) -> usize {
+    if detail.is_neutral() {
+        return 0;
+    }
+    Plan::new(detail, scale).halo()
+}
+
 pub fn apply(
     image: &mut image::Rgba32FImage,
     detail: &Detail,
     luminance_weights: [f32; 3],
     scale: f32,
-    photo_noise: Option<f32>,
+    whole: Whole,
 ) {
     if detail.is_neutral() {
         return;
@@ -586,7 +604,7 @@ pub fn apply(
     } else {
         height as usize
     };
-    apply_in_strips(image, detail, luminance_weights, scale, strip, photo_noise);
+    apply_in_strips(image, detail, luminance_weights, scale, strip, whole);
 }
 
 /// The photograph's colour noise at full resolution: `chroma_noise` over a
@@ -629,14 +647,17 @@ fn apply_in_strips(
     weights: [f32; 3],
     scale: f32,
     strip_rows: usize,
-    photo_noise: Option<f32>,
+    whole: Whole,
 ) {
+    let photo_noise = whole.noise;
     let plan = Plan::new(detail, scale);
     let (width, height) = (image.width() as usize, image.height() as usize);
     let halo = plan.halo();
     // The colour of the haze belongs to the whole photograph. Estimated per
     // strip, two strips would disagree about it and the seam would show.
-    let airlight = plan.dehaze.map(|_| airlight(image.as_raw()));
+    let airlight = plan
+        .dehaze
+        .map(|_| whole.airlight.unwrap_or_else(|| airlight(image.as_raw())));
     // So is its colour noise, which colour noise reduction adapts to. It is
     // judged at this size (`here`) and for the photograph (`photo`), and the
     // two follow from the photograph's own noise by the same rule at every
@@ -1002,12 +1023,19 @@ fn rebuild(o1: f32, o2: f32, y: f32, weights: [f32; 3]) -> [f32; 3] {
 /// brightest — the top 0.1% of the dark channel, from He, Sun and Tang.
 /// Estimated from a subsample, since it is a statistic of the whole frame.
 pub(crate) fn airlight(rgba: &[f32]) -> [f32; 3] {
-    let pixels = rgba.len() / 4;
+    airlight_of(rgba.len() / 4, |i| {
+        [rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2]]
+    })
+}
+
+/// `airlight`, of `pixels` pixels read through `at` (an RGBA picture kept in
+/// another form): the same samples, so the same answer.
+pub(crate) fn airlight_of(pixels: usize, at: impl Fn(usize) -> [f32; 3]) -> [f32; 3] {
     let stride = (pixels / 1_000_000).max(1);
     let samples: Vec<(f32, usize)> = (0..pixels)
         .step_by(stride)
         .map(|i| {
-            let p = &rgba[i * 4..i * 4 + 3];
+            let p = at(i);
             (p[0].min(p[1]).min(p[2]).max(0.0), i)
         })
         .collect();
@@ -1019,8 +1047,9 @@ pub(crate) fn airlight(rgba: &[f32]) -> [f32; 3] {
     let mut n = 0.0f64;
     for &(dark, i) in &samples {
         if dark >= threshold {
+            let p = at(i);
             for c in 0..3 {
-                sum[c] += rgba[i * 4 + c].max(0.0) as f64;
+                sum[c] += p[c].max(0.0) as f64;
             }
             n += 1.0;
         }
@@ -1491,7 +1520,7 @@ mod tests {
     fn neutral_is_identity() {
         let mut img = image(32, 16, |x, y| [0.1 + noise(x, y).abs(), 0.2, 0.3]);
         let before = img.clone();
-        apply(&mut img, &Detail::default(), SRGB_Y, 1.0, None);
+        apply(&mut img, &Detail::default(), SRGB_Y, 1.0, Whole::default());
         assert_eq!(img, before);
     }
 
@@ -1507,7 +1536,7 @@ mod tests {
             ..Detail::default()
         };
         let mut img = image(48, 24, |_, _| [0.3, 0.2, 0.1]);
-        apply(&mut img, &detail, SRGB_Y, 1.0, None);
+        apply(&mut img, &detail, SRGB_Y, 1.0, Whole::default());
         for p in img.pixels() {
             for (c, want) in [0.3f32, 0.2, 0.1].iter().enumerate() {
                 assert!((p[c] - want).abs() < 1e-4, "flat field changed: {p:?}");
@@ -1527,7 +1556,7 @@ mod tests {
                 threshold: 0.,
                 ..Detail::default()
             };
-            apply(&mut img, &detail, SRGB_Y, 1.0, None);
+            apply(&mut img, &detail, SRGB_Y, 1.0, Whole::default());
             let after = edge_contrast_at(&img, 4, 1);
             assert_eq!(after > base, sharper, "{amount}: {base} -> {after}");
         }
@@ -1548,7 +1577,7 @@ mod tests {
             threshold: 0.,
             ..Detail::default()
         };
-        apply(&mut img, &detail, SRGB_Y, 1.0, None);
+        apply(&mut img, &detail, SRGB_Y, 1.0, Whole::default());
         for p in img.pixels() {
             // Same 4:2:1 ratio as the source: brightness moved, hue did not.
             assert!(
@@ -1578,7 +1607,7 @@ mod tests {
                 },
                 SRGB_Y,
                 1.0,
-                None,
+                Whole::default(),
             );
             spread(&img)
         };
@@ -1608,7 +1637,7 @@ mod tests {
 
     fn sharpened(detail: Detail) -> image::Rgba32FImage {
         let mut img = image(64, 16, grain_and_edge);
-        apply(&mut img, &detail, SRGB_Y, 1.0, None);
+        apply(&mut img, &detail, SRGB_Y, 1.0, Whole::default());
         img
     }
 
@@ -1664,7 +1693,7 @@ mod tests {
                 },
                 SRGB_Y,
                 1.0,
-                None,
+                Whole::default(),
             );
             // Overshoot four pixels from the step, on the bright side.
             img.get_pixel(36, 4)[1] - 0.4
@@ -1708,7 +1737,7 @@ mod tests {
             },
             SRGB_Y,
             1.0,
-            None,
+            Whole::default(),
         );
         assert!(
             variance(&after) < variance(&before) * 0.5,
@@ -1737,7 +1766,7 @@ mod tests {
             },
             SRGB_Y,
             1.0,
-            None,
+            Whole::default(),
         );
         for (b, p) in before.iter().zip(img.pixels()) {
             assert!(
@@ -1810,7 +1839,7 @@ mod tests {
             },
             SRGB_Y,
             1.0,
-            None,
+            Whole::default(),
         );
         assert!(
             error(&clear) < error(&hazy) * 0.5,
@@ -1828,7 +1857,7 @@ mod tests {
             },
             SRGB_Y,
             1.0,
-            None,
+            Whole::default(),
         );
         assert!(
             error(&hazier) > error(&hazy),
@@ -1869,10 +1898,10 @@ mod tests {
             })
         };
         let mut whole = make();
-        apply_in_strips(&mut whole, &detail, SRGB_Y, 1.0, 200, None);
+        apply_in_strips(&mut whole, &detail, SRGB_Y, 1.0, 200, Whole::default());
         for strip in [7, 32, 61] {
             let mut tiled = make();
-            apply_in_strips(&mut tiled, &detail, SRGB_Y, 1.0, strip, None);
+            apply_in_strips(&mut tiled, &detail, SRGB_Y, 1.0, strip, Whole::default());
             for (a, b) in whole.as_raw().iter().zip(tiled.as_raw()) {
                 assert!(
                     (a - b).abs() < 1e-5,
@@ -1952,7 +1981,7 @@ mod tests {
         ] {
             let mut img = make();
             let start = std::time::Instant::now();
-            apply(&mut img, &detail, SRGB_Y, 1.0, None);
+            apply(&mut img, &detail, SRGB_Y, 1.0, Whole::default());
             println!(
                 "{name:24} {:>7.0} ms",
                 start.elapsed().as_secs_f64() * 1000.0
