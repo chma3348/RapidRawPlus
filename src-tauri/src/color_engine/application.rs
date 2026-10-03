@@ -47,6 +47,11 @@ pub enum Quality {
 /// zoomed in, the size the visible region is shown at — and with one slot
 /// each switch rebuilt the prepared image and its neighbourhood (a second at
 /// full size).
+/// What a cache entry costs to keep, so the caches can hold to a budget.
+pub trait Weigh {
+    fn bytes(&self) -> usize;
+}
+
 pub struct Slots<T>(Vec<T>);
 
 impl<T> Default for Slots<T> {
@@ -55,8 +60,22 @@ impl<T> Default for Slots<T> {
     }
 }
 
-impl<T> Slots<T> {
+impl<T: Weigh> Slots<T> {
+    /// Keep only the smallest entry (the picture on screen), letting go of
+    /// a full-size one.
+    pub fn keep_smallest(&mut self) {
+        if let Some(smallest) = (0..self.0.len()).min_by_key(|&i| self.0[i].bytes()) {
+            let keep = self.0.swap_remove(smallest);
+            self.0.clear();
+            self.0.push(keep);
+        }
+    }
+
     const KEEP: usize = 2;
+    /// Two entries are kept (a zoomed-in editor alternates between the
+    /// whole picture on screen and the full-size region), but never more than
+    /// this between them unless one alone is larger.
+    const BUDGET: usize = 768 << 20;
 
     /// The entry `hit` accepts, now the most recently used.
     pub fn find(&mut self, hit: impl Fn(&T) -> bool) -> Option<&T> {
@@ -68,13 +87,65 @@ impl<T> Slots<T> {
 
     pub fn put(&mut self, entry: T) {
         self.0.push(entry);
-        while self.0.len() > Self::KEEP {
+        let total = |v: &Vec<T>| v.iter().map(Weigh::bytes).sum::<usize>();
+        while self.0.len() > Self::KEEP || (self.0.len() > 1 && total(&self.0) > Self::BUDGET) {
             self.0.remove(0);
         }
     }
 
     pub fn clear(&mut self) {
         self.0.clear();
+    }
+}
+
+/// A cached stage's picture at half precision: half the memory of 32-bit
+/// floats, and plenty for scene-linear light (about 0.05% steps). Every
+/// render uses the rounded picture, cached or freshly made, so the two can
+/// never differ.
+pub struct HalfImage {
+    width: u32,
+    height: u32,
+    data: Vec<half::f16>,
+}
+
+impl HalfImage {
+    fn new(image: &DynamicImage) -> Self {
+        use rayon::prelude::*;
+        let pixels = float_pixels(image);
+        Self {
+            width: pixels.width(),
+            height: pixels.height(),
+            data: pixels
+                .as_raw()
+                .par_iter()
+                .map(|&v| half::f16::from_f32(v))
+                .collect(),
+        }
+    }
+
+    fn picture(&self) -> Arc<DynamicImage> {
+        use rayon::prelude::*;
+        let data: Vec<f32> = self.data.par_iter().map(|v| v.to_f32()).collect();
+        Arc::new(DynamicImage::ImageRgba32F(
+            image::Rgba32FImage::from_raw(self.width, self.height, data)
+                .expect("a cached picture keeps its own size"),
+        ))
+    }
+}
+
+impl Weigh for PreparedCache {
+    fn bytes(&self) -> usize {
+        self.image.data.len() * 2
+    }
+}
+impl Weigh for DetailCache {
+    fn bytes(&self) -> usize {
+        self.image.data.len() * 2
+    }
+}
+impl Weigh for NeighbourhoodCache {
+    fn bytes(&self) -> usize {
+        self.blurs.len() * 16
     }
 }
 
@@ -86,11 +157,56 @@ pub struct V3Caches {
     pub neighbourhood: Mutex<Slots<NeighbourhoodCache>>,
     pub sampling: Mutex<Option<(u64, Arc<DynamicImage>)>>,
     pub masks: Mutex<std::collections::HashMap<u64, Arc<image::GrayImage>>>,
+    /// The photograph's own colour noise (detail::photo_colour_noise),
+    /// measured once so every render of it, preview, zoomed region or
+    /// export, reduces it alike.
+    pub noise: Mutex<Option<(Arc<DecodedFrame>, f32)>>,
 }
 
 impl V3Caches {
+    /// Zoomed back out: the full-size stages behind the sharp region are no
+    /// longer needed; the whole picture on screen keeps its own.
+    pub fn release_full_size(&self) {
+        if let Ok(mut c) = self.prepared.lock() {
+            c.keep_smallest();
+        }
+        if let Ok(mut c) = self.detail.lock() {
+            c.keep_smallest();
+        }
+        if let Ok(mut c) = self.neighbourhood.lock() {
+            c.keep_smallest();
+        }
+    }
+
+    /// Let go of what can be rebuilt, when the system is short of memory:
+    /// every derived stage, and under critical pressure the decoded photo
+    /// too (it is decoded again on the next render).
+    pub fn trim(&self, critical: bool) {
+        if critical && let Ok(mut c) = self.source.lock() {
+            *c = None;
+        }
+        if let Ok(mut c) = self.prepared.lock() {
+            c.clear();
+        }
+        if let Ok(mut c) = self.detail.lock() {
+            c.clear();
+        }
+        if let Ok(mut c) = self.neighbourhood.lock() {
+            c.clear();
+        }
+        if let Ok(mut c) = self.sampling.lock() {
+            *c = None;
+        }
+        if let Ok(mut c) = self.masks.lock() {
+            c.clear();
+        }
+    }
+
     /// Forget everything: a different photo is being opened.
     pub fn clear(&self) {
+        if let Ok(mut c) = self.noise.lock() {
+            *c = None;
+        }
         if let Ok(mut c) = self.source.lock() {
             *c = None;
         }
@@ -118,7 +234,7 @@ pub struct EngineCache {
 pub struct DetailCache {
     source: Arc<DecodedFrame>,
     key: u64,
-    image: Arc<DynamicImage>,
+    image: HalfImage,
 }
 pub struct NeighbourhoodCache {
     source: Arc<DecodedFrame>,
@@ -133,7 +249,7 @@ pub struct PreparedCache {
     transform: u64,
     patches: u64,
     dimension: Option<u32>,
-    image: Arc<DynamicImage>,
+    image: HalfImage,
     offset: (f32, f32),
     scale: f32,
 }
@@ -607,18 +723,20 @@ fn spatial(
     if let Ok(mut cache) = caches.detail.lock()
         && let Some(c) = cache.find(|c| Arc::ptr_eq(&c.source, source) && c.key == key)
     {
-        return Ok(c.image.clone());
+        return Ok(c.image.picture());
     }
     // Luminance in the source's own primaries: the prepared image has not
     // been converted to the working space yet.
     let y = super::spaces::rgb_to_xyz(source.color.primaries).row(1);
     let weights = [y.x as f32, y.y as f32, y.z as f32];
+    let noise = (controls.detail.color_noise > 0.).then(|| photo_noise(caches, source));
     let mut pixels = image.to_rgba32f();
+    drop(image);
     super::optics::correct_chromatic_aberration(&mut pixels, effects);
-    super::detail::apply(&mut pixels, &controls.detail, weights, scale);
+    super::detail::apply(&mut pixels, &controls.detail, weights, scale, noise);
     if let Some(clarity) = super::optics::centre_clarity(effects) {
         let mut clarified = pixels.clone();
-        super::detail::apply(&mut clarified, &clarity, weights, scale);
+        super::detail::apply(&mut clarified, &clarity, weights, scale, noise);
         super::optics::blend_centre(&mut pixels, &clarified);
     }
     super::optics::add_light(
@@ -627,15 +745,31 @@ fn spatial(
         controls.tone.exposure,
         source.color.primaries,
     );
-    let result = Arc::new(DynamicImage::ImageRgba32F(pixels));
+    let stored = HalfImage::new(&DynamicImage::ImageRgba32F(pixels));
+    let result = stored.picture();
     if let Ok(mut cache) = caches.detail.lock() {
         cache.put(DetailCache {
             source: source.clone(),
             key,
-            image: result.clone(),
+            image: stored,
         });
     }
     Ok(result)
+}
+
+/// The photograph's colour noise, measured once on the decoded source.
+fn photo_noise(caches: &V3Caches, source: &Arc<DecodedFrame>) -> f32 {
+    if let Ok(cache) = caches.noise.lock()
+        && let Some((frame, noise)) = cache.as_ref()
+        && Arc::ptr_eq(frame, source)
+    {
+        return *noise;
+    }
+    let noise = super::detail::photo_colour_noise(&source.pixels);
+    if let Ok(mut cache) = caches.noise.lock() {
+        *cache = Some((source.clone(), noise));
+    }
+    noise
 }
 
 /// The previous engine's tonal and structure blurs of the unedited picture,
@@ -1218,7 +1352,7 @@ fn render(
                 && p.patches == patches
                 && p.dimension == max_dimension
         })
-        .map(|p| (p.image.clone(), p.offset, p.scale, p.full));
+        .map(|p| (p.image.picture(), p.offset, p.scale, p.full));
     let (image, offset, scale, full) = if let Some(found) = found {
         found
     } else {
@@ -1270,8 +1404,9 @@ fn render(
         } else {
             edits
         };
-        let base = DynamicImage::ImageRgba32F(patched);
-        let (transformed, offset) = crate::apply_all_transformations(&base, geometry_edits);
+        // Handed over whole, so a frame with no geometry is not copied again.
+        let (transformed, offset) =
+            crate::apply_all_transformations(DynamicImage::ImageRgba32F(patched), geometry_edits);
         let full = transformed.dimensions();
         let full_width = full.0;
         let image = if let Some(dim) = max_dimension {
@@ -1281,14 +1416,16 @@ fn render(
             transformed.into_owned()
         };
         let scale = image.width() as f32 / full_width as f32;
-        let image = Arc::new(image);
+        let stored = HalfImage::new(&image);
+        drop(image);
+        let image = stored.picture();
         prepared.put(PreparedCache {
             full,
             source: source.clone(),
             transform,
             patches,
             dimension: max_dimension,
-            image: image.clone(),
+            image: stored,
             offset,
             scale,
         });
@@ -1515,7 +1652,8 @@ fn render(
             &working
         } else {
             let mut copy = working.clone();
-            super::detail::apply(&mut copy, &local.detail, working_luminance, scale);
+            let noise = (local.detail.color_noise > 0.).then(|| photo_noise(caches, &source));
+            super::detail::apply(&mut copy, &local.detail, working_luminance, scale, noise);
             // The working image is already exposed, so no further gain.
             super::optics::add_light(&mut copy, &local_light, 0., Primaries::DavinciWideGamut);
             detailed = copy;

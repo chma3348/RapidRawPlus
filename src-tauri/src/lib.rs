@@ -343,6 +343,56 @@ fn process_preview_job(
     Ok(response)
 }
 
+/// macOS asks apps to give memory back before it starts closing them. While
+/// it reports memory pressure, let go of the editor's caches, which are all
+/// rebuilt on demand: the derived stages under a warning, the decoded photo
+/// too when critical.
+fn start_memory_watch(app_handle: tauri::AppHandle) {
+    #[cfg(target_os = "macos")]
+    std::thread::spawn(move || {
+        let mut since_trim = u32::MAX;
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            let level = memory_pressure_level();
+            if level < 2 {
+                since_trim = u32::MAX;
+                continue;
+            }
+            // Once on arriving, then every ten seconds while it lasts.
+            since_trim = since_trim.saturating_add(1);
+            if since_trim >= 5 {
+                since_trim = 0;
+                let critical = level >= 4;
+                app_handle.state::<AppState>().v3.trim(critical);
+                log::warn!(
+                    "Memory pressure ({}): released the editor's caches",
+                    if critical { "critical" } else { "warning" }
+                );
+            }
+        }
+    });
+    #[cfg(not(target_os = "macos"))]
+    let _ = app_handle;
+}
+
+/// The kernel's memory pressure: 1 normal, 2 warning, 4 critical.
+#[cfg(target_os = "macos")]
+fn memory_pressure_level() -> i32 {
+    let mut level: libc::c_int = 1;
+    let mut size = std::mem::size_of::<libc::c_int>();
+    // SAFETY: a fixed-size integer read into a correctly sized buffer.
+    let ok = unsafe {
+        libc::sysctlbyname(
+            c"kern.memorystatus_vm_pressure_level".as_ptr(),
+            (&mut level as *mut libc::c_int).cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if ok == 0 { level } else { 1 }
+}
+
 fn start_analytics_worker(app_handle: tauri::AppHandle) {
     let state = app_handle.state::<AppState>();
     let (tx, rx): (Sender<AnalyticsJob>, Receiver<AnalyticsJob>) = mpsc::channel();
@@ -410,6 +460,12 @@ fn start_preview_worker(app_handle: tauri::AppHandle) {
             }
         }
     });
+}
+
+/// The editor zoomed back out: let go of the full-size renders' caches.
+#[tauri::command]
+fn release_zoom_caches(state: tauri::State<AppState>) {
+    state.v3.release_full_size();
 }
 
 #[tauri::command]
@@ -1455,6 +1511,7 @@ pub fn run() {
             }
 
             start_preview_worker(app_handle.clone());
+            start_memory_watch(app_handle.clone());
             start_analytics_worker(app_handle.clone());
             file_management::start_thumbnail_workers(app_handle.clone());
             jxl_oxide::integration::register_image_decoding_hook();
@@ -1732,6 +1789,7 @@ pub fn run() {
             color_engine::application::pin_color_v3,
             color_engine::selection::inspect_color_v3,
             apply_adjustments,
+            release_zoom_caches,
             generate_preview_for_path,
             generate_original_transformed_preview,
             generate_preset_preview,

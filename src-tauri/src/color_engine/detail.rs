@@ -46,6 +46,9 @@ const TONE_SIGMA: f32 = 2.0;
 /// Colour noise is judged against a local mean this wide (full-resolution
 /// pixels): high-ISO colour noise comes in blotches several pixels across.
 const NOISE_RADIUS: f32 = 4.0;
+/// How the colour noise judged at a preview's size follows the scale
+/// (measured on an ISO 12800 frame: 1.3x the full-size figure at 0.43).
+const PREVIEW_NOISE_POWER: f32 = -0.31;
 /// The smallest blur that still does something at preview scale.
 const MIN_SIGMA: f32 = 0.6;
 /// Offset before the logarithm, so black is a finite number of stops down
@@ -562,11 +565,15 @@ impl Gaussian {
 
 /// Apply `detail` to an image in `primaries`, whose longer edge is `scale`
 /// times the full-resolution photograph's.
+/// `photo_noise` is the photograph's own colour noise
+/// (`photo_colour_noise`, at full resolution), so every render of it reduces
+/// it alike whatever its size; measured on `image` when not given.
 pub fn apply(
     image: &mut image::Rgba32FImage,
     detail: &Detail,
     luminance_weights: [f32; 3],
     scale: f32,
+    photo_noise: Option<f32>,
 ) {
     if detail.is_neutral() {
         return;
@@ -579,7 +586,41 @@ pub fn apply(
     } else {
         height as usize
     };
-    apply_in_strips(image, detail, luminance_weights, scale, strip);
+    apply_in_strips(image, detail, luminance_weights, scale, strip, photo_noise);
+}
+
+/// The photograph's colour noise at full resolution: `chroma_noise` over a
+/// grid of samples (a whole frame's statistic, and stable from a few
+/// hundred thousand pixels), measured once per photo.
+pub fn photo_colour_noise(image: &image::Rgba32FImage) -> f32 {
+    const SIDE: u32 = 384;
+    let (w, h) = image.dimensions();
+    if w <= SIDE * 2 || h <= SIDE * 2 {
+        return chroma_noise(
+            image.as_raw(),
+            w as usize,
+            h as usize,
+            1.0,
+            NOISE_RADIUS as usize,
+        );
+    }
+    let mut samples = Vec::new();
+    for gy in 0..3 {
+        for gx in 0..3 {
+            let x = (w - SIDE) * (2 * gx + 1) / 6;
+            let y = (h - SIDE) * (2 * gy + 1) / 6;
+            let crop = image::imageops::crop_imm(image, x, y, SIDE, SIDE).to_image();
+            samples.push(chroma_noise(
+                crop.as_raw(),
+                SIDE as usize,
+                SIDE as usize,
+                1.0,
+                NOISE_RADIUS as usize,
+            ));
+        }
+    }
+    samples.sort_by(f32::total_cmp);
+    samples[samples.len() / 2]
 }
 
 fn apply_in_strips(
@@ -588,28 +629,65 @@ fn apply_in_strips(
     weights: [f32; 3],
     scale: f32,
     strip_rows: usize,
+    photo_noise: Option<f32>,
 ) {
     let plan = Plan::new(detail, scale);
     let (width, height) = (image.width() as usize, image.height() as usize);
     let halo = plan.halo();
-    let source = image.as_raw().clone();
     // The colour of the haze belongs to the whole photograph. Estimated per
     // strip, two strips would disagree about it and the seam would show.
-    let airlight = plan.dehaze.map(|_| airlight(&source));
-    // So is its colour noise, which colour noise reduction adapts to.
-    let noise = plan
-        .colour
-        .as_ref()
-        .map(|nr| chroma_noise(&source, width, height, nr.guide_sigma, nr.noise_radius));
-    let output = image.as_mut();
+    let airlight = plan.dehaze.map(|_| airlight(image.as_raw()));
+    // So is its colour noise, which colour noise reduction adapts to. It is
+    // judged at this size (`here`) and for the photograph (`photo`), and the
+    // two follow from the photograph's own noise by the same rule at every
+    // size, so a preview, a zoomed region and an export of one photo never
+    // disagree. The rule is what measuring at each size gave (the noise
+    // filter's own reach shrinks with the preview), which is also what makes
+    // a preview match Lightroom's full-size result shrunk.
+    let noise = plan.colour.as_ref().map(|nr| {
+        let s = scale.min(1.0);
+        let here = match photo_noise {
+            Some(photo) => photo * s.powf(PREVIEW_NOISE_POWER),
+            None => chroma_noise(
+                image.as_raw(),
+                width,
+                height,
+                nr.guide_sigma,
+                nr.noise_radius,
+            ),
+        };
+        (here, here / s)
+    });
+    let row = width * 4;
+    if strip_rows >= height {
+        let processed = process(
+            image.as_raw(),
+            width,
+            height,
+            detail,
+            &plan,
+            weights,
+            airlight,
+            noise,
+        );
+        image.as_mut().copy_from_slice(&processed);
+        return;
+    }
+    // Each strip is written back as soon as it is done, so the picture is
+    // never copied whole. The rows the next strip still has to read as they
+    // were (its upper halo) are kept aside before they are overwritten.
+    let mut kept: Vec<f32> = Vec::new();
+    let mut kept_from = 0;
     let mut start = 0;
     while start < height {
         let end = (start + strip_rows).min(height);
         let top = start.saturating_sub(halo);
         let bottom = (end + halo).min(height);
-        let region = &source[top * width * 4..bottom * width * 4];
+        let mut region = Vec::with_capacity((bottom - top) * row);
+        region.extend_from_slice(&kept[(top - kept_from) * row..]);
+        region.extend_from_slice(&image.as_raw()[start * row..bottom * row]);
         let processed = process(
-            region,
+            &region,
             width,
             bottom - top,
             detail,
@@ -618,9 +696,18 @@ fn apply_in_strips(
             airlight,
             noise,
         );
-        let skip = (start - top) * width * 4;
-        output[start * width * 4..end * width * 4]
-            .copy_from_slice(&processed[skip..skip + (end - start) * width * 4]);
+        drop(region);
+        let next_top = end.saturating_sub(halo);
+        let mut next_kept = Vec::with_capacity((end - next_top) * row);
+        if next_top < start {
+            next_kept.extend_from_slice(&kept[(next_top - kept_from) * row..]);
+        }
+        next_kept.extend_from_slice(&image.as_raw()[next_top.max(start) * row..end * row]);
+        kept = next_kept;
+        kept_from = next_top;
+        let skip = (start - top) * row;
+        image.as_mut()[start * row..end * row]
+            .copy_from_slice(&processed[skip..skip + (end - start) * row]);
         start = end;
     }
 }
@@ -636,7 +723,7 @@ fn process(
     plan: &Plan,
     weights: [f32; 3],
     airlight: Option<[f32; 3]>,
-    noise: Option<f32>,
+    noise: Option<(f32, f32)>,
 ) -> Vec<f32> {
     let pixels = width * height;
     // Negative Dehaze scatters light: a share mixed toward a fine and a broad
@@ -717,7 +804,7 @@ fn process(
             }
             smooth
         }
-        None => log.clone(),
+        None => log,
     };
 
     let mut graded = denoised.clone();
@@ -842,10 +929,12 @@ fn process(
                 .map(|i| rgba[i * 4 + c].max(0.0).cbrt() - rgba[i * 4 + 1].max(0.0).cbrt())
                 .collect()
         };
-        // The fine stage, steered by luminance.
+        // The fine stage, steered by luminance (its statistics shared by both
+        // channels).
+        let steer = Guide1::new(&denoised, width, height, nr.radius, nr.eps);
         let fine = [0, 2].map(|c| {
             let o = channel(c);
-            let smooth = guided(&denoised, &o, width, height, nr.radius, nr.eps);
+            let smooth = steer.filter(&o);
             o.par_iter()
                 .zip(smooth.par_iter())
                 .map(|(o, s)| o + (s - o) * nr.mix)
@@ -854,17 +943,17 @@ fn process(
         // The adaptive stage, steered by the colour the fine stage left: it
         // smooths what is within the photo's own noise and keeps colour edges.
         let (radius2, k, mix2, power) = nr.adaptive;
-        // How noisy the photo is, is judged at full size: a preview has
-        // averaged its noise down (by about the scale, for fine noise), but
-        // Lightroom's strength follows the photograph's own noise.
-        let n = noise.unwrap_or(0.0);
-        let photo = n / nr.guide_sigma.min(1.0);
+        // What counts as noise is judged by the noise at this size; how
+        // strongly, by the photograph's own (Lightroom's strength follows the
+        // photograph, however small it is shown).
+        let (n, photo) = noise.unwrap_or((0.0, 0.0));
         let eps = (k * n * (photo / 0.01).powf(power)).powi(2) + 1e-10;
         // What is left of the colour noise shrinks as the photo gets noisier.
         let mix2 = 1.0 - (1.0 - mix2) * (0.01 / photo.max(1e-6)).min(1.0);
         let guide = [0, 1].map(|j| exact_gaussian(&fine[j], width, height, nr.guide_sigma));
+        let steer = Guide2::new(&guide[0], &guide[1], width, height, radius2, eps);
         fine.map(|o| {
-            let smooth = guided2(&guide[0], &guide[1], &o, width, height, radius2, eps);
+            let smooth = steer.filter(&o);
             o.par_iter()
                 .zip(smooth.par_iter())
                 .map(|(o, s)| o + (s - o) * mix2)
@@ -1101,48 +1190,156 @@ fn chroma_noise(rgba: &[f32], w: usize, h: usize, sigma: f32, radius: usize) -> 
             .1
 }
 
-/// A guided filter steered by a two-channel guide (He, Sun and Tang).
-#[allow(clippy::too_many_arguments)]
-fn guided2(g1: &[f32], g2: &[f32], x: &[f32], w: usize, h: usize, r: usize, eps: f32) -> Vec<f32> {
-    let product = |a: &[f32], b: &[f32]| -> Vec<f32> {
-        a.par_iter().zip(b.par_iter()).map(|(a, b)| a * b).collect()
-    };
-    let m1 = box_mean(g1, w, h, r);
-    let m2 = box_mean(g2, w, h, r);
-    let mx = box_mean(x, w, h, r);
-    let s11 = box_mean(&product(g1, g1), w, h, r);
-    let s22 = box_mean(&product(g2, g2), w, h, r);
-    let s12 = box_mean(&product(g1, g2), w, h, r);
-    let s1x = box_mean(&product(g1, x), w, h, r);
-    let s2x = box_mean(&product(g2, x), w, h, r);
-    let n = w * h;
-    let mut a1 = vec![0f32; n];
-    let mut a2 = vec![0f32; n];
-    let mut b = vec![0f32; n];
-    a1.par_iter_mut()
-        .zip(a2.par_iter_mut())
-        .zip(b.par_iter_mut())
-        .enumerate()
-        .for_each(|(k, ((a1, a2), b))| {
-            let v11 = s11[k] - m1[k] * m1[k] + eps;
-            let v22 = s22[k] - m2[k] * m2[k] + eps;
-            let v12 = s12[k] - m1[k] * m2[k];
-            let c1 = s1x[k] - m1[k] * mx[k];
-            let c2 = s2x[k] - m2[k] * mx[k];
-            let det = v11 * v22 - v12 * v12;
-            *a1 = (v22 * c1 - v12 * c2) / det;
-            *a2 = (v11 * c2 - v12 * c1) / det;
-            *b = mx[k] - *a1 * m1[k] - *a2 * m2[k];
-        });
-    let (a1, a2, b) = (
-        box_mean(&a1, w, h, r),
-        box_mean(&a2, w, h, r),
-        box_mean(&b, w, h, r),
-    );
-    (0..n)
-        .into_par_iter()
-        .map(|k| a1[k] * g1[k] + a2[k] * g2[k] + b[k])
-        .collect()
+/// `guided`, with the guide's statistics worked out once for several inputs.
+struct Guide1<'a> {
+    g: &'a [f32],
+    w: usize,
+    h: usize,
+    r: usize,
+    mean: Vec<f32>,
+    /// One over the guide's regularised local variance.
+    inverse: Vec<f32>,
+}
+
+impl<'a> Guide1<'a> {
+    fn new(g: &'a [f32], w: usize, h: usize, r: usize, eps: f32) -> Self {
+        let mean = box_mean(g, w, h, r);
+        let square: Vec<f32> = g.par_iter().map(|a| a * a).collect();
+        let square = box_mean(&square, w, h, r);
+        let inverse = mean
+            .par_iter()
+            .zip(square.par_iter())
+            .map(|(m, s)| 1.0 / ((s - m * m).max(0.0) + eps))
+            .collect();
+        Self {
+            g,
+            w,
+            h,
+            r,
+            mean,
+            inverse,
+        }
+    }
+
+    fn filter(&self, x: &[f32]) -> Vec<f32> {
+        let (w, h, r) = (self.w, self.h, self.r);
+        let mean_x = box_mean(x, w, h, r);
+        let product: Vec<f32> = self
+            .g
+            .par_iter()
+            .zip(x.par_iter())
+            .map(|(a, b)| a * b)
+            .collect();
+        let mean_gx = box_mean(&product, w, h, r);
+        drop(product);
+        let a: Vec<f32> = (0..w * h)
+            .into_par_iter()
+            .map(|k| (mean_gx[k] - self.mean[k] * mean_x[k]) * self.inverse[k])
+            .collect();
+        let b: Vec<f32> = (0..w * h)
+            .into_par_iter()
+            .map(|k| mean_x[k] - a[k] * self.mean[k])
+            .collect();
+        drop((mean_x, mean_gx));
+        let (a, b) = (box_mean(&a, w, h, r), box_mean(&b, w, h, r));
+        (0..w * h)
+            .into_par_iter()
+            .map(|k| a[k] * self.g[k] + b[k])
+            .collect()
+    }
+}
+
+/// A guided filter steered by a two-channel guide (He, Sun and Tang). The
+/// guide's own statistics are worked out once and shared by everything it
+/// filters (both colour channels), which halves the work and the memory.
+struct Guide2<'a> {
+    g1: &'a [f32],
+    g2: &'a [f32],
+    w: usize,
+    h: usize,
+    r: usize,
+    m1: Vec<f32>,
+    m2: Vec<f32>,
+    /// The inverse of the guide's regularised local covariance, [v11, v12, v22].
+    inverse: Vec<[f32; 3]>,
+}
+
+impl<'a> Guide2<'a> {
+    fn new(g1: &'a [f32], g2: &'a [f32], w: usize, h: usize, r: usize, eps: f32) -> Self {
+        let product = |a: &[f32], b: &[f32]| -> Vec<f32> {
+            a.par_iter().zip(b.par_iter()).map(|(a, b)| a * b).collect()
+        };
+        let m1 = box_mean(g1, w, h, r);
+        let m2 = box_mean(g2, w, h, r);
+        let s11 = box_mean(&product(g1, g1), w, h, r);
+        let s22 = box_mean(&product(g2, g2), w, h, r);
+        let s12 = box_mean(&product(g1, g2), w, h, r);
+        let inverse = (0..w * h)
+            .into_par_iter()
+            .map(|k| {
+                let v11 = s11[k] - m1[k] * m1[k] + eps;
+                let v22 = s22[k] - m2[k] * m2[k] + eps;
+                let v12 = s12[k] - m1[k] * m2[k];
+                let det = v11 * v22 - v12 * v12;
+                [v22 / det, -v12 / det, v11 / det]
+            })
+            .collect();
+        Self {
+            g1,
+            g2,
+            w,
+            h,
+            r,
+            m1,
+            m2,
+            inverse,
+        }
+    }
+
+    fn filter(&self, x: &[f32]) -> Vec<f32> {
+        let (w, h, r) = (self.w, self.h, self.r);
+        let mx = box_mean(x, w, h, r);
+        let s1x: Vec<f32> = self
+            .g1
+            .par_iter()
+            .zip(x.par_iter())
+            .map(|(a, b)| a * b)
+            .collect();
+        let s1x = box_mean(&s1x, w, h, r);
+        let s2x: Vec<f32> = self
+            .g2
+            .par_iter()
+            .zip(x.par_iter())
+            .map(|(a, b)| a * b)
+            .collect();
+        let s2x = box_mean(&s2x, w, h, r);
+        let n = w * h;
+        let mut a1 = vec![0f32; n];
+        let mut a2 = vec![0f32; n];
+        let mut b = vec![0f32; n];
+        a1.par_iter_mut()
+            .zip(a2.par_iter_mut())
+            .zip(b.par_iter_mut())
+            .enumerate()
+            .for_each(|(k, ((a1, a2), b))| {
+                let c1 = s1x[k] - self.m1[k] * mx[k];
+                let c2 = s2x[k] - self.m2[k] * mx[k];
+                let [i11, i12, i22] = self.inverse[k];
+                *a1 = i11 * c1 + i12 * c2;
+                *a2 = i12 * c1 + i22 * c2;
+                *b = mx[k] - *a1 * self.m1[k] - *a2 * self.m2[k];
+            });
+        drop((mx, s1x, s2x));
+        let (a1, a2, b) = (
+            box_mean(&a1, w, h, r),
+            box_mean(&a2, w, h, r),
+            box_mean(&b, w, h, r),
+        );
+        (0..n)
+            .into_par_iter()
+            .map(|k| a1[k] * self.g1[k] + a2[k] * self.g2[k] + b[k])
+            .collect()
+    }
 }
 
 /// The radius of `exact_gaussian`'s kernel: three sigma, as scipy's.
@@ -1294,7 +1491,7 @@ mod tests {
     fn neutral_is_identity() {
         let mut img = image(32, 16, |x, y| [0.1 + noise(x, y).abs(), 0.2, 0.3]);
         let before = img.clone();
-        apply(&mut img, &Detail::default(), SRGB_Y, 1.0);
+        apply(&mut img, &Detail::default(), SRGB_Y, 1.0, None);
         assert_eq!(img, before);
     }
 
@@ -1310,7 +1507,7 @@ mod tests {
             ..Detail::default()
         };
         let mut img = image(48, 24, |_, _| [0.3, 0.2, 0.1]);
-        apply(&mut img, &detail, SRGB_Y, 1.0);
+        apply(&mut img, &detail, SRGB_Y, 1.0, None);
         for p in img.pixels() {
             for (c, want) in [0.3f32, 0.2, 0.1].iter().enumerate() {
                 assert!((p[c] - want).abs() < 1e-4, "flat field changed: {p:?}");
@@ -1330,7 +1527,7 @@ mod tests {
                 threshold: 0.,
                 ..Detail::default()
             };
-            apply(&mut img, &detail, SRGB_Y, 1.0);
+            apply(&mut img, &detail, SRGB_Y, 1.0, None);
             let after = edge_contrast_at(&img, 4, 1);
             assert_eq!(after > base, sharper, "{amount}: {base} -> {after}");
         }
@@ -1351,7 +1548,7 @@ mod tests {
             threshold: 0.,
             ..Detail::default()
         };
-        apply(&mut img, &detail, SRGB_Y, 1.0);
+        apply(&mut img, &detail, SRGB_Y, 1.0, None);
         for p in img.pixels() {
             // Same 4:2:1 ratio as the source: brightness moved, hue did not.
             assert!(
@@ -1381,6 +1578,7 @@ mod tests {
                 },
                 SRGB_Y,
                 1.0,
+                None,
             );
             spread(&img)
         };
@@ -1410,7 +1608,7 @@ mod tests {
 
     fn sharpened(detail: Detail) -> image::Rgba32FImage {
         let mut img = image(64, 16, grain_and_edge);
-        apply(&mut img, &detail, SRGB_Y, 1.0);
+        apply(&mut img, &detail, SRGB_Y, 1.0, None);
         img
     }
 
@@ -1466,6 +1664,7 @@ mod tests {
                 },
                 SRGB_Y,
                 1.0,
+                None,
             );
             // Overshoot four pixels from the step, on the bright side.
             img.get_pixel(36, 4)[1] - 0.4
@@ -1509,6 +1708,7 @@ mod tests {
             },
             SRGB_Y,
             1.0,
+            None,
         );
         assert!(
             variance(&after) < variance(&before) * 0.5,
@@ -1537,6 +1737,7 @@ mod tests {
             },
             SRGB_Y,
             1.0,
+            None,
         );
         for (b, p) in before.iter().zip(img.pixels()) {
             assert!(
@@ -1609,6 +1810,7 @@ mod tests {
             },
             SRGB_Y,
             1.0,
+            None,
         );
         assert!(
             error(&clear) < error(&hazy) * 0.5,
@@ -1626,6 +1828,7 @@ mod tests {
             },
             SRGB_Y,
             1.0,
+            None,
         );
         assert!(
             error(&hazier) > error(&hazy),
@@ -1666,10 +1869,10 @@ mod tests {
             })
         };
         let mut whole = make();
-        apply_in_strips(&mut whole, &detail, SRGB_Y, 1.0, 200);
+        apply_in_strips(&mut whole, &detail, SRGB_Y, 1.0, 200, None);
         for strip in [7, 32, 61] {
             let mut tiled = make();
-            apply_in_strips(&mut tiled, &detail, SRGB_Y, 1.0, strip);
+            apply_in_strips(&mut tiled, &detail, SRGB_Y, 1.0, strip, None);
             for (a, b) in whole.as_raw().iter().zip(tiled.as_raw()) {
                 assert!(
                     (a - b).abs() < 1e-5,
@@ -1749,7 +1952,7 @@ mod tests {
         ] {
             let mut img = make();
             let start = std::time::Instant::now();
-            apply(&mut img, &detail, SRGB_Y, 1.0);
+            apply(&mut img, &detail, SRGB_Y, 1.0, None);
             println!(
                 "{name:24} {:>7.0} ms",
                 start.elapsed().as_secs_f64() * 1000.0

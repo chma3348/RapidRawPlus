@@ -47,6 +47,9 @@ export function useImageProcessing(
   // one on screen.
   const tileJobRef = useRef(0);
   const tileResRef = useRef(0);
+  // The settings the zoom tile on screen was rendered with: a tile from
+  // earlier settings is taken down when the picture under it is renewed.
+  const tileAdjustmentsRef = useRef<Adjustments | null>(null);
   const activeWaveformChannelRef = useRef(activeWaveformChannel);
   activeWaveformChannelRef.current = activeWaveformChannel;
 
@@ -206,6 +209,7 @@ export function useImageProcessing(
           const [x, y, w, h, fullW, fullH] = [0, 4, 8, 12, 16, 20].map((o) => view.getUint32(o, true));
           const url = URL.createObjectURL(new Blob([buffer.slice(28)], { type: 'image/png' }));
           tileResRef.current = targetRes || 0;
+          tileAdjustmentsRef.current = currentAdjustments;
           setEditor((state) => {
             const previous = state.zoomTile?.url;
             if (previous) setTimeout(() => URL.revokeObjectURL(previous), 250);
@@ -271,6 +275,15 @@ export function useImageProcessing(
                     URL.revokeObjectURL(prevUrl);
                   }
                 }, 250);
+              }
+              // A tile rendered with earlier settings would sit on the renewed
+              // picture as a block of the old look until its successor came.
+              const tile = state.zoomTile;
+              if (tile && tileAdjustmentsRef.current !== currentAdjustments) {
+                setTimeout(() => URL.revokeObjectURL(tile.url), 250);
+                tileResRef.current = 0;
+                tileAdjustmentsRef.current = null;
+                return { finalPreviewUrl: url, zoomTile: null };
               }
               return { finalPreviewUrl: url };
             });
@@ -406,6 +419,10 @@ export function useImageProcessing(
   const clearZoomTile = useCallback(() => {
     tileJobRef.current += 1;
     tileResRef.current = 0;
+    tileAdjustmentsRef.current = null;
+    // Zoomed out (or a new photo): the full-size stages behind the tile can
+    // go; they are hundreds of megabytes each.
+    if (useEditorStore.getState().zoomTile) invoke(Invokes.ReleaseZoomCaches).catch(() => {});
     setEditor((state) => {
       const previous = state.zoomTile?.url;
       if (previous) setTimeout(() => URL.revokeObjectURL(previous), 250);
@@ -547,11 +564,14 @@ export function useImageProcessing(
       dragIdleTimer.current = setTimeout(() => {
         currentResRef.current = targetRes;
 
-        // Zoomed in, the region on screen first (it is what is being looked
-        // at), then the whole picture; one after the other, as the preview
-        // worker keeps only the newest request.
+        // Zoomed in, the whole picture first (it is quick, and replaces a
+        // stale tile at once), then the sharp region on screen; one after the
+        // other, as the preview worker keeps only the newest request.
         if (isZoomedIn()) {
-          requestZoomTile(renderAdjustments).finally(() => applyAdjustments(renderAdjustments, false, targetRes));
+          pendingApplyRef.current = null;
+          executeApplyAdjustments(renderAdjustments, false, targetRes).finally(() =>
+            requestZoomTile(renderAdjustments),
+          );
         } else {
           applyAdjustments(renderAdjustments, false, targetRes);
         }
