@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Fit RapidRAW's lighting sliders (Blacks, Shadows, Highlights, Whites and
+"""Fit Darkroom Index's lighting sliders (Blacks, Shadows, Highlights, Whites and
 Contrast) to Lightroom's strength, measured by tools/adobe_lighting.py, and
 write the engine's tables (src-tauri/src/color_engine/tone_zones_table.rs).
 
 What is fitted is only how far each tone moves: Lightroom's change in L*
 for a tone at a given lightness, at slider +-50 and +-100. How a move is made
-stays RapidRAW's: one gain on all three channels for the zones (hues stay
+stays Darkroom Index's: one gain on all three channels for the zones (hues stay
 put, Resolve's colour and texture finishes ride along) and a per-channel
 curve in DaVinci Intermediate for Contrast, as Resolve applies it.
 
 Each table is held as targets for greys: where a grey of a given lightness
 should land. `seed` takes them straight from Lightroom; after rendering and
-measuring RapidRAW with those tables, `correct` moves each target by what is
+measuring Darkroom Index with those tables, `correct` moves each target by what is
 still missing, and the tables are rewritten. A target never crosses another,
 so no slider can reverse tones.
 
@@ -30,7 +30,7 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 TABLE = os.path.join(HERE, "..", "src-tauri/src/color_engine/tone_zones_table.rs")
 TARGETS = os.path.join(HERE, "tone_zones_targets.json")
-SUP = os.path.expanduser("~/Library/Application Support/io.github.CyberTimon.RapidRAW")
+SUP = os.path.expanduser("~/Library/Application Support/io.github.chma3348.DarkroomIndex")
 KNOTS = 65
 MIN_SLOPE = 0.1
 # Lightroom's curves are smooth; a table fitted knot by knot picks up the
@@ -283,7 +283,7 @@ def write(targets):
         for name in ("cut", "cut_half"):
             tables[(z, name)] = np.minimum(tables[(z, name)], 0.0)
     lines = [
-        "//! RapidRAW's lighting tables: the tone zones (Blacks, Shadows, Highlights,",
+        "//! Darkroom Index's lighting tables: the tone zones (Blacks, Shadows, Highlights,",
         "//! Whites) and Contrast, fitted to Lightroom's strength by",
         "//! tools/fit_lighting.py from tools/adobe_lighting.py's measurements; do",
         "//! not edit.",

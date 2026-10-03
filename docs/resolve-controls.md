@@ -33,11 +33,11 @@ being fitted. Midtone Detail is spatial by definition and is not captured.
 
 ## The captures
 
-In the existing "RapidRAW DRT capture" project:
+In the existing "Darkroom Index DRT capture" project:
 
 1. **Output colour space → DaVinci WG/Intermediate.**
 2. Import `lattice.tiff` and `lattice-scrambled.tiff` from
-   `~/Desktop/RapidRAW control captures/`, and tag **both** clips
+   `~/Desktop/Darkroom Index control captures/`, and tag **both** clips
    **Input Color Space → DaVinci WG/Intermediate**.
 3. For each row below, in the Photo page: set that one control, export as a
    16-bit TIFF at 512×512 the same way as the lattice before, named as shown,

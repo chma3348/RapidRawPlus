@@ -650,8 +650,9 @@ mod input_tests {
     #[test]
     #[ignore]
     fn input_transform_cost() {
-        let path = std::path::Path::new(&std::env::var("HOME").unwrap())
-            .join("Library/Application Support/io.github.CyberTimon.RapidRAW/input-transform.cube");
+        let path = std::path::Path::new(&std::env::var("HOME").unwrap()).join(
+            "Library/Application Support/io.github.chma3348.DarkroomIndex/input-transform.cube",
+        );
         let Ok(cube) = CubeLut::load(&path) else {
             return;
         };

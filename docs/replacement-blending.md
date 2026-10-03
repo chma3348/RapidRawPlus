@@ -2,7 +2,7 @@
 
 ## Try it
 
-Open the freshly built `src-tauri/target/debug/bundle/macos/RapidRAW+.app` after quitting an older RapidRAW instance. Select the existing successful replacement in the AI panel. Below the generation button, **Blend this result** offers:
+Open the freshly built `src-tauri/target/debug/bundle/macos/Darkroom Index.app` after quitting an older Darkroom Index instance. Select the existing successful replacement in the AI panel. Below the generation button, **Blend this result** offers:
 
 - **Transition width**: starts at 40, measured relative to a 1536-pixel context crop. For a recognized sky, extends outward through a conservative sky region. With no safe expansion, adjusts the narrow inward seam instead.
 - **Match appearance**: starts at 35%. Bounded brightness and saturation correction using healthy sky pixels. Clipped white pixels and non-sky materials are excluded. If reliable samples are absent, tone correction is skipped.

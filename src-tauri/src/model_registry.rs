@@ -104,7 +104,7 @@ pub struct ModelRegistry {
     download_lock: TokioMutex<()>,
 }
 
-/// Manifests for the models RapidRAW already ships with, so existing
+/// Manifests for the models Darkroom Index already ships with, so existing
 /// features can be driven through the registry.
 fn builtin_manifests() -> Vec<ModelManifest> {
     use crate::ai_processing as ai;

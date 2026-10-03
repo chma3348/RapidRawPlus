@@ -3,8 +3,8 @@
 //! comparison against Resolve exports.
 //!   cargo run --release --example render_neutral -- OUT_DIR PHOTO...
 use anyhow::Result;
-use rapidraw_lib::color_engine::application::render_aside;
-use rapidraw_lib::image_processing::GpuContext;
+use darkroom_index::color_engine::application::render_aside;
+use darkroom_index::image_processing::GpuContext;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 
@@ -25,9 +25,9 @@ fn main() -> Result<()> {
         limits,
         display: Arc::new(Mutex::new(None)),
     };
-    let state = rapidraw_lib::AppState::default();
+    let state = darkroom_index::AppState::default();
     let support = std::path::PathBuf::from(std::env::var("HOME")?)
-        .join("Library/Application Support/io.github.CyberTimon.RapidRAW");
+        .join("Library/Application Support/io.github.chma3348.DarkroomIndex");
     for (slot, name) in [
         (&state.output_transform, "output-transform.cube"),
         (&state.input_transform, "input-transform.cube"),

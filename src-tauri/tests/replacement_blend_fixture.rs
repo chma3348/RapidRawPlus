@@ -1,7 +1,7 @@
 //! Opt-in regression on the user's backed-up successful sky, never live edits.
 use base64::Engine;
+use darkroom_index::replacement_blend::{BlendOptions, blend};
 use image::imageops::{self, FilterType};
-use rapidraw_lib::replacement_blend::{BlendOptions, blend};
 
 #[test]
 #[ignore = "requires local checkpoint fixture"]
@@ -12,8 +12,7 @@ fn saved_clouds_blend_without_regeneration() {
         std::path::PathBuf::from(std::env::var("REPLACEMENT_PREVIEWS").expect("preview directory"));
     std::fs::create_dir_all(&output).unwrap();
     let sidecar: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(fixture.join("DSC08212.JPG.rrdata")).unwrap())
-            .unwrap();
+        serde_json::from_slice(&std::fs::read(fixture.join("DSC08212.JPG.dri")).unwrap()).unwrap();
     let mut adjustments = sidecar["adjustments"].clone();
     let patches = adjustments["aiPatches"].as_array_mut().unwrap();
     let index = patches
@@ -22,7 +21,7 @@ fn saved_clouds_blend_without_regeneration() {
         .unwrap();
     let patch = patches.remove(index);
     let base = image::open(fixture.join("DSC08212.JPG")).unwrap();
-    let source = rapidraw_lib::image_loader::composite_patches_on_image(&base, &adjustments)
+    let source = darkroom_index::image_loader::composite_patches_on_image(&base, &adjustments)
         .unwrap()
         .to_rgba8();
     let source = imageops::rotate180(&source); // fixture has both flips, no coarse rotation

@@ -15,7 +15,7 @@ The reference project in `Photo Editer` informed accumulated prompts, model-nati
 low-resolution feedback, quality-based candidate selection, and image-guided soft
 edges. No external source implementation or new model dependency was copied.
 
-RapidRAW retains its installed SAM ViT-B model and its existing image encoding,
+Darkroom Index retains its installed SAM ViT-B model and its existing image encoding,
 transforms, compositing, and saved bitmap masks. A first ambiguous click prefers
 a larger mask only among similarly confident, prompt-consistent candidates.
 Refinement retains the original prompts and the model's padded 256-square logits;

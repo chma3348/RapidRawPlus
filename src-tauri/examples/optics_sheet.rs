@@ -7,10 +7,10 @@
 //! the first panel is always the photograph untouched. Rendered as the app
 //! renders: through the captured Resolve transforms when they are installed.
 use anyhow::{Result, ensure};
-use rapidraw_lib::color_engine::{
+use darkroom_index::color_engine::{
     ColorEngine, config::*, controls::Controls, cube::CubeLut, optics, plan::RenderPlan,
 };
-use rapidraw_lib::image_processing::GpuContext;
+use darkroom_index::image_processing::GpuContext;
 use std::sync::{Arc, Mutex};
 
 fn main() -> Result<()> {
@@ -20,17 +20,17 @@ fn main() -> Result<()> {
         "Usage: optics_sheet PHOTO OUT.png [EFFECTS_JSON...]"
     );
     let bytes = std::fs::read(&args[0])?;
-    let mut frame = if rapidraw_lib::formats::is_raw_file(&args[0]) {
-        rapidraw_lib::color_engine::raw::decode_raw(&bytes, false, || Ok(()))?
+    let mut frame = if darkroom_index::formats::is_raw_file(&args[0]) {
+        darkroom_index::color_engine::raw::decode_raw(&bytes, false, || Ok(()))?
     } else {
-        rapidraw_lib::color_engine::input::decode_profiled_photo(&bytes)?
+        darkroom_index::color_engine::input::decode_profiled_photo(&bytes)?
     };
     let support = std::path::PathBuf::from(std::env::var("HOME")?)
-        .join("Library/Application Support/io.github.CyberTimon.RapidRAW");
+        .join("Library/Application Support/io.github.chma3348.DarkroomIndex");
     let output_cube = Some(support.join("output-transform.cube")).filter(|p| p.exists());
     let input_cube = support.join("input-transform.cube");
     if frame.color.reference == ReferenceDomain::Display && input_cube.exists() {
-        rapidraw_lib::color_engine::cube::apply_input_transform(
+        darkroom_index::color_engine::cube::apply_input_transform(
             &CubeLut::load(&input_cube)?.clone(),
             &mut frame.pixels,
         );
@@ -48,7 +48,7 @@ fn main() -> Result<()> {
 
     // Full-resolution cost of each setting.
     for s in &settings[1..] {
-        let e: rapidraw_lib::color_engine::controls::Effects = serde_json::from_value(s.clone())?;
+        let e: darkroom_index::color_engine::controls::Effects = serde_json::from_value(s.clone())?;
         let mut pixels = frame.pixels.clone();
         let start = std::time::Instant::now();
         optics::correct_chromatic_aberration(&mut pixels, &e);

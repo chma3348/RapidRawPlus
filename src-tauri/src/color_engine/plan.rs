@@ -611,7 +611,7 @@ impl RenderPlan {
     /// must be added to this key before introducing a render cache.
     pub fn fingerprint(&self, source_revision: &str) -> String {
         let mut hash = blake3::Hasher::new();
-        hash.update(b"rapidraw-color-v3-audit-2026-09-22\0");
+        hash.update(b"darkroom-index-color-v3-audit-2026-09-22\0");
         hash.update(&serde_json::to_vec(&self.config).expect("validated finite config"));
         // The cube's contents, not the path it was read from.
         if let Some(cube) = &self.cube {

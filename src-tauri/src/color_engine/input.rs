@@ -587,7 +587,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "macos")]
     fn system_codec_formats_keep_their_profile() {
-        let dir = std::env::temp_dir().join("rapidraw_codec_fixture");
+        let dir = std::env::temp_dir().join("darkroom_index_codec_fixture");
         let _ = std::fs::create_dir_all(&dir);
         // A small wide-gamut source: saturated P3 red, which sRGB cannot hold.
         let source = dir.join("p3.png");

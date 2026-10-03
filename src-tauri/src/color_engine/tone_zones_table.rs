@@ -1,4 +1,4 @@
-//! RapidRAW's lighting tables: the tone zones (Blacks, Shadows, Highlights,
+//! Darkroom Index's lighting tables: the tone zones (Blacks, Shadows, Highlights,
 //! Whites) and Contrast, fitted to Lightroom's strength by
 //! tools/fit_lighting.py from tools/adobe_lighting.py's measurements; do
 //! not edit.

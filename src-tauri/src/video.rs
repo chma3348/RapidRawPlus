@@ -242,7 +242,7 @@ fn timing_from_moov(moov: &[u8]) -> Result<FrameTiming> {
 #[cfg(target_os = "macos")]
 pub fn poster_frame(path: &Path) -> Result<DynamicImage> {
     let dir = std::env::temp_dir().join(format!(
-        "rapidraw_poster_{}_{}",
+        "darkroom_index_poster_{}_{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

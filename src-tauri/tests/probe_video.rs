@@ -1,6 +1,6 @@
 //! Poster frames and metadata from real video files.
 //! `VIDEO_DIR=/path/with/clips VIDEO_OUT=/tmp/out cargo test --test probe_video -- --ignored --nocapture`
-use rapidraw_lib::{formats, video};
+use darkroom_index::{formats, video};
 use std::path::PathBuf;
 
 #[test]

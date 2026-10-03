@@ -2,7 +2,7 @@
 which is where pure-sky photographs live."""
 import json, os, re, sys, time, urllib.parse, urllib.request
 OUT=sys.argv[1]; RAW=os.path.join(OUT,"raw"); os.makedirs(RAW,exist_ok=True)
-UA="RapidRAWPlus/1.0 (personal photo-editor sky library; local use)"
+UA="Darkroom IndexPlus/1.0 (personal photo-editor sky library; local use)"
 OK=re.compile(r"(public domain|cc0|cc by|cc-by)",re.I)
 CATS=["Category:Cloudscapes","Category:Cirrus clouds","Category:Cumulus clouds",
       "Category:Altocumulus clouds","Category:Cirrocumulus clouds","Category:Stratocumulus clouds",

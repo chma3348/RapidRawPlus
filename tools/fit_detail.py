@@ -32,7 +32,7 @@ VALUES = ("50", "100", "-50", "-100")
 
 def write(state):
     lines = [
-        "//! RapidRAW's Clarity and Texture bands, fitted to Lightroom's by",
+        "//! Darkroom Index's Clarity and Texture bands, fitted to Lightroom's by",
         "//! tools/fit_detail.py from tools/adobe_detail.py's measurements; do not",
         "//! edit.",
         "//!",

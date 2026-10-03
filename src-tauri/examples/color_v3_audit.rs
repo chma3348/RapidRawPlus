@@ -1,6 +1,6 @@
 //! Before/after pixel and warm-render benchmark. No photo/sidecar writes.
 use anyhow::{Context, Result};
-use rapidraw_lib::{
+use darkroom_index::{
     AppState,
     color_engine::{application, identity},
     image_processing::GpuContext,

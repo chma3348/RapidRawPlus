@@ -11,7 +11,7 @@ fitting. The tools below **do not tune anything** and never overwrite photos.
   exact output setting; the importer only permits an explicit sRGB assumption
   when the recorded output is sRGB. Do not attach an sRGB tag to other values.
 - One changed control per export, reset before the next. Name files with the
-  control and **actual Resolve value**, not an assumed equivalent RapidRAW value.
+  control and **actual Resolve value**, not an assumed equivalent Darkroom Index value.
 - Resolve version, page/panel, input/timeline/output spaces, tone/gamut mapping,
   automatic options, RAW development settings, node state and export settings.
   Keep these fixed within a package. Screenshots/project backups are useful.

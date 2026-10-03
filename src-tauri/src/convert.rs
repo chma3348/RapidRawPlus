@@ -266,7 +266,7 @@ fn convert_with_sips(source: &Path, target: &Path, request: &ConvertRequest) -> 
     {
         command.args(["-Z", &max.to_string()]);
     }
-    let tmp = target.with_extension(format!("{}.rapidraw-tmp", request.format.extension()));
+    let tmp = target.with_extension(format!("{}.darkroom-tmp", request.format.extension()));
     let output = command
         .arg(source)
         .arg("--out")
@@ -373,7 +373,7 @@ fn convert_in_app(
         request.strip_location,
         space,
     )?;
-    let tmp = target.with_extension(format!("{ext}.rapidraw-tmp"));
+    let tmp = target.with_extension(format!("{ext}.darkroom-tmp"));
     std::fs::write(&tmp, &bytes)
         .and_then(|_| std::fs::rename(&tmp, target))
         .map_err(|e| {

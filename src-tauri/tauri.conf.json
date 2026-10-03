@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Darkroom Index",
-  "identifier": "io.github.CyberTimon.RapidRAW",
+  "identifier": "io.github.chma3348.DarkroomIndex",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -101,6 +101,22 @@
         "name": "Image",
         "description": "Image file",
         "role": "Editor"
+      },
+      {
+        "ext": [
+          "dri"
+        ],
+        "name": "Darkroom Index edit",
+        "description": "Darkroom Index edit",
+        "role": "None",
+        "mimeType": "application/json",
+        "exportedType": {
+          "identifier": "io.github.chma3348.DarkroomIndex.edit",
+          "conformsTo": [
+            "public.json",
+            "public.data"
+          ]
+        }
       }
     ],
     "windows": {

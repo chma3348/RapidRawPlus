@@ -6,8 +6,8 @@
 //! Each EDITS_JSON is merged over `{"processVersion":3,"toneMapper":"resolve"}`;
 //! the first panel is always that base.
 use anyhow::Result;
-use rapidraw_lib::color_engine::application::render_file;
-use rapidraw_lib::image_processing::GpuContext;
+use darkroom_index::color_engine::application::render_file;
+use darkroom_index::image_processing::GpuContext;
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 
@@ -30,9 +30,9 @@ fn main() -> Result<()> {
         limits,
         display: Arc::new(Mutex::new(None)),
     };
-    let state = rapidraw_lib::AppState::default();
+    let state = darkroom_index::AppState::default();
     let support = std::path::PathBuf::from(std::env::var("HOME")?)
-        .join("Library/Application Support/io.github.CyberTimon.RapidRAW");
+        .join("Library/Application Support/io.github.chma3348.DarkroomIndex");
     for (slot, name) in [
         (&state.output_transform, "output-transform.cube"),
         (&state.input_transform, "input-transform.cube"),

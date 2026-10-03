@@ -454,8 +454,7 @@ pub async fn save_expanded_image(
         .map_err(|e| format!("Failed to save image: {}", e))?;
 
     let (real_path, _) = parse_virtual_path(&original_path_str);
-    let _ =
-        crate::exif_processing::write_rrexif_sidecar(&real_path.to_string_lossy(), &output_path);
+    let _ = crate::exif_processing::write_exif_sidecar(&real_path.to_string_lossy(), &output_path);
     // Deliberately NOT copying the source sidecar: edits are already baked
     // into this file, so inheriting them would re-apply crop/rotation/AI
     // patches on top of the baked pixels (tilted/warped display).

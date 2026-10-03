@@ -1,6 +1,6 @@
 # Sharpening and noise reduction: Lightroom's, slider for slider
 
-2 October 2026. The third wave of Lightroom calibration. RapidRAW's Detail
+2 October 2026. The third wave of Lightroom calibration. Darkroom Index's Detail
 panel now has Lightroom's controls and behaves like them:
 
 - **Sharpening**: Amount (0–150; negative still softens), Radius, Detail,

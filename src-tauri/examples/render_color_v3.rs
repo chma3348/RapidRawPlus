@@ -1,9 +1,9 @@
 //! Developer-only renderer; requires explicit interpretation of decoded pixels.
 use anyhow::{Context, Result, ensure};
-use rapidraw_lib::color_engine::{
+use darkroom_index::color_engine::{
     ColorEngine, config::*, input::decode_profiled_photo, plan::RenderPlan,
 };
-use rapidraw_lib::image_processing::GpuContext;
+use darkroom_index::image_processing::GpuContext;
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
@@ -28,7 +28,7 @@ fn main() -> Result<()> {
         let decoded = if args[3] == "auto" {
             decode_profiled_photo(&bytes)?
         } else {
-            rapidraw_lib::color_engine::raw::decode_raw(&bytes, args[3] == "raw-fast", || Ok(()))?
+            darkroom_index::color_engine::raw::decode_raw(&bytes, args[3] == "raw-fast", || Ok(()))?
         };
         let output_rendering = match (&captured, decoded.color.reference) {
             (Some(_), _) => OutputRendering::ResolveCubeV1,

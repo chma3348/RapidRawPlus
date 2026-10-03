@@ -267,7 +267,7 @@ async fn ensure_convert_env(app_handle: &tauri::AppHandle) -> Result<PathBuf, St
         candidates.push(dir.join("pyenv/bin/python3"));
     }
     if let Ok(home) = std::env::var("HOME") {
-        candidates.push(PathBuf::from(home).join(".local/rapidraw-export-venv/bin/python3"));
+        candidates.push(PathBuf::from(home).join(".local/darkroom-index-export-venv/bin/python3"));
     }
 
     for python in &candidates {
@@ -358,7 +358,7 @@ async fn convert_checkpoint_to_onnx(
 ) -> Result<String, String> {
     let python = ensure_convert_env(app_handle).await?;
 
-    let script_path = std::env::temp_dir().join("rapidraw_convert_model.py");
+    let script_path = std::env::temp_dir().join("darkroom_index_convert_model.py");
     fs::write(&script_path, CONVERT_SCRIPT).map_err(|e| e.to_string())?;
 
     let out_name = format!("{}.onnx", slug);

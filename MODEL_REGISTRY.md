@@ -8,7 +8,7 @@ model dropdown in each feature's dialog.
 ## Where things live
 
 - **Weights:** `<app-data>/models/`
-  (macOS: `~/Library/Application Support/io.github.CyberTimon.RapidRAW/models/`)
+  (macOS: `~/Library/Application Support/io.github.chma3348.DarkroomIndex/models/`)
 - **Custom manifests:** `<app-data>/models/manifests/*.json`
 - **Built-in manifests:** compiled in — see `builtin_manifests()` in
   [`src-tauri/src/model_registry.rs`](src-tauri/src/model_registry.rs)

@@ -6,7 +6,7 @@
 //! degrees (through the app's own `apply_rotation`) and reports how far the
 //! change in estimate is from the applied tilt, which measures accuracy
 //! without needing ground truth for the originals.
-use rapidraw_lib::{auto_level, image_processing::apply_rotation};
+use darkroom_index::{auto_level, image_processing::apply_rotation};
 use std::time::Instant;
 
 /// `AUTO_LEVEL_FILE=/photo.jpg [AUTO_LEVEL_TILT=3.5] [AUTO_LEVEL_OUT=dir]`:

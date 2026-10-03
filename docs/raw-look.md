@@ -4,20 +4,20 @@
 Standard profile, sharpening and noise reduction at 0, as the reference
 exports were made), measured on pairs of the same RAWs developed
 by both. Rendered photographs (JPEGs and the like) are untouched: they
-already opened alike in RapidRAW, Resolve and Lightroom (median L* 56.4 /
+already opened alike in Darkroom Index, Resolve and Lightroom (median L* 56.4 /
 56.3 / 56.4 over the test set).
 
 ## Why
 
-Unedited, RapidRAW's RAWs were darker, flatter and duller than Lightroom's
+Unedited, Darkroom Index's RAWs were darker, flatter and duller than Lightroom's
 (and than Resolve's own default, which they were never calibrated against).
-RapidRAW developed a RAW at the camera's metered exposure through Resolve's
+Darkroom Index developed a RAW at the camera's metered exposure through Resolve's
 gentle rendering; Lightroom adds a baseline exposure, a midtone-lifting
 S-curve and a saturation boost (richest in warm browns and oranges). Every
 slider then started from that dull picture.
 
 Over the 7 test RAWs (Sony A7C II and A9, ISO 100–12800), in Oklab ×100
-(about 2 is just visible), RapidRAW / Lightroom:
+(about 2 is just visible), Darkroom Index / Lightroom:
 
 | unedited | before | now | Lightroom |
 |---|---|---|---|

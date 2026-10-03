@@ -3,7 +3,7 @@
 //!
 //! `SCENE_DIR=/photos SCENE_OUT=/out cargo test --test probe_scene_masks raw_stats -- --ignored --nocapture`
 //! prints raw model statistics per photo and saves the raw probability maps.
-use rapidraw_lib::{ai_processing, model_registry::ModelRegistry};
+use darkroom_index::{ai_processing, model_registry::ModelRegistry};
 use std::path::PathBuf;
 
 fn env(k: &str) -> String {
@@ -214,8 +214,8 @@ fn depth_maps() {
 // photo), edge alignment of the coarse vs guided mask, timings. Saves
 // full-res masks downscaled to 1024 px for contact sheets.
 // ---------------------------------------------------------------------------
+use darkroom_index::scene_masks::{self, Orientation, ProbabilityMap};
 use image::{DynamicImage, GrayImage};
-use rapidraw_lib::scene_masks::{self, Orientation, ProbabilityMap};
 
 fn small(img: &DynamicImage) -> DynamicImage {
     let (w, h) = (img.width(), img.height());
@@ -514,7 +514,7 @@ fn new_pipeline() {
         }
         // Load the way the app does, so EXIF rotation is applied.
         let bytes = std::fs::read(&path).unwrap();
-        let img = rapidraw_lib::image_loader::load_image_with_orientation(&bytes, None).unwrap();
+        let img = darkroom_index::image_loader::load_image_with_orientation(&bytes, None).unwrap();
         let img = img.resize(2400, 2400, image::imageops::FilterType::Triangle);
         let t = std::time::Instant::now();
         let sky = scene_masks::sky_mask_scene(&img, &scene, o).unwrap();

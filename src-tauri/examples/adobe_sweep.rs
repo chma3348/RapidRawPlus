@@ -16,7 +16,7 @@
 //! display-encoded sRGB) and a matching .json with the size. Existing files
 //! are kept, so an interrupted sweep resumes.
 use anyhow::{Context, Result, ensure};
-use rapidraw_lib::{
+use darkroom_index::{
     AppState, color_engine::application, color_engine::reference, image_processing::GpuContext,
 };
 use std::{
@@ -46,7 +46,7 @@ fn gpu() -> Result<GpuContext> {
 fn installed_state() -> Result<AppState> {
     let state = AppState::default();
     let support = PathBuf::from(std::env::var("HOME")?)
-        .join("Library/Application Support/io.github.CyberTimon.RapidRAW");
+        .join("Library/Application Support/io.github.chma3348.DarkroomIndex");
     for (slot, name) in [
         (&state.output_transform, "output-transform.cube"),
         (&state.input_transform, "input-transform.cube"),
@@ -64,7 +64,7 @@ fn installed_state() -> Result<AppState> {
 /// controls as the reference package defines them, and the detail and
 /// effect controls Lightroom exports were made for (Clarity, Texture,
 /// Dehaze; Grain at Lightroom's default size 25 and roughness 50, which are
-/// RapidRAW's defaults too).
+/// Darkroom Index's defaults too).
 fn edits_for(control: &str, value: f64) -> Result<serde_json::Value> {
     let mut edits = lightroom_edits(control, value)?;
     // Lightroom's references were exported with no sharpening or noise

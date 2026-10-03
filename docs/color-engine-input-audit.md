@@ -73,7 +73,7 @@ full gamut mapping and app-wide v3 controls remain separate work.
 
 `color_engine/raw.rs` now provides a separate experimental RAW path. It reuses
 the pinned rawler file decoder, demosaicing and cropping, but does not call its
-calibration/color-clipping stage or the legacy RapidRAW highlight processing.
+calibration/color-clipping stage or the legacy Darkroom Index highlight processing.
 
 The supported subset is 2×2 RGB Bayer mosaics with even dimensions, supported
 black-level layouts and a single sensor white level, a finite invertible decoder-reported D65 3×3 matrix,

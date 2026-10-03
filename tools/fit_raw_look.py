@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Fit RapidRAW's RAW starting look (color_engine/raw_look.rs) to Lightroom's
+"""Fit Darkroom Index's RAW starting look (color_engine/raw_look.rs) to Lightroom's
 default rendering of the same RAWs, and write its table
 (src-tauri/src/color_engine/raw_look_table.rs).
 
-Measured pixel by pixel on pairs: RapidRAW's render of a RAW and Lightroom's
+Measured pixel by pixel on pairs: Darkroom Index's render of a RAW and Lightroom's
 unedited export of it ("Adobe no edits"), Lightroom's resized onto ours by
 area. Only RAWs: rendered photographs already open alike in both.
 
@@ -123,7 +123,7 @@ def write(state):
     tone = tone_table(state["tone"])
     colour = np.array(state["colour"])
     lines = [
-        "//! RapidRAW's RAW starting look, fitted to Lightroom's default rendering",
+        "//! Darkroom Index's RAW starting look, fitted to Lightroom's default rendering",
         "//! by tools/fit_raw_look.py; do not edit.",
         "//!",
         "//! `TONE`: offsets on the tonal key (DaVinci Intermediate), 65 knots over",

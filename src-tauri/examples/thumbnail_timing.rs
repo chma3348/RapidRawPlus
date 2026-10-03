@@ -2,8 +2,8 @@
 //! editor's caches alone.
 //!   cargo run --release --example thumbnail_timing -- EDITOR_PHOTO THUMB_PHOTO...
 use anyhow::Result;
-use rapidraw_lib::color_engine::application::{render_file, render_thumbnail};
-use rapidraw_lib::image_processing::GpuContext;
+use darkroom_index::color_engine::application::{render_file, render_thumbnail};
+use darkroom_index::image_processing::GpuContext;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 
@@ -22,7 +22,7 @@ fn main() -> Result<()> {
         limits,
         display: Arc::new(Mutex::new(None)),
     };
-    let state = rapidraw_lib::AppState::default();
+    let state = darkroom_index::AppState::default();
     let edits = json!({"processVersion": 3, "toneMapper": "resolve", "v3": {}});
     // The editor has a photo open.
     render_file(&context, &state, &args[0], &edits, Some(1600))?;

@@ -8,10 +8,10 @@
 //!
 //!   cargo run --release --example basic_parity -- PHOTO [OUT_DIR]
 use anyhow::Result;
+use darkroom_index::color_engine::application::render_file;
+use darkroom_index::gpu_processing::{GpuProcessor, RenderRequest};
+use darkroom_index::image_processing::{GpuContext, get_all_adjustments_from_json};
 use image::{DynamicImage, ImageBuffer, Luma};
-use rapidraw_lib::color_engine::application::render_file;
-use rapidraw_lib::gpu_processing::{GpuProcessor, RenderRequest};
-use rapidraw_lib::image_processing::{GpuContext, get_all_adjustments_from_json};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 
@@ -33,12 +33,12 @@ fn main() -> Result<()> {
         limits,
         display: Arc::new(Mutex::new(None)),
     };
-    let state = rapidraw_lib::AppState::default();
+    let state = darkroom_index::AppState::default();
     // As the app renders: the Resolve rendering and the installed transforms.
     let as_app = std::env::var_os("AS_APP").is_some();
     if as_app {
         let support = std::path::PathBuf::from(std::env::var("HOME")?)
-            .join("Library/Application Support/io.github.CyberTimon.RapidRAW");
+            .join("Library/Application Support/io.github.chma3348.DarkroomIndex");
         for (slot, name) in [
             (&state.output_transform, "output-transform.cube"),
             (&state.input_transform, "input-transform.cube"),
@@ -52,13 +52,13 @@ fn main() -> Result<()> {
 
     // The same pixels v3 prepares: its decode, its downscale.
     let bytes = std::fs::read(&path)?;
-    let raw = rapidraw_lib::formats::is_raw_file(&path);
+    let raw = darkroom_index::formats::is_raw_file(&path);
     let frame = if raw {
-        rapidraw_lib::color_engine::raw::decode_raw(&bytes, false, || Ok(()))?
+        darkroom_index::color_engine::raw::decode_raw(&bytes, false, || Ok(()))?
     } else {
-        rapidraw_lib::color_engine::input::decode_profiled_photo(&bytes)?
+        darkroom_index::color_engine::input::decode_profiled_photo(&bytes)?
     };
-    let small = rapidraw_lib::image_processing::downscale_f32_image(
+    let small = darkroom_index::image_processing::downscale_f32_image(
         &DynamicImage::ImageRgba32F(frame.pixels),
         SIZE,
         SIZE,

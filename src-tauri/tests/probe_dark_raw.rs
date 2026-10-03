@@ -12,14 +12,14 @@ fn dark_raw_inpaint() {
             manifest_dir.join("resources/libonnxruntime.dylib"),
         )
     };
-    rapidraw_lib::register_exit_handler();
+    darkroom_index::register_exit_handler();
     let models_dir = std::env::var("HOME").unwrap()
-        + "/Library/Application Support/io.github.CyberTimon.RapidRAW/models";
+        + "/Library/Application Support/io.github.chma3348.DarkroomIndex/models";
     if !PathBuf::from(&models_dir).join("lama_fp16.onnx").is_file() {
         eprintln!("lama_fp16.onnx not present; skipping");
         return;
     }
-    let registry = rapidraw_lib::model_registry::ModelRegistry::new(PathBuf::from(models_dir));
+    let registry = darkroom_index::model_registry::ModelRegistry::new(PathBuf::from(models_dir));
     let session = registry.get_session("lama-fp16", None).unwrap();
 
     // Deep-shadow linear image: noisy values around 1e-4..1e-2 (like a
@@ -50,7 +50,7 @@ fn dark_raw_inpaint() {
 
     let dynamic = DynamicImage::ImageRgb32F(img.clone());
     let (result, is_gamma) =
-        rapidraw_lib::ai_processing::run_lama_inpainting(&dynamic, &mask, &session).unwrap();
+        darkroom_index::ai_processing::run_lama_inpainting(&dynamic, &mask, &session).unwrap();
     assert!(is_gamma, "float source must come back gamma-encoded");
 
     // Decode fill back to linear and compare against ring level.

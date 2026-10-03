@@ -3,8 +3,8 @@
 //!
 //!   cargo run --release --example v3_auto -- PHOTO...
 use anyhow::Result;
-use rapidraw_lib::color_engine::application::auto_controls;
-use rapidraw_lib::image_processing::GpuContext;
+use darkroom_index::color_engine::application::auto_controls;
+use darkroom_index::image_processing::GpuContext;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 
@@ -22,9 +22,9 @@ fn main() -> Result<()> {
         limits,
         display: Arc::new(Mutex::new(None)),
     };
-    let state = rapidraw_lib::AppState::default();
+    let state = darkroom_index::AppState::default();
     let support = std::path::PathBuf::from(std::env::var("HOME")?)
-        .join("Library/Application Support/io.github.CyberTimon.RapidRAW");
+        .join("Library/Application Support/io.github.chma3348.DarkroomIndex");
     for (slot, name) in [
         (&state.output_transform, "output-transform.cube"),
         (&state.input_transform, "input-transform.cube"),
@@ -39,7 +39,7 @@ fn main() -> Result<()> {
         let start = std::time::Instant::now();
         let auto = auto_controls(&context, &state, &path, &edits)?;
         if let Ok(dir) = std::env::var("V3_AUTO_SHEETS") {
-            let before = rapidraw_lib::color_engine::application::render_file(
+            let before = darkroom_index::color_engine::application::render_file(
                 &context,
                 &state,
                 &path,
@@ -49,7 +49,7 @@ fn main() -> Result<()> {
             .preview_rgba8();
             let mut adjusted = edits.clone();
             adjusted["v3"] = auto.clone();
-            let after = rapidraw_lib::color_engine::application::render_file(
+            let after = darkroom_index::color_engine::application::render_file(
                 &context,
                 &state,
                 &path,

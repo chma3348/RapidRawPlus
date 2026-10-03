@@ -1,10 +1,10 @@
 use std::fs;
 use std::path::PathBuf;
 
+use darkroom_index::enhancement::{run_single_pass_enhancement, run_tiled_enhancement};
+use darkroom_index::model_registry::{ModelRegistry, TaskType};
 use image::Rgb32FImage;
 use ndarray::{Array, IxDyn};
-use rapidraw_lib::enhancement::{run_single_pass_enhancement, run_tiled_enhancement};
-use rapidraw_lib::model_registry::{ModelRegistry, TaskType};
 
 const DUMMY_MANIFEST: &str = r#"{
     "id": "dummy-identity",
@@ -67,7 +67,7 @@ fn dummy_model_round_trip() {
     // ONNX Runtime's environment may abort during process teardown (after
     // the test harness has already reported results); exit cleanly instead,
     // the same way the app does.
-    rapidraw_lib::register_exit_handler();
+    darkroom_index::register_exit_handler();
     let models_dir = setup_models_dir();
     let registry = ModelRegistry::new(models_dir.path().to_path_buf());
 
@@ -132,7 +132,7 @@ fn dummy_model_round_trip() {
 /// pixel mismatch.
 #[test]
 fn tiled_enhancement_identity_reassembly() {
-    rapidraw_lib::register_exit_handler();
+    darkroom_index::register_exit_handler();
     let models_dir = setup_models_dir();
     let registry = ModelRegistry::new(models_dir.path().to_path_buf());
     let session = registry.get_session("dummy-identity", None).unwrap();
@@ -178,12 +178,12 @@ fn tiled_enhancement_real_upscaler_4x() {
         eprintln!("RAPIDRAW_UPSCALE_TEST_MODEL not set; skipping");
         return;
     };
-    rapidraw_lib::register_exit_handler();
+    darkroom_index::register_exit_handler();
     let models_dir = setup_models_dir();
 
     // The auto-probe must classify a real dynamic 4x upscaler correctly.
-    let probe =
-        rapidraw_lib::model_registry::probe_onnx_model(std::path::Path::new(&model_path)).unwrap();
+    let probe = darkroom_index::model_registry::probe_onnx_model(std::path::Path::new(&model_path))
+        .unwrap();
     assert_eq!(probe.scale_factor, 4);
     assert_eq!(probe.fixed_size, None);
     let manifest = format!(
@@ -222,7 +222,7 @@ fn tiled_enhancement_real_upscaler_4x() {
 /// then cropped back. Output must still equal the input exactly.
 #[test]
 fn tiled_enhancement_fixed_size_padding() {
-    rapidraw_lib::register_exit_handler();
+    darkroom_index::register_exit_handler();
     let models_dir = setup_models_dir();
     let registry = ModelRegistry::new(models_dir.path().to_path_buf());
     let session = registry.get_session("dummy-identity", None).unwrap();
@@ -248,9 +248,9 @@ fn tiled_enhancement_fixed_size_padding() {
 /// image-to-image graph.
 #[test]
 fn probe_detects_identity_model() {
-    rapidraw_lib::register_exit_handler();
+    darkroom_index::register_exit_handler();
     let models_dir = setup_models_dir();
-    let probe = rapidraw_lib::model_registry::probe_onnx_model(
+    let probe = darkroom_index::model_registry::probe_onnx_model(
         &models_dir.path().join("dummy_identity.onnx"),
     )
     .expect("identity model should pass the probe");
@@ -260,14 +260,14 @@ fn probe_detects_identity_model() {
     // A non-model file must be rejected, not crash.
     let junk = models_dir.path().join("junk.onnx");
     fs::write(&junk, b"not a model").unwrap();
-    assert!(rapidraw_lib::model_registry::probe_onnx_model(&junk).is_err());
+    assert!(darkroom_index::model_registry::probe_onnx_model(&junk).is_err());
 }
 
 /// The bundled model catalog must always parse, and its entries must carry
 /// verifiable download specs.
 #[test]
 fn bundled_catalog_is_valid() {
-    let catalog = rapidraw_lib::model_library::bundled_catalog();
+    let catalog = darkroom_index::model_library::bundled_catalog();
     assert!(!catalog.is_empty());
     for entry in &catalog {
         let dl = entry.manifest.download.as_ref().unwrap_or_else(|| {
@@ -291,7 +291,7 @@ fn bundled_catalog_is_valid() {
 /// identity model the result must equal the input exactly.
 #[test]
 fn single_pass_identity_roundtrip() {
-    rapidraw_lib::register_exit_handler();
+    darkroom_index::register_exit_handler();
     let models_dir = setup_models_dir();
     let registry = ModelRegistry::new(models_dir.path().to_path_buf());
     let session = registry.get_session("dummy-identity", None).unwrap();
@@ -325,7 +325,7 @@ fn expansion_canvas_and_mask_geometry() {
     }
     let dynamic = DynamicImage::ImageRgb32F(img);
     let (canvas, mask) =
-        rapidraw_lib::expansion::build_canvas_and_mask(&dynamic, 30, 0, 0, 20).unwrap();
+        darkroom_index::expansion::build_canvas_and_mask(&dynamic, 30, 0, 0, 20).unwrap();
     assert_eq!(canvas.dimensions(), (150, 110));
     assert_eq!(mask.dimensions(), (150, 110));
 
@@ -373,7 +373,7 @@ fn expansion_fill_with_real_lama() {
         eprintln!("RAPIDRAW_INPAINT_TEST_MODEL not set; skipping");
         return;
     };
-    rapidraw_lib::register_exit_handler();
+    darkroom_index::register_exit_handler();
     let models_dir = setup_models_dir();
     let manifest = format!(
         r#"{{"id":"lama-test","display_name":"LaMa","task_type":"inpaint","file_path":"{}","params":{{}}}}"#,
@@ -390,8 +390,8 @@ fn expansion_fill_with_real_lama() {
     }
     let dynamic = DynamicImage::ImageRgb32F(img);
     let (canvas, mask) =
-        rapidraw_lib::expansion::build_canvas_and_mask(&dynamic, 0, 0, 60, 0).unwrap();
-    let result = rapidraw_lib::expansion::fill_variant(&canvas, &mask, &session, 512)
+        darkroom_index::expansion::build_canvas_and_mask(&dynamic, 0, 0, 60, 0).unwrap();
+    let result = darkroom_index::expansion::fill_variant(&canvas, &mask, &session, 512)
         .expect("expansion fill should succeed");
     assert_eq!(result.dimensions(), (260, 150));
     // Unmasked original pixels must be untouched.
@@ -408,13 +408,13 @@ fn tiled_enhancement_real_deblur_fixed_size() {
         eprintln!("RAPIDRAW_DEBLUR_TEST_MODEL not set; skipping");
         return;
     };
-    rapidraw_lib::register_exit_handler();
+    darkroom_index::register_exit_handler();
     let models_dir = setup_models_dir();
 
     // NAFNet declares dynamic dims but rejects small inputs at runtime; the
     // probe must fall back and classify it as a fixed 512x512 model.
-    let probe =
-        rapidraw_lib::model_registry::probe_onnx_model(std::path::Path::new(&model_path)).unwrap();
+    let probe = darkroom_index::model_registry::probe_onnx_model(std::path::Path::new(&model_path))
+        .unwrap();
     assert_eq!(probe.scale_factor, 1);
     assert_eq!(probe.fixed_size, Some((512, 512)));
     let manifest = format!(

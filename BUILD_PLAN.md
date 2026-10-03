@@ -39,7 +39,7 @@ Nothing gets added or dropped from this list silently.
 ## Standing rules for every phase
 - Verify: cargo tests (incl. GPU harness where measurable), clippy 0,
   TS baseline 120, vite build.
-- Rebuild RapidRAW+, install, relaunch.
+- Rebuild Darkroom Index, install, relaunch.
 - Commit + push with the phase name; report acceptance-list status.
 
 ## Round: color-select fill quality — SHIPPED
@@ -129,7 +129,7 @@ rebuild + install at phase end. Nothing added or dropped silently.
       tests (flog2c.rs) against Fujifilm's published code values.
 - [x] lutInputSpace adjustment ('display'/'flog2c'), auto-inferred from
       FLog2C_to_* filenames.
-- [x] Managed LUT folder (~/Documents/RapidRAW Models/luts/<pack>/) with
+- [x] Managed LUT folder (~/Documents/Darkroom Index/Models/luts/<pack>/) with
       per-pack SOURCES.md provenance; official pack copied there; files
       never committed (Fujifilm copyright). Repo doc: LUTS.md.
 - [x] "Film simulations" preset dropdown in Effects -> LUT.
@@ -141,7 +141,7 @@ repro setup) by dividing each photo by a "master flat" reference frame,
 per-pixel, in linear light. Replaces parametric devignette for rig shots.
 
 ### Backend — profile store
-- [x] Managed folder `~/Documents/RapidRAW Models/flats/<profile>/`:
+- [x] Managed folder `~/Documents/Darkroom Index/Models/flats/<profile>/`:
       `flat.png` (16-bit, linear-encoded, long edge capped ~2048 — the
       field is smooth, full res is wasted) + `profile.json` (name,
       created date, frame count, source filenames, notes, stats).

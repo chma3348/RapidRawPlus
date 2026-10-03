@@ -1,4 +1,4 @@
-//! RapidRAW's negative Dehaze (adding haze), fitted to Lightroom's by
+//! Darkroom Index's negative Dehaze (adding haze), fitted to Lightroom's by
 //! tools/fit_dehaze.py from tools/adobe_detail.py's measurements; do
 //! not edit.
 //!

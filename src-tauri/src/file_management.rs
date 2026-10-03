@@ -199,7 +199,7 @@ pub fn parse_virtual_path(virtual_path: &str) -> (PathBuf, PathBuf) {
 
     let sidecar_filename = if let Some(id) = copy_id {
         format!(
-            "{}.{}.rrdata",
+            "{}.{}.dri",
             source_path
                 .file_name()
                 .unwrap_or_default()
@@ -208,7 +208,7 @@ pub fn parse_virtual_path(virtual_path: &str) -> (PathBuf, PathBuf) {
         )
     } else {
         format!(
-            "{}.rrdata",
+            "{}.dri",
             source_path
                 .file_name()
                 .unwrap_or_default()
@@ -232,7 +232,7 @@ pub async fn read_exif_for_paths(
                 let source_path_str = source_path.to_string_lossy().to_string();
 
                 let map = if let Some(sidecar_exif) =
-                    crate::exif_processing::read_rrexif_sidecar(&source_path)
+                    crate::exif_processing::read_exif_sidecar(&source_path)
                 {
                     sidecar_exif
                 } else if let Ok(mmap) = read_file_mapped(&source_path) {
@@ -275,7 +275,7 @@ pub async fn update_exif_fields(
             let temp_metadata = crate::exif_processing::load_sidecar(&primary_path);
 
             let mut exif_data = temp_metadata.exif.unwrap_or_else(|| {
-                if let Some(existing) = crate::exif_processing::read_rrexif_sidecar(original_path) {
+                if let Some(existing) = crate::exif_processing::read_exif_sidecar(original_path) {
                     existing
                 } else if let Ok(mmap) = read_file_mapped(original_path) {
                     crate::exif_processing::read_exif_data_from_bytes(path, &mmap)
@@ -328,7 +328,7 @@ pub fn list_images_in_dir(path: String, app_handle: AppHandle) -> Result<Vec<Ima
             .into_string()
             .unwrap_or_else(|os| os.to_string_lossy().into_owned());
 
-        if file_name.ends_with(".rrdata") {
+        if file_name.ends_with(".dri") {
             let base = &file_name[..file_name.len() - 7];
 
             let (source_filename, copy_id) =
@@ -380,9 +380,9 @@ pub fn list_images_in_dir(path: String, app_handle: AppHandle) -> Result<Vec<Ima
                     Some(id) => (
                         format!("{}?vc={}", path_str, id),
                         true,
-                        format!("{}.{}.rrdata", file_name, id),
+                        format!("{}.{}.dri", file_name, id),
                     ),
-                    None => (path_str.clone(), false, format!("{}.rrdata", file_name)),
+                    None => (path_str.clone(), false, format!("{}.dri", file_name)),
                 };
 
                 let sidecar_path = path_buf.with_file_name(sidecar_filename);
@@ -459,7 +459,7 @@ pub fn list_images_recursive(
         }
 
         let file_name = entry_path.file_name().unwrap_or_default().to_string_lossy();
-        if let Some(base) = file_name.strip_suffix(".rrdata") {
+        if let Some(base) = file_name.strip_suffix(".dri") {
             let (source_filename, copy_id) =
                 if base.len() >= 7 && base.as_bytes()[base.len() - 7] == b'.' {
                     let id = &base[base.len() - 6..];
@@ -516,9 +516,9 @@ pub fn list_images_recursive(
                     Some(id) => (
                         format!("{}?vc={}", path_str, id),
                         true,
-                        format!("{}.{}.rrdata", file_name, id),
+                        format!("{}.{}.dri", file_name, id),
                     ),
-                    None => (path_str.clone(), false, format!("{}.rrdata", file_name)),
+                    None => (path_str.clone(), false, format!("{}.dri", file_name)),
                 };
 
                 let sidecar_path = path_buf.with_file_name(sidecar_filename);
@@ -1703,9 +1703,9 @@ pub fn duplicate_file(
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned();
-        let is_virtual_copy = file != format!("{name}.rrdata")
+        let is_virtual_copy = file != format!("{name}.dri")
             && file.starts_with(&format!("{name}."))
-            && file.ends_with(".rrdata");
+            && file.ends_with(".dri");
         if is_virtual_copy {
             continue;
         }
@@ -1735,13 +1735,13 @@ pub fn companion_files(image: &Path) -> Vec<PathBuf> {
         return found;
     };
     let name = name.to_string_lossy().into_owned();
-    let primary = format!("{name}.rrdata");
+    let primary = format!("{name}.dri");
     let copies_prefix = format!("{name}.");
     if let Ok(entries) = fs::read_dir(parent) {
         for entry in entries.filter_map(Result::ok) {
             let entry_name = entry.file_name().to_string_lossy().into_owned();
             let is_sidecar = entry_name == primary
-                || (entry_name.starts_with(&copies_prefix) && entry_name.ends_with(".rrdata"))
+                || (entry_name.starts_with(&copies_prefix) && entry_name.ends_with(".dri"))
                 || entry_name == format!("{name}.rrexif");
             if is_sidecar && entry.path().is_file() {
                 found.push(entry.path());
@@ -1783,7 +1783,7 @@ pub fn companion_files(image: &Path) -> Vec<PathBuf> {
 }
 
 /// Where `companion` goes when `old_image` becomes `new_image`: sidecars
-/// named after the whole file name (`IMG.CR3.rrdata`, `IMG.CR3.xmp`) or
+/// named after the whole file name (`IMG.CR3.dri`, `IMG.CR3.xmp`) or
 /// after its stem (`IMG.xmp`) follow the new name.
 pub fn companion_target(companion: &Path, old_image: &Path, new_image: &Path) -> PathBuf {
     let parent = new_image.parent().unwrap_or_else(|| Path::new(""));
@@ -1852,7 +1852,7 @@ fn relink_versions(old: &Path, new: &Path) {
     };
     for entry in entries.filter_map(Result::ok) {
         let path = entry.path();
-        if path.extension().is_none_or(|e| e != "rrdata") {
+        if path.extension().is_none_or(|e| e != "dri") {
             continue;
         }
         let mut meta = crate::exif_processing::load_sidecar(&path);
@@ -2752,7 +2752,7 @@ pub fn clear_all_sidecars(root_path: String) -> Result<usize, String> {
         let path = entry.path();
         if path.is_file()
             && let Some(extension) = path.extension()
-            && (extension == "rrdata" || extension == "rrexif")
+            && (extension == "dri" || extension == "rrexif")
         {
             if fs::remove_file(path).is_ok() {
                 deleted_count += 1;
@@ -2927,7 +2927,7 @@ pub fn delete_files_with_associated(
                 if let Some(base_stem) = entry_filename_str.split('.').next()
                     && stems_to_delete.contains(base_stem)
                     && (is_supported_image_file(entry_filename_str.as_ref())
-                        || entry_filename_str.ends_with(".rrdata")
+                        || entry_filename_str.ends_with(".dri")
                         || entry_filename_str.ends_with(".rrexif"))
                 {
                     files_to_trash.insert(entry_path);
@@ -3497,10 +3497,10 @@ mod companion_tests {
         let old = d.join("DSC1.ARW");
         let new = d.join("Tahiti_001.ARW");
         let t = |c: &str| companion_target(&d.join(c), &old, &new);
-        assert_eq!(t("DSC1.ARW.rrdata"), d.join("Tahiti_001.ARW.rrdata"));
+        assert_eq!(t("DSC1.ARW.dri"), d.join("Tahiti_001.ARW.dri"));
         assert_eq!(
-            t("DSC1.ARW.a1b2c3.rrdata"),
-            d.join("Tahiti_001.ARW.a1b2c3.rrdata")
+            t("DSC1.ARW.a1b2c3.dri"),
+            d.join("Tahiti_001.ARW.a1b2c3.dri")
         );
         assert_eq!(t("DSC1.xmp"), d.join("Tahiti_001.xmp"));
         assert_eq!(t("DSC1.ARW.xmp"), d.join("Tahiti_001.ARW.xmp"));
@@ -3568,10 +3568,10 @@ mod companion_tests {
             "DSC1.ARW",
             "DSC1.JPG",
             "DSC1.xmp",
-            "DSC1.ARW.rrdata",
-            "DSC1.ARW.a1b2c3.rrdata",
-            "DSC1.JPG.rrdata",
-            "DSC10.ARW.rrdata",
+            "DSC1.ARW.dri",
+            "DSC1.ARW.a1b2c3.dri",
+            "DSC1.JPG.dri",
+            "DSC10.ARW.dri",
         ] {
             touch(&p(n));
         }
@@ -3579,20 +3579,16 @@ mod companion_tests {
         raw.sort();
         assert_eq!(
             raw,
-            [
-                p("DSC1.ARW.a1b2c3.rrdata"),
-                p("DSC1.ARW.rrdata"),
-                p("DSC1.xmp")
-            ]
+            [p("DSC1.ARW.a1b2c3.dri"), p("DSC1.ARW.dri"), p("DSC1.xmp")]
         );
-        assert_eq!(companion_files(&p("DSC1.JPG")), [p("DSC1.JPG.rrdata")]);
+        assert_eq!(companion_files(&p("DSC1.JPG")), [p("DSC1.JPG.dri")]);
     }
 
     #[test]
     fn copying_into_the_same_folder_never_overwrites() {
         let dir = tempfile::tempdir().unwrap();
         let p = |n: &str| dir.path().join(n);
-        for n in ["DSC1.ARW", "DSC1.xmp", "DSC1.ARW.rrdata"] {
+        for n in ["DSC1.ARW", "DSC1.xmp", "DSC1.ARW.dri"] {
             touch(&p(n));
         }
         let folder = dir.path().to_string_lossy().to_string();
@@ -3600,7 +3596,7 @@ mod companion_tests {
             copy_files(vec![p("DSC1.ARW").to_string_lossy().into()], folder.clone()).unwrap();
         assert_eq!(made, [p("DSC1_copy_1.ARW").to_string_lossy().to_string()]);
         assert!(p("DSC1_copy_1.xmp").exists());
-        assert!(p("DSC1_copy_1.ARW.rrdata").exists());
+        assert!(p("DSC1_copy_1.ARW.dri").exists());
         // The originals are untouched.
         assert_eq!(fs::read_to_string(p("DSC1.xmp")).unwrap(), "DSC1.xmp");
         copy_files(vec![p("DSC1.ARW").to_string_lossy().into()], folder).unwrap();
@@ -3628,7 +3624,7 @@ mod companion_tests {
         touch(&p("DSC1_Restored.png"));
         crate::versions::record_version(&p("DSC1_Restored.png"), &p("DSC1.ARW"), "Restored");
         relink_versions(&p("DSC1.ARW"), &p("Tahiti_001.ARW"));
-        let meta = crate::exif_processing::load_sidecar(&p("DSC1_Restored.png.rrdata"));
+        let meta = crate::exif_processing::load_sidecar(&p("DSC1_Restored.png.dri"));
         assert_eq!(meta.derived_from.as_deref(), Some("Tahiti_001.ARW"));
     }
 }

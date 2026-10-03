@@ -38,19 +38,19 @@ fn lama_sanity() {
             manifest_dir.join("resources/libonnxruntime.dylib"),
         )
     };
-    rapidraw_lib::register_exit_handler();
+    darkroom_index::register_exit_handler();
     let models_dir = std::env::var("HOME").unwrap()
-        + "/Library/Application Support/io.github.CyberTimon.RapidRAW/models";
+        + "/Library/Application Support/io.github.chma3348.DarkroomIndex/models";
     if !PathBuf::from(&models_dir).join("lama_fp16.onnx").is_file() {
         eprintln!("lama_fp16.onnx not present; skipping");
         return;
     }
-    let registry = rapidraw_lib::model_registry::ModelRegistry::new(PathBuf::from(models_dir));
+    let registry = darkroom_index::model_registry::ModelRegistry::new(PathBuf::from(models_dir));
     let session = registry.get_session("lama-fp16", None).unwrap();
 
     let (img, mask) = test_image();
     let (result, _) =
-        rapidraw_lib::ai_processing::run_lama_inpainting(&img, &mask, &session).unwrap();
+        darkroom_index::ai_processing::run_lama_inpainting(&img, &mask, &session).unwrap();
     // Center of the oval should no longer be black if the fill worked.
     let center = result.get_pixel(200, 150);
     let src = img.to_rgba8();
@@ -76,7 +76,7 @@ fn lama_sanity() {
         p[0] = 255 - p[0];
     }
     let (result_inv, _) =
-        rapidraw_lib::ai_processing::run_lama_inpainting(&img, &inv, &session).unwrap();
+        darkroom_index::ai_processing::run_lama_inpainting(&img, &inv, &session).unwrap();
     let center_inv = result_inv.get_pixel(200, 150);
     println!("INVERTED mask: center px after = {:?}", center_inv);
 }

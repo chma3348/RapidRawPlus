@@ -1027,14 +1027,14 @@ fn dilate_mask(mask: &GrayImage, radius: u32) -> GrayImage {
 }
 
 /// Lists .cube LUTs from the managed folder
-/// (~/Documents/RapidRAW Models/luts/**), grouped by pack. Input space is
+/// (~/Documents/Darkroom Index/Models/luts/**), grouped by pack. Input space is
 /// inferred from the filename: Fujifilm's official film-sim cubes are
 /// named `FLog2C_to_*` and expect F-Log2C-encoded input (see each pack's
 /// SOURCES.md for provenance).
 #[tauri::command]
 pub async fn list_managed_luts() -> Result<Vec<serde_json::Value>, String> {
     let home = std::env::var("HOME").map_err(|e| e.to_string())?;
-    let root = std::path::PathBuf::from(home).join("Documents/RapidRAW Models/luts");
+    let root = std::path::PathBuf::from(home).join("Documents/Darkroom Index/Models/luts");
     let mut out = Vec::new();
     if !root.is_dir() {
         return Ok(out);

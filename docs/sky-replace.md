@@ -65,7 +65,7 @@ through `src-tauri/tests/probe_sky_replace.rs`. Not yet wired to the UI.
 
 ## The plate library
 
-`~/Library/Application Support/io.github.CyberTimon.RapidRAW/skies/` holds
+`~/Library/Application Support/io.github.chma3348.DarkroomIndex/skies/` holds
 the plates and `library.json`, which records each plate's title, licence,
 author and source page.
 

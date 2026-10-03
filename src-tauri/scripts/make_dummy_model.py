@@ -63,7 +63,7 @@ graph = ld(1, node) + s(2, "dummy_identity") + ld(11, value_info("input")) + ld(
 opset = s(1, "") + i(2, 13)
 
 # ModelProto: ir_version = 1, producer_name = 2, graph = 7, opset_import = 8
-model = i(1, 8) + s(2, "rapidraw-dummy") + ld(7, graph) + ld(8, opset)
+model = i(1, 8) + s(2, "darkroom-index-dummy") + ld(7, graph) + ld(8, opset)
 
 out_path = os.path.join(os.path.dirname(__file__), "..", "tests", "fixtures", "dummy_identity.onnx")
 os.makedirs(os.path.dirname(out_path), exist_ok=True)

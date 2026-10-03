@@ -322,7 +322,7 @@ pub fn system_codec_png(bytes: &[u8], extension: &str) -> Result<Vec<u8>> {
     static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     let id = format!(
-        "rapidraw_codec_{}_{}",
+        "darkroom_index_codec_{}_{}",
         std::process::id(),
         TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
     );
@@ -780,7 +780,7 @@ mod system_codec_tests {
     /// right size and with the right pixels.
     #[test]
     fn heic_avif_and_psd_open() {
-        let dir = std::env::temp_dir().join("rapidraw_loader_codec_fixture");
+        let dir = std::env::temp_dir().join("darkroom_index_loader_codec_fixture");
         let _ = std::fs::create_dir_all(&dir);
         let source = dir.join("source.png");
         image::RgbImage::from_fn(32, 16, |x, _| {

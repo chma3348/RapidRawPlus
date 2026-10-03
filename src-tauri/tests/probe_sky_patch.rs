@@ -4,7 +4,7 @@
 //!
 //! `SUBJECT_MODELS=<models dir> ORT_DYLIB_PATH=<runtime> SKY_PHOTO=a.jpg
 //!  SKY_PLATE=p.jpg cargo test --release --test probe_sky_patch -- --ignored --nocapture`
-use rapidraw_lib::{
+use darkroom_index::{
     color_engine::{config::*, patches},
     model_registry::ModelRegistry,
     scene_masks, sky_commands, sky_replace,
@@ -32,7 +32,7 @@ fn sky_patch_round_trip() {
         .get_session("upernet-swin-large-ade", None)
         .expect("scene model");
     let bytes = std::fs::read(env("SKY_PHOTO")).unwrap();
-    let photo = rapidraw_lib::image_loader::load_image_with_orientation(&bytes, None).unwrap();
+    let photo = darkroom_index::image_loader::load_image_with_orientation(&bytes, None).unwrap();
     let plate = image::open(env("SKY_PLATE")).unwrap();
 
     let t = std::time::Instant::now();
@@ -71,11 +71,11 @@ fn sky_patch_round_trip() {
         }]});
 
         // Previous engine: composites onto the display-encoded base.
-        let legacy = rapidraw_lib::image_loader::composite_patches_on_image(&photo, &edits)
+        let legacy = darkroom_index::image_loader::composite_patches_on_image(&photo, &edits)
             .unwrap()
             .to_rgb8();
         // v3: composites onto the linear decoded source.
-        let mut frame = rapidraw_lib::color_engine::input::decode_profiled_photo(&bytes).unwrap();
+        let mut frame = darkroom_index::color_engine::input::decode_profiled_photo(&bytes).unwrap();
         patches::composite(
             &mut frame.pixels,
             &edits,

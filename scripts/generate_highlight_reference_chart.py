@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate a highlight stress chart for Resolve/RapidRAW matching.
+"""Generate a highlight stress chart for Resolve/Darkroom Index matching.
 
 The chart is designed for highlight slider measurements: upper grey ramps,
 near-white color patches, clipped-channel ramps, and specular-like soft spots.

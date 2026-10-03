@@ -681,7 +681,7 @@ fn agx_full_transform_with(
 
 fn apply_raw_resolve_display_match(c: vec3<f32>) -> vec3<f32> {
     // Fitted from a no-edit RAW pair exported through DaVinci Resolve and
-    // RapidRAW. The main error was display-space chroma, not scene-linear
+    // Darkroom Index. The main error was display-space chroma, not scene-linear
     // exposure: Resolve's render was about 23% more saturated overall, with
     // much warmer yellow/orange highlights.
     let source = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
@@ -699,7 +699,7 @@ fn apply_raw_resolve_display_match(c: vec3<f32>) -> vec3<f32> {
     var min_c = min(matched.r, min(matched.g, matched.b));
     var chroma = (max_c - min_c) / max(max_c, 1.0e-5);
 
-    // Near-white clipped highlights in RapidRAW were landing pink/gray
+    // Near-white clipped highlights in Darkroom Index were landing pink/gray
     // while Resolve keeps a luminous white-yellow core.
     let neutral_core = clipped_core * (1.0 - smoothstep(0.08, 0.18, chroma)) * 0.65;
     matched = mix(matched, vec3<f32>(1.0), neutral_core);

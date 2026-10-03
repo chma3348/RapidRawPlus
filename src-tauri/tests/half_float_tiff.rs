@@ -20,13 +20,13 @@ fn half_to_f32_matches_reference_values() {
         (0x3555, 0.333251953125), // ~1/3
     ];
     for (bits, expected) in cases {
-        let got = rapidraw_lib::image_loader::half_to_f32(*bits);
+        let got = darkroom_index::image_loader::half_to_f32(*bits);
         assert!(
             (got - expected).abs() <= expected.abs() * 1e-6 + 1e-12,
             "half 0x{bits:04X}: expected {expected}, got {got}"
         );
     }
 
-    assert!(rapidraw_lib::image_loader::half_to_f32(0x7C00).is_infinite());
-    assert!(rapidraw_lib::image_loader::half_to_f32(0x7E00).is_nan());
+    assert!(darkroom_index::image_loader::half_to_f32(0x7C00).is_infinite());
+    assert!(darkroom_index::image_loader::half_to_f32(0x7E00).is_nan());
 }

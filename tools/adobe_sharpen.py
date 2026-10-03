@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Measure what Lightroom's Sharpening (Amount, Radius, Detail, Masking) and
 noise reduction (Color, Luminance and their Detail/Smoothness/Contrast) do,
-and what RapidRAW's do, at full resolution: sharpening works on single
+and what Darkroom Index's do, at full resolution: sharpening works on single
 pixels, so it cannot be judged on a shrunk picture.
 
 As with the other sliders, only *changes* are measured: each edited picture

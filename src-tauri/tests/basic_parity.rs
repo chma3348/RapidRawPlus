@@ -3,10 +3,10 @@
 //! engine's Basic tone mapper, and as the app renders when Resolve's
 //! transforms are installed. `examples/basic_parity` runs the same check on
 //! real photographs (`AS_APP=1` for the installed transforms).
+use darkroom_index::color_engine::application::render_file;
+use darkroom_index::gpu_processing::{GpuProcessor, RenderRequest};
+use darkroom_index::image_processing::{GpuContext, get_all_adjustments_from_json};
 use image::{ImageBuffer, Luma, Rgba};
-use rapidraw_lib::color_engine::application::render_file;
-use rapidraw_lib::gpu_processing::{GpuProcessor, RenderRequest};
-use rapidraw_lib::image_processing::{GpuContext, get_all_adjustments_from_json};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 
@@ -116,8 +116,8 @@ fn basic_sliders_match_the_previous_engine() {
     // DaVinci Intermediate, so a correct round trip gives the previous
     // engine's picture back. It is the case where values past white used to
     // reach the brightness curve and break it into bands.
-    let plain = rapidraw_lib::AppState::default();
-    let resolve = rapidraw_lib::AppState::default();
+    let plain = darkroom_index::AppState::default();
+    let resolve = darkroom_index::AppState::default();
     let (input, output) = (dir.path().join("in.cube"), dir.path().join("out.cube"));
     write_transforms(&input, &output);
     *resolve.input_transform.lock().unwrap() = Some(input);
@@ -242,7 +242,7 @@ fn basic_sliders_match_the_previous_engine() {
 /// lattices, input in sRGB code values, scene side in DaVinci Intermediate
 /// and DaVinci Wide Gamut, as the captured ones are.
 fn write_transforms(input: &std::path::Path, output: &std::path::Path) {
-    use rapidraw_lib::color_engine::{
+    use darkroom_index::color_engine::{
         config::{Primaries, Transfer},
         spaces,
     };

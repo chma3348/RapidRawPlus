@@ -4,12 +4,12 @@
 fn main() -> anyhow::Result<()> {
     let path = std::env::args().nth(1).expect("a RAW file");
     let bytes = std::fs::read(&path)?;
-    let settings = rapidraw_lib::AppSettings::default();
-    let legacy = rapidraw_lib::image_loader::load_base_image_from_bytes(
+    let settings = darkroom_index::AppSettings::default();
+    let legacy = darkroom_index::image_loader::load_base_image_from_bytes(
         &bytes, &path, false, &settings, None,
     )?
     .to_rgb32f();
-    let v3 = rapidraw_lib::color_engine::raw::decode_raw(&bytes, false, || Ok(()))?;
+    let v3 = darkroom_index::color_engine::raw::decode_raw(&bytes, false, || Ok(()))?;
     println!(
         "legacy {}x{}  v3 {}x{}  v3 space {:?}",
         legacy.width(),

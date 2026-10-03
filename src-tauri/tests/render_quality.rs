@@ -5,9 +5,9 @@
 //!  2. Filmic rolloff — an HDR ramp must reach white smoothly (fewer hard
 //!     clips than the basic mapper, shoulder engaged below clip).
 
+use darkroom_index::gpu_processing::{GpuProcessor, RenderRequest};
+use darkroom_index::image_processing::{AllAdjustments, GpuContext};
 use image::{ImageBuffer, Luma};
-use rapidraw_lib::gpu_processing::{GpuProcessor, RenderRequest};
-use rapidraw_lib::image_processing::{AllAdjustments, GpuContext};
 use std::sync::Arc;
 
 const W: u32 = 64;

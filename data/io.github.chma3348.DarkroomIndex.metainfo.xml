@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="UTF-8" ?>
 <component type="desktop-application">
-  <id>io.github.CyberTimon.RapidRAW</id>
+  <id>io.github.chma3348.DarkroomIndex</id>
 
-  <name>RapidRAW</name>
+  <name>Darkroom Index</name>
   <summary>A non-destructive, and GPU-accelerated RAW image editor built with performance in mind</summary>
-  <developer id="io.github.CyberTimon">
-    <name>Timon Käch</name>
+  <developer id="io.github.chma3348">
+    <name>Chris Manning</name>
   </developer>
 
   <metadata_license>FSFAP</metadata_license>
@@ -19,14 +19,14 @@
 
   <description>
     <p>
-      RapidRAW is a modern, high-performance alternative to Adobe Lightroom®. It delivers a simple, beautiful editing experience in a lightweight package (under 20MB) for Windows, macOS, and Linux.
+      Darkroom Index is a modern, high-performance alternative to Adobe Lightroom®. It delivers a simple, beautiful editing experience in a lightweight package (under 20MB) for Windows, macOS, and Linux.
     </p>
     <p>
       I started developing this project as a personal challenge when I was 18. My goal was to create a high-performance tool for my own photography workflow while deepening my understanding of React, WGSL and Rust, with the support from Google Gemini.
     </p>
   </description>
 
-  <launchable type="desktop-id">io.github.CyberTimon.RapidRAW.desktop</launchable>
+  <launchable type="desktop-id">io.github.chma3348.DarkroomIndex.desktop</launchable>
   <screenshots>
     <screenshot type="default">
       <image>https://raw.githubusercontent.com/CyberTimon/RapidRAW/2f7c0354580bbd403287a924e2a7fce9f2cdfc40/.github/assets/editor.png</image>
@@ -363,7 +363,7 @@
                 <li>Keyword Tagging: Tag images with custom keywords, AI suggestions, and quick shortcuts.</li>
                 <li>Virtual Copies: Create multiple edits of an image without duplicating the file on disk.</li>
                 <li>Folder Search: A new search bar to quickly find folders in the library panel.</li>
-                <li>"Open With" Support: Right-click an image in your file manager to open it directly in RapidRAW.</li>
+                <li>"Open With" Support: Right-click an image in your file manager to open it directly in Darkroom Index.</li>
             </ul>
             <p>Core Improvements</p>
             <ul>
@@ -383,7 +383,7 @@
         <description translate="no">
             <p>New Features</p>
             <ul>
-                <li>AgX Color Management: Like in Blender and darktable, RapidRAW now supports the advanced AgX tone mapper for better highlight rolloff and more natural colors.</li>
+                <li>AgX Color Management: Like in Blender and darktable, Darkroom Index now supports the advanced AgX tone mapper for better highlight rolloff and more natural colors.</li>
                 <li>Reworked Exposure Controls: The exposure slider has been split into two more powerful controls: Exposure (for true exposure compensation) and Brightness (for adjusting mid-tones).</li>
                 <li>Copy Paste Settings: Selectively copy and paste adjustments between images with new Merge and Replace modes to give you full control over how settings are applied.</li>
                 <li>Processing Engine Settings: A new section to manually select the processing backend for performance tuning. Includes a Linux GPU Compatibility Mode to resolve stability issues for some users.</li>
@@ -467,7 +467,7 @@
                 <li>Brand new app icons &amp; dark theme wallpaper.</li>
             </ul>
             <p>Important: Action Required for Upgrading Users</p>
-            <p>In this update, the application's internal identifier has been changed from <code>com.rapidraw.app</code> to <code>io.github.CyberTimon.RapidRAW</code>. This is a technical but important change that helps with long-term maintenance and ensures better compatibility going forward.</p>
+            <p>In this update, the application's internal identifier has been changed from <code>com.rapidraw.app</code> to <code>io.github.chma3348.DarkroomIndex</code>. This is a technical but important change that helps with long-term maintenance and ensures better compatibility going forward.</p>
             <p>Unfortunately, this means that when you first launch v1.4.0, it won't be able to find your existing user data. As a result:</p>
             <ul>
                 <li>Your AI models will need to be redownloaded.</li>
@@ -478,13 +478,13 @@
             <p>Option A: Full Migration (Recommended)</p>
             <p>This method migrates everything: your settings, presets, and cached data. To do this, you'll need to manually rename the application's data folder.</p>
             <ul>
-                <li>Linux: The location can vary, but typically check <code>~/.config/</code> and <code>~/.local/share/</code>. Rename the <code>com.rapidraw.app</code> folder in each relevant location to <code>io.github.CyberTimon.RapidRAW</code>.</li>
+                <li>Linux: The location can vary, but typically check <code>~/.config/</code> and <code>~/.local/share/</code>. Rename the <code>com.rapidraw.app</code> folder in each relevant location to <code>io.github.chma3348.DarkroomIndex</code>.</li>
             </ul>
             <p>Option B: Migrate Presets Only</p>
             <p>If you only care about saving your presets and don't mind re-caching thumbnails and models, this is a simpler alternative.</p>
             <ol>
-                <li>In your old version of RapidRAW, export all your presets to a safe location.</li>
-                <li>Install and open RapidRAW v1.4.0.</li>
+                <li>In your old version of Darkroom Index, export all your presets to a safe location.</li>
+                <li>Install and open Darkroom Index v1.4.0.</li>
                 <li>Import your presets using the new Universal Preset Importer.</li>
             </ol>
             <p>I sincerely apologize for the inconvenience this one-time migration step causes. This change was a tough decision, but it sets the app up for a more stable and robust future. Thank you for your understanding!</p>
@@ -530,7 +530,7 @@
                 <li>Define and map which models should be loaded.</li>
                 <li>See which custom nodes you need to install, in order to use the default workflow.</li>
             </ul>
-            <p>RapidRAW automatically handles downscaling, mask generation, patch layer composition, and saving. These enhancements make ComfyUI integration practical for everyday use.</p>
+            <p>Darkroom Index automatically handles downscaling, mask generation, patch layer composition, and saving. These enhancements make ComfyUI integration practical for everyday use.</p>
             <p>Note: Some bugs and unfinished elements may still be present. Please report any issues you encounter. Also, if you have a better &amp; easier inpainting workflow, please share it with me as I'm not satisfied with the current one.</p>
             <p>Chromatic Aberration Correction</p>
             <p>A new tool for chromatic aberration correction has been added.</p>

@@ -489,7 +489,7 @@ mod tests {
             ] {
                 directory.add_untyped_tag(tag, value);
             }
-            directory.add_untyped_tag(271, "RapidRAW Test");
+            directory.add_untyped_tag(271, "Darkroom Index Test");
             directory.add_untyped_tag(272, "Synthetic Bayer");
             directory.add_untyped_tag(50706, Value::Byte(vec![1, 4, 0, 0]));
             directory.add_untyped_tag(33421, Value::Short(vec![2, 2]));

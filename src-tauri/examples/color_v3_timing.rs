@@ -2,8 +2,8 @@
 //!
 //!   cargo run --release --example color_v3_timing -- PHOTO
 use anyhow::Result;
-use rapidraw_lib::color_engine::application::render_file;
-use rapidraw_lib::image_processing::GpuContext;
+use darkroom_index::color_engine::application::render_file;
+use darkroom_index::image_processing::GpuContext;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 
@@ -22,7 +22,7 @@ fn main() -> Result<()> {
         limits,
         display: Arc::new(Mutex::new(None)),
     };
-    let state = rapidraw_lib::AppState::default();
+    let state = darkroom_index::AppState::default();
     let mask = |target: f64| {
         json!([{
             "id":"m","name":"m","visible":true,"invert":false,"opacity":100,

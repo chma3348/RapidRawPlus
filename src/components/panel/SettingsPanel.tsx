@@ -2348,7 +2348,7 @@ export default function SettingsPanel({
                       description={
                         <Text as="span" variant={TextVariants.small}>
                           {t('settings.data.clearSidecarsDesc')}{' '}
-                          <code className="bg-bg-primary px-1 rounded-sm text-text-primary">.rrdata</code> files
+                          <code className="bg-bg-primary px-1 rounded-sm text-text-primary">.dri</code> files
                           (containing your edits) within your root folders:
                           <span className="block font-mono bg-bg-primary p-2 rounded-sm mt-2 break-all border border-border-color whitespace-pre-wrap">
                             {effectiveRootPaths.length > 0

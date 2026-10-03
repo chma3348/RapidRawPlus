@@ -4,7 +4,7 @@
 //! `SUBJECT_MODELS=<models dir> ORT_DYLIB_PATH=<runtime> SKY_PHOTOS=a.jpg,b.jpg
 //!  SKY_PLATES=p1.jpg,p2.jpg SKY_OUT=<dir> cargo test --test probe_sky_replace
 //!  -- --ignored --nocapture`
-use rapidraw_lib::{model_registry::ModelRegistry, scene_masks, sky_replace};
+use darkroom_index::{model_registry::ModelRegistry, scene_masks, sky_replace};
 use std::path::PathBuf;
 
 fn env(k: &str) -> String {
@@ -42,7 +42,8 @@ fn replace() {
     let plates: Vec<PathBuf> = env("SKY_PLATES").split(',').map(PathBuf::from).collect();
     for photo_path in env("SKY_PHOTOS").split(',') {
         let bytes = std::fs::read(photo_path).unwrap();
-        let photo = rapidraw_lib::image_loader::load_image_with_orientation(&bytes, None).unwrap();
+        let photo =
+            darkroom_index::image_loader::load_image_with_orientation(&bytes, None).unwrap();
         let photo = photo.resize(2400, 2400, image::imageops::FilterType::Triangle);
         let t = std::time::Instant::now();
         let Some(sky) =

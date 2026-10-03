@@ -20,8 +20,8 @@
 //! (named v3 control settings). Every fixture is rendered through every case.
 
 use anyhow::{Context, Result, ensure};
-use rapidraw_lib::color_engine::{application, config::*, input::decode_profiled_photo, spaces};
-use rapidraw_lib::image_processing::GpuContext;
+use darkroom_index::color_engine::{application, config::*, input::decode_profiled_photo, spaces};
+use darkroom_index::image_processing::GpuContext;
 use serde::{Deserialize, Serialize};
 use std::{
     path::{Path, PathBuf},
@@ -188,7 +188,7 @@ fn load(path: &Path, max_dimension: u32) -> Result<(image::Rgba32FImage, SourceC
         .with_context(|| format!("interpreting {}", path.display()))?;
     let (w, h) = decoded.pixels.dimensions();
     let pixels = if w.max(h) > max_dimension {
-        rapidraw_lib::image_processing::downscale_f32_image(
+        darkroom_index::image_processing::downscale_f32_image(
             &image::DynamicImage::ImageRgba32F(decoded.pixels),
             max_dimension,
             max_dimension,
@@ -227,7 +227,7 @@ fn main() -> Result<()> {
         limits,
         display: Arc::new(Mutex::new(None)),
     };
-    let state = rapidraw_lib::AppState::default();
+    let state = darkroom_index::AppState::default();
     *state.input_transform.lock().unwrap() = manifest.input_transform.clone();
     *state.output_transform.lock().unwrap() = manifest.output_transform.clone();
     let mut measurements = Vec::new();

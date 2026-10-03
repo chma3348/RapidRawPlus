@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Measure what the lighting sliders do, in Lightroom and in RapidRAW, so ours
-can be given Lightroom's strength while keeping RapidRAW's (Resolve's) colour.
+"""Measure what the lighting sliders do, in Lightroom and in Darkroom Index, so ours
+can be given Lightroom's strength while keeping Darkroom Index's (Resolve's) colour.
 
 Only *changes* are measured: every edited picture is compared with the same
 engine's unedited picture of the same photo, never with the other engine's.
@@ -10,7 +10,7 @@ and neither engine's colour enters the numbers: just how far each tone moves.
 A tone's movement is its change in CIE lightness (L*, 0-100), grouped by
 where it sits in the unedited picture. Two groupings are kept: by the pixel's
 own lightness, and by its region's (a box mean over 2% of the short edge,
-like the regional key RapidRAW's tone zones use), which shows how local a
+like the regional key Darkroom Index's tone zones use), which shows how local a
 slider is.
 
     uv run --with numpy --with scipy --with tifffile --with imagecodecs \\

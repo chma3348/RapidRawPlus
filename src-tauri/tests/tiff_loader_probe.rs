@@ -14,7 +14,7 @@ fn loader_probe() {
                 continue;
             }
         };
-        match rapidraw_lib::image_loader::load_image_with_orientation(&bytes, None) {
+        match darkroom_index::image_loader::load_image_with_orientation(&bytes, None) {
             Ok(img) => {
                 let rgb = img.to_rgb32f();
                 let n = (rgb.width() as f64) * (rgb.height() as f64);

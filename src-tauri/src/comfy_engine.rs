@@ -660,8 +660,8 @@ pub async fn run_generative_fill(
     ensure_running(app_handle, &state.comfy_process).await?;
     on_progress("Uploading image to engine...".to_string());
     let client = reqwest::Client::new();
-    upload_image(&client, "rapidraw_fill_image.png", image_png).await?;
-    upload_image(&client, "rapidraw_fill_mask.png", mask_png).await?;
+    upload_image(&client, "darkroom_index_fill_image.png", image_png).await?;
+    upload_image(&client, "darkroom_index_fill_mask.png", mask_png).await?;
 
     // A/B-tested (2026-08-17): on featureless context, caption fallback,
     // empty@g30 and empty@g10 all produce identical context-continuation.
@@ -679,9 +679,9 @@ pub async fn run_generative_fill(
         // area holds an edge-replicated hint), then rework only the masked
         // latents at high-but-not-full denoise.
         FillKind::SdxlBase => json!({
-            "1": {"class_type": "LoadImage", "inputs": {"image": "rapidraw_fill_image.png"}},
+            "1": {"class_type": "LoadImage", "inputs": {"image": "darkroom_index_fill_image.png"}},
             "2": {"class_type": "LoadImageMask",
-                  "inputs": {"image": "rapidraw_fill_mask.png", "channel": "red"}},
+                  "inputs": {"image": "darkroom_index_fill_mask.png", "channel": "red"}},
             "3": {"class_type": "CheckpointLoaderSimple",
                   "inputs": {"ckpt_name": "sd_xl_base_1.0.safetensors"}},
             "4": {"class_type": "CLIPTextEncode", "inputs": {"text": positive, "clip": ["3", 1]}},
@@ -695,13 +695,13 @@ pub async fn run_generative_fill(
                               "sampler_name": "dpmpp_2m", "scheduler": "karras", "denoise": 0.85}},
             "8": {"class_type": "VAEDecode", "inputs": {"samples": ["7", 0], "vae": ["3", 2]}},
             "9": {"class_type": "SaveImage",
-                  "inputs": {"images": ["8", 0], "filename_prefix": "rapidraw_fill"}}
+                  "inputs": {"images": ["8", 0], "filename_prefix": "darkroom_index_fill"}}
         }),
         // Fooocus patch turns base SDXL into a proper inpainting model.
         FillKind::SdxlFooocus => json!({
-            "1": {"class_type": "LoadImage", "inputs": {"image": "rapidraw_fill_image.png"}},
+            "1": {"class_type": "LoadImage", "inputs": {"image": "darkroom_index_fill_image.png"}},
             "2": {"class_type": "LoadImageMask",
-                  "inputs": {"image": "rapidraw_fill_mask.png", "channel": "red"}},
+                  "inputs": {"image": "darkroom_index_fill_mask.png", "channel": "red"}},
             "3": {"class_type": "CheckpointLoaderSimple",
                   "inputs": {"ckpt_name": "sd_xl_base_1.0.safetensors"}},
             "4": {"class_type": "CLIPTextEncode", "inputs": {"text": positive, "clip": ["3", 1]}},
@@ -724,14 +724,14 @@ pub async fn run_generative_fill(
                               "sampler_name": "dpmpp_2m", "scheduler": "karras", "denoise": 1.0}},
             "10": {"class_type": "VAEDecode", "inputs": {"samples": ["9", 0], "vae": ["3", 2]}},
             "11": {"class_type": "SaveImage",
-                   "inputs": {"images": ["10", 0], "filename_prefix": "rapidraw_fill"}}
+                   "inputs": {"images": ["10", 0], "filename_prefix": "darkroom_index_fill"}}
         }),
         // Flux Fill: purpose-trained inpainting DiT (quantized), cfg 1 +
         // FluxGuidance, InpaintModelConditioning supplies image+mask.
         FillKind::Flux => json!({
-            "1": {"class_type": "LoadImage", "inputs": {"image": "rapidraw_fill_image.png"}},
+            "1": {"class_type": "LoadImage", "inputs": {"image": "darkroom_index_fill_image.png"}},
             "2": {"class_type": "LoadImageMask",
-                  "inputs": {"image": "rapidraw_fill_mask.png", "channel": "red"}},
+                  "inputs": {"image": "darkroom_index_fill_mask.png", "channel": "red"}},
             "3": {"class_type": "UnetLoaderGGUF",
                   "inputs": {"unet_name": "flux1-fill-dev-Q8_0.gguf"}},
             // A/B-proven (2026-08-16): without DifferentialDiffusion the
@@ -755,7 +755,7 @@ pub async fn run_generative_fill(
                               "sampler_name": "euler", "scheduler": "normal", "denoise": 1.0}},
             "8": {"class_type": "VAEDecode", "inputs": {"samples": ["7", 0], "vae": ["3v", 0]}},
             "9": {"class_type": "SaveImage",
-                  "inputs": {"images": ["8", 0], "filename_prefix": "rapidraw_fill"}}
+                  "inputs": {"images": ["8", 0], "filename_prefix": "darkroom_index_fill"}}
         }),
     };
 
@@ -830,12 +830,22 @@ pub async fn run_free_generation(
             let mut open_png = std::io::Cursor::new(Vec::new());
             image::DynamicImage::ImageLuma8(open)
                 .write_to(&mut open_png, image::ImageFormat::Png)?;
-            upload_image(&client, "rapidraw_gen_canvas.png", grey_png.into_inner()).await?;
-            upload_image(&client, "rapidraw_gen_openmask.png", open_png.into_inner()).await?;
+            upload_image(
+                &client,
+                "darkroom_index_gen_canvas.png",
+                grey_png.into_inner(),
+            )
+            .await?;
+            upload_image(
+                &client,
+                "darkroom_index_gen_openmask.png",
+                open_png.into_inner(),
+            )
+            .await?;
             json!({
-                "1": {"class_type": "LoadImage", "inputs": {"image": "rapidraw_gen_canvas.png"}},
+                "1": {"class_type": "LoadImage", "inputs": {"image": "darkroom_index_gen_canvas.png"}},
                 "2": {"class_type": "LoadImageMask",
-                      "inputs": {"image": "rapidraw_gen_openmask.png", "channel": "red"}},
+                      "inputs": {"image": "darkroom_index_gen_openmask.png", "channel": "red"}},
                 "3": {"class_type": "UnetLoaderGGUF",
                       "inputs": {"unet_name": "flux1-fill-dev-Q8_0.gguf"}},
                 "3d": {"class_type": "DifferentialDiffusion", "inputs": {"model": ["3", 0]}},
@@ -856,7 +866,7 @@ pub async fn run_free_generation(
                                   "sampler_name": "euler", "scheduler": "normal", "denoise": 1.0}},
                 "8": {"class_type": "VAEDecode", "inputs": {"samples": ["7", 0], "vae": ["3v", 0]}},
                 "9": {"class_type": "SaveImage",
-                      "inputs": {"images": ["8", 0], "filename_prefix": "rapidraw_gen"}}
+                      "inputs": {"images": ["8", 0], "filename_prefix": "darkroom_index_gen"}}
             })
         }
         // Both SDXL tiers generate the same way; the Fooocus patch is an
@@ -874,7 +884,7 @@ pub async fn run_free_generation(
                               "sampler_name": "dpmpp_2m", "scheduler": "karras", "denoise": 1.0}},
             "8": {"class_type": "VAEDecode", "inputs": {"samples": ["7", 0], "vae": ["3", 2]}},
             "9": {"class_type": "SaveImage",
-                  "inputs": {"images": ["8", 0], "filename_prefix": "rapidraw_gen"}}
+                  "inputs": {"images": ["8", 0], "filename_prefix": "darkroom_index_gen"}}
         }),
     };
 
@@ -907,7 +917,7 @@ pub async fn run_seedvr2(
     ensure_running(app_handle, &state.comfy_process).await?;
     on_progress("Uploading image to engine...".to_string());
     let client = reqwest::Client::new();
-    let input_name = "rapidraw_seedvr2_input.png";
+    let input_name = "darkroom_index_seedvr2_input.png";
     upload_image(&client, input_name, input_png).await?;
 
     let prompt = json!({
@@ -927,7 +937,7 @@ pub async fn run_seedvr2(
                           "max_resolution": 0, "batch_size": 1,
                           "uniform_batch_size": false, "color_correction": "lab"}},
         "5": {"class_type": "SaveImage",
-              "inputs": {"images": ["4", 0], "filename_prefix": "rapidraw_seedvr2"}}
+              "inputs": {"images": ["4", 0], "filename_prefix": "darkroom_index_seedvr2"}}
     });
     run_workflow(prompt, &mut on_progress).await
 }

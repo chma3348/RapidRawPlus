@@ -1,4 +1,4 @@
-package io.github.CyberTimon.RapidRAW
+package io.github.chma3348.DarkroomIndex
 
 import android.graphics.Color
 import android.os.Bundle

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Measure what Lightroom's detail and effect sliders (Clarity, Texture,
-Dehaze, Grain) do, and what RapidRAW's do, so ours can be fitted to them.
+Dehaze, Grain) do, and what Darkroom Index's do, so ours can be fitted to them.
 
 As with the lighting sliders (adobe_lighting.py), only *changes* are
 measured: every edited picture against the same engine's own unedited
-picture of the same photo. Lightroom's exports are resized onto RapidRAW's
+picture of the same photo. Lightroom's exports are resized onto Darkroom Index's
 render by area.
 
 For each photo and setting, in CIE L*a*b*:

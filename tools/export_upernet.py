@@ -2,7 +2,7 @@
 
     pip install torch transformers onnx onnxruntime
     python tools/export_upernet.py . openmmlab/upernet-swin-large \
-        "$HOME/Library/Application Support/io.github.CyberTimon.RapidRAW/models/upernet_swin_large.onnx"
+        "$HOME/Library/Application Support/io.github.chma3348.DarkroomIndex/models/upernet_swin_large.onnx"
 
 The model is exported at a fixed 768x768 input (its pyramid pooling cannot
 be traced with a dynamic size); the app letterboxes photos into that and

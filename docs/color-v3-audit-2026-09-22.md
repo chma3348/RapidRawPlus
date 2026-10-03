@@ -153,7 +153,7 @@ for neutral, positive/negative exposure and contrast; positive exposure
 increased average lightness and negative exposure decreased it on all three.
 This is a control-wiring/render-completion smoke test, not a new perceptual
 quality assessment or a new Resolve comparison. Temporary images, manifest
-and measurements are under `/tmp/rapidraw-v3-audit.ZERSTr/` and may be removed
+and measurements are under `/tmp/darkroom-index-v3-audit.ZERSTr/` and may be removed
 by the operating system. Original photos were read only.
 
 Reproduction commands (run from the repository root):
@@ -166,8 +166,8 @@ cargo test --manifest-path src-tauri/Cargo.toml --offline --example color_v3_bas
 cargo clippy --manifest-path src-tauri/Cargo.toml --offline --lib --test color_v3_contracts --example color_v3_baseline -- -D warnings
 cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 node --experimental-strip-types --test tests/colorV3.test.mjs
-./node_modules/.bin/esbuild tests/colorV3-history.test.ts --bundle --platform=node --format=cjs --outfile=/tmp/rapidraw-v3-audit-history.cjs
-node --test /tmp/rapidraw-v3-audit-history.cjs
+./node_modules/.bin/esbuild tests/colorV3-history.test.ts --bundle --platform=node --format=cjs --outfile=/tmp/darkroom-index-v3-audit-history.cjs
+node --test /tmp/darkroom-index-v3-audit-history.cjs
 npm run build
 npm run typecheck
 ```

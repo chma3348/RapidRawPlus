@@ -10,7 +10,7 @@
 //! sweep keeps exposure consistent across several frames. Nothing is ever
 //! merged automatically — candidates only pre-fill the existing dialogs.
 
-use crate::exif_processing::{read_exif, read_rrexif_sidecar};
+use crate::exif_processing::{read_exif, read_exif_sidecar};
 use chrono::NaiveDateTime;
 use rayon::prelude::*;
 use serde::Serialize;
@@ -145,7 +145,7 @@ pub fn read_frame_meta(path: &str) -> FrameMeta {
 
     // Cached sidecar covers files whose EXIF sat past the prefix.
     if (meta.exposure_secs.is_none() || meta.aperture.is_none())
-        && let Some(map) = read_rrexif_sidecar(Path::new(path))
+        && let Some(map) = read_exif_sidecar(Path::new(path))
     {
         if meta.exposure_secs.is_none()
             && let Some(raw) = map.get("ExposureTime")

@@ -1,7 +1,7 @@
 // Flat-field correction: cancel a fixed rig's illumination falloff by
 // dividing each photo by a "master flat" reference frame in linear light.
 //
-// Profiles live in ~/Documents/RapidRAW Models/flats/<name>/ as a 16-bit
+// Profiles live in ~/Documents/Darkroom Index/Models/flats/<name>/ as a 16-bit
 // linear-encoded flat.png plus profile.json (stats + provenance). The
 // divide runs at the head of the geometry-warp stage (see
 // image_processing::apply_geometry_warp), before distortion/rotation/crop,
@@ -50,7 +50,7 @@ fn linear_to_srgb(x: f32) -> f32 {
 
 fn flats_root() -> Result<PathBuf, String> {
     let home = std::env::var("HOME").map_err(|e| e.to_string())?;
-    Ok(PathBuf::from(home).join("Documents/RapidRAW Models/flats"))
+    Ok(PathBuf::from(home).join("Documents/Darkroom Index/Models/flats"))
 }
 
 fn sanitize_profile_name(name: &str) -> Result<String, String> {

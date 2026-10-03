@@ -1,12 +1,12 @@
 [package]
-name = "RapidRAW"
-description = "A blazingly-fast, non-destructive, and GPU-accelerated RAW image editor built with performance in mind."
-authors = ["Timon Käch"]
+name = "darkroom-index"
+description = "Darkroom Index: a non-destructive, GPU-accelerated RAW photo editor, built on RapidRAW."
+authors = ["Chris Manning", "Timon Käch (RapidRAW)"]
 edition = "2024"
 rust-version = "1.95"
 
 [lib]
-name = "rapidraw_lib"
+name = "darkroom_index"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [lints.rust]

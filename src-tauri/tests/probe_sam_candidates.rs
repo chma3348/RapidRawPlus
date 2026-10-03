@@ -1,9 +1,9 @@
 //! Diagnostic: dump every SAM hypothesis for a click so ranking can be judged.
 //!   SUBJECT_MODELS=... ORT_DYLIB_PATH=... SUBJECT_PHOTO=... SUBJECT_CLICK=x,y \
 //!   SUBJECT_OUTPUT=dir cargo test --test probe_sam_candidates -- --ignored --nocapture
+use darkroom_index::{ai_processing, model_registry::ModelRegistry};
 use ndarray::Array;
 use ort::value::Tensor;
-use rapidraw_lib::{ai_processing, model_registry::ModelRegistry};
 use std::path::PathBuf;
 
 #[test]

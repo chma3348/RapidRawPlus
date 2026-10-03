@@ -337,7 +337,7 @@ pub async fn convert_negatives(
                 .save(&out_path)
                 .map_err(|e| format!("Failed to save {}: {}", filename, e))?;
 
-            let _ = crate::exif_processing::write_rrexif_sidecar(&real_path, &out_path);
+            let _ = crate::exif_processing::write_exif_sidecar(&real_path, &out_path);
             crate::versions::record_version(&out_path, &source_path, "Positive");
             results.push(out_path.to_string_lossy().to_string());
         }

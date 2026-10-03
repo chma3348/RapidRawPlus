@@ -3,7 +3,7 @@
 
 Uses spandrel (the architecture loader behind chaiNNer) so the ~30 common
 super-resolution / restoration architectures load without per-model code.
-Prints a single JSON line on success or failure — consumed by RapidRAW's
+Prints a single JSON line on success or failure — consumed by Darkroom Index's
 conversion assistant.
 
 Requires: torch, spandrel, onnx (and optionally spandrel_extra_arches).
@@ -49,7 +49,7 @@ def main() -> None:
         )
 
     if not isinstance(descriptor, ImageModelDescriptor):
-        fail("This checkpoint is not a single-image model and cannot run in RapidRAW.")
+        fail("This checkpoint is not a single-image model and cannot run in Darkroom Index.")
     if descriptor.input_channels != 3 or descriptor.output_channels != 3:
         fail(
             f"Model uses {descriptor.input_channels}->{descriptor.output_channels} channels; "

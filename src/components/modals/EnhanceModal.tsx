@@ -116,31 +116,31 @@ export default function EnhanceModal({
   // Remembered across dialog opens: snapping back to the default made it
   // easy to re-run at the same strength by accident.
   const [strength, setStrength] = useState(() => {
-    const saved = Number(localStorage.getItem('rapidraw-enhance-strength'));
+    const saved = Number(localStorage.getItem('darkroom-index-enhance-strength'));
     return Number.isFinite(saved) && saved >= 10 && saved <= 100 ? saved : 70;
   });
   // Authentic-texture blend: how much of the ORIGINAL's fine detail layer
   // (micro-texture, grain) survives over the model output.
   const [texture, setTexture] = useState(() => {
-    const saved = Number(localStorage.getItem('rapidraw-enhance-texture'));
+    const saved = Number(localStorage.getItem('darkroom-index-enhance-texture'));
     return Number.isFinite(saved) && saved >= 0 && saved <= 100 ? saved : 40;
   });
   // De-pixelate prep: dissolve a hard mosaic before the model runs.
   // Cell: 0 = auto-detect the grid, otherwise a forced size in px.
   const [depixelate, setDepixelate] = useState(false);
   const [depixCell, setDepixCell] = useState(() => {
-    const saved = Number(localStorage.getItem('rapidraw-enhance-depix-cell'));
+    const saved = Number(localStorage.getItem('darkroom-index-enhance-depix-cell'));
     return Number.isFinite(saved) && saved >= 0 ? saved : 0;
   });
   const [grain, setGrain] = useState(() => {
-    const saved = Number(localStorage.getItem('rapidraw-enhance-grain'));
+    const saved = Number(localStorage.getItem('darkroom-index-enhance-grain'));
     return Number.isFinite(saved) && saved >= 0 && saved <= 100 ? saved : 50;
   });
   const [outputScale, setOutputScale] = useState(2);
   // Restore at 2x pre-upscales the input so the engine runs in its
   // detail-inventing regime — the reconstruction mode for low-res photos.
   const [restoreScale, setRestoreScale] = useState(() => {
-    const saved = Number(localStorage.getItem('rapidraw-restore-scale'));
+    const saved = Number(localStorage.getItem('darkroom-index-restore-scale'));
     return saved === 2 ? 2 : 1;
   });
   const [previewData, setPreviewData] = useState<PreviewData | null>(null);
@@ -720,7 +720,7 @@ export default function EnhanceModal({
                   value={restoreScale}
                   onChange={(v: number) => {
                     setRestoreScale(v);
-                    localStorage.setItem('rapidraw-restore-scale', String(v));
+                    localStorage.setItem('darkroom-index-restore-scale', String(v));
                     // The scale changes the model run itself, so any
                     // existing preview no longer predicts the result.
                     setPreviewData(null);
@@ -755,7 +755,7 @@ export default function EnhanceModal({
                   value={depixCell}
                   onChange={(v: number) => {
                     setDepixCell(v);
-                    localStorage.setItem('rapidraw-enhance-depix-cell', String(v));
+                    localStorage.setItem('darkroom-index-enhance-depix-cell', String(v));
                     setPreviewData(null);
                     markDirty();
                   }}
@@ -775,7 +775,7 @@ export default function EnhanceModal({
                 onChange={(e: any) => {
                   const v = Number(e.target.value);
                   setStrength(v);
-                  localStorage.setItem('rapidraw-enhance-strength', String(v));
+                  localStorage.setItem('darkroom-index-enhance-strength', String(v));
                   markDirty();
                 }}
                 trackClassName="bg-bg-secondary"
@@ -793,7 +793,7 @@ export default function EnhanceModal({
                 onChange={(e: any) => {
                   const v = Number(e.target.value);
                   setTexture(v);
-                  localStorage.setItem('rapidraw-enhance-texture', String(v));
+                  localStorage.setItem('darkroom-index-enhance-texture', String(v));
                   markDirty();
                 }}
                 trackClassName="bg-bg-secondary"
@@ -811,7 +811,7 @@ export default function EnhanceModal({
                 onChange={(e: any) => {
                   const v = Number(e.target.value);
                   setGrain(v);
-                  localStorage.setItem('rapidraw-enhance-grain', String(v));
+                  localStorage.setItem('darkroom-index-enhance-grain', String(v));
                   markDirty();
                 }}
                 trackClassName="bg-bg-secondary"

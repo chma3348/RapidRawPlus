@@ -1,5 +1,5 @@
 //! Optional local model regression. No downloads; run with SUBJECT_MODELS set.
-use rapidraw_lib::{ai_processing, model_registry::ModelRegistry, subject_selection};
+use darkroom_index::{ai_processing, model_registry::ModelRegistry, subject_selection};
 use std::path::PathBuf;
 
 #[test]

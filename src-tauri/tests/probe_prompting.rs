@@ -1,5 +1,5 @@
 //! Diagnostics for prompting strategies. Needs SUBJECT_MODELS + ORT_DYLIB_PATH.
-use rapidraw_lib::{ai_processing, model_registry::ModelRegistry, subject_selection};
+use darkroom_index::{ai_processing, model_registry::ModelRegistry, subject_selection};
 use std::path::PathBuf;
 
 fn env(k: &str) -> String {

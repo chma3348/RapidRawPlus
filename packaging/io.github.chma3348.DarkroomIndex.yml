@@ -1,4 +1,4 @@
-id: io.github.CyberTimon.RapidRAW
+id: io.github.chma3348.DarkroomIndex
 
 runtime: org.gnome.Platform
 runtime-version: '49'
@@ -7,7 +7,7 @@ sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
   - org.freedesktop.Sdk.Extension.node24
 
-command: RapidRAW
+command: darkroom-index
 finish-args:
   - --socket=wayland
   - --socket=fallback-x11
@@ -18,7 +18,7 @@ build-options:
   append-path: /usr/lib/sdk/node24/bin:/usr/lib/sdk/rust-stable/bin
 
 modules:
-  - name: RapidRAW
+  - name: darkroom-index
     buildsystem: simple
     sources:
       - type: git
@@ -48,33 +48,33 @@ modules:
 
     build-options:
       env:
-        CARGO_HOME: /run/build/RapidRAW/cargo
-        XDG_CACHE_HOME: /run/build/RapidRAW/flatpak-node/cache
-        npm_config_cache: /run/build/RapidRAW/flatpak-node/npm-cache
+        CARGO_HOME: /run/build/darkroom-index/cargo
+        XDG_CACHE_HOME: /run/build/darkroom-index/flatpak-node/cache
+        npm_config_cache: /run/build/darkroom-index/flatpak-node/npm-cache
         npm_config_offline: 'true'
         ORT_STRATEGY: system
 
     build-commands:
-      - mkdir -p /run/build/RapidRAW/src-tauri/resources
-      - cp -rf libonnxruntime.so /run/build/RapidRAW/src-tauri/resources
+      - mkdir -p /run/build/darkroom-index/src-tauri/resources
+      - cp -rf libonnxruntime.so /run/build/darkroom-index/src-tauri/resources
 
       - npm ci --offline --legacy-peer-deps
       - cargo --offline fetch --manifest-path src-tauri/Cargo.toml --verbose
       - npm run --offline tauri build -- --no-bundle
 
-      - install -Dm644 -t /app/share/metainfo/ data/io.github.CyberTimon.RapidRAW.metainfo.xml
-      - install -Dm644 -t /app/share/applications/ data/io.github.CyberTimon.RapidRAW.desktop
-      - install -Dm755 -t /app/bin/ src-tauri/target/release/RapidRAW
+      - install -Dm644 -t /app/share/metainfo/ data/io.github.chma3348.DarkroomIndex.metainfo.xml
+      - install -Dm644 -t /app/share/applications/ data/io.github.chma3348.DarkroomIndex.desktop
+      - install -Dm755 -t /app/bin/ src-tauri/target/release/darkroom-index
 
-      - desktop-file-edit --set-key=Icon --set-value="io.github.CyberTimon.RapidRAW" /app/share/applications/io.github.CyberTimon.RapidRAW.desktop
+      - desktop-file-edit --set-key=Icon --set-value="io.github.chma3348.DarkroomIndex" /app/share/applications/io.github.chma3348.DarkroomIndex.desktop
 
-      - install -Dm644 src-tauri/icons/32x32.png /app/share/icons/hicolor/32x32/apps/io.github.CyberTimon.RapidRAW.png
-      - install -Dm644 src-tauri/icons/128x128.png /app/share/icons/hicolor/128x128/apps/io.github.CyberTimon.RapidRAW.png
-      - install -Dm644 src-tauri/icons/128x128@2x.png /app/share/icons/hicolor/256x256/apps/io.github.CyberTimon.RapidRAW.png
-      - install -Dm644 src-tauri/icons/icon.png /app/share/icons/hicolor/256x256@2/apps/io.github.CyberTimon.RapidRAW.png
+      - install -Dm644 src-tauri/icons/32x32.png /app/share/icons/hicolor/32x32/apps/io.github.chma3348.DarkroomIndex.png
+      - install -Dm644 src-tauri/icons/128x128.png /app/share/icons/hicolor/128x128/apps/io.github.chma3348.DarkroomIndex.png
+      - install -Dm644 src-tauri/icons/128x128@2x.png /app/share/icons/hicolor/256x256/apps/io.github.chma3348.DarkroomIndex.png
+      - install -Dm644 src-tauri/icons/icon.png /app/share/icons/hicolor/256x256@2/apps/io.github.chma3348.DarkroomIndex.png
 
-      - mkdir -p /app/lib/RapidRAW
-      - cp -rf src-tauri/resources /app/lib/RapidRAW
-      - cp -rf src-tauri/workflows /app/lib/RapidRAW
+      - mkdir -p /app/lib/darkroom-index
+      - cp -rf src-tauri/resources /app/lib/darkroom-index
+      - cp -rf src-tauri/workflows /app/lib/darkroom-index
 
-      - install -Dm644 LICENSE /app/share/licenses/io.github.CyberTimon.RapidRAW/LICENSE
+      - install -Dm644 LICENSE /app/share/licenses/io.github.chma3348.DarkroomIndex/LICENSE

@@ -1,6 +1,6 @@
 # Managed LUTs & film simulations
 
-RapidRAW+ scans `~/Documents/RapidRAW Models/luts/<pack>/*.cube` and lists
+Darkroom Index scans `~/Documents/Darkroom Index/Models/luts/<pack>/*.cube` and lists
 every cube in Effects → LUT → "Film simulations". Each pack folder should
 carry a `SOURCES.md` recording provenance (origin, publisher, version,
 input space, license notes) — LUT files are typically third-party

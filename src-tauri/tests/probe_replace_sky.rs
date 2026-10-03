@@ -13,10 +13,10 @@ fn inspect_sky_recognition() {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/libonnxruntime.dylib"),
         );
     }
-    rapidraw_lib::register_exit_handler();
+    darkroom_index::register_exit_handler();
     let models = PathBuf::from(std::env::var("HOME").unwrap())
-        .join("Library/Application Support/io.github.CyberTimon.RapidRAW/models");
-    let registry = rapidraw_lib::model_registry::ModelRegistry::new(models);
+        .join("Library/Application Support/io.github.chma3348.DarkroomIndex/models");
+    let registry = darkroom_index::model_registry::ModelRegistry::new(models);
     let session = registry.get_session("u2net-sky", None).unwrap();
     {
         let guard = session.lock().unwrap();
@@ -54,7 +54,7 @@ fn inspect_sky_recognition() {
         } else {
             crop.clone()
         };
-        let sky = rapidraw_lib::ai_processing::run_sky_seg_model(&model_input, &session).unwrap();
+        let sky = darkroom_index::ai_processing::run_sky_seg_model(&model_input, &session).unwrap();
         let sky = image::imageops::resize(&sky, crop.width(), crop.height(), FilterType::Triangle);
         let mut selected = 0u64;
         let mut confident = 0u64;
@@ -117,8 +117,12 @@ fn inspect_sky_recognition() {
                     .to_rgba8();
                 let mut full = photo.to_rgba8();
                 image::imageops::replace(&mut full, &generated, x as i64, y as i64);
-                let result =
-                    rapidraw_lib::heal_blend::blend_generated(&photo.to_rgba8(), &full, &mask, 8.0);
+                let result = darkroom_index::heal_blend::blend_generated(
+                    &photo.to_rgba8(),
+                    &full,
+                    &mask,
+                    8.0,
+                );
                 result.save(output.join("local-composite.png")).unwrap();
                 result
                     .view(

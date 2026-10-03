@@ -6,8 +6,8 @@ fn heic_decodes_through_loader() {
     use image::{Rgb, RgbImage};
 
     let dir = std::env::temp_dir();
-    let png = dir.join("rapidraw_heic_test_src.png");
-    let heic = dir.join("rapidraw_heic_test.heic");
+    let png = dir.join("darkroom_index_heic_test_src.png");
+    let heic = dir.join("darkroom_index_heic_test.heic");
 
     let mut img = RgbImage::new(120, 60);
     for p in img.pixels_mut() {
@@ -25,7 +25,7 @@ fn heic_decodes_through_loader() {
     assert!(status.status.success(), "sips heic encode failed");
 
     let bytes = std::fs::read(&heic).unwrap();
-    let decoded = rapidraw_lib::image_loader::load_image_with_orientation(&bytes, None)
+    let decoded = darkroom_index::image_loader::load_image_with_orientation(&bytes, None)
         .expect("HEIC should decode through the loader");
     assert_eq!(
         (decoded.width(), decoded.height()),

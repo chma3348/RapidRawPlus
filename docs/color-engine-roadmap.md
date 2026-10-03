@@ -146,6 +146,6 @@ The work is a multi-stage engineering project, not a reliable one-session slider
 
 ## Reference inputs needed before behavior matching
 
-Useful user input: a small set of disliked RapidRAW examples and the Resolve setup/results they prefer. Until supplied, use a documented neutral SDR reference as a provisional target and continue objective correctness work. Do not claim that a guessed setup reproduces the user's preferred Resolve behavior.
+Useful user input: a small set of disliked Darkroom Index examples and the Resolve setup/results they prefer. Until supplied, use a documented neutral SDR reference as a provisional target and continue objective correctness work. Do not claim that a guessed setup reproduces the user's preferred Resolve behavior.
 
 Blackmagic reference: https://documents.blackmagicdesign.com/UserManuals/DaVinci-Resolve-17-Colorist-Guide.pdf (color-managed working-space concepts; pin the actual installed Resolve version for measurements).

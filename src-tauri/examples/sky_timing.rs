@@ -8,15 +8,15 @@ fn main() -> anyhow::Result<()> {
     for (label, o) in [
         (
             "as shot",
-            rapidraw_lib::sky_replace::SkyReplaceOptions::as_shot(),
+            darkroom_index::sky_replace::SkyReplaceOptions::as_shot(),
         ),
         (
             "auto match",
-            rapidraw_lib::sky_replace::SkyReplaceOptions::auto_match(),
+            darkroom_index::sky_replace::SkyReplaceOptions::auto_match(),
         ),
     ] {
         let t = std::time::Instant::now();
-        let out = rapidraw_lib::sky_replace::replace_sky(&photo, &alpha, &plate, &o)?;
+        let out = darkroom_index::sky_replace::replace_sky(&photo, &alpha, &plate, &o)?;
         println!(
             "{label:12} {w}x{h}  {:>6.0} ms",
             t.elapsed().as_secs_f64() * 1000.0
@@ -31,11 +31,11 @@ fn main() -> anyhow::Result<()> {
         image::imageops::FilterType::Triangle,
     );
     let t = std::time::Instant::now();
-    rapidraw_lib::sky_replace::replace_sky(
+    darkroom_index::sky_replace::replace_sky(
         &small,
         &sa,
         &plate,
-        &rapidraw_lib::sky_replace::SkyReplaceOptions::auto_match(),
+        &darkroom_index::sky_replace::SkyReplaceOptions::auto_match(),
     )?;
     println!(
         "preview      {}x{}  {:>6.0} ms",

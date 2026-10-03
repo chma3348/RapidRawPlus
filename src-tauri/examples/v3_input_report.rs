@@ -3,9 +3,9 @@
 //!   cargo run --release --example v3_input_report -- PHOTO...
 use anyhow::Result;
 fn main() -> Result<()> {
-    let state = rapidraw_lib::AppState::default();
+    let state = darkroom_index::AppState::default();
     let support = std::path::PathBuf::from(std::env::var("HOME")?)
-        .join("Library/Application Support/io.github.CyberTimon.RapidRAW");
+        .join("Library/Application Support/io.github.chma3348.DarkroomIndex");
     for (slot, name) in [
         (&state.output_transform, "output-transform.cube"),
         (&state.input_transform, "input-transform.cube"),
@@ -18,7 +18,7 @@ fn main() -> Result<()> {
     }
     for path in std::env::args().skip(1) {
         let start = std::time::Instant::now();
-        let report = rapidraw_lib::color_engine::application::input_report(
+        let report = darkroom_index::color_engine::application::input_report(
             &state,
             &path,
             &serde_json::json!({"processVersion": 3}),

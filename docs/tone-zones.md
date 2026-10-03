@@ -2,7 +2,7 @@
 
 1 October 2026. The six lighting sliders have Lightroom's strength, measured,
 and render like Lightroom's (smooth, with its colour response), on
-RapidRAW's own base colour: the Resolve-matched rendering, colour transforms
+Darkroom Index's own base colour: the Resolve-matched rendering, colour transforms
 and Saturation. This
 replaces the hand-designed tone zones of 30 September and the previous
 engine's Contrast.
@@ -13,7 +13,7 @@ How far each tone moves is taken from Lightroom: its change in CIE lightness
 (L*) for a tone at a given lightness, at slider ±50 and ±100 (Exposure ±1 and
 ±2.5 stops). Each engine is measured against its *own* unedited picture, so
 Lightroom's base look (its Adobe Color profile, its contrast) is never
-copied. The base colours stay RapidRAW's: the Resolve-matched rendering,
+copied. The base colours stay Darkroom Index's: the Resolve-matched rendering,
 colour transforms and Saturation.
 
 How a slider moves colour was chosen by scoring candidates against every

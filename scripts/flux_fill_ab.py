@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Run controlled Flux Fill workflow variants against a saved RapidRAW fill debug crop.
+Run controlled Flux Fill workflow variants against a saved Darkroom Index fill debug crop.
 
 This intentionally bypasses the editor pipeline. It reuses one pair of files:
   blob-00-engine-input.png
@@ -27,9 +27,9 @@ from typing import Any
 
 PORT = 8399
 BASE_URL = f"http://127.0.0.1:{PORT}"
-APP_SUPPORT = Path.home() / "Library/Application Support/io.github.CyberTimon.RapidRAW"
+APP_SUPPORT = Path.home() / "Library/Application Support/io.github.chma3348.DarkroomIndex"
 DEBUG_ROOT = APP_SUPPORT / "ai-fill-debug"
-DOCUMENT_ENGINE = Path.home() / "Documents/RapidRAW Models/Engine"
+DOCUMENT_ENGINE = Path.home() / "Documents/Darkroom Index/Models/Engine"
 APP_ENGINE = APP_SUPPORT / "comfy"
 
 
@@ -87,7 +87,7 @@ def engine_dir() -> Path:
         return APP_ENGINE
     if (DOCUMENT_ENGINE / "ComfyUI/main.py").is_file() and (DOCUMENT_ENGINE / "venv/bin/python").is_file():
         return DOCUMENT_ENGINE
-    raise SystemExit("Could not find a RapidRAW Comfy engine install.")
+    raise SystemExit("Could not find a Darkroom Index Comfy engine install.")
 
 
 def engine_needs_cpu_flag(root: Path) -> bool:
@@ -232,7 +232,7 @@ def workflow(variant: Variant, image_name: str, mask_name: str, prompt: str, see
         },
     }
     nodes["8"] = {"class_type": "VAEDecode", "inputs": {"samples": ["7", 0], "vae": ["3v", 0]}}
-    nodes["9"] = {"class_type": "SaveImage", "inputs": {"images": ["8", 0], "filename_prefix": "rapidraw_ab"}}
+    nodes["9"] = {"class_type": "SaveImage", "inputs": {"images": ["8", 0], "filename_prefix": "darkroom_index_ab"}}
     return nodes
 
 
@@ -290,7 +290,7 @@ def default_output_root() -> Path:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--debug-dir", type=Path, default=None, help="RapidRAW ai-fill-debug run directory to use.")
+    parser.add_argument("--debug-dir", type=Path, default=None, help="Darkroom Index ai-fill-debug run directory to use.")
     parser.add_argument("--prompt", default="blue sky", help="Prompt to test.")
     parser.add_argument("--seed", type=int, default=123456789, help="Fixed seed for all variants.")
     parser.add_argument("--out", type=Path, default=None, help="Output directory. Defaults under app support.")
@@ -319,8 +319,8 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     proc = start_engine(out_dir, args.cpu)
-    image_name = f"rapidraw_ab_{run_id}_image.png"
-    mask_name = f"rapidraw_ab_{run_id}_mask.png"
+    image_name = f"darkroom_index_ab_{run_id}_image.png"
+    mask_name = f"darkroom_index_ab_{run_id}_mask.png"
     upload_image(image_name, image_path)
     upload_image(mask_name, mask_path)
 

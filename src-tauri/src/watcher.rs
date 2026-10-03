@@ -6,7 +6,7 @@
 //! Lightroom — the app is told which folders changed, a moment after the
 //! burst settles, and the grid and folder tree refresh themselves.
 //!
-//! What is ignored: the app's own sidecars (`.rrdata`), its temporary
+//! What is ignored: the app's own sidecars (`.dri`), its temporary
 //! files, hidden files, metadata-only changes (Finder tags, permissions),
 //! and XMP the app itself has just written.
 //!
@@ -90,10 +90,10 @@ fn classify(event: &Event) -> Change {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        if name.starts_with('.') || name.ends_with(".rrdata") || name.ends_with(".rrexif") {
+        if name.starts_with('.') || name.ends_with(".dri") || name.ends_with(".rrexif") {
             continue;
         }
-        if name.contains(".rapidraw-tmp") || written_by_us(path) {
+        if name.contains(".darkroom-tmp") || written_by_us(path) {
             continue;
         }
         let is_dir = path.is_dir()
@@ -309,9 +309,9 @@ mod tests {
         assert!(!c.structure);
 
         for ignored in [
-            "DSC1.ARW.rrdata",
+            "DSC1.ARW.dri",
             ".DS_Store",
-            "DSC1.xmp.rapidraw-tmp",
+            "DSC1.xmp.darkroom-tmp",
             "notes.txt",
         ] {
             let p = d.join(ignored);
@@ -370,7 +370,7 @@ mod tests {
         .unwrap();
         std::thread::sleep(Duration::from_millis(300));
         // A burst: three photos and a sidecar, as an import writes them.
-        for n in ["a.ARW", "b.ARW", "c.ARW", "a.ARW.rrdata"] {
+        for n in ["a.ARW", "b.ARW", "c.ARW", "a.ARW.dri"] {
             std::fs::write(root.join(n), b"x").unwrap();
         }
         let change = rx

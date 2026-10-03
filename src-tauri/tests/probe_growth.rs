@@ -1,8 +1,8 @@
 //! Diagnostic: iterative ghost-box growth. Click -> low-confidence component
 //! containing the click -> padded bbox -> re-decode with box+click+prior.
+use darkroom_index::{ai_processing, model_registry::ModelRegistry};
 use ndarray::Array;
 use ort::value::Tensor;
-use rapidraw_lib::{ai_processing, model_registry::ModelRegistry};
 use std::path::PathBuf;
 fn env(k: &str) -> String {
     std::env::var(k).unwrap_or_else(|_| panic!("{k}"))

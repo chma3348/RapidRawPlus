@@ -1,6 +1,6 @@
+use darkroom_index::color_engine::{ColorEngine, config::*, plan::RenderPlan, spaces};
+use darkroom_index::image_processing::GpuContext;
 use image::{ImageBuffer, Rgba};
-use rapidraw_lib::color_engine::{ColorEngine, config::*, plan::RenderPlan, spaces};
-use rapidraw_lib::image_processing::GpuContext;
 use std::sync::{Arc, Mutex};
 
 fn config() -> PipelineConfig {
@@ -122,7 +122,7 @@ fn spaces_compose_to_the_same_oklab() {
 
 #[test]
 fn creative_controls_are_strict_and_part_of_saved_identity() {
-    use rapidraw_lib::color_engine::{application::controls, controls::Controls};
+    use darkroom_index::color_engine::{application::controls, controls::Controls};
     use serde_json::json;
     assert_eq!(controls(&json!({"v3":{}})).unwrap(), Controls::default());
     for invalid in [
@@ -151,7 +151,7 @@ fn creative_controls_are_strict_and_part_of_saved_identity() {
 
 #[test]
 fn render_fingerprint_includes_bound_data_and_scale() {
-    use rapidraw_lib::color_engine::cube::CubeLut;
+    use darkroom_index::color_engine::cube::CubeLut;
     let mut plan = RenderPlan::build(config()).unwrap();
     let bare = plan.fingerprint("source");
     plan.set_render_scale(0.5);
@@ -171,13 +171,13 @@ fn render_fingerprint_includes_bound_data_and_scale() {
     );
     plan.set_neighbourhood(
         Arc::new(vec![[0.1; 4]; 2]),
-        rapidraw_lib::color_engine::plan::PhotoTones::neutral(),
+        darkroom_index::color_engine::plan::PhotoTones::neutral(),
     );
     let blurred = plan.fingerprint("source");
     assert_ne!(domain, blurred);
     plan.set_neighbourhood(
         Arc::new(vec![[0.2; 4]; 2]),
-        rapidraw_lib::color_engine::plan::PhotoTones::neutral(),
+        darkroom_index::color_engine::plan::PhotoTones::neutral(),
     );
     assert_ne!(blurred, plan.fingerprint("source"));
 }
@@ -207,10 +207,10 @@ fn gpu_color_pipeline_contracts() {
     ImageBuffer::from_fn(32, 24, |x, y| Rgba([x as u8 * 7, y as u8 * 9, 80, 255]))
         .save(&photo)
         .unwrap();
-    let state = rapidraw_lib::AppState::default();
+    let state = darkroom_index::AppState::default();
     let path = photo.to_str().unwrap();
     let reference_edits = serde_json::json!({"processVersion":3,"toneMapper":"resolve","highlights":-70,"shadows":80});
-    let reference = rapidraw_lib::color_engine::application::render_file(
+    let reference = darkroom_index::color_engine::application::render_file(
         &context,
         &state,
         path,
@@ -226,7 +226,7 @@ fn gpu_color_pipeline_contracts() {
         let mut old = reference_edits.clone();
         old["processVersion"] = version;
         old["toneMapper"] = serde_json::json!("basic");
-        let migrated = rapidraw_lib::color_engine::application::render_file(
+        let migrated = darkroom_index::color_engine::application::render_file(
             &context,
             &state,
             path,
@@ -241,7 +241,7 @@ fn gpu_color_pipeline_contracts() {
     for mapper in ["basic", "agx", "filmic"] {
         let mut old = reference_edits.clone();
         old["toneMapper"] = serde_json::json!(mapper);
-        let rendered = rapidraw_lib::color_engine::application::render_file(
+        let rendered = darkroom_index::color_engine::application::render_file(
             &context,
             &state,
             path,
@@ -376,7 +376,7 @@ fn gpu_color_pipeline_contracts() {
     assert_eq!(decoded.into_rgba16(), export);
     let mut tagged = Vec::new();
     result.write_srgb_png(&mut tagged, true).unwrap();
-    let roundtrip = rapidraw_lib::color_engine::input::decode_profiled_photo(&tagged).unwrap();
+    let roundtrip = darkroom_index::color_engine::input::decode_profiled_photo(&tagged).unwrap();
     assert!(roundtrip.provenance.profile_hash.is_some());
     let mut roundtrip_config = config();
     roundtrip_config.source = roundtrip.color;
@@ -415,7 +415,7 @@ fn gpu_color_pipeline_contracts() {
     let enc = |v: f32| spaces::encode_intermediate(v.max(0.0) as f64) as f32;
     let dec = |v: f32| spaces::decode(v as f64, Transfer::DavinciIntermediate) as f32;
     let shaped = |v: f32| {
-        use rapidraw_lib::color_engine::tone_zones_table::{EXPOSURE, KNOTS};
+        use darkroom_index::color_engine::tone_zones_table::{EXPOSURE, KNOTS};
         if v * 2.0 <= 1e-6 {
             return v * 2.0;
         }
@@ -550,7 +550,7 @@ fn gpu_color_pipeline_contracts() {
     // brighten, and only their strength follows Lightroom's.
     let enc = |v: f32| spaces::encode_intermediate(v.max(0.0) as f64);
     let dec = |v: f64| spaces::decode(v, Transfer::DavinciIntermediate) as f32;
-    let per_stop = rapidraw_lib::color_engine::plan::EXPOSURE_COLOUR[0] as f64;
+    let per_stop = darkroom_index::color_engine::plan::EXPOSURE_COLOUR[0] as f64;
     let model = |p: &Rgba<f32>, f: f32| -> [f32; 3] {
         let logged: Vec<f64> = (0..3).map(|c| enc(p[c] * f)).collect();
         let l = 0.2126 * logged[0] + 0.7152 * logged[1] + 0.0722 * logged[2];
@@ -625,7 +625,7 @@ fn gpu_color_pipeline_contracts() {
 
 /// Detail through the application path, on an image with something to act on.
 fn detail_contracts(context: &GpuContext) {
-    use rapidraw_lib::color_engine::application::render_file;
+    use darkroom_index::color_engine::application::render_file;
     use serde_json::json;
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("textured.png");
@@ -641,7 +641,7 @@ fn detail_contracts(context: &GpuContext) {
     .save(&path)
     .unwrap();
     let path = path.to_str().unwrap();
-    let state = rapidraw_lib::AppState::default();
+    let state = darkroom_index::AppState::default();
     let neutral = json!({"processVersion":3,"v3":{},"masks":[]});
     let base = render_file(context, &state, path, &neutral, None).unwrap();
 
@@ -745,7 +745,7 @@ fn detail_contracts(context: &GpuContext) {
             "parameters":{"startX":0,"startY":1000,"endX":100,"endY":1000,"range":1}}]
     }]});
     let local = render_file(context, &state, path, &masked, None).unwrap();
-    let captured = rapidraw_lib::color_engine::application::render_file_with_capture(
+    let captured = darkroom_index::color_engine::application::render_file_with_capture(
         context, &state, path, &masked, None, true,
     )
     .unwrap();
@@ -823,7 +823,7 @@ fn detail_contracts(context: &GpuContext) {
 fn application_contracts(context: &GpuContext) {
     pinned_pipeline_contracts(context);
     stabilization_contracts(context);
-    use rapidraw_lib::color_engine::application::render_file;
+    use darkroom_index::color_engine::application::render_file;
     use serde_json::json;
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("source.png");
@@ -832,7 +832,7 @@ fn application_contracts(context: &GpuContext) {
         .save(&path)
         .unwrap();
     let path = path.to_str().unwrap();
-    let state = rapidraw_lib::AppState::default();
+    let state = darkroom_index::AppState::default();
     let neutral = json!({"processVersion":3,"v3":{},"masks":[]});
     let exposed = json!({"processVersion":3,"exposure":0.8,"v3":{},"masks":[]});
     let base = render_file(context, &state, path, &neutral, None).unwrap();
@@ -925,7 +925,7 @@ fn application_contracts(context: &GpuContext) {
     invalid["v3"]["revision"] = json!(999);
     assert!(render_file(context, &state, path, &invalid, None).is_err());
     use base64::Engine;
-    use rapidraw_lib::color_engine::selection::inspect;
+    use darkroom_index::color_engine::selection::inspect;
     let mut selecting = json!({"processVersion":3,"v3":{"ranges":[{"center":[0,0.1,0.5],"width":[45,0.2,0.5],"adjustment":[0,0,0]}]},"masks":[]});
     let picked = inspect(context, &state, path, &selecting, 0, Some([0.5, 0.5])).unwrap();
     let center = picked.center.unwrap();
@@ -990,7 +990,7 @@ fn application_contracts(context: &GpuContext) {
     let warm = render_file(context, &state, replacement, &range_edit, None).unwrap();
     let cold = render_file(
         context,
-        &rapidraw_lib::AppState::default(),
+        &darkroom_index::AppState::default(),
         replacement,
         &range_edit,
         None,
@@ -1006,7 +1006,7 @@ fn application_contracts(context: &GpuContext) {
     let warm = render_file(context, &state, replacement, &range_edit, None).unwrap();
     let cold = render_file(
         context,
-        &rapidraw_lib::AppState::default(),
+        &darkroom_index::AppState::default(),
         replacement,
         &range_edit,
         None,
@@ -1041,7 +1041,7 @@ fn application_contracts(context: &GpuContext) {
 }
 
 fn stabilization_contracts(context: &GpuContext) {
-    use rapidraw_lib::color_engine::{
+    use darkroom_index::color_engine::{
         application::{input_report, render_file},
         reference,
     };
@@ -1054,7 +1054,7 @@ fn stabilization_contracts(context: &GpuContext) {
     });
     ramp.save(&path).unwrap();
     let path_str = path.to_str().unwrap();
-    let state = rapidraw_lib::AppState::default();
+    let state = darkroom_index::AppState::default();
     let edits = json!({"processVersion":3,"toneMapper":"resolve","exposure":0.2,"shadows":25,"highlights":-30,
         "v3":{"detail":{"clarity":12,"texture":8}}});
     let first = render_file(context, &state, path_str, &edits, None).unwrap();
@@ -1062,7 +1062,7 @@ fn stabilization_contracts(context: &GpuContext) {
     let reopened: serde_json::Value = serde_json::from_str(&edits.to_string()).unwrap();
     let fresh = render_file(
         context,
-        &rapidraw_lib::AppState::default(),
+        &darkroom_index::AppState::default(),
         path_str,
         &reopened,
         None,
@@ -1071,7 +1071,7 @@ fn stabilization_contracts(context: &GpuContext) {
     assert_eq!(first.encoded_srgb, cached.encoded_srgb);
     assert_eq!(first.encoded_srgb, fresh.encoded_srgb);
     let preview = render_file(context, &state, path_str, &edits, Some(128)).unwrap();
-    let down = rapidraw_lib::image_processing::downscale_f32_image(
+    let down = darkroom_index::image_processing::downscale_f32_image(
         &image::DynamicImage::ImageRgba32F(first.encoded_srgb.clone()),
         128,
         128,
@@ -1090,16 +1090,16 @@ fn stabilization_contracts(context: &GpuContext) {
         "16-bit export was quantized to eight bits"
     );
     let before = input_report(&state, path_str, &edits).unwrap();
-    let sidecar = dir.path().join("source.rrdata");
+    let sidecar = dir.path().join("source.dri");
     let mut saved_edits = edits.clone();
     saved_edits["v3Input"] = before.clone();
     saved_edits["v3RawRecovery"] = json!("off");
-    let metadata = rapidraw_lib::image_processing::ImageMetadata {
+    let metadata = darkroom_index::image_processing::ImageMetadata {
         adjustments: saved_edits.clone(),
         ..Default::default()
     };
     std::fs::write(&sidecar, serde_json::to_vec_pretty(&metadata).unwrap()).unwrap();
-    let reopened: rapidraw_lib::image_processing::ImageMetadata =
+    let reopened: darkroom_index::image_processing::ImageMetadata =
         serde_json::from_slice(&std::fs::read(&sidecar).unwrap()).unwrap();
     assert_eq!(reopened.adjustments, saved_edits);
     let original_time = std::fs::metadata(&path).unwrap().modified().unwrap();
@@ -1119,7 +1119,7 @@ fn stabilization_contracts(context: &GpuContext) {
     let replaced = render_file(context, &state, path_str, &edits, None).unwrap();
     let replaced_fresh = render_file(
         context,
-        &rapidraw_lib::AppState::default(),
+        &darkroom_index::AppState::default(),
         path_str,
         &edits,
         None,
@@ -1141,7 +1141,7 @@ fn stabilization_contracts(context: &GpuContext) {
 }
 
 fn pinned_pipeline_contracts(context: &GpuContext) {
-    use rapidraw_lib::color_engine::{application::render_file, identity};
+    use darkroom_index::color_engine::{application::render_file, identity};
     use serde_json::json;
     let dir = tempfile::tempdir().unwrap();
     let photo = dir.path().join("photo.png");
@@ -1153,7 +1153,7 @@ fn pinned_pipeline_contracts(context: &GpuContext) {
     let output = dir.path().join("installed-output.cube");
     std::fs::write(&input, cube(0.3)).unwrap();
     std::fs::write(&output, cube(0.4)).unwrap();
-    let state = rapidraw_lib::AppState::default();
+    let state = darkroom_index::AppState::default();
     *state.v3_asset_dir.lock().unwrap() = Some(dir.path().join("assets"));
     *state.input_transform.lock().unwrap() = Some(input.clone());
     *state.output_transform.lock().unwrap() = Some(output.clone());
@@ -1172,7 +1172,7 @@ fn pinned_pipeline_contracts(context: &GpuContext) {
     std::fs::remove_file(output).unwrap();
     let reopened: serde_json::Value =
         serde_json::from_slice(&std::fs::read(saved).unwrap()).unwrap();
-    let fresh = rapidraw_lib::AppState::default();
+    let fresh = darkroom_index::AppState::default();
     *fresh.v3_asset_dir.lock().unwrap() = Some(dir.path().join("assets"));
     let after = render_file(context, &fresh, path, &reopened, None).unwrap();
     assert!(
@@ -1228,7 +1228,8 @@ fn channel_curve_contracts(engine: &ColorEngine) {
     };
     let base = graded(c.clone());
     // Identity curves change nothing, bit for bit.
-    c.controls.channel_curves = [rapidraw_lib::color_engine::controls::Controls::IDENTITY_CURVE; 3];
+    c.controls.channel_curves =
+        [darkroom_index::color_engine::controls::Controls::IDENTITY_CURVE; 3];
     assert_eq!(graded(c.clone()), base);
     // Lifting only the red curve lifts only red: a neutral ramp turns warm,
     // monotonically, and green and blue are untouched.
@@ -1460,7 +1461,7 @@ fn effects_contracts(engine: &ColorEngine) {
 /// A transform captured from Resolve is only worth having if what runs on the
 /// GPU is the transform that was captured.
 fn captured_transform_contracts(engine: &ColorEngine) {
-    use rapidraw_lib::color_engine::cube::CubeLut;
+    use darkroom_index::color_engine::cube::CubeLut;
     let size = 17usize;
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("captured.cube");
@@ -1546,9 +1547,9 @@ fn captured_transform_contracts(engine: &ColorEngine) {
 /// film simulation — in place of the rendering. Each is checked against a
 /// CPU evaluation of exactly that placement.
 fn look_contracts(engine: &ColorEngine) {
-    use rapidraw_lib::color_engine::cube::CubeLut;
-    use rapidraw_lib::color_engine::plan::{Look, LookSpace};
-    use rapidraw_lib::lut_processing::Lut;
+    use darkroom_index::color_engine::cube::CubeLut;
+    use darkroom_index::color_engine::plan::{Look, LookSpace};
+    use darkroom_index::lut_processing::Lut;
     let size = 17usize;
     let axis = |i: usize| i as f32 / (size - 1) as f32;
     let build = |f: &dyn Fn([f32; 3]) -> [f32; 3]| {
@@ -1800,7 +1801,7 @@ fn output_and_grading_contracts(engine: &ColorEngine) {
 }
 
 fn advanced_control_contracts(engine: &ColorEngine) {
-    use rapidraw_lib::color_engine::controls::ColorRange;
+    use darkroom_index::color_engine::controls::ColorRange;
     let mut c = config();
     c.source.transfer = Transfer::Linear;
     let ramp = ImageBuffer::from_fn(4097, 1, |x, _| {
@@ -1933,7 +1934,7 @@ fn advanced_control_contracts(engine: &ColorEngine) {
 #[test]
 fn a_patch_of_the_photo_itself_is_invisible_on_a_p3_file() {
     use base64::Engine;
-    use rapidraw_lib::color_engine::{input::decode_profiled_photo, patches};
+    use darkroom_index::color_engine::{input::decode_profiled_photo, patches};
     let profile = "/System/Library/ColorSync/Profiles/Display P3.icc";
     if !std::path::Path::new(profile).exists() {
         return;
@@ -2031,7 +2032,7 @@ fn zone_config(amounts: [f32; 4]) -> PipelineConfig {
 }
 
 fn zone_table_offset(key: f32, zone: usize, amount: f32) -> f32 {
-    use rapidraw_lib::color_engine::tone_zones_table::{CUT, CUT_HALF, KNOTS, LIFT, LIFT_HALF};
+    use darkroom_index::color_engine::tone_zones_table::{CUT, CUT_HALF, KNOTS, LIFT, LIFT_HALF};
     if amount == 0.0 {
         return 0.0;
     }
@@ -2147,7 +2148,7 @@ fn tone_zones_on_greys() {
 }
 
 fn tone_zones_on_colour() {
-    use rapidraw_lib::color_engine::plan::ZONE_STYLE;
+    use darkroom_index::color_engine::plan::ZONE_STYLE;
     let engine = ColorEngine::new(gpu()).unwrap();
     let enc = |v: f64| spaces::encode_intermediate(v.max(0.0));
     let dec = |v: f64| spaces::decode(v, Transfer::DavinciIntermediate).max(0.0);
@@ -2280,7 +2281,7 @@ fn gpu() -> GpuContext {
 
 #[test]
 fn output_space_contracts() {
-    use rapidraw_lib::color_engine::{
+    use darkroom_index::color_engine::{
         application::{render_file, render_for_output},
         config::OutputSpace,
         cube::{CubeLut, p3_output_matches, srgb_encoded_to_p3},
@@ -2308,7 +2309,7 @@ fn output_space_contracts() {
     let edits = json!({"processVersion":3,"toneMapper":"resolve","v3":{}});
 
     // Without a P3 capture: the sRGB rendering, stored as P3.
-    let state = rapidraw_lib::AppState::default();
+    let state = darkroom_index::AppState::default();
     *state.v3_asset_dir.lock().unwrap() = Some(dir.path().join("assets"));
     let srgb = render_file(&context, &state, path, &edits, None).unwrap();
     assert_eq!(srgb.space, OutputSpace::Srgb);
@@ -2375,7 +2376,7 @@ fn output_space_contracts() {
     pinned_edits["v3Pipeline"] =
         serde_json::to_value(identity::pin(&state, &edits).unwrap()).unwrap();
     assert!(pinned_edits["v3Pipeline"]["output_transform_p3"]["blake3"].is_string());
-    let fresh = rapidraw_lib::AppState::default();
+    let fresh = darkroom_index::AppState::default();
     *fresh.v3_asset_dir.lock().unwrap() = Some(dir.path().join("assets"));
     *fresh.output_space.lock().unwrap() = OutputSpace::DisplayP3;
     assert_eq!(
@@ -2418,7 +2419,7 @@ fn output_space_contracts() {
 /// render the whole and cut the region out).
 #[test]
 fn a_zoomed_region_is_exactly_that_part_of_the_whole() {
-    use rapidraw_lib::color_engine::application::{render_for_output, render_region_for_output};
+    use darkroom_index::color_engine::application::{render_for_output, render_region_for_output};
     use serde_json::json;
     let context = gpu();
     let directory = tempfile::tempdir().unwrap();
@@ -2475,7 +2476,7 @@ fn a_zoomed_region_is_exactly_that_part_of_the_whole() {
     ];
     for (name, edits) in cases {
         for size in [None, Some(1800)] {
-            let state = rapidraw_lib::AppState::default();
+            let state = darkroom_index::AppState::default();
             let whole = render_for_output(&context, &state, path, &edits, size).unwrap();
             for roi in [
                 (0.4, 0.45, 0.12, 0.1),

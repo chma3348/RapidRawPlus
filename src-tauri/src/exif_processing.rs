@@ -153,7 +153,7 @@ pub fn read_raw_metadata(file_bytes: &[u8]) -> Option<RawMetadata> {
 }
 
 pub fn read_exposure_time_secs(path: &str, file_bytes: &[u8]) -> Option<f32> {
-    if let Some(map) = read_rrexif_sidecar(Path::new(path))
+    if let Some(map) = read_exif_sidecar(Path::new(path))
         && let Some(val_str) = map.get("ExposureTime").or(map.get("ShutterSpeedValue"))
     {
         let cleaned = val_str.replace(" s", "");
@@ -224,7 +224,7 @@ pub fn read_exposure_time_secs(path: &str, file_bytes: &[u8]) -> Option<f32> {
 }
 
 pub fn read_iso(path: &str, file_bytes: &[u8]) -> Option<u32> {
-    if let Some(map) = read_rrexif_sidecar(Path::new(path))
+    if let Some(map) = read_exif_sidecar(Path::new(path))
         && let Some(val_str) = map
             .get("ISOSpeed")
             .or(map.get("PhotographicSensitivity"))
@@ -602,7 +602,7 @@ pub fn extract_metadata(file_bytes: &[u8]) -> Option<HashMap<String, String>> {
 }
 
 pub fn get_creation_date_from_path(path: &Path) -> DateTime<Utc> {
-    if let Some(map) = read_rrexif_sidecar(path)
+    if let Some(map) = read_exif_sidecar(path)
         && let Some(dt_str) = map.get("DateTimeOriginal").or(map.get("CreateDate"))
         && let Some(dt) = parse_creation_datetime(dt_str)
     {
@@ -712,7 +712,7 @@ pub fn write_image_with_metadata(
     let mut metadata = Metadata::new();
     let mut source_read_success = false;
 
-    if let Some(map) = read_rrexif_sidecar(original_path) {
+    if let Some(map) = read_exif_sidecar(original_path) {
         source_read_success = true;
 
         let clean_s = |s: &String| s.replace('"', "").trim().to_string();
@@ -1082,11 +1082,13 @@ pub fn write_image_with_metadata(
 
 pub fn get_primary_sidecar_path(image_path: &Path) -> PathBuf {
     let mut filename = image_path.file_name().unwrap_or_default().to_os_string();
-    filename.push(".rrdata");
+    filename.push(".dri");
     image_path.with_file_name(filename)
 }
 
-pub fn get_rrexif_path(image_path: &Path) -> PathBuf {
+/// RapidRAW's older separate EXIF file (`.rrexif`), read once and folded
+/// into the edit file, then removed.
+pub fn legacy_exif_path(image_path: &Path) -> PathBuf {
     let mut filename = image_path.file_name().unwrap_or_default().to_os_string();
     filename.push(".rrexif");
     image_path.with_file_name(filename)
@@ -1103,13 +1105,13 @@ fn save_primary_metadata(image_path: &Path, metadata: &ImageMetadata) -> std::io
     fs::write(&primary, json)
 }
 
-pub fn read_rrexif_sidecar(image_path: &Path) -> Option<HashMap<String, String>> {
+pub fn read_exif_sidecar(image_path: &Path) -> Option<HashMap<String, String>> {
     let metadata = load_primary_metadata(image_path);
     if let Some(exif) = metadata.exif {
         return Some(exif);
     }
 
-    let legacy = get_rrexif_path(image_path);
+    let legacy = legacy_exif_path(image_path);
     if legacy.exists()
         && let Ok(content) = fs::read_to_string(&legacy)
         && let Ok(map) = serde_json::from_str::<HashMap<String, String>>(&content)
@@ -1144,7 +1146,7 @@ pub fn read_exif_data_from_bytes(path: &str, file_bytes: &[u8]) -> HashMap<Strin
 
 pub fn read_exif_data(path: &str, file_bytes: &[u8]) -> HashMap<String, String> {
     let source_path = Path::new(path);
-    if let Some(sidecar_exif) = read_rrexif_sidecar(source_path) {
+    if let Some(sidecar_exif) = read_exif_sidecar(source_path) {
         return sidecar_exif;
     }
 
@@ -1165,7 +1167,7 @@ pub fn persist_exif_if_missing(source_path: &Path, source_path_str: &str, file_b
         }
     }
 
-    let legacy = get_rrexif_path(source_path);
+    let legacy = legacy_exif_path(source_path);
     if legacy.exists()
         && let Ok(content) = fs::read_to_string(&legacy)
         && let Ok(map) = serde_json::from_str::<HashMap<String, String>>(&content)
@@ -1191,10 +1193,10 @@ pub fn persist_exif_if_missing(source_path: &Path, source_path_str: &str, file_b
     }
 }
 
-pub fn write_rrexif_sidecar(source_path_str: &str, target_image_path: &Path) -> Result<(), String> {
+pub fn write_exif_sidecar(source_path_str: &str, target_image_path: &Path) -> Result<(), String> {
     let source_path = Path::new(source_path_str);
 
-    let exif_data = if let Some(existing) = read_rrexif_sidecar(source_path) {
+    let exif_data = if let Some(existing) = read_exif_sidecar(source_path) {
         existing
     } else if let Ok(bytes) = fs::read(source_path) {
         read_exif_data_from_bytes(source_path_str, &bytes)

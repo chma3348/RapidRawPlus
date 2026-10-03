@@ -27,7 +27,7 @@ type Side = 'left' | 'top' | 'right' | 'bottom';
 const MAX_FRAC = 0.5;
 // Keep the target under the backend's output cap.
 const MAX_OUTPUT_PIXELS = 48_000_000;
-const GUIDES_STORAGE_KEY = 'rapidraw-expand-guides';
+const GUIDES_STORAGE_KEY = 'darkroom-index-expand-guides';
 
 const RATIO_PRESETS: Array<{ label: string; value: number }> = [
   { label: '1:1', value: 1 },

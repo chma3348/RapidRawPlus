@@ -1,4 +1,4 @@
-//! RapidRAW's RAW starting look, fitted to Lightroom's default rendering
+//! Darkroom Index's RAW starting look, fitted to Lightroom's default rendering
 //! by tools/fit_raw_look.py; do not edit.
 //!
 //! `TONE`: offsets on the tonal key (DaVinci Intermediate), 65 knots over

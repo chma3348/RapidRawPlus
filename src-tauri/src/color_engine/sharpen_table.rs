@@ -1,4 +1,4 @@
-//! RapidRAW's Sharpening, fitted to Lightroom's by tools/fit_sharpen.py
+//! Darkroom Index's Sharpening, fitted to Lightroom's by tools/fit_sharpen.py
 //! from tools/adobe_sharpen.py's measurements; do not edit.
 //!
 //! Bands at sigma `SIGMAS` x Radius (full-resolution pixels): their amounts

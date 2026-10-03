@@ -442,8 +442,8 @@ Manual component fixture (using the regular Vite development server):
 Editor-history integration test:
 
 ```sh
-./node_modules/.bin/esbuild tests/colorV3-history.test.ts --bundle --platform=node --format=cjs --outfile=/tmp/rapidraw-color-v3-history-test.cjs
-node --test /tmp/rapidraw-color-v3-history-test.cjs
+./node_modules/.bin/esbuild tests/colorV3-history.test.ts --bundle --platform=node --format=cjs --outfile=/tmp/darkroom-index-color-v3-history-test.cjs
+node --test /tmp/darkroom-index-color-v3-history-test.cjs
 ```
 
 ## Application integration update — September 20, 2026

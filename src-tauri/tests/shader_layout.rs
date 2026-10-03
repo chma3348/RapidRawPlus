@@ -5,7 +5,7 @@
 //! WGSL struct layout drift (the auto layout's min_binding_size is the
 //! WGSL struct size — a too-small Rust struct fails bind group creation).
 
-use rapidraw_lib::image_processing::AllAdjustments;
+use darkroom_index::image_processing::AllAdjustments;
 
 #[test]
 fn shader_compiles_and_struct_layout_matches() {
@@ -30,7 +30,7 @@ fn shader_compiles_and_struct_layout_matches() {
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("adjustments shader under test"),
-        source: wgpu::ShaderSource::Wgsl(rapidraw_lib::gpu_processing::LEGACY_SHADER.into()),
+        source: wgpu::ShaderSource::Wgsl(darkroom_index::gpu_processing::LEGACY_SHADER.into()),
     });
 
     let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {

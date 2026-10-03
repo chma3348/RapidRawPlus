@@ -27,7 +27,7 @@ export const FRAME_KIND = 'Frame';
 
 /** Dispatched on `window` by views that write a file into the open folder
  *  (a saved video frame) so the library lists it without a manual refresh. */
-export const LIBRARY_REFRESH_EVENT = 'rapidraw:library-refresh';
+export const LIBRARY_REFRESH_EVENT = 'darkroom-index:library-refresh';
 
 const realPath = (path: string) => path.split('?vc=')[0];
 const fileName = (path: string) => path.split(/[\\/]/).pop() || path;

@@ -95,7 +95,7 @@ transform expands and the output transform compresses.
 Copy the cube to the app's data directory as `output-transform.cube`:
 
 ```
-~/Library/Application Support/io.github.CyberTimon.RapidRAW/output-transform.cube
+~/Library/Application Support/io.github.chma3348.DarkroomIndex/output-transform.cube
 ```
 
 v3 picks it up at startup, logs the size and content hash it is rendering
