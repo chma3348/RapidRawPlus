@@ -2500,6 +2500,20 @@ const ImageCanvas = memo(
 
     const visiblePatch = interactivePatch ?? (baseIsReady ? null : retainedPatchRef.current);
 
+    // Zoomed in, the full-detail tile is drawn by the editor under this
+    // layer, at its size on screen; the picture here leaves a hole for it,
+    // half a pixel smaller than the tile so no seam shows.
+    const tileHole = useMemo(() => {
+      if (!zoomTile || interactivePatch || isWgpuActive || !imageRenderSize.width || !imageRenderSize.height) return null;
+      const ix = 0.5 / imageRenderSize.width;
+      const iy = 0.5 / imageRenderSize.height;
+      const x0 = zoomTile.normX + ix;
+      const y0 = zoomTile.normY + iy;
+      const x1 = zoomTile.normX + zoomTile.normW - ix;
+      const y1 = zoomTile.normY + zoomTile.normH - iy;
+      if (x1 <= x0 || y1 <= y0) return null;
+      return `M0,0 H1 V1 H0 Z M${x0},${y0} V${y1} H${x1} V${y0} Z`;
+    }, [zoomTile, interactivePatch, isWgpuActive, imageRenderSize.width, imageRenderSize.height]);
     useEffect(() => {
       if (baseIsReady && !interactivePatch) {
         retainedPatchRef.current = null;
@@ -2638,8 +2652,16 @@ const ImageCanvas = memo(
                 }
                 preserveAspectRatio={imageRenderSize.width > 0 && imageRenderSize.height > 0 ? 'none' : 'xMidYMid meet'}
               >
+                {tileHole && (
+                  <defs>
+                    <clipPath id="zoom-tile-hole" clipPathUnits="objectBoundingBox">
+                      <path d={tileHole} clipRule="evenodd" />
+                    </clipPath>
+                  </defs>
+                )}
                 {displayState.base && !isWgpuActive && (
                   <image
+                    clipPath={tileHole ? 'url(#zoom-tile-hole)' : undefined}
                     href={displayState.base}
                     x="0"
                     y="0"
@@ -2651,6 +2673,7 @@ const ImageCanvas = memo(
 
                 {displayState.fade && !isWgpuActive && (
                   <image
+                    clipPath={tileHole ? 'url(#zoom-tile-hole)' : undefined}
                     href={displayState.fade}
                     x="0"
                     y="0"
@@ -2664,17 +2687,6 @@ const ImageCanvas = memo(
                   />
                 )}
 
-                {zoomTile && !isWgpuActive && !interactivePatch && (
-                  <image
-                    href={zoomTile.url}
-                    x={`${zoomTile.normX * 100}%`}
-                    y={`${zoomTile.normY * 100}%`}
-                    width={`${zoomTile.normW * 100}%`}
-                    height={`${zoomTile.normH * 100}%`}
-                    preserveAspectRatio="none"
-                    style={{ imageRendering: isMaxZoom ? 'pixelated' : 'auto' }}
-                  />
-                )}
                 {visiblePatch && !isWgpuActive && (
                   <image
                     href={visiblePatch.url}

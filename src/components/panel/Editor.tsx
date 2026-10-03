@@ -2042,6 +2042,29 @@ export default function Editor({ onBackToLibrary, onContextMenu, transformWrappe
             it replaces the canvas entirely rather than layering over it. */}
         {selectedImage?.isVideo && <VideoViewer path={selectedImage.path} />}
 
+        {/* Zoomed in, the region on screen at full detail, drawn here — outside
+            the scaled layer below, at exactly its size on screen. WebKit draws
+            a CSS-scaled layer from a bitmap near its unscaled size and
+            stretches it, which lost a third of the detail of whatever was in
+            it (measured on the editor's own screenshots); the picture in the
+            layer has a hole where this shows through, and the editor's
+            overlays stay on top. */}
+        {zoomTile && !interactivePatch && !selectedImage?.isVideo && !showOriginal && !(isCropping && uncroppedAdjustedPreviewUrl) && (
+          <img
+            src={zoomTile.url}
+            alt=""
+            draggable={false}
+            className="absolute pointer-events-none select-none"
+            style={{
+              left: transformState.positionX + transformState.scale * (imageRenderSize.offsetX + zoomTile.normX * imageRenderSize.width),
+              top: transformState.positionY + transformState.scale * (imageRenderSize.offsetY + zoomTile.normY * imageRenderSize.height),
+              width: transformState.scale * zoomTile.normW * imageRenderSize.width,
+              height: transformState.scale * zoomTile.normH * imageRenderSize.height,
+              maxWidth: 'none',
+            }}
+          />
+        )}
+
         {!selectedImage?.isVideo && (
           <div
             ref={contentRef}
@@ -2063,7 +2086,7 @@ export default function Editor({ onBackToLibrary, onContextMenu, transformWrappe
               handleCropComplete={handleCropComplete}
               imageRenderSize={imageRenderSize}
               interactivePatch={interactivePatch}
-              zoomTile={zoomTile}
+              zoomTile={zoomTile && !showOriginal && !(isCropping && uncroppedAdjustedPreviewUrl) ? zoomTile : null}
               isAiEditing={isAiEditing}
               isCropping={isCropping}
               isMaskControlHovered={isMaskControlHovered}
