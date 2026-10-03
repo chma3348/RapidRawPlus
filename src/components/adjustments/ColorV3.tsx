@@ -383,7 +383,10 @@ export default function ColorV3Controls({
   onAuto?: () => void;
 }) {
   const { t } = useTranslation();
-  const values: V3Controls = { ...defaultV3Controls(), ...adjustments.v3 };
+  // A RAW opens with Lightroom's default sharpening and colour noise
+  // reduction, so its sliders start (and reset) there.
+  const isRaw = useEditorStore((s) => s.selectedImage?.isRaw) ?? false;
+  const values: V3Controls = { ...defaultV3Controls(isRaw), ...adjustments.v3 };
   const renderError = useEditorStore((s) => s.colorV3Error);
   const selectedPath = useEditorStore((s) => s.selectedImage?.path);
   const [layout, updateLayout] = useEditorLayout();
@@ -391,7 +394,7 @@ export default function ColorV3Controls({
   const [band, setBand] = useState(0);
   const [gradingExpanded, setGradingExpanded] = useState(false);
   const update = (key: keyof V3Controls, value: any) =>
-    setAdjustments((prev: any) => ({ ...prev, v3: { ...defaultV3Controls(), ...prev.v3, [key]: value } }));
+    setAdjustments((prev: any) => ({ ...prev, v3: { ...defaultV3Controls(isRaw), ...prev.v3, [key]: value } }));
   const slider = (key: keyof V3Controls, label: string, min = -100, max = 100, step = 1) => (
     <Slider
       key={key}
@@ -405,16 +408,17 @@ export default function ColorV3Controls({
       onDragStateChange={onDragStateChange}
     />
   );
-  const detail: V3Detail = { ...defaultV3Detail(), ...values.detail };
-  const detailSlider = (key: keyof V3Detail, label: string, min = -100, max = 100, fallback = 0) => (
+  const detailDefaults = defaultV3Detail(isRaw);
+  const detail: V3Detail = { ...detailDefaults, ...values.detail };
+  const detailSlider = (key: keyof V3Detail, label: string, min = -100, max = 100, step = 1) => (
     <Slider
       key={`detail-${key}`}
       label={label}
       value={detail[key]}
       min={min}
       max={max}
-      step={1}
-      defaultValue={fallback}
+      step={step}
+      defaultValue={detailDefaults[key]}
       onDragStateChange={onDragStateChange}
       onChange={(e: any) => update('detail', { ...detail, [key]: Number(e.target.value) })}
     />
@@ -494,7 +498,7 @@ export default function ColorV3Controls({
       })}
     </p>
   );
-  const defaults = defaultV3Controls();
+  const defaults = defaultV3Controls(isRaw);
   const top = (k: string) => adjustments[k] ?? 0;
 
   // ---------------------------------------------------------------- Basic
@@ -549,7 +553,7 @@ export default function ColorV3Controls({
         {showDetail && (
           <div>
             <BasicGroupTitle>{t('colorV3.detail', { defaultValue: 'Detail' })}</BasicGroupTitle>
-            {detailSlider('sharpening', t('colorV3.sharpening', { defaultValue: 'Sharpening' }))}
+            {detailSlider('sharpening', t('colorV3.sharpening', { defaultValue: 'Sharpening' }), -100, 150)}
             {detailSlider('luminance_noise', t('colorV3.luminanceNoise', { defaultValue: 'Noise reduction' }), 0, 100)}
           </div>
         )}
@@ -705,18 +709,48 @@ export default function ColorV3Controls({
     detail: {
       title: t('colorV3.detail', { defaultValue: 'Detail' }),
       // Cleanup: sharpening and noise. Texture, clarity and dehaze are in Presence.
-      modified:
-        detail.sharpening !== 0 ||
-        detail.threshold !== defaultV3Detail().threshold ||
-        detail.luminance_noise !== 0 ||
-        detail.color_noise !== 0,
+      modified: (
+        [
+          'sharpening',
+          'sharpen_radius',
+          'sharpen_detail',
+          'sharpen_masking',
+          'threshold',
+          'luminance_noise',
+          'luminance_noise_detail',
+          'luminance_noise_contrast',
+          'color_noise',
+          'color_noise_detail',
+          'color_noise_smoothness',
+        ] as (keyof V3Detail)[]
+      ).some((k) => detail[k] !== detailDefaults[k]),
       available: showDetail,
       body: (
         <>
-          {detailSlider('sharpening', t('colorV3.sharpening', { defaultValue: 'Sharpening' }))}
-          {detailSlider('threshold', t('colorV3.threshold', { defaultValue: 'Sharpening threshold' }), 0, 80, 15)}
+          {/* Lightroom's Detail panel, slider for slider. */}
+          <BasicGroupTitle>{t('colorV3.sharpeningGroup', { defaultValue: 'Sharpening' })}</BasicGroupTitle>
+          {detailSlider('sharpening', t('colorV3.sharpenAmount', { defaultValue: 'Amount' }), -100, 150)}
+          {detailSlider('sharpen_radius', t('colorV3.sharpenRadius', { defaultValue: 'Radius' }), 0.5, 3, 0.1)}
+          {detailSlider('sharpen_detail', t('colorV3.sharpenDetail', { defaultValue: 'Detail' }), 0, 100)}
+          {detailSlider('sharpen_masking', t('colorV3.sharpenMasking', { defaultValue: 'Masking' }), 0, 100)}
+          {detailSlider('threshold', t('colorV3.threshold', { defaultValue: 'Threshold' }), 0, 80)}
+          <BasicGroupTitle>{t('colorV3.noiseGroup', { defaultValue: 'Noise reduction' })}</BasicGroupTitle>
           {detailSlider('luminance_noise', t('colorV3.luminanceNoise', { defaultValue: 'Noise reduction' }), 0, 100)}
+          {detailSlider('luminance_noise_detail', t('colorV3.luminanceNoiseDetail', { defaultValue: 'Detail' }), 0, 100)}
+          {detailSlider(
+            'luminance_noise_contrast',
+            t('colorV3.luminanceNoiseContrast', { defaultValue: 'Contrast' }),
+            0,
+            100,
+          )}
           {detailSlider('color_noise', t('colorV3.colorNoise', { defaultValue: 'Color noise reduction' }), 0, 100)}
+          {detailSlider('color_noise_detail', t('colorV3.colorNoiseDetail', { defaultValue: 'Detail' }), 0, 100)}
+          {detailSlider(
+            'color_noise_smoothness',
+            t('colorV3.colorNoiseSmoothness', { defaultValue: 'Smoothness' }),
+            0,
+            100,
+          )}
           <p className="text-xs text-text-secondary leading-relaxed">
             {t('colorV3.sharpeningZoom', {
               defaultValue: 'Sharpening works at the scale of single pixels, so judge it at 100% zoom.',

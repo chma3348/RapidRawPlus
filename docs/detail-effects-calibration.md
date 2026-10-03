@@ -49,9 +49,10 @@ Texture works from about 2 to 16 px and is gone by 48. Ours is three bands
 | Lightroom +100 | 1.32 | 1.23 | 1.18 | 1.12 | 1.07 |
 | ours +100 | 1.30 | 1.23 | 1.15 | 1.11 | 1.06 |
 
-- **Negative Texture is provisional**: it mirrors the positive side. The
-  Lightroom exports for -50 and -100 have Sharpening 40 on and cannot be
-  measured; they need re-exporting with Sharpening 0.
+- **Negative Texture** is fitted too (2 October, wave 3): measured from the
+  Texture -50 and -100 exports (made with Sharpening 40) against Lightroom's
+  Sharpening 40 export, so the sharpening cancels; within 0.04 at every
+  scale. See sharpening-noise-calibration.md.
 - Lightroom's Texture also lifts colour speckle in skin; ours changes
   lightness only.
 

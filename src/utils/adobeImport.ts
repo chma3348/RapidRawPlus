@@ -41,8 +41,8 @@ export const ADOBE_TUNING = {
   hslHueDegrees: 0.3,
   hslSaturation: 1,
   hslLuminance: 1,
-  /** Adobe sharpening runs 0–150 (40 by default on RAWs). */
-  sharpening: 0.4,
+  /** Sharpening and noise reduction are Lightroom's own scales (fitted to its exports). */
+  sharpening: 1,
   luminanceNoise: 1,
   colorNoise: 1,
   /** Distance from the daylight curve (Duv) per Adobe tint step, for RAWs: the DNG SDK's scale of 3000. */
@@ -390,12 +390,20 @@ export function adobeToAdjustments(d: AdobeDevelop): Record<string, any> {
 
   v3.detail = {
     ...v3.detail,
-    sharpening: clamp(n('Sharpness') * T.sharpening, 0, 100),
+    sharpening: clamp(n('Sharpness') * T.sharpening, 0, 150),
+    sharpen_radius: clamp(n('SharpenRadius', 1), 0.5, 3),
+    sharpen_detail: clamp(n('SharpenDetail', 25), 0, 100),
+    sharpen_masking: clamp(n('SharpenEdgeMasking'), 0, 100),
+    threshold: 0,
     texture: clamp(n('Texture') * T.texture, -100, 100),
     clarity: clamp(n('Clarity2012') * T.clarity, -100, 100),
     dehaze: clamp(n('Dehaze') * T.dehaze, -100, 100),
     luminance_noise: clamp(n('LuminanceSmoothing') * T.luminanceNoise, 0, 100),
+    luminance_noise_detail: clamp(n('LuminanceNoiseReductionDetail', 50), 0, 100),
+    luminance_noise_contrast: clamp(n('LuminanceNoiseReductionContrast'), 0, 100),
     color_noise: clamp(n('ColorNoiseReduction') * T.colorNoise, 0, 100),
+    color_noise_detail: clamp(n('ColorNoiseReductionDetail', 50), 0, 100),
+    color_noise_smoothness: clamp(n('ColorNoiseReductionSmoothness', 50), 0, 100),
   };
   v3.effects = {
     ...v3.effects,

@@ -13,11 +13,15 @@
 //! reduction is the one exception, and acts on chromaticity — the colour with
 //! the luminance divided out — so it cannot change brightness at all.
 //!
-//! **Radii.** The previous engine's: 1, 3.5, 8 and 40 pixels for sharpening,
-//! texture, clarity and structure, in full-resolution pixels, scaled with the
-//! preview so a control keeps its size relative to the photograph. Sharpening
-//! at one pixel cannot be shown faithfully in a small preview — no preview can
-//! — so it is only exact at 100%.
+//! **Radii.** In full-resolution pixels, scaled with the preview so a control
+//! keeps its size relative to the photograph. Sharpening at one pixel cannot
+//! be shown faithfully in a small preview — no preview can — so it is only
+//! exact at 100%.
+//!
+//! **Sharpening and noise reduction are Lightroom's**, slider for slider
+//! (Amount, Radius, Detail and Masking; Color and Luminance noise reduction
+//! with their Detail, Smoothness and Contrast), fitted to its exports by
+//! tools/fit_sharpen.py (sharpen_table.rs).
 //!
 //! **The tiling contract.** A large export is processed in horizontal strips,
 //! each read with a halo wider than every filter that runs on it, so a strip
@@ -36,6 +40,12 @@ const STRUCTURE_SIGMA: f32 = 40.0;
 /// Negative Dehaze's scattering blurs, as the texture and structure radii.
 const HAZE_FINE_SIGMA: f32 = 3.5;
 const HAZE_BROAD_SIGMA: f32 = 120.0;
+/// Sharpening's tone weighting judges each pixel's tone from the luminance
+/// blurred this much, so the weight is as smooth as the picture.
+const TONE_SIGMA: f32 = 2.0;
+/// Colour noise is judged against a local mean this wide (full-resolution
+/// pixels): high-ISO colour noise comes in blotches several pixels across.
+const NOISE_RADIUS: f32 = 4.0;
 /// The smallest blur that still does something at preview scale.
 const MIN_SIGMA: f32 = 0.6;
 /// Offset before the logarithm, so black is a finite number of stops down
@@ -47,17 +57,35 @@ const MID_GREY_LOG: f32 = -2.473_931_2;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Detail {
-    /// -100..100. Negative softens.
+    /// -100..150: Lightroom's Sharpening Amount (40 is its default for a
+    /// RAW). Negative softens.
     pub sharpening: f32,
+    /// 0.5..3.0: Lightroom's Radius, the size of the detail sharpened.
+    pub sharpen_radius: f32,
+    /// 0..100: Lightroom's Detail. Low holds back the halos on strong edges;
+    /// high sharpens the finest texture harder.
+    pub sharpen_detail: f32,
+    /// 0..100: Lightroom's Masking. Higher leaves smooth areas unsharpened
+    /// and sharpens only edges.
+    pub sharpen_masking: f32,
     /// 0..80. Detail smaller than this is left unsharpened, so noise is not.
     pub threshold: f32,
     pub texture: f32,
     pub clarity: f32,
     pub structure: f32,
-    /// 0..100.
+    /// 0..100: Lightroom's (luminance) Noise Reduction.
     pub luminance_noise: f32,
-    /// 0..100.
+    /// 0..100: its Detail. Higher keeps more fine detail.
+    pub luminance_noise_detail: f32,
+    /// 0..100: its Contrast. Higher keeps more local contrast.
+    pub luminance_noise_contrast: f32,
+    /// 0..100: Lightroom's Color Noise Reduction (25 is its default for a
+    /// RAW).
     pub color_noise: f32,
+    /// 0..100: its Detail. Higher keeps small colour detail.
+    pub color_noise_detail: f32,
+    /// 0..100: its Smoothness. Higher also smooths broad colour mottling.
+    pub color_noise_smoothness: f32,
     /// -100..100. Positive removes haze, negative adds it.
     pub dehaze: f32,
 }
@@ -66,12 +94,19 @@ impl Default for Detail {
     fn default() -> Self {
         Self {
             sharpening: 0.,
-            threshold: 15.,
+            sharpen_radius: 1.,
+            sharpen_detail: 25.,
+            sharpen_masking: 0.,
+            threshold: 0.,
             texture: 0.,
             clarity: 0.,
             structure: 0.,
             luminance_noise: 0.,
+            luminance_noise_detail: 50.,
+            luminance_noise_contrast: 0.,
             color_noise: 0.,
+            color_noise_detail: 50.,
+            color_noise_smoothness: 50.,
             dehaze: 0.,
         }
     }
@@ -80,13 +115,28 @@ impl Default for Detail {
 impl Detail {
     pub fn validate(&self) -> Result<()> {
         let within = |v: f32, a: f32, b: f32| v.is_finite() && (a..=b).contains(&v);
+        ensure!(
+            within(self.sharpening, -100., 150.),
+            "Sharpening must be within -100..150"
+        );
+        ensure!(
+            within(self.sharpen_radius, 0.5, 3.0),
+            "Sharpening radius must be within 0.5..3"
+        );
         for v in [
-            self.sharpening,
-            self.texture,
-            self.clarity,
-            self.structure,
-            self.dehaze,
+            self.sharpen_detail,
+            self.sharpen_masking,
+            self.luminance_noise_detail,
+            self.luminance_noise_contrast,
+            self.color_noise_detail,
+            self.color_noise_smoothness,
         ] {
+            ensure!(
+                within(v, 0., 100.),
+                "Sharpening and noise reduction settings must be within 0..100"
+            );
+        }
+        for v in [self.texture, self.clarity, self.structure, self.dehaze] {
             ensure!(
                 within(v, -100., 100.),
                 "Detail controls must be within -100..100"
@@ -101,6 +151,20 @@ impl Detail {
             "Noise reduction must be within 0..100"
         );
         Ok(())
+    }
+
+    /// A RAW opens as in Lightroom, with its default Sharpening (40) and
+    /// Color Noise Reduction (25), wherever `given` (the saved `v3.detail`)
+    /// leaves them unset. A rendered photograph opens with neither.
+    pub fn with_raw_defaults(mut self, given: &serde_json::Value) -> Self {
+        let unset = |key: &str| given.get(key).is_none_or(|v| v.is_null());
+        if unset("sharpening") {
+            self.sharpening = 40.;
+        }
+        if unset("color_noise") {
+            self.color_noise = 25.;
+        }
+        self
     }
 
     /// The threshold only means something while there is sharpening to gate.
@@ -118,7 +182,9 @@ impl Detail {
 /// Filter sizes for one image scale, fixed before any pixel is touched so the
 /// halo can be computed from exactly what will run.
 struct Plan {
-    sharpen: Option<Gaussian>,
+    sharpen: Option<Sharpen>,
+    /// Negative sharpening: one-pixel softening.
+    soften: Option<Gaussian>,
     /// Texture and Clarity: local contrast at several sizes, each band with
     /// its own amount (detail_table.rs, fitted to Lightroom's).
     texture: Vec<(Gaussian, f32)>,
@@ -127,8 +193,8 @@ struct Plan {
     /// raises contrast at every scale, the broadest included).
     dehaze_bands: Vec<(Gaussian, f32)>,
     structure: Option<Gaussian>,
-    luminance_radius: Option<usize>,
-    color_radius: Option<usize>,
+    luminance: Option<LuminanceNr>,
+    colour: Option<ColourNr>,
     /// Dehaze: the dark channel's minimum-filter radius and the guided
     /// filter's radius that refines the transmission map.
     dehaze: Option<(usize, usize)>,
@@ -138,13 +204,216 @@ struct Plan {
     haze: Option<(Gaussian, Gaussian, [f32; 2])>,
 }
 
+/// Lightroom's sharpening at one scale: bands (the log luminance less its
+/// exact Gaussian blur at `sigma` preview pixels) with their amounts, the
+/// soft limit (stops) on their sum, and the edge mask's thresholds (log2
+/// per full-resolution pixel).
+struct Sharpen {
+    bands: Vec<(f32, f32)>,
+    limit: f32,
+    mask: Option<[f32; 2]>,
+    scale: f32,
+}
+
+impl Sharpen {
+    fn new(detail: &Detail, scale: f32) -> Option<Self> {
+        use super::sharpen_table as t;
+        if detail.sharpening <= 0. {
+            return None;
+        }
+        // Lightroom was measured at Detail 25 and 75; between and beyond them
+        // the kernel's shape and the limit move in proportion.
+        let along = ((detail.sharpen_detail - 25.) / 50.).clamp(-0.5, 1.5);
+        let strength = (detail.sharpening / 40.).powf(t::POWER);
+        let full: Vec<(f32, f32)> = (0..3)
+            .map(|j| {
+                let shape = t::D25[j] + (t::D75[j] - t::D25[j]) * along;
+                (t::SIGMAS[j] * detail.sharpen_radius, shape * strength)
+            })
+            .collect();
+        let bands = if scale >= 0.999 {
+            full
+        } else {
+            preview_bands(&full, scale)
+        };
+        let limit = (t::D25_LIMIT.ln() + (t::D75_LIMIT.ln() - t::D25_LIMIT.ln()) * along).exp();
+        let mask = (detail.sharpen_masking > 0.)
+            .then(|| t::MASKING_50.map(|v| v * detail.sharpen_masking / 50.));
+        Some(Self {
+            bands,
+            limit,
+            mask,
+            scale,
+        })
+    }
+
+    fn reach(&self) -> usize {
+        let bands = self
+            .bands
+            .iter()
+            .map(|&(s, _)| exact_radius(s))
+            .max()
+            .unwrap_or(0);
+        let mask = self.mask.map_or(0, |_| exact_radius(self.scale) + 1);
+        bands.max(mask).max(exact_radius(TONE_SIGMA * self.scale))
+    }
+}
+
+/// Sharpening for a preview smaller than the photograph. Its bands shrink
+/// below a pixel there, and a blur that small does almost nothing, so the
+/// preview would look softer than the full-size result shrunk (measured: at
+/// 0.43 of the size, 1.15x on the finest preview detail against Lightroom's
+/// 1.41x). Instead: the full-size bands' response at the frequencies the
+/// preview can show, `full` at frequency f x scale, matched (least squares)
+/// by bands the preview can hold, at the same sizes but none under half a
+/// preview pixel.
+fn preview_bands(full: &[(f32, f32)], scale: f32) -> Vec<(f32, f32)> {
+    let response = |sigma: f32, f: f32| {
+        // 1 minus the sampled kernel's response: what a band passes.
+        let r = exact_radius(sigma);
+        if r == 0 || sigma <= 0.0 {
+            return 0.0;
+        }
+        let (mut sum, mut at) = (0.0f32, 0.0f32);
+        for n in -(r as i32)..=(r as i32) {
+            let w = (-(n * n) as f32 / (2.0 * sigma * sigma)).exp();
+            sum += w;
+            at += w * (std::f32::consts::TAU * f * n as f32).cos();
+        }
+        1.0 - at / sum
+    };
+    let sigmas: Vec<f32> = full
+        .iter()
+        .enumerate()
+        .map(|(j, &(s, _))| (s * scale).max(0.5 * (j + 1) as f32))
+        .collect();
+    let freqs: Vec<f32> = (1..=40).map(|i| i as f32 / 80.0).collect();
+    let target: Vec<f32> = freqs
+        .iter()
+        .map(|&f| full.iter().map(|&(s, a)| a * response(s, f * scale)).sum())
+        .collect();
+    // Normal equations, with a little ridge so near-equal bands stay tame.
+    let n = sigmas.len();
+    let basis: Vec<Vec<f32>> = sigmas
+        .iter()
+        .map(|&s| freqs.iter().map(|&f| response(s, f)).collect())
+        .collect();
+    let mut m = vec![vec![0f64; n + 1]; n];
+    for i in 0..n {
+        for j in 0..n {
+            m[i][j] = basis[i]
+                .iter()
+                .zip(&basis[j])
+                .map(|(a, b)| f64::from(a * b))
+                .sum();
+        }
+        m[i][i] += 1e-4;
+        m[i][n] = basis[i]
+            .iter()
+            .zip(&target)
+            .map(|(a, b)| f64::from(a * b))
+            .sum();
+    }
+    for col in 0..n {
+        let pivot = (col..n)
+            .max_by(|&a, &b| m[a][col].abs().total_cmp(&m[b][col].abs()))
+            .unwrap();
+        m.swap(col, pivot);
+        for row in 0..n {
+            if row != col && m[col][col].abs() > 1e-12 {
+                let k = m[row][col] / m[col][col];
+                let pivot_row = m[col].clone();
+                for (v, p) in m[row].iter_mut().zip(&pivot_row).skip(col) {
+                    *v -= k * p;
+                }
+            }
+        }
+    }
+    sigmas
+        .iter()
+        .enumerate()
+        .map(|(i, &s)| {
+            let a = if m[i][i].abs() > 1e-12 {
+                m[i][n] / m[i][i]
+            } else {
+                0.0
+            };
+            (s, a as f32)
+        })
+        .collect()
+}
+
+/// Luminance noise reduction: a guided filter on the log luminance, with
+/// some of the local contrast it flattened given back (Contrast).
+struct LuminanceNr {
+    radius: usize,
+    eps: f32,
+    contrast: Option<(Gaussian, f32)>,
+}
+
+/// Colour noise reduction, as Lightroom's. It smooths opponent colour in
+/// cube-root light (as Lab's a* and b* see it, so brightness noise cannot
+/// leave colour flicker behind) and rebuilds each pixel at its own
+/// luminance. A fine stage (a guided filter steered by luminance), then an
+/// adaptive one that smooths colour variation within the photo's own colour
+/// noise over a wide area while keeping colour edges (a guided filter
+/// steered by the colour itself). Measured: on an ISO 12800 photo
+/// Lightroom's 25 removes 95% of colour variation out to 8 px; on a clean
+/// one, mostly the single-pixel speckle.
+struct ColourNr {
+    radius: usize,
+    eps: f32,
+    mix: f32,
+    /// The adaptive stage's radius, how many times the noise counts as
+    /// noise (growing as (noise / 0.01) ^ power: Lightroom's is
+    /// disproportionately stronger on a noisy photo), how much is mixed in.
+    adaptive: (usize, f32, f32, f32),
+    /// The noise estimate's neighbourhood.
+    noise_radius: usize,
+    /// Blur of the colour guide: one full-resolution pixel.
+    guide_sigma: f32,
+}
+
+impl ColourNr {
+    fn new(detail: &Detail, scale: f32) -> Option<Self> {
+        if detail.color_noise <= 0. {
+            return None;
+        }
+        // Measured at Lightroom's 25 with Detail and Smoothness at 50. Beyond
+        // 25 what counts as noise grows with the square root of the amount
+        // and the mixes close on all of it; below, the mixes scale down.
+        // Detail raises the bar for colour to be kept as detail (lower keeps
+        // less); Smoothness widens the adaptive stage. Not yet measured
+        // against Lightroom away from 25 / 50 / 50.
+        let [radius, eps, mix, radius2, k, mix2, power] = super::sharpen_table::COLOUR_25;
+        let c = detail.color_noise / 25.;
+        let toward = |m: f32| if c <= 1. { m * c } else { 1. - (1. - m) / c };
+        let detail_factor = 2f32.powf((50. - detail.color_noise_detail) / 50.);
+        let smooth = 0.5 + detail.color_noise_smoothness / 100.;
+        Some(Self {
+            radius: ((radius * scale).round() as usize).max(1),
+            eps: eps * detail_factor * detail_factor,
+            mix: toward(mix),
+            adaptive: (
+                ((radius2 * smooth * scale).round() as usize).max(1),
+                k * c.max(1.).sqrt() * detail_factor,
+                toward(mix2),
+                power,
+            ),
+            guide_sigma: scale,
+            noise_radius: ((NOISE_RADIUS * scale).round() as usize).max(1),
+        })
+    }
+}
+
 impl Plan {
     fn new(detail: &Detail, scale: f32) -> Self {
         let band = |amount: f32, sigma: f32| {
             (amount != 0.).then(|| Gaussian::new((sigma * scale).max(MIN_SIGMA)))
         };
         Self {
-            sharpen: band(detail.sharpening, SHARPEN_SIGMA),
+            sharpen: Sharpen::new(detail, scale),
+            soften: band(detail.sharpening.min(0.), SHARPEN_SIGMA),
             texture: bands(
                 detail.texture,
                 &super::detail_table::TEXTURE_SIGMAS,
@@ -164,11 +433,21 @@ impl Plan {
                 scale,
             ),
             structure: band(detail.structure, STRUCTURE_SIGMA),
-            luminance_radius: (detail.luminance_noise > 0.)
-                .then(|| ((3.0 * scale).round() as usize).max(1)),
-            color_radius: (detail.color_noise > 0.).then(|| {
-                (((2.0 + 8.0 * detail.color_noise / 100.) * scale).round() as usize).max(1)
+            luminance: (detail.luminance_noise > 0.).then(|| {
+                let s = detail.luminance_noise / 100.;
+                LuminanceNr {
+                    radius: ((3.0 * scale).round() as usize).max(1),
+                    eps: (0.3 * s).powi(2) * 2f32.powf((50. - detail.luminance_noise_detail) / 25.)
+                        + 1e-8,
+                    contrast: (detail.luminance_noise_contrast > 0.).then(|| {
+                        (
+                            Gaussian::new((1.5 * scale).max(MIN_SIGMA)),
+                            0.5 * detail.luminance_noise_contrast / 100.,
+                        )
+                    }),
+                }
             }),
+            colour: ColourNr::new(detail, scale),
             dehaze: (detail.dehaze > 0.).then(|| {
                 (
                     ((15.0 * scale).round() as usize).max(1),
@@ -196,7 +475,7 @@ impl Plan {
     /// their reaches add: the bands read the denoised luminance, which read
     /// its own neighbourhood first. A guided filter reads twice its radius.
     fn halo(&self) -> usize {
-        let bands = [&self.sharpen, &self.structure]
+        let bands = [&self.soften, &self.structure]
             .into_iter()
             .flatten()
             .chain(
@@ -208,9 +487,14 @@ impl Plan {
             )
             .map(|g| g.support())
             .max()
-            .unwrap_or(0);
-        let luminance = self.luminance_radius.map_or(0, |r| 2 * r);
-        let color = self.color_radius.map_or(0, |r| 2 * r);
+            .unwrap_or(0)
+            .max(self.sharpen.as_ref().map_or(0, Sharpen::reach));
+        let luminance = self.luminance.as_ref().map_or(0, |n| {
+            2 * n.radius + n.contrast.map_or(0, |(g, _)| g.support())
+        });
+        let color = self.colour.as_ref().map_or(0, |n| {
+            2 * n.radius + exact_radius(n.guide_sigma) + 2 * n.adaptive.0
+        });
         // Dehaze runs first and everything after reads its result.
         let dehaze = self.dehaze.map_or(0, |(min, guide)| min + 2 * guide);
         let haze = self.haze.map_or(0, |(_, broad, _)| broad.support());
@@ -312,6 +596,11 @@ fn apply_in_strips(
     // The colour of the haze belongs to the whole photograph. Estimated per
     // strip, two strips would disagree about it and the seam would show.
     let airlight = plan.dehaze.map(|_| airlight(&source));
+    // So is its colour noise, which colour noise reduction adapts to.
+    let noise = plan
+        .colour
+        .as_ref()
+        .map(|nr| chroma_noise(&source, width, height, nr.guide_sigma, nr.noise_radius));
     let output = image.as_mut();
     let mut start = 0;
     while start < height {
@@ -327,6 +616,7 @@ fn apply_in_strips(
             &plan,
             weights,
             airlight,
+            noise,
         );
         let skip = (start - top) * width * 4;
         output[start * width * 4..end * width * 4]
@@ -337,6 +627,7 @@ fn apply_in_strips(
 
 /// One region, whole. Its edges are treated as image edges, which is exactly
 /// why a strip is read with a halo.
+#[allow(clippy::too_many_arguments)]
 fn process(
     rgba: &[f32],
     width: usize,
@@ -345,6 +636,7 @@ fn process(
     plan: &Plan,
     weights: [f32; 3],
     airlight: Option<[f32; 3]>,
+    noise: Option<f32>,
 ) -> Vec<f32> {
     let pixels = width * height;
     // Negative Dehaze scatters light: a share mixed toward a fine and a broad
@@ -410,10 +702,20 @@ fn process(
         .collect();
 
     // Noise first: sharpening afterwards should not be sharpening the noise.
-    let denoised = match plan.luminance_radius {
-        Some(radius) => {
-            let s = detail.luminance_noise / 100.;
-            guided(&log, &log, width, height, radius, (0.3 * s).powi(2) + 1e-8)
+    let denoised = match &plan.luminance {
+        Some(nr) => {
+            let mut smooth = guided(&log, &log, width, height, nr.radius, nr.eps);
+            // Contrast: give back some of what was flattened, blurred first so
+            // the pixel noise does not come back with it.
+            if let Some((g, share)) = nr.contrast {
+                let lost: Vec<f32> = log.par_iter().zip(&smooth).map(|(l, s)| l - s).collect();
+                let lost = blur(&lost, width, height, g);
+                smooth
+                    .par_iter_mut()
+                    .zip(lost.par_iter())
+                    .for_each(|(s, d)| *s += share * d);
+            }
+            smooth
         }
         None => log.clone(),
     };
@@ -443,13 +745,7 @@ fn process(
                     *out += amount * d * weight;
                 });
         };
-    add_band(
-        plan.sharpen,
-        detail.sharpening / 100. * 1.5,
-        0.5,
-        false,
-        detail.threshold * 0.004,
-    );
+    add_band(plan.soften, detail.sharpening / 100. * 1.5, 0.5, false, 0.0);
     for &(g, amount) in &plan.texture {
         add_band(Some(g), amount, 0.5, false, 0.0);
     }
@@ -467,28 +763,111 @@ fn process(
         0.0,
     );
 
-    // Chromaticity: the colour with luminance divided out. Smoothing it
-    // cannot change brightness, and a guided filter steered by luminance keeps
-    // colour from bleeding across the edges luminance can see.
-    let lit = |i: usize| luminance[i] > 1e-6;
-    let chroma: Option<[Vec<f32>; 3]> = plan.color_radius.map(|radius| {
-        let s = detail.color_noise / 100.;
-        std::array::from_fn(|c| {
-            let ratio: Vec<f32> = (0..pixels)
+    // Sharpening, as Lightroom's: the bands' sum soft-limited as a whole (the
+    // limit is what holds a strong edge's halo back), gated by the threshold,
+    // and masked to the edges.
+    if let Some(sharp) = &plan.sharpen {
+        let mut total = vec![0f32; pixels];
+        // The threshold judges the detail itself (the middle band, before
+        // any amplifying), not what sharpening makes of it.
+        let mut detail_size = Vec::new();
+        for (j, &(sigma, amount)) in sharp.bands.iter().enumerate() {
+            let blurred = exact_gaussian(&denoised, width, height, sigma);
+            total
+                .par_iter_mut()
+                .zip(denoised.par_iter())
+                .zip(blurred.par_iter())
+                .for_each(|((t, l), b)| *t += amount * (l - b));
+            if j == 1 && detail.threshold > 0. {
+                detail_size = denoised.iter().zip(&blurred).map(|(l, b)| l - b).collect();
+            }
+        }
+        let mask = sharp.mask.map(|[lo, hi]| {
+            let edges = edge_strength(&denoised, width, height, sharp.scale);
+            edges
                 .into_par_iter()
-                .map(|i| {
-                    if lit(i) {
-                        rgba[i * 4 + c] / luminance[i]
-                    } else {
-                        1.0
-                    }
+                .map(|e| {
+                    // Per full-resolution pixel, so the mask is the same at
+                    // every preview size.
+                    let t = ((e * sharp.scale - lo) / (hi - lo).max(1e-6)).clamp(0., 1.);
+                    t * t * (3. - 2. * t)
                 })
-                .collect();
-            let smooth = guided(&denoised, &ratio, width, height, radius, 0.01);
-            ratio
-                .par_iter()
+                .collect::<Vec<f32>>()
+        });
+        // Lightroom sharpens the shadows (and a little the highlights) less
+        // than the midtones: measured, at Sharpening 40 the finest detail
+        // gains 1.1x below L* 12 and 1.7x in the midtones.
+        let tone = exact_gaussian(&denoised, width, height, TONE_SIGMA * sharp.scale);
+        let weight = |l: f32| {
+            use super::sharpen_table::{TONE_KNOTS as K, TONES as W};
+            // The tone as the tone zones judge it: the DaVinci Intermediate key.
+            let x = super::spaces::encode_intermediate(f64::from((l.exp2() - LOG_FLOOR).max(0.0)))
+                as f32;
+            if x <= K[0] {
+                return W[0];
+            }
+            for i in 1..K.len() {
+                if x <= K[i] {
+                    let t = (x - K[i - 1]) / (K[i] - K[i - 1]);
+                    return W[i - 1] + (W[i] - W[i - 1]) * t;
+                }
+            }
+            W[K.len() - 1]
+        };
+        let gate = detail.threshold * 0.004;
+        let limit = sharp.limit;
+        graded
+            .par_iter_mut()
+            .zip(total.par_iter())
+            .enumerate()
+            .for_each(|(i, (out, &t))| {
+                let mut d = t;
+                if gate > 0.0 {
+                    let s = detail_size[i];
+                    d *= s * s / (s * s + gate * gate);
+                }
+                let d = limit * (d / limit).tanh() * weight(tone[i]);
+                *out += d * mask.as_ref().map_or(1.0, |m| m[i]);
+            });
+    }
+
+    // Colour: opponent colour in cube-root light, smoothed, and each pixel
+    // rebuilt at its own luminance, so colour noise reduction cannot change
+    // brightness at all.
+    let lit = |i: usize| luminance[i] > 1e-6;
+    let opponent: Option<[Vec<f32>; 2]> = plan.colour.as_ref().map(|nr| {
+        let channel = |c: usize| -> Vec<f32> {
+            (0..pixels)
+                .into_par_iter()
+                .map(|i| rgba[i * 4 + c].max(0.0).cbrt() - rgba[i * 4 + 1].max(0.0).cbrt())
+                .collect()
+        };
+        // The fine stage, steered by luminance.
+        let fine = [0, 2].map(|c| {
+            let o = channel(c);
+            let smooth = guided(&denoised, &o, width, height, nr.radius, nr.eps);
+            o.par_iter()
                 .zip(smooth.par_iter())
-                .map(|(r, q)| r + (q - r) * s)
+                .map(|(o, s)| o + (s - o) * nr.mix)
+                .collect::<Vec<f32>>()
+        });
+        // The adaptive stage, steered by the colour the fine stage left: it
+        // smooths what is within the photo's own noise and keeps colour edges.
+        let (radius2, k, mix2, power) = nr.adaptive;
+        // How noisy the photo is, is judged at full size: a preview has
+        // averaged its noise down (by about the scale, for fine noise), but
+        // Lightroom's strength follows the photograph's own noise.
+        let n = noise.unwrap_or(0.0);
+        let photo = n / nr.guide_sigma.min(1.0);
+        let eps = (k * n * (photo / 0.01).powf(power)).powi(2) + 1e-10;
+        // What is left of the colour noise shrinks as the photo gets noisier.
+        let mix2 = 1.0 - (1.0 - mix2) * (0.01 / photo.max(1e-6)).min(1.0);
+        let guide = [0, 1].map(|j| exact_gaussian(&fine[j], width, height, nr.guide_sigma));
+        fine.map(|o| {
+            let smooth = guided2(&guide[0], &guide[1], &o, width, height, radius2, eps);
+            o.par_iter()
+                .zip(smooth.par_iter())
+                .map(|(o, s)| o + (s - o) * mix2)
                 .collect()
         })
     });
@@ -499,11 +878,10 @@ fn process(
             return;
         }
         let y = (graded[i].exp2() - LOG_FLOOR).max(0.0);
-        match &chroma {
-            Some(q) => {
-                for c in 0..3 {
-                    px[c] = q[c][i] * y;
-                }
+        match &opponent {
+            Some([o1, o2]) => {
+                let rgb = rebuild(o1[i], o2[i], y, weights);
+                px[..3].copy_from_slice(&rgb);
             }
             None => {
                 let ratio = y / luminance[i];
@@ -514,6 +892,21 @@ fn process(
         }
     });
     out
+}
+
+/// Light with opponent colour (`o1` = red less green, `o2` = blue less
+/// green, in cube-root light) and luminance exactly `y`: Newton on the green
+/// root, which the luminance grows with wherever the channels are positive.
+fn rebuild(o1: f32, o2: f32, y: f32, weights: [f32; 3]) -> [f32; 3] {
+    let mut g = y.max(0.0).cbrt();
+    for _ in 0..8 {
+        let (r, gg, b) = ((g + o1).max(0.0), g.max(0.0), (g + o2).max(0.0));
+        let f = weights[0] * r * r * r + weights[1] * gg * gg * gg + weights[2] * b * b * b - y;
+        let d = 3.0 * (weights[0] * r * r + weights[1] * gg * gg + weights[2] * b * b) + 1e-9;
+        g -= f / d;
+    }
+    let (r, gg, b) = ((g + o1).max(0.0), g.max(0.0), (g + o2).max(0.0));
+    [r * r * r, gg * gg * gg, b * b * b]
 }
 
 /// The haze colour: the mean of the pixels whose darkest channel is
@@ -668,6 +1061,149 @@ fn guided(guide: &[f32], input: &[f32], w: usize, h: usize, radius: usize, eps: 
     (0..w * h)
         .into_par_iter()
         .map(|k| mean_a[k] * guide[k] + mean_b[k])
+        .collect()
+}
+
+/// Opponent colour in cube-root light (roughly as Lab sees it, so shadow
+/// noise is not exaggerated), blurred by `sigma`: what colour noise
+/// reduction judges colour edges by.
+fn chroma_guide(rgba: &[f32], w: usize, h: usize, sigma: f32) -> [Vec<f32>; 2] {
+    let opponent = |c: usize| -> Vec<f32> {
+        (0..w * h)
+            .into_par_iter()
+            .map(|i| rgba[i * 4 + c].max(0.0).cbrt() - rgba[i * 4 + 1].max(0.0).cbrt())
+            .collect()
+    };
+    [0, 2].map(|c| exact_gaussian(&opponent(c), w, h, sigma))
+}
+
+/// The photo's colour noise: a robust spread (1.4826 x the median absolute
+/// residual from a local mean of `radius`) of the colour guide, over the
+/// whole frame.
+fn chroma_noise(rgba: &[f32], w: usize, h: usize, sigma: f32, radius: usize) -> f32 {
+    let mut residuals = Vec::new();
+    for g in chroma_guide(rgba, w, h, sigma) {
+        let mean = box_mean(&g, w, h, radius);
+        residuals.extend(
+            (0..h)
+                .step_by(3)
+                .flat_map(|y| (0..w).step_by(3).map(move |x| y * w + x))
+                .map(|i| (g[i] - mean[i]).abs()),
+        );
+    }
+    if residuals.is_empty() {
+        return 0.0;
+    }
+    let mid = residuals.len() / 2;
+    1.4826
+        * *residuals
+            .select_nth_unstable_by(mid, |a, b| a.total_cmp(b))
+            .1
+}
+
+/// A guided filter steered by a two-channel guide (He, Sun and Tang).
+#[allow(clippy::too_many_arguments)]
+fn guided2(g1: &[f32], g2: &[f32], x: &[f32], w: usize, h: usize, r: usize, eps: f32) -> Vec<f32> {
+    let product = |a: &[f32], b: &[f32]| -> Vec<f32> {
+        a.par_iter().zip(b.par_iter()).map(|(a, b)| a * b).collect()
+    };
+    let m1 = box_mean(g1, w, h, r);
+    let m2 = box_mean(g2, w, h, r);
+    let mx = box_mean(x, w, h, r);
+    let s11 = box_mean(&product(g1, g1), w, h, r);
+    let s22 = box_mean(&product(g2, g2), w, h, r);
+    let s12 = box_mean(&product(g1, g2), w, h, r);
+    let s1x = box_mean(&product(g1, x), w, h, r);
+    let s2x = box_mean(&product(g2, x), w, h, r);
+    let n = w * h;
+    let mut a1 = vec![0f32; n];
+    let mut a2 = vec![0f32; n];
+    let mut b = vec![0f32; n];
+    a1.par_iter_mut()
+        .zip(a2.par_iter_mut())
+        .zip(b.par_iter_mut())
+        .enumerate()
+        .for_each(|(k, ((a1, a2), b))| {
+            let v11 = s11[k] - m1[k] * m1[k] + eps;
+            let v22 = s22[k] - m2[k] * m2[k] + eps;
+            let v12 = s12[k] - m1[k] * m2[k];
+            let c1 = s1x[k] - m1[k] * mx[k];
+            let c2 = s2x[k] - m2[k] * mx[k];
+            let det = v11 * v22 - v12 * v12;
+            *a1 = (v22 * c1 - v12 * c2) / det;
+            *a2 = (v11 * c2 - v12 * c1) / det;
+            *b = mx[k] - *a1 * m1[k] - *a2 * m2[k];
+        });
+    let (a1, a2, b) = (
+        box_mean(&a1, w, h, r),
+        box_mean(&a2, w, h, r),
+        box_mean(&b, w, h, r),
+    );
+    (0..n)
+        .into_par_iter()
+        .map(|k| a1[k] * g1[k] + a2[k] * g2[k] + b[k])
+        .collect()
+}
+
+/// The radius of `exact_gaussian`'s kernel: three sigma, as scipy's.
+fn exact_radius(sigma: f32) -> usize {
+    (3.0 * sigma + 0.5) as usize
+}
+
+/// A true Gaussian, for the small sigmas sharpening works at, where three
+/// box passes are too coarse. Edges repeated.
+fn exact_gaussian(plane: &[f32], w: usize, h: usize, sigma: f32) -> Vec<f32> {
+    let r = exact_radius(sigma);
+    if r == 0 || sigma <= 0.0 {
+        return plane.to_vec();
+    }
+    let mut kernel: Vec<f32> = (0..=2 * r)
+        .map(|i| {
+            let x = i as f32 - r as f32;
+            (-x * x / (2.0 * sigma * sigma)).exp()
+        })
+        .collect();
+    let sum: f32 = kernel.iter().sum();
+    kernel.iter_mut().for_each(|k| *k /= sum);
+    let pass = |src: &[f32], w: usize, h: usize| {
+        let mut out = vec![0f32; w * h];
+        out.par_chunks_mut(w)
+            .zip(src.par_chunks(w))
+            .take(h)
+            .for_each(|(dst, row)| {
+                for (x, d) in dst.iter_mut().enumerate() {
+                    let mut acc = 0f32;
+                    for (k, &weight) in kernel.iter().enumerate() {
+                        let at = (x + k).saturating_sub(r).min(w - 1);
+                        acc += weight * row[at];
+                    }
+                    *d = acc;
+                }
+            });
+        out
+    };
+    let rows = pass(plane, w, h);
+    let cols = pass(&transpose(&rows, w, h), h, w);
+    transpose(&cols, h, w)
+}
+
+/// The local gradient of the log luminance per preview pixel: Sobel of a
+/// one-full-resolution-pixel blur, as Masking judges edges.
+fn edge_strength(log: &[f32], w: usize, h: usize, scale: f32) -> Vec<f32> {
+    let b = exact_gaussian(log, w, h, scale);
+    let at = |x: isize, y: isize| {
+        b[(y.clamp(0, h as isize - 1) as usize) * w + x.clamp(0, w as isize - 1) as usize]
+    };
+    (0..w * h)
+        .into_par_iter()
+        .map(|i| {
+            let (x, y) = ((i % w) as isize, (i / w) as isize);
+            let gx = (at(x + 1, y - 1) + 2.0 * at(x + 1, y) + at(x + 1, y + 1))
+                - (at(x - 1, y - 1) + 2.0 * at(x - 1, y) + at(x - 1, y + 1));
+            let gy = (at(x - 1, y + 1) + 2.0 * at(x, y + 1) + at(x + 1, y + 1))
+                - (at(x - 1, y - 1) + 2.0 * at(x, y - 1) + at(x + 1, y - 1));
+            gx.hypot(gy) / 8.0
+        })
         .collect()
 }
 
@@ -860,6 +1396,98 @@ mod tests {
         );
     }
 
+    /// Grain on both sides of a step: flat texture and one strong edge.
+    fn grain_and_edge(x: u32, y: u32) -> [f32; 3] {
+        let v = if x < 32 { 0.1 } else { 0.4 } * (1.0 + 0.04 * noise(x, y));
+        [v, v, v]
+    }
+
+    fn grain_spread(img: &image::Rgba32FImage) -> f32 {
+        let v: Vec<f32> = (2..24).map(|x| img.get_pixel(x, 8)[1]).collect();
+        let m = v.iter().sum::<f32>() / v.len() as f32;
+        (v.iter().map(|x| (x - m).powi(2)).sum::<f32>() / v.len() as f32).sqrt()
+    }
+
+    fn sharpened(detail: Detail) -> image::Rgba32FImage {
+        let mut img = image(64, 16, grain_and_edge);
+        apply(&mut img, &detail, SRGB_Y, 1.0);
+        img
+    }
+
+    #[test]
+    fn masking_spares_flat_texture_but_still_sharpens_the_edge() {
+        let before = image(64, 16, grain_and_edge);
+        let open = sharpened(Detail {
+            sharpening: 40.,
+            ..Detail::default()
+        });
+        let masked = sharpened(Detail {
+            sharpening: 40.,
+            sharpen_masking: 100.,
+            ..Detail::default()
+        });
+        let grown = |img: &image::Rgba32FImage| grain_spread(img) / grain_spread(&before);
+        assert!(grown(&open) > 1.3, "sharpening left the grain alone");
+        assert!(
+            grown(&masked) < 1.0 + (grown(&open) - 1.0) * 0.5,
+            "masking still sharpened the flat area: {} vs {}",
+            grown(&masked),
+            grown(&open)
+        );
+        assert!(
+            edge_contrast_at(&masked, 8, 1) > edge_contrast_at(&before, 8, 1) * 1.05,
+            "masking took the edge's sharpening away too"
+        );
+    }
+
+    #[test]
+    fn more_detail_sharpens_fine_texture_harder() {
+        let at = |d: f32| {
+            grain_spread(&sharpened(Detail {
+                sharpening: 40.,
+                sharpen_detail: d,
+                ..Detail::default()
+            }))
+        };
+        assert!(at(75.) > at(25.) * 1.1, "{} vs {}", at(75.), at(25.));
+    }
+
+    #[test]
+    fn a_larger_radius_reaches_further_from_the_edge() {
+        let edge = |x: u32, _: u32| if x < 32 { [0.1f32; 3] } else { [0.4f32; 3] };
+        let reach = |radius: f32| {
+            let mut img = image(64, 8, edge);
+            apply(
+                &mut img,
+                &Detail {
+                    sharpening: 60.,
+                    sharpen_radius: radius,
+                    ..Detail::default()
+                },
+                SRGB_Y,
+                1.0,
+            );
+            // Overshoot four pixels from the step, on the bright side.
+            img.get_pixel(36, 4)[1] - 0.4
+        };
+        assert!(
+            reach(3.0) > reach(1.0) + 1e-3,
+            "{} vs {}",
+            reach(3.0),
+            reach(1.0)
+        );
+    }
+
+    #[test]
+    fn a_raw_opens_with_lightroom_defaults_only_where_unset() {
+        let given = serde_json::json!({"sharpening": 0, "clarity": 10});
+        let d = Detail::default().with_raw_defaults(&given);
+        assert_eq!(d.sharpening, 0.0, "an explicit 0 must stay 0");
+        assert_eq!(d.color_noise, 25.0);
+        let d = Detail::default().with_raw_defaults(&serde_json::Value::Null);
+        assert_eq!((d.sharpening, d.color_noise), (40.0, 25.0));
+    }
+
     #[test]
     fn noise_reduction_quiets_noise_and_keeps_the_edge() {
         let noisy = |x: u32, y: u32| {
@@ -1017,6 +1645,14 @@ mod tests {
             color_noise: 60.,
             threshold: 10.,
             dehaze: 50.,
+            // Every Lightroom sub-control, so their reach is in the halo too.
+            sharpen_radius: 2.5,
+            sharpen_detail: 60.,
+            sharpen_masking: 40.,
+            luminance_noise_detail: 30.,
+            luminance_noise_contrast: 50.,
+            color_noise_detail: 70.,
+            color_noise_smoothness: 80.,
         };
         let make = || {
             image(96, 200, |x, y| {
@@ -1106,6 +1742,8 @@ mod tests {
                     color_noise: 50.,
                     threshold: 15.,
                     dehaze: 50.,
+                    sharpen_masking: 50.,
+                    ..Detail::default()
                 },
             ),
         ] {

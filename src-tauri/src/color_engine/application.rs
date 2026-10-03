@@ -1188,7 +1188,10 @@ fn render(
     let edits = normalized.as_ref();
     validate_features(edits)?;
     let mut watch = Stopwatch::start();
-    let controls = controls(edits)?;
+    let mut controls = controls(edits)?;
+    if crate::formats::is_raw_file(path) {
+        controls.detail = controls.detail.with_raw_defaults(&edits["v3"]["detail"]);
+    }
     let pair = super::identity::resolve(state, edits)?;
     let source = source_for(caches, path, &pair, quality)?;
     watch.lap("source");

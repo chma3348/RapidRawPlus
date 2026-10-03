@@ -23,6 +23,7 @@ pub mod rcd;
 pub mod reference;
 mod renderer;
 pub mod selection;
+pub mod sharpen_table;
 pub mod spaces;
 pub mod tone_zones_table;
 

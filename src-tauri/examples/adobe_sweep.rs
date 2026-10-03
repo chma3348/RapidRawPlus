@@ -4,6 +4,13 @@
 //! tools/adobe_lighting.py to measure. Nothing here changes a slider.
 //!
 //!   adobe_sweep SOURCE_DIR OUT_DIR MAX_DIMENSION CONTROL:V1,V2,... [CONTROL:...]
+//!   adobe_sweep SOURCE_DIR OUT_DIR MAX_DIMENSION NAME=KEY:V+KEY:V [...]
+//!
+//! The second form is one case setting several controls at once, by their
+//! place in the v3 settings (`detail.sharpening:40+detail.sharpen_detail:75`),
+//! written as OUT_DIR/<stem>__<NAME>.f32. With ADOBE_SWEEP_CROP=N only the
+//! central N x N pixels are kept (full-resolution sweeps of sharpening and
+//! noise reduction, which are measured on that crop).
 //!
 //! Writes OUT_DIR/<stem>__<control>_<value>.f32 (little-endian RGB float32,
 //! display-encoded sRGB) and a matching .json with the size. Existing files
@@ -59,6 +66,18 @@ fn installed_state() -> Result<AppState> {
 /// Dehaze; Grain at Lightroom's default size 25 and roughness 50, which are
 /// RapidRAW's defaults too).
 fn edits_for(control: &str, value: f64) -> Result<serde_json::Value> {
+    let mut edits = lightroom_edits(control, value)?;
+    // Lightroom's references were exported with no sharpening or noise
+    // reduction, which a RAW otherwise opens with (Detail::with_raw_defaults).
+    for key in ["sharpening", "color_noise"] {
+        if edits["v3"]["detail"][key].is_null() {
+            edits["v3"]["detail"][key] = serde_json::json!(0);
+        }
+    }
+    Ok(edits)
+}
+
+fn lightroom_edits(control: &str, value: f64) -> Result<serde_json::Value> {
     match control {
         "clarity" | "texture" | "dehaze" => {
             let mut edits = reference::edits_for("neutral", 0.0)?;
@@ -77,18 +96,36 @@ fn edits_for(control: &str, value: f64) -> Result<serde_json::Value> {
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     ensure!(
-        args.len() >= 4,
+        args.len() >= 3,
         "adobe_sweep SOURCE_DIR OUT_DIR MAX_DIMENSION CONTROL:V1,V2,... [CONTROL:...]"
     );
     let source_dir = PathBuf::from(&args[0]);
     let out = PathBuf::from(&args[1]);
     let max: u32 = args[2].parse()?;
     std::fs::create_dir_all(&out)?;
-    let mut cases = vec![("neutral".to_string(), 0.0f64)];
+    let crop: Option<u32> = std::env::var("ADOBE_SWEEP_CROP")
+        .ok()
+        .map(|v| v.parse())
+        .transpose()?;
+    let mut cases = vec![("neutral_0".to_string(), edits_for("neutral", 0.0)?)];
     for spec in &args[3..] {
+        if let Some((name, settings)) = spec.split_once('=') {
+            let mut edits = edits_for("neutral", 0.0)?;
+            for setting in settings.split('+') {
+                let (key, v) = setting.split_once(':').context("KEY:VALUE")?;
+                let mut at = &mut edits["v3"];
+                for part in key.split('.') {
+                    at = &mut at[part];
+                }
+                *at = serde_json::json!(v.parse::<f64>()?);
+            }
+            cases.push((name.to_string(), edits));
+            continue;
+        }
         let (control, values) = spec.split_once(':').context("CONTROL:V1,V2,...")?;
         for v in values.split(',') {
-            cases.push((control.to_string(), v.parse()?));
+            let value: f64 = v.parse()?;
+            cases.push((format!("{control}_{value}"), edits_for(control, value)?));
         }
     }
     let mut sources: Vec<PathBuf> = std::fs::read_dir(&source_dir)?
@@ -101,16 +138,24 @@ fn main() -> Result<()> {
     for source in &sources {
         let stem = source.file_stem().unwrap().to_string_lossy().into_owned();
         let path = source.to_str().context("Non-UTF8 path")?;
-        for (control, value) in &cases {
-            let name = format!("{stem}__{control}_{value}");
+        for (case, edits) in &cases {
+            let name = format!("{stem}__{case}");
             let bin = out.join(format!("{name}.f32"));
             if bin.exists() {
                 continue;
             }
             let started = Instant::now();
-            let edits = edits_for(control, *value)?;
-            let frame = application::render_file(&context, &state, path, &edits, Some(max))?;
-            let image = &frame.encoded_srgb;
+            let frame = application::render_file(&context, &state, path, edits, Some(max))?;
+            let image = match crop {
+                Some(n) => {
+                    let (w, h) = frame.encoded_srgb.dimensions();
+                    let n = n.min(w).min(h);
+                    image::imageops::crop_imm(&frame.encoded_srgb, (w - n) / 2, (h - n) / 2, n, n)
+                        .to_image()
+                }
+                None => frame.encoded_srgb.clone(),
+            };
+            let image = &image;
             let mut bytes =
                 Vec::with_capacity(image.width() as usize * image.height() as usize * 12);
             for p in image.pixels() {

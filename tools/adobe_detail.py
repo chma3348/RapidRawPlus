@@ -74,9 +74,17 @@ OTHERS = ["Exposure2012", "Contrast2012", "Highlights2012", "Shadows2012", "Whit
           "Vibrance", "Saturation", "Sharpness", "LuminanceSmoothing", "ColorNoiseReduction"]
 
 
+# Sliders the base pictures share with the edited ones (ADOBE_DETAIL_SHARED,
+# comma-separated, e.g. Sharpness when the base is Lightroom's Sharpening 40
+# export), so they cancel in the comparison and are not a reason to skip.
+SHARED = [k for k in os.environ.get("ADOBE_DETAIL_SHARED", "").split(",") if k]
+
+
 def setting(path):
     head = open(path, "rb").read(1_000_000).decode("latin-1")
     values = {k: float(v) for k, v in re.findall(r'crs:(\w+)="([+-]?[\d.]+)"', head)}
+    for k in SHARED:
+        values.pop(k, None)
     found = [(CONTROLS[k], v) for k, v in values.items() if k in CONTROLS and abs(v) > 1e-9]
     others = [k for k in OTHERS + list(CONTROLS) if abs(values.get(k, 0.0)) > 1e-9 and k not in dict(
         (key, 1) for key in CONTROLS if any(CONTROLS[key] == f[0] for f in found))]

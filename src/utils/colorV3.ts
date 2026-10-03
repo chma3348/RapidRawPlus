@@ -32,25 +32,46 @@ export function evaluateV3Curve(curve: number[], x: number): number {
     ((t * t * t - t * t) * m[i + 1]) / 4
   );
 }
-/** Spatial controls, applied as their own stage before the pointwise pass. */
+/** Spatial controls, applied as their own stage before the pointwise pass.
+ *  Sharpening and noise reduction are Lightroom's, slider for slider. */
 export interface V3Detail {
+  /** -100..150, Lightroom's Amount; negative softens. */
   sharpening: number;
+  /** 0.5..3, Lightroom's Radius. */
+  sharpen_radius: number;
+  /** 0..100, Lightroom's Detail. */
+  sharpen_detail: number;
+  /** 0..100, Lightroom's Masking. */
+  sharpen_masking: number;
   threshold: number;
   texture: number;
   clarity: number;
   structure: number;
   luminance_noise: number;
+  luminance_noise_detail: number;
+  luminance_noise_contrast: number;
   color_noise: number;
+  color_noise_detail: number;
+  color_noise_smoothness: number;
   dehaze: number;
 }
-export const defaultV3Detail = (): V3Detail => ({
-  sharpening: 0,
-  threshold: 15,
+/** A RAW opens as in Lightroom, with Sharpening 40 and Color Noise
+ *  Reduction 25 (the engine applies the same when they are unset). */
+export const defaultV3Detail = (raw = false): V3Detail => ({
+  sharpening: raw ? 40 : 0,
+  sharpen_radius: 1,
+  sharpen_detail: 25,
+  sharpen_masking: 0,
+  threshold: 0,
   texture: 0,
   clarity: 0,
   structure: 0,
   luminance_noise: 0,
-  color_noise: 0,
+  luminance_noise_detail: 50,
+  luminance_noise_contrast: 0,
+  color_noise: raw ? 25 : 0,
+  color_noise_detail: 50,
+  color_noise_smoothness: 50,
   dehaze: 0,
 });
 
@@ -127,7 +148,7 @@ export interface V3Controls {
   effects: V3Effects;
   calibration: V3Calibration;
 }
-export function defaultV3Controls(): V3Controls {
+export function defaultV3Controls(raw = false): V3Controls {
   return {
     revision: 1,
     temperature: 0,
@@ -140,7 +161,7 @@ export function defaultV3Controls(): V3Controls {
     curve: [0, 0.25, 0.5, 0.75, 1],
     channel_curves: Array.from({ length: 3 }, () => [0, 0.25, 0.5, 0.75, 1]),
     ranges: [],
-    detail: defaultV3Detail(),
+    detail: defaultV3Detail(raw),
     effects: defaultV3Effects(),
     calibration: defaultV3Calibration(),
   };
@@ -178,6 +199,12 @@ export function mixV3Controls(preset: Partial<V3Controls>, intensity: number): V
         (Object.keys(from) as (keyof V3Calibration)[]).map((k) => [k, from[k] + (to[k] - from[k]) * fraction]),
       ) as unknown as V3Calibration;
     } else if (key === 'detail') {
+      // A preset without detail settings leaves the photo's own (a RAW's
+      // default sharpening included).
+      if (!preset.detail) {
+        delete (result as Partial<V3Controls>).detail;
+        continue;
+      }
       // Every detail value fades toward neutral, the threshold included, so
       // a half-strength preset is a half-strength preset.
       const from = neutral.detail;
