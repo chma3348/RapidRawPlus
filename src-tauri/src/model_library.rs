@@ -463,7 +463,7 @@ pub async fn add_model_from_file(
             "Unsupported file type. Choose a .onnx model, or a .pth/.safetensors/.ckpt \
              checkpoint to convert automatically. Note: diffusion checkpoints (SeedVR2, \
              Stable Diffusion, Flux…) are one part of a multi-model pipeline and need a \
-             diffusion engine — RapidRAW runs self-contained image models only."
+             diffusion engine — Darkroom Index runs self-contained image models only."
                 .to_string(),
         );
     };
@@ -657,7 +657,7 @@ pub async fn search_remote_models(query: String) -> Result<Vec<RemoteModelRepo>,
             "https://huggingface.co/api/models?search={}&limit=12",
             encoded_query
         ))
-        .header("User-Agent", "RapidRAW-ModelLibrary")
+        .header("User-Agent", "DarkroomIndex-ModelLibrary")
         .send()
         .await
         .map_err(|e| format!("Search failed: {}", e))?
@@ -686,7 +686,7 @@ pub async fn search_remote_models(query: String) -> Result<Vec<RemoteModelRepo>,
         async move {
             client
                 .get(&url)
-                .header("User-Agent", "RapidRAW-ModelLibrary")
+                .header("User-Agent", "DarkroomIndex-ModelLibrary")
                 .send()
                 .await
                 .ok()?

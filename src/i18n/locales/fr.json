@@ -687,7 +687,7 @@
         "importPresetsTitle": "Importer des paramètres prédéfinis",
         "legacyPreset": "Ancien paramètre prédéfini",
         "presetFile": "Fichier de paramètre prédéfini",
-        "rapidRawPreset": "Paramètre prédéfini RapidRAW"
+        "rapidRawPreset": "Paramètre prédéfini Darkroom Index"
       },
       "menu": {
         "configurePreset": "Configurer le paramètre prédéfini",
@@ -997,7 +997,7 @@
     },
     "splash": {
       "addFolder": "Ajouter un dossier",
-      "brand": "RapidRAW",
+      "brand": "Darkroom Index",
       "continueSession": "Poursuivre la session",
       "contribute": "Contribuer sur GitHub",
       "descriptionAndroid": "Un éditeur d'images RAW ultra-rapide, accéléré par GPU. Ouvrez la bibliothèque pour commencer.",
@@ -1513,7 +1513,7 @@
       "font": "Police",
       "fontDesc": "Modifier la police de l'application.",
       "nativeTitlebar": "Barre de titre native",
-      "nativeTitlebarDesc": "Utiliser la barre de titre de fenêtre par défaut de votre système au lieu de celle personnalisée de RapidRAW.",
+      "nativeTitlebarDesc": "Utiliser la barre de titre de fenêtre par défaut de votre système au lieu de celle personnalisée de Darkroom Index.",
       "poppins": "Poppins",
       "showImageCounts": "Afficher le nombre d'images",
       "system": "Défaut du système",
@@ -1640,7 +1640,7 @@
         "connector": {
           "address": "Adresse AI Connector",
           "addressDesc": "Saisissez l'adresse et le port de votre instance AI Connector en cours d'exécution. Requis pour les fonctionnalités d'IA générative.",
-          "description": "Pour les utilisateurs disposant d'un GPU performant et souhaitant un contrôle maximal, connectez RapidRAW à votre propre serveur Connector. Cela vous donne un contrôle total sur vos workflows techniques.",
+          "description": "Pour les utilisateurs disposant d'un GPU performant et souhaitant un contrôle maximal, connectez Darkroom Index à votre propre serveur Connector. Cela vous donne un contrôle total sur vos workflows techniques.",
           "failed": "Échec de la connexion.",
           "feature1": "Utilisez votre propre instance ComfyUI",
           "feature2": "Retouches génératives avancées gratuites",
@@ -1651,13 +1651,13 @@
           "title": "Auto-hébergé (RapidRAW AI Connector)"
         },
         "cpu": {
-          "description": "Intégrées directement dans RapidRAW, ces fonctionnalités fonctionnent entièrement sur votre ordinateur. Elles sont rapides, gratuites et ne nécessitent aucune configuration, idéales pour accélérer vos tâches quotidiennes.",
+          "description": "Intégrées directement dans Darkroom Index, ces fonctionnalités fonctionnent entièrement sur votre ordinateur. Elles sont rapides, gratuites et ne nécessitent aucune configuration, idéales pour accélérer vos tâches quotidiennes.",
           "feature1": "Masquage IA (Sujet, Ciel, Premier plan)",
           "feature2": "Marquage automatique des images",
           "feature3": "Remplacement génératif basique par CPU",
           "title": "IA intégrée (CPU)"
         },
-        "description": "L'IA de RapidRAW est conçue pour être flexible. Choisissez votre workflow idéal, des outils locaux rapides aux puissantes options d'auto-hébergement.",
+        "description": "L'IA de Darkroom Index est conçue pour être flexible. Choisissez votre workflow idéal, des outils locaux rapides aux puissantes options d'auto-hébergement.",
         "providers": {
           "aiConnector": "AI Connector",
           "cloud": "Cloud",
@@ -1781,7 +1781,7 @@
       "clearCustomTooltip": "Effacer la liste d'étiquettes IA",
       "clearShortcutsTooltip": "Effacer la liste d'étiquettes de raccourcis",
       "customList": "Liste d'étiquettes IA personnalisée",
-      "customListDesc": "Si renseignée, l'IA utilisera UNIQUEMENT les étiquettes de cette liste, ignorant la liste intégrée de RapidRAW. Le marquage ne fonctionne qu'en anglais.",
+      "customListDesc": "Si renseignée, l'IA utilisera UNIQUEMENT les étiquettes de cette liste, ignorant la liste intégrée de Darkroom Index. Le marquage ne fonctionne qu'en anglais.",
       "maxAiTags": "Maximum d'étiquettes IA",
       "maxAiTagsDesc": "Le nombre maximum d'étiquettes à générer par image.",
       "noCustomTags": "Aucune étiquette IA personnalisée (Utilisation de la liste intégrée)",
@@ -1793,18 +1793,18 @@
       "title": "Marquage"
     },
     "thanks": {
-      "description": "Un grand merci aux projets suivants qui ont été très importants dans le développement de RapidRAW :",
+      "description": "Un grand merci aux projets suivants qui ont été très importants dans le développement de Darkroom Index :",
       "list": {
         "darktable": "Pour certaines implémentations de référence qui ont guidé une partie de ce travail.",
         "depth": "Pour le puissant modèle d'estimation de profondeur monoculaire qui permet les capacités de masquage de profondeur par l'IA.",
         "lama": "Pour le modèle d'inpainting d'image puissant & simple, qui permet le remplissage génératif et la suppression d'objets.",
         "lensfun": "Pour son inestimable bibliothèque open-source et sa base de données complète pour la correction automatique de l'objectif.",
         "negpy": "Pour l'inspiration derrière la logique de conversion de négatif.",
-        "nind": "Pour avoir fourni les modèles d'IA qui propulsent les capacités de réduction de bruit par IA dans RapidRAW.",
+        "nind": "Pour avoir fourni les modèles d'IA qui propulsent les capacités de réduction de bruit par IA dans Darkroom Index.",
         "rawler": "Pour l'excellente crate Rust qui fournit la base du traitement des fichiers RAW dans ce projet.",
         "sam2": "Pour avoir fourni le modèle de base utilisé pour les capacités de détection de sujet par IA.",
         "u2net": "Pour avoir fourni l'architecture robuste utilisée pour les capacités de détection du ciel et du premier plan par l'IA.",
-        "you": "À vous, pour l'utilisation et le soutien de RapidRAW. Votre intérêt maintient ce projet vivant et en évolution.",
+        "you": "À vous, pour l'utilisation et le soutien de Darkroom Index. Votre intérêt maintient ce projet vivant et en évolution.",
         "youLabel": "Vous"
       },
       "title": "Remerciements spéciaux"

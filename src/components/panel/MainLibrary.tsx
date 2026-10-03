@@ -20,6 +20,7 @@ import { useTranslation } from 'react-i18next';
 import Button from '../ui/Button';
 import SettingsPanel from './SettingsPanel';
 import { getTheme } from '../../utils/themes';
+import { Theme } from '../ui/AppProperties';
 import HomeScreen, { HomeTarget } from './library/HomeScreen';
 
 const noThumbnails = () => {};
@@ -97,6 +98,9 @@ export interface ColumnWidths {
   iso: number;
   focal: number;
 }
+
+/** Darkroom Index's own repository: releases and contributions. */
+const REPOSITORY = 'chma3348/RapidRawPlus';
 
 export default function MainLibrary(props: MainLibraryProps) {
   const { t } = useTranslation();
@@ -213,7 +217,7 @@ export default function MainLibrary(props: MainLibraryProps) {
         const currentVersion = await getVersion();
         setAppVersion(currentVersion);
 
-        const response = await fetch('https://api.github.com/repos/CyberTimon/RapidRAW/releases/latest');
+        const response = await fetch(`https://api.github.com/repos/${REPOSITORY}/releases/latest`);
         if (!response.ok) {
           console.error('Failed to fetch latest release info from GitHub.');
           return;
@@ -242,6 +246,15 @@ export default function MainLibrary(props: MainLibraryProps) {
     }
     const hasLastPath = !!props.appSettings.lastRootPath || !!props.appSettings.rootFolders?.length;
     const splashImage = getTheme(props.theme).splashImage;
+    // The wordmark: dark lettering on the light theme, light on the others.
+    const logo = (height: string) => (
+      <img
+        src={getTheme(props.theme).id === Theme.Paper ? '/brand/logo-light.png' : '/brand/logo-dark.png'}
+        alt={t('library.splash.brand')}
+        draggable={false}
+        className={`${height} w-auto select-none drop-shadow-sm`}
+      />
+    );
     const versionInfo = appVersion && (
       <div className="flex items-center space-x-2">
         <p>
@@ -251,7 +264,7 @@ export default function MainLibrary(props: MainLibraryProps) {
             }`}
             onClick={() => {
               if (isUpdateAvailable) {
-                open('https://github.com/CyberTimon/RapidRAW/releases/latest');
+                open(`https://github.com/${REPOSITORY}/releases/latest`);
               }
             }}
             data-tooltip={
@@ -277,7 +290,7 @@ export default function MainLibrary(props: MainLibraryProps) {
           </a>
           <span className="mx-1">{t('library.splash.or')}</span>
           <a
-            href="https://github.com/CyberTimon/RapidRAW"
+            href={`https://github.com/${REPOSITORY}`}
             className="hover:underline"
             target="_blank"
             rel="noopener noreferrer"
@@ -307,7 +320,7 @@ export default function MainLibrary(props: MainLibraryProps) {
       return (
         <HomeScreen
           appSettings={props.appSettings}
-          brand={<Text variant={TextVariants.display}>{t('library.splash.brand')}</Text>}
+          brand={logo('h-12')}
           footer={
             <Text variant={TextVariants.small} as="div">
               {versionInfo}
@@ -364,7 +377,7 @@ export default function MainLibrary(props: MainLibraryProps) {
               ) : (
                 <>
                   <div className="my-auto text-left relative z-10">
-                    <Text variant={TextVariants.displayLarge}>{t('library.splash.brand')}</Text>
+                    <div className="mb-4">{logo('h-16 lg:h-20')}</div>
                     <Text
                       variant={TextVariants.heading}
                       color={TextColors.secondary}

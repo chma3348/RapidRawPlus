@@ -1,4 +1,16 @@
 <p align="center">
+  <img src="public/brand/logo-light.png" alt="Darkroom Index" width="560">
+</p>
+
+# Darkroom Index
+
+Darkroom Index is a photo editor built on [RapidRAW](https://github.com/CyberTimon/RapidRAW) by Timon Käch, and released, as RapidRAW is, under the [GNU Affero General Public License v3.0](LICENSE). It adds a new colour engine calibrated against DaVinci Resolve and Adobe Lightroom, Lightroom-style tone, detail, sharpening and noise controls, Lightroom edit import, RCD demosaicing and a Lightroom-like viewer.
+
+The rest of this file is RapidRAW's own README, kept for its documentation and credits.
+
+---
+
+<p align="center">
   <img src="https://raw.githubusercontent.com/CyberTimon/RapidRAW/assets/.github/assets/editor.png" alt="RapidRAW Editor">
 </p>
 
@@ -17,7 +29,7 @@
 
 </div>
 
-# RapidRAW
+## RapidRAW
 
 > A beautiful, non-destructive, and GPU-accelerated RAW image editor built with performance in mind.
 

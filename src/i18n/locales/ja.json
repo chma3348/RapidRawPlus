@@ -687,7 +687,7 @@
         "importPresetsTitle": "プリセットをインポート",
         "legacyPreset": "レガシープリセット",
         "presetFile": "プリセットファイル",
-        "rapidRawPreset": "RapidRAWプリセット"
+        "rapidRawPreset": "Darkroom Indexプリセット"
       },
       "menu": {
         "configurePreset": "プリセットを構成",
@@ -996,7 +996,7 @@
     },
     "splash": {
       "addFolder": "フォルダを追加",
-      "brand": "RapidRAW",
+      "brand": "Darkroom Index",
       "continueSession": "セッションを続行",
       "contribute": "GitHubで貢献する",
       "descriptionAndroid": "圧倒的に高速な、GPUアクセラレーション対応RAW画像エディタ。ライブラリを開いて始めましょう。",
@@ -1512,7 +1512,7 @@
       "font": "フォント",
       "fontDesc": "アプリケーションのフォントを変更します。",
       "nativeTitlebar": "OS標準のタイトルバー",
-      "nativeTitlebarDesc": "RapidRAWカスタムのもの代わりに、システムのデフォルトのウィンドウタイトルバーを使用します。",
+      "nativeTitlebarDesc": "Darkroom Indexカスタムのもの代わりに、システムのデフォルトのウィンドウタイトルバーを使用します。",
       "poppins": "Poppins",
       "showImageCounts": "画像数を表示",
       "system": "システムデフォルト",
@@ -1639,7 +1639,7 @@
         "connector": {
           "address": "AI Connectorのアドレス",
           "addressDesc": "起動中の AI Connector インスタンスのアドレスとポートを入力してください。生成AI機能に必要です。",
-          "description": "十分なスペックのGPUを搭載し、フルコントロールを行いたいユーザー向けの機能です。RapidRAWをご自身の Connector サーバーに接続します。",
+          "description": "十分なスペックのGPUを搭載し、フルコントロールを行いたいユーザー向けの機能です。Darkroom Indexをご自身の Connector サーバーに接続します。",
           "failed": "接続に失敗しました。",
           "feature1": "自身の ComfyUI インスタンスを使用可能",
           "feature2": "追加コスト不要の高度な生成編集",
@@ -1650,13 +1650,13 @@
           "title": "セルフホスト (RapidRAW AI Connector)"
         },
         "cpu": {
-          "description": "RapidRAWに直接内蔵されており、お使いのコンピューター上のみで動作します。高速かつ無料でセットアップも不要です。",
+          "description": "Darkroom Indexに直接内蔵されており、お使いのコンピューター上のみで動作します。高速かつ無料でセットアップも不要です。",
           "feature1": "AIマスク機能 (被写体、空、手前)",
           "feature2": "自動画像タグ付け機能",
           "feature3": "CPUベースの簡易生成塗りつぶし",
           "title": "内蔵AI (CPU)"
         },
-        "description": "RapidRAWのAIは、優れた柔軟性を備えています。高速なローカル処理から本格的なセルフホストまで、最適なワークフローを選択してください。",
+        "description": "Darkroom IndexのAIは、優れた柔軟性を備えています。高速なローカル処理から本格的なセルフホストまで、最適なワークフローを選択してください。",
         "providers": {
           "aiConnector": "AI Connector",
           "cloud": "クラウド",
@@ -1780,7 +1780,7 @@
       "clearCustomTooltip": "AIタグリストをクリア",
       "clearShortcutsTooltip": "ショートカットリストをクリア",
       "customList": "カスタムAIタグリスト",
-      "customListDesc": "タグを指定した場合、AIはリスト内のタグのみを使用し、RapidRAWの内蔵リストは使用されません。タグ付け機能は英語のみ対応しています。",
+      "customListDesc": "タグを指定した場合、AIはリスト内のタグのみを使用し、Darkroom Indexの内蔵リストは使用されません。タグ付け機能は英語のみ対応しています。",
       "maxAiTags": "最大AIタグ数",
       "maxAiTagsDesc": "画像ごとに生成されるAIタグの最大数。",
       "noCustomTags": "カスタムAIタグなし（内蔵リストを使用中）",
@@ -1792,7 +1792,7 @@
       "title": "タグ付け"
     },
     "thanks": {
-      "description": "RapidRAWの開発において、非常に重要な役割を果たしてくれた以下のプロジェクトに心より感謝いたします:",
+      "description": "Darkroom Indexの開発において、非常に重要な役割を果たしてくれた以下のプロジェクトに心より感謝いたします:",
       "list": {
         "darktable": "一部の実装において参考にさせていただきました。",
         "depth": "AI奥行きマスクを可能にする、単眼深度推定モデルを提供しています。",
@@ -1803,7 +1803,7 @@
         "rawler": "RAWファイル処理の基盤となる優れたRustライブラリを提供しています。",
         "sam2": "AI被写体検出機能の基盤となるモデルを提供しています。",
         "u2net": "AIによる空や手前の自動検出に用いる、堅牢なアーキテクチャを提供しています。",
-        "you": "RapidRAWをご利用、ご支援いただきありがとうございます。皆様のご関心こそが、プロジェクトの存続と発展の支えです。",
+        "you": "Darkroom Indexをご利用、ご支援いただきありがとうございます。皆様のご関心こそが、プロジェクトの存続と発展の支えです。",
         "youLabel": "皆様"
       },
       "title": "特別な謝辞"

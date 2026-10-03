@@ -836,7 +836,7 @@ async fn fetch_community_presets() -> Result<Vec<CommunityPreset>, String> {
 
     let response = client
         .get(url)
-        .header("User-Agent", "RapidRAW-App")
+        .header("User-Agent", "DarkroomIndex-App")
         .send()
         .await
         .map_err(|e| format!("Failed to fetch manifest from GitHub: {}", e))?;

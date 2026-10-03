@@ -1256,7 +1256,7 @@
     },
     "splash": {
       "addFolder": "Add Folder",
-      "brand": "RapidRAW",
+      "brand": "Darkroom Index",
       "continueSession": "Continue Session",
       "contribute": "Contribute on GitHub",
       "descriptionAndroid": "A blazingly fast, GPU-accelerated RAW image editor. Open the library to begin.",
@@ -1844,7 +1844,7 @@
       "font": "Font",
       "fontDesc": "Change the application font.",
       "nativeTitlebar": "Native Titlebar",
-      "nativeTitlebarDesc": "Use your system's default window titlebar instead of RapidRAW's custom one.",
+      "nativeTitlebarDesc": "Use your system's default window titlebar instead of Darkroom Index's custom one.",
       "poppins": "Poppins",
       "rejects": "Rejected photos after culling",
       "rejectsAsk": "Ask each time",
@@ -1985,7 +1985,7 @@
         "connector": {
           "address": "AI Connector Address",
           "addressDesc": "Enter the address and port of your running AI Connector instance. Required for generative AI features.",
-          "description": "For users with a capable GPU who want maximum control, connect RapidRAW to your own Connector server. This gives you full control for technical workflows.",
+          "description": "For users with a capable GPU who want maximum control, connect Darkroom Index to your own Connector server. This gives you full control for technical workflows.",
           "failed": "Connection failed.",
           "feature1": "Use your own ComfyUI instance",
           "feature2": "Cost-free advanced generative edits",
@@ -1996,13 +1996,13 @@
           "title": "Self-Hosted (RapidRAW AI Connector)"
         },
         "cpu": {
-          "description": "Integrated directly into RapidRAW, these features run entirely on your computer. They are fast, free, and require no setup, making them ideal for everyday workflow acceleration.",
+          "description": "Integrated directly into Darkroom Index, these features run entirely on your computer. They are fast, free, and require no setup, making them ideal for everyday workflow acceleration.",
           "feature1": "AI Masking (Subject, Sky, Foreground)",
           "feature2": "Automatic Image Tagging",
           "feature3": "Simple CPU-based Generative Replace",
           "title": "Built-in AI (CPU)"
         },
-        "description": "RapidRAW's AI is built for flexibility. Choose your ideal workflow, from fast local tools to powerful self-hosting.",
+        "description": "Darkroom Index's AI is built for flexibility. Choose your ideal workflow, from fast local tools to powerful self-hosting.",
         "providers": {
           "aiConnector": "AI Connector",
           "cloud": "Cloud",
@@ -2126,7 +2126,7 @@
       "clearCustomTooltip": "Clear AI Tag List",
       "clearShortcutsTooltip": "Clear Shortcuts Tag List",
       "customList": "Custom AI Tag List",
-      "customListDesc": "If provided, the AI will ONLY use tags from this list, overriding RapidRAW’s built-in list. Tagging works only in English.",
+      "customListDesc": "If provided, the AI will ONLY use tags from this list, overriding Darkroom Index’s built-in list. Tagging works only in English.",
       "maxAiTags": "Maximum AI Tags",
       "maxAiTagsDesc": "The maximum number of tags to generate per image.",
       "noCustomTags": "No custom AI tags (Using built-in list)",
@@ -2138,21 +2138,23 @@
       "title": "Tagging"
     },
     "thanks": {
-      "description": "A huge thank you to the following projects that were very important in the development of RapidRAW:",
+      "description": "A huge thank you to the following projects that were very important in the development of Darkroom Index:",
       "list": {
         "darktable": "For some reference implementations that guided parts of this work.",
         "depth": "For the powerful monocular depth estimation model that enables the AI depth masking capabilities.",
         "lama": "For the powerful & simple image inpainting model, which enables content-aware fill and object removal.",
         "lensfun": "For its invaluable open-source library and comprehensive database for automatic lens correction.",
         "negpy": "For the inspiration behind the negative conversion logic.",
-        "nind": "For providing AI models that power the AI noise reduction capabilities in RapidRAW.",
+        "nind": "For providing AI models that power the AI noise reduction capabilities in Darkroom Index.",
         "rawler": "For the excellent Rust crate that provides the foundation for RAW file processing in this project.",
         "sam2": "For providing the foundation model used for the AI subject detection capabilities.",
         "u2net": "For providing the robust architecture used for the AI sky and foreground detection capabilities.",
-        "you": "For using and supporting RapidRAW. Your interest keeps this project alive and evolving.",
+        "you": "For using and supporting Darkroom Index. Your interest keeps this project alive and evolving.",
         "youLabel": "You"
       },
-      "title": "Special Thanks"
+      "title": "Special Thanks",
+      "builtOn": "Darkroom Index is built on RapidRAW by Timon Käch, released under the GNU Affero General Public License v3.0. Thank you for the foundation this work stands on.",
+      "builtOnLabel": "RapidRAW"
     },
     "themes": {
       "darkroom": "Darkroom",

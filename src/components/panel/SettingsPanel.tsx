@@ -1655,6 +1655,18 @@ export default function SettingsPanel({
                   <Text variant={TextVariants.title} color={TextColors.accent} className="mb-6">
                     {t('settings.thanks.title')}
                   </Text>
+                  {/* The AGPL credit: Darkroom Index is RapidRAW's descendant. */}
+                  <Text className="mb-4">
+                    <a
+                      href="https://github.com/CyberTimon/RapidRAW"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="font-semibold text-accent hover:underline"
+                    >
+                      {t('settings.thanks.builtOnLabel')}
+                    </a>
+                    : {t('settings.thanks.builtOn')}
+                  </Text>
                   <Text className="mb-4">{t('settings.thanks.description')}</Text>
                   <Text as="ul" className="space-y-3 list-disc ml-5 pl-1">
                     <li>
