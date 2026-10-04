@@ -90,6 +90,8 @@ export default function SkyPanel() {
   const selectedImage = useEditorStore((s) => s.selectedImage);
   const adjustments = useEditorStore((s) => s.adjustments);
   const { setAdjustments } = useEditorActions();
+  // The detected sky, shown in red on the photograph until a sky is applied.
+  const setSkyOverlay = (mask: string | null) => useEditorStore.getState().setEditor({ skyMaskOverlay: mask });
   const existing = useMemo(
     () => (adjustments.aiPatches || []).find((p: any) => p.patchType === 'sky'),
     [adjustments.aiPatches],
@@ -126,6 +128,7 @@ export default function SkyPanel() {
     setStatus('idle');
     setMessage('');
     setPreview(null);
+    setSkyOverlay(null);
   }, [selectedImage?.path, adjustments.orientationSteps, adjustments.flipHorizontal, adjustments.flipVertical]);
 
   const detect = () => {
@@ -134,7 +137,8 @@ export default function SkyPanel() {
     setStatus('finding');
     setMessage('');
     setPreview(null);
-    invoke<{ coverage: number }>(Invokes.PrepareSkyReplacement, {
+    setSkyOverlay(null);
+    invoke<{ coverage: number; mask: string }>(Invokes.PrepareSkyReplacement, {
       path: selectedImage.path,
       orientationSteps: adjustments.orientationSteps ?? 0,
       flipHorizontal: adjustments.flipHorizontal ?? false,
@@ -149,6 +153,7 @@ export default function SkyPanel() {
           setMessage(t('sky.noSky', { defaultValue: 'There is almost no sky in this photograph to replace.' }));
         } else {
           setStatus('ready');
+          setSkyOverlay(r.mask);
         }
       })
       .catch((e) => {
@@ -206,6 +211,8 @@ export default function SkyPanel() {
         ...prev,
         aiPatches: [...(prev.aiPatches || []).filter((p: any) => p.patchType !== 'sky'), patch],
       }));
+      // The red would hide the new sky; Detect again brings it back.
+      setSkyOverlay(null);
       toast.success(
         t('sky.applied', {
           defaultValue: 'Sky applied. It is a patch: hide, fade or delete it from the Inpaint panel.',
@@ -247,7 +254,7 @@ export default function SkyPanel() {
   }
 
   return (
-    <div className="flex h-full flex-col gap-3 overflow-y-auto p-4 text-sm text-text-primary">
+    <div className="flex h-full flex-col gap-3 overflow-y-auto p-4 text-sm text-text-primary [&>*]:shrink-0">
       <div className="flex items-center gap-2">
         <Cloud size={18} />
         <h2 className="text-base font-medium">{t('sky.title', { defaultValue: 'Sky Replace' })}</h2>

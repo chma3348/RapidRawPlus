@@ -75,6 +75,9 @@ interface EditorState {
   // Patch row under the cursor — the red overlay shows on hover instead
   // of permanently covering the finished edit.
   hoveredAiPatchId: string | null;
+  // Sky Replace's detected sky (a mask data URL), shown in red on the
+  // canvas while a sky is being chosen.
+  skyMaskOverlay: string | null;
   isMaskControlHovered: boolean;
   isGeneratingAiMask: boolean;
   isGeneratingAi: boolean;
@@ -122,6 +125,7 @@ export const useEditorStore = create<EditorState>((set) => ({
   activeAiPatchContainerId: null,
   activeAiSubMaskId: null,
   hoveredAiPatchId: null,
+  skyMaskOverlay: null,
 
   zoom: 1,
   maskMatteView: false,

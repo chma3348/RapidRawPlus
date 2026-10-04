@@ -44,6 +44,8 @@ interface ImageCanvasProps {
   isSliderDragging: boolean;
   isStraightenActive: boolean;
   isRotationActive?: boolean;
+  // Sky Replace open: the detected sky shows in red, as AI masks do.
+  isSkyEditing?: boolean;
   maskOverlayUrl: string | null;
   onGenerateAiMask(id: string | null, start: Coord, end: Coord, exclude?: boolean): void;
   onGenerateAiPaintMask?(id: string | null, lines: any[]): void;
@@ -1055,6 +1057,7 @@ const ImageCanvas = memo(
     isSliderDragging,
     isStraightenActive,
     isRotationActive,
+    isSkyEditing = false,
     maskOverlayUrl,
     onGenerateAiMask,
     onGenerateAiPaintMask,
@@ -1520,12 +1523,12 @@ const ImageCanvas = memo(
     const isToolActive = isBrushActive || isAiSubjectActive || isInitialDrawing || isParametricActive;
 
     useEffect(() => {
-      if (maskOverlayUrl && (isMasking || isAiEditing)) {
+      if (maskOverlayUrl && (isMasking || isAiEditing || isSkyEditing)) {
         setDisplayedMaskUrl(maskOverlayUrl);
       } else {
         setDisplayedMaskUrl(null);
       }
-    }, [maskOverlayUrl, isMasking, isAiEditing]);
+    }, [maskOverlayUrl, isMasking, isAiEditing, isSkyEditing]);
 
     useEffect(() => {
       if (isToolActive) {

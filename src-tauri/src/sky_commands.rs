@@ -97,6 +97,20 @@ pub struct SkyPreparation {
     /// Share of the frame the mask calls sky.
     coverage: f32,
     raw: bool,
+    /// The sky mask, full size in the photo's stored orientation, as a PNG
+    /// data URL: what an AI sky mask carries, so the editor can show it in
+    /// red the same way.
+    mask: String,
+}
+
+fn mask_data_url(mask: &GrayImage) -> Result<String, String> {
+    let mut buf = Cursor::new(Vec::new());
+    mask.write_to(&mut buf, ImageFormat::Png)
+        .map_err(|e| e.to_string())?;
+    Ok(format!(
+        "data:image/png;base64,{}",
+        general_purpose::STANDARD.encode(buf.get_ref())
+    ))
 }
 
 fn skies_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -178,6 +192,7 @@ pub async fn prepare_sky_replacement(
         return Ok(SkyPreparation {
             coverage: coverage(&s.alpha),
             raw: s.gamma,
+            mask: mask_data_url(&s.alpha)?,
         });
     }
     let (image, is_raw) = crate::get_full_image_for_processing(&state)?;
@@ -256,6 +271,7 @@ pub async fn prepare_sky_replacement(
     let result = SkyPreparation {
         coverage: found.coverage,
         raw: is_raw,
+        mask: mask_data_url(&found.mask)?,
     };
     *state.sky_session.lock().unwrap() = Some(SkySession {
         path,

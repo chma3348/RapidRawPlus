@@ -115,6 +115,7 @@ export default function Editor({ onBackToLibrary, onContextMenu, transformWrappe
   const activeAiPatchContainerId = useEditorStore((s) => s.activeAiPatchContainerId);
   const activeAiSubMaskId = useEditorStore((s) => s.activeAiSubMaskId);
   const hoveredAiPatchId = useEditorStore((s) => s.hoveredAiPatchId);
+  const skyMaskOverlay = useEditorStore((s) => s.skyMaskOverlay);
   const isMaskControlHovered = useEditorStore((s) => s.isMaskControlHovered);
   const hasRenderedFirstFrame = useEditorStore((s) => s.hasRenderedFirstFrame);
 
@@ -290,6 +291,7 @@ export default function Editor({ onBackToLibrary, onContextMenu, transformWrappe
   const isCropping = activeRightPanel === Panel.Crop;
   const isMasking = activeRightPanel === Panel.Masks;
   const isAiEditing = activeRightPanel === Panel.Ai;
+  const isSkyEditing = activeRightPanel === Panel.Sky && !!skyMaskOverlay;
 
   const croppedDimensions = useMemo<ImageDimensions | null>(() => {
     if (!selectedImage?.width || !selectedImage?.height) {
@@ -1408,6 +1410,33 @@ export default function Editor({ onBackToLibrary, onContextMenu, transformWrappe
           opacity: 100,
         };
       }
+    } else if (activeRightPanel === Panel.Sky && skyMaskOverlay) {
+      // Sky Replace's detected sky, shown as an AI sky mask would be.
+      maskDefForOverlay = {
+        id: 'sky-replace-detection',
+        name: 'Sky',
+        visible: true,
+        invert: false,
+        opacity: 100,
+        adjustments: {},
+        subMasks: [
+          {
+            id: 'sky-replace-detection-sky',
+            type: 'ai-sky',
+            visible: true,
+            mode: 'additive',
+            invert: false,
+            opacity: 100,
+            parameters: {
+              maskDataBase64: skyMaskOverlay,
+              rotation: adjustments.rotation ?? 0,
+              flipHorizontal: adjustments.flipHorizontal ?? false,
+              flipVertical: adjustments.flipVertical ?? false,
+              orientationSteps: adjustments.orientationSteps ?? 0,
+            },
+          },
+        ],
+      };
     }
 
     requestMaskOverlay(maskDefForOverlay, imageRenderSize, adjustments);
@@ -1420,6 +1449,7 @@ export default function Editor({ onBackToLibrary, onContextMenu, transformWrappe
     activeAiPatchContainerId,
     activeAiSubMaskId,
     hoveredAiPatchId,
+    skyMaskOverlay,
     imageRenderSize,
     maskMatteView,
   ]);
@@ -2088,6 +2118,7 @@ export default function Editor({ onBackToLibrary, onContextMenu, transformWrappe
               interactivePatch={interactivePatch}
               zoomTile={zoomTile && !showOriginal && !(isCropping && uncroppedAdjustedPreviewUrl) ? zoomTile : null}
               isAiEditing={isAiEditing}
+              isSkyEditing={isSkyEditing}
               isCropping={isCropping}
               isMaskControlHovered={isMaskControlHovered}
               isMasking={isMasking}
