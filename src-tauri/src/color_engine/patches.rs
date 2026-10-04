@@ -94,11 +94,12 @@ pub fn composite(
         let feather = patch["feather"].as_f64().unwrap_or(0.0) as f32;
         let opacity = (patch["opacity"].as_f64().unwrap_or(100.0) as f32 / 100.0).clamp(0.0, 1.0);
 
-        let mut colour = decode_layer(
-            data["color"].as_str().context("Patch has no colour data")?,
-            width,
-            height,
-        )?;
+        // A patch smaller than the photograph (a sky shown while it is being
+        // chosen is about screen size) is converted at its own size and
+        // sampled into the photograph as it is blended, not enlarged first:
+        // enlarging and converting a whole 24-megapixel layer took over a
+        // second on every change.
+        let mut colour = decode_layer(data["color"].as_str().context("Patch has no colour data")?)?;
         let stored_gamma = data["encoding"].as_str() == Some("gamma");
         to_source_space(
             &mut colour,
@@ -113,21 +114,47 @@ pub fn composite(
 
         let mut mask = mask_for(patch, data, width, height)?;
         if feather > 0.0 {
+            // Feathering is measured in the photograph's pixels.
+            if mask.dimensions() != (width, height) {
+                mask = imageops::resize(&mask, width, height, imageops::FilterType::Lanczos3);
+            }
             mask = crate::ai_processing::feather_mask_inward(&mask, feather);
         }
 
+        let colour_at = Sampler::new(colour.dimensions(), (width, height));
+        let mask_at = Sampler::new(mask.dimensions(), (width, height));
+        let (cw, mw) = (colour.width() as usize, mask.width() as usize);
+        let (colour, mask) = (colour.as_raw(), mask.as_raw());
         base.par_chunks_mut((width * 4) as usize)
             .enumerate()
             .for_each(|(y, row)| {
+                let (cy0, cy1, cfy) = colour_at.rows[y];
+                let (my0, my1, mfy) = mask_at.rows[y];
                 for x in 0..width as usize {
-                    let coverage = mask.get_pixel(x as u32, y as u32)[0];
-                    if coverage == 0 {
+                    let (mx0, mx1, mfx) = mask_at.columns[x];
+                    let coverage = if mask_at.exact {
+                        mask[y * mw + x] as f32
+                    } else {
+                        let m = |yy: usize, xx: usize| mask[yy * mw + xx] as f32;
+                        let top = m(my0, mx0) + (m(my0, mx1) - m(my0, mx0)) * mfx;
+                        let bottom = m(my1, mx0) + (m(my1, mx1) - m(my1, mx0)) * mfx;
+                        top + (bottom - top) * mfy
+                    };
+                    if coverage < 0.5 {
                         continue;
                     }
-                    let alpha = coverage as f32 / 255.0 * opacity;
-                    let patched = colour.get_pixel(x as u32, y as u32);
+                    let alpha = coverage / 255.0 * opacity;
+                    let (cx0, cx1, cfx) = colour_at.columns[x];
                     for c in 0..3 {
-                        row[x * 4 + c] = patched[c] * alpha + row[x * 4 + c] * (1.0 - alpha);
+                        let patched = if colour_at.exact {
+                            colour[(y * cw + x) * 3 + c]
+                        } else {
+                            let v = |yy: usize, xx: usize| colour[(yy * cw + xx) * 3 + c];
+                            let top = v(cy0, cx0) + (v(cy0, cx1) - v(cy0, cx0)) * cfx;
+                            let bottom = v(cy1, cx0) + (v(cy1, cx1) - v(cy1, cx0)) * cfx;
+                            top + (bottom - top) * cfy
+                        };
+                        row[x * 4 + c] = patched * alpha + row[x * 4 + c] * (1.0 - alpha);
                     }
                 }
             });
@@ -135,26 +162,49 @@ pub fn composite(
     Ok(())
 }
 
-fn decode_layer(encoded: &str, width: u32, height: u32) -> Result<image::Rgb32FImage> {
+/// Where each row and column of the photograph falls in a layer of another
+/// size, for bilinear sampling (pixel centres aligned): the two neighbours
+/// and the weight of the second. A layer of the photograph's size is read
+/// exactly.
+struct Sampler {
+    exact: bool,
+    rows: Vec<(usize, usize, f32)>,
+    columns: Vec<(usize, usize, f32)>,
+}
+
+impl Sampler {
+    fn new(layer: (u32, u32), photo: (u32, u32)) -> Self {
+        let axis = |from: u32, to: u32| -> Vec<(usize, usize, f32)> {
+            let last = from.max(1) as usize - 1;
+            let step = from as f32 / to.max(1) as f32;
+            (0..to as usize)
+                .map(|i| {
+                    let at = ((i as f32 + 0.5) * step - 0.5).clamp(0.0, last as f32);
+                    let low = at.floor() as usize;
+                    (low, (low + 1).min(last), at - low as f32)
+                })
+                .collect()
+        };
+        Self {
+            exact: layer == photo,
+            rows: axis(layer.1, photo.1),
+            columns: axis(layer.0, photo.0),
+        }
+    }
+}
+
+/// A patch's colour, at its own size.
+fn decode_layer(encoded: &str) -> Result<image::Rgb32FImage> {
     let bytes = general_purpose::STANDARD.decode(encoded)?;
     let image = image::load_from_memory(&bytes)?.to_rgb8();
-    let image = if image.dimensions() == (width, height) {
-        image
-    } else {
-        imageops::resize(&image, width, height, imageops::FilterType::Lanczos3)
-    };
     Ok(DynamicImage::ImageRgb8(image).to_rgb32f())
 }
 
 fn mask_for(patch: &Value, data: &Value, width: u32, height: u32) -> Result<image::GrayImage> {
     if let Some(encoded) = data["mask"].as_str().filter(|s| !s.is_empty()) {
+        // At its own size: `composite` samples it into the photograph.
         let bytes = general_purpose::STANDARD.decode(encoded)?;
-        let mask = image::load_from_memory(&bytes)?.to_luma8();
-        return Ok(if mask.dimensions() == (width, height) {
-            mask
-        } else {
-            imageops::resize(&mask, width, height, imageops::FilterType::Lanczos3)
-        });
+        return Ok(image::load_from_memory(&bytes)?.to_luma8());
     }
     // Older patches carry their shapes instead of a rendered mask.
     let info: crate::image_loader::PatchMaskInfo =
@@ -185,11 +235,9 @@ fn to_source_space(
     if stored_gamma {
         // Linear already, once the storage curve is undone, in the primaries
         // the source was decoded to.
-        for pixel in colour.pixels_mut() {
-            for c in 0..3 {
-                pixel[c] = pixel[c].clamp(0.0, 1.0).powf(STORED_GAMMA);
-            }
-        }
+        colour
+            .par_iter_mut()
+            .for_each(|v| *v = v.clamp(0.0, 1.0).powf(STORED_GAMMA));
         return Ok(());
     }
     // Display pixels, in the file's own code values: the previous engine's
