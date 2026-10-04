@@ -332,6 +332,34 @@ fn captured_input(pair: &super::identity::Resolved) -> Result<Option<super::cube
     }))
 }
 
+/// The picture v3 renders a photo from, before any edit: for a RAW, its own
+/// development (RCD demosaic, calibration, its Lightroom default look),
+/// linear in the source's primaries. Tools that make patches (heal, fill,
+/// sky) must work from this, because v3 composites their pixels onto it:
+/// patches made from any other development would not match the photo.
+pub fn decoded_source(state: &AppState, path: &str) -> Result<Arc<DecodedFrame>> {
+    let pair = super::identity::resolve(state, &serde_json::json!({}))?;
+    source_for(&state.v3, path, &pair, Quality::Full)
+}
+
+/// A RAW as patch-making tools must see it: v3's decoded picture, divided by
+/// its `raw_patch_scale` so it fits the eight bits patches are stored in.
+pub fn raw_patch_base(state: &AppState, path: &str) -> Result<DynamicImage> {
+    use rayon::prelude::*;
+    let frame = decoded_source(state, path)?;
+    let scale = super::patches::raw_patch_scale(&frame.pixels);
+    let (w, h) = frame.pixels.dimensions();
+    let rgb: Vec<f32> = frame
+        .pixels
+        .as_raw()
+        .par_chunks(4)
+        .flat_map_iter(|p| [p[0] / scale, p[1] / scale, p[2] / scale])
+        .collect();
+    Ok(DynamicImage::ImageRgb32F(
+        image::Rgb32FImage::from_raw(w, h, rgb).context("raw patch base")?,
+    ))
+}
+
 fn source_for(
     caches: &V3Caches,
     path: &str,
@@ -1588,12 +1616,18 @@ fn render(
                 None
             };
             let mut pixels = source.pixels.clone();
+            let raw_scale = if crate::formats::is_raw_file(path) {
+                super::patches::raw_patch_scale(&source.pixels)
+            } else {
+                1.0
+            };
             super::patches::composite(
                 &mut pixels,
                 edits,
                 &source.color,
                 source.source_profile.as_deref(),
                 captured.as_ref().zip(source.input_domain),
+                raw_scale,
             )?;
             pixels
         };

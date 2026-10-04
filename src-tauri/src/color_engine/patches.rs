@@ -11,7 +11,10 @@
 //!
 //! - `encoding: "gamma"` marks a patch lifted from float or RAW data, stored
 //!   through a 1/2.4 curve so deep shadows survive eight bits. Undo the curve
-//!   and the values are linear in the source's own primaries.
+//!   and the values are linear in the source's own primaries. A RAW's
+//!   scene-linear values run well above one, so its patches are made from
+//!   the picture divided by `raw_patch_scale` (a whole number of stops, from
+//!   the picture itself) and multiplied back here.
 //! - Anything else came from rendered, display-referred pixels, and is sRGB.
 //!
 //! Patches join the picture at the decoded-source stage, the same place the
@@ -49,13 +52,37 @@ pub fn visible(edits: &Value) -> Vec<&Value> {
         .unwrap_or_default()
 }
 
+/// The scale a RAW's patches are made at: the picture divided by this fits
+/// eight bits but for its brightest 0.1% (specular highlights). A power of
+/// two, so the tool that makes a patch and the render that places it, both
+/// measuring the same decoded picture, can never disagree.
+pub fn raw_patch_scale(pixels: &Rgba32FImage) -> f32 {
+    let raw = pixels.as_raw();
+    let n = raw.len() / 4;
+    let stride = (n / 400_000).max(1);
+    let mut peaks: Vec<f32> = (0..n)
+        .step_by(stride)
+        .map(|i| raw[i * 4].max(raw[i * 4 + 1]).max(raw[i * 4 + 2]))
+        .filter(|v| v.is_finite())
+        .collect();
+    if peaks.is_empty() {
+        return 1.0;
+    }
+    let at = (peaks.len() - 1) * 999 / 1000;
+    let high = *peaks.select_nth_unstable_by(at, f32::total_cmp).1;
+    high.max(1.0).log2().ceil().exp2()
+}
+
 /// Composite every visible patch onto `base`, which is in `color`.
+/// `raw_scale` is `raw_patch_scale` of a RAW's decoded picture (1 for
+/// anything else): what its gamma-stored patches are multiplied back by.
 pub fn composite(
     base: &mut Rgba32FImage,
     edits: &Value,
     color: &SourceColor,
     source_profile: Option<&[u8]>,
     input_transform: Option<(&CapturedInput, InputDomain)>,
+    raw_scale: f32,
 ) -> Result<()> {
     let patches = visible(edits);
     if patches.is_empty() {
@@ -80,6 +107,9 @@ pub fn composite(
             stored_gamma,
             input_transform,
         )?;
+        if stored_gamma && raw_scale != 1.0 {
+            colour.par_iter_mut().for_each(|v| *v *= raw_scale);
+        }
 
         let mut mask = mask_for(patch, data, width, height)?;
         if feather > 0.0 {
@@ -268,6 +298,7 @@ mod tests {
             &display_source(),
             None,
             None,
+            1.0,
         )
         .unwrap();
         let got = base.get_pixel(0, 0);
@@ -291,10 +322,46 @@ mod tests {
             &display_source(),
             None,
             None,
+            1.0,
         )
         .unwrap();
         let want = (128.0f32 / 255.0).powf(STORED_GAMMA);
         assert!((base.get_pixel(0, 0)[0] - want).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_raw_patch_is_multiplied_back_by_its_scale() {
+        // Made from the picture divided by 4, stored through the curve: the
+        // render multiplies it back.
+        let colour = image::ImageBuffer::from_pixel(2, 2, image::Rgb([128u8, 128, 128]));
+        let mask = image::ImageBuffer::from_pixel(2, 2, image::Luma([255u8]));
+        let mut base = image::ImageBuffer::from_pixel(2, 2, image::Rgba([0.0f32, 0.0, 0.0, 1.0]));
+        composite(
+            &mut base,
+            &patch_json(colour, mask, "gamma"),
+            &display_source(),
+            None,
+            None,
+            4.0,
+        )
+        .unwrap();
+        let want = 4.0 * (128.0f32 / 255.0).powf(STORED_GAMMA);
+        assert!((base.get_pixel(0, 0)[0] - want).abs() < 1e-4);
+    }
+
+    #[test]
+    fn the_raw_patch_scale_is_whole_stops_and_fits_the_highlights() {
+        let mut pixels =
+            image::ImageBuffer::from_pixel(100, 100, image::Rgba([0.5f32, 2.5, 0.2, 1.0]));
+        assert_eq!(raw_patch_scale(&pixels), 4.0);
+        // A few specular pixels do not raise it.
+        for x in 0..5 {
+            pixels.put_pixel(x, 0, image::Rgba([40.0, 40.0, 40.0, 1.0]));
+        }
+        assert_eq!(raw_patch_scale(&pixels), 4.0);
+        // Never below one.
+        let dim = image::ImageBuffer::from_pixel(10, 10, image::Rgba([0.1f32, 0.1, 0.1, 1.0]));
+        assert_eq!(raw_patch_scale(&dim), 1.0);
     }
 
     /// The mask is coverage, and zero coverage must leave the base exactly.
@@ -311,6 +378,7 @@ mod tests {
             &display_source(),
             None,
             None,
+            1.0,
         )
         .unwrap();
         assert!(
@@ -334,7 +402,7 @@ mod tests {
         edits["aiPatches"][0]["visible"] = Value::Bool(false);
         let mut base = image::ImageBuffer::from_pixel(2, 2, image::Rgba([0.1f32, 0.1, 0.1, 1.0]));
         let before = base.clone();
-        composite(&mut base, &edits, &display_source(), None, None).unwrap();
+        composite(&mut base, &edits, &display_source(), None, None, 1.0).unwrap();
         assert_eq!(base, before);
     }
 }

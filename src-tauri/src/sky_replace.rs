@@ -16,9 +16,10 @@
 //! of the new sky is mixed in there as atmospheric haze.
 //!
 //! The plate is placed so its own bottom edge lands on the photo's horizon
-//! (the lowest row the mask still calls sky), scaled to cover, and
-//! mirror-tiled if it is too short rather than stretched, because stretching
-//! a short plate smears it into vertical streaks.
+//! (the lowest row the mask still calls sky), scaled, keeping its
+//! proportions, to cover both the width and the sky above the horizon, and
+//! centred. It is never stretched one way (that smears it into streaks) nor
+//! repeated mirrored (that makes a kaleidoscope in a tall portrait sky).
 
 use image::imageops::{self, FilterType};
 use image::{DynamicImage, GrayImage, RgbImage};
@@ -145,8 +146,35 @@ pub fn horizon_row(alpha: &GrayImage) -> u32 {
     lowest[lowest.len() / 2]
 }
 
-/// Scale the plate to cover the frame and sit with its bottom edge on the
-/// horizon, mirror-tiling upward when it is too short.
+/// The lowest row where there is still sky anywhere: the 98th percentile of
+/// each column's lowest sky row (so a stray speck does not count). A narrow
+/// gap of sky between buildings can reach far below the horizon; the plate
+/// has to reach it too, or the gap shows its last row smeared downward.
+pub fn sky_bottom_row(alpha: &GrayImage) -> u32 {
+    let (w, h) = alpha.dimensions();
+    let mut lowest = Vec::new();
+    for x in 0..w {
+        let mut last = None;
+        for y in 0..h {
+            if alpha.get_pixel(x, y)[0] > 127 {
+                last = Some(y);
+            }
+        }
+        if let Some(y) = last {
+            lowest.push(y);
+        }
+    }
+    if lowest.is_empty() {
+        return h / 2;
+    }
+    lowest.sort_unstable();
+    lowest[(lowest.len() - 1) * 98 / 100]
+}
+
+/// Scale the plate to cover the sky (the full width, and from the top of the
+/// frame down to the horizon), keeping its proportions, centred, with its
+/// bottom edge on the horizon. A tall sky in a portrait photo enlarges the
+/// plate rather than repeating it: mirrored copies make a kaleidoscope.
 pub fn place_plate(
     plate: &DynamicImage,
     size: (u32, u32),
@@ -155,9 +183,16 @@ pub fn place_plate(
 ) -> RgbImage {
     let (w, h) = size;
     let zoom = o.scale.max(0.2);
-    let width = ((w as f32 * zoom).round() as u32).max(1);
-    let plate_h = ((plate.height() as f32 / plate.width() as f32) * width as f32).round() as u32;
-    let scaled = plate.resize_exact(width, plate_h.max(1), FilterType::Lanczos3);
+    let horizon = horizon.clamp(1, h);
+    let aspect = plate.height() as f32 / plate.width().max(1) as f32;
+    // Cover the width, then enlarge further if that leaves the sky short.
+    let mut width = w as f32 * zoom;
+    if width * aspect < horizon as f32 * zoom {
+        width = horizon as f32 * zoom / aspect;
+    }
+    let width = (width.round() as u32).max(1);
+    let plate_h = ((aspect * width as f32).round() as u32).max(1);
+    let scaled = plate.resize_exact(width, plate_h, FilterType::Lanczos3);
     let scaled = if o.flip_horizontal {
         scaled.fliph()
     } else {
@@ -165,26 +200,20 @@ pub fn place_plate(
     };
     let band = scaled.to_rgb8();
     let (bw, bh) = band.dimensions();
-    let x_shift = (o.pan * bw as f32).round() as i64;
-    let horizon = horizon.max(1);
+    // Centred, then slid by Pan (a fraction of the plate's width).
+    let x_shift = ((bw as f32 - w as f32) / 2.0 + o.pan * bw as f32).round() as i64;
 
     RgbImage::from_fn(w, h, |x, y| {
         // Horizontal: wrap, so panning never runs out of plate.
         let sx = (x as i64 + x_shift).rem_euclid(bw as i64) as u32;
-        // Vertical: the plate's bottom edge sits on the horizon; above it
-        // the plate repeats mirrored, below it the last row continues
-        // (below the horizon sky is only ever seen through gaps).
+        // Vertical: the plate's bottom edge on the horizon; below it the last
+        // row continues (sky there is only seen through gaps), and above the
+        // plate's top (only when Scale is below 1) its top row does.
         let from_bottom = horizon as i64 - y as i64;
         let sy = if from_bottom <= 0 {
             bh - 1
         } else {
-            let period = (2 * bh) as i64;
-            let t = (from_bottom - 1).rem_euclid(period);
-            if t < bh as i64 {
-                (bh as i64 - 1 - t) as u32
-            } else {
-                (t - bh as i64) as u32
-            }
+            (bh as i64 - from_bottom).max(0) as u32
         };
         *band.get_pixel(sx, sy.min(bh - 1))
     })
@@ -347,9 +376,12 @@ pub fn replace_sky(
     );
     let long = w.max(h) as f32;
     let alpha = &adjust_edges(alpha, o.edge_shift * long, o.edge_feather * long);
-    let horizon = (horizon_row(alpha) as i64 + (o.horizon_offset * h as f32).round() as i64)
-        .clamp(1, h as i64 - 1) as u32;
-    let mut new_sky = place_plate(plate, (w, h), horizon, o);
+    let offset = (o.horizon_offset * h as f32).round() as i64;
+    let horizon = (horizon_row(alpha) as i64 + offset).clamp(1, h as i64 - 1) as u32;
+    // The plate reaches down to the lowest sky, which in a gap between
+    // buildings can be well below the horizon.
+    let bottom = (sky_bottom_row(alpha) as i64 + offset).clamp(horizon as i64, h as i64 - 1) as u32;
+    let mut new_sky = place_plate(plate, (w, h), bottom, o);
 
     // White balance: move the plate's cast toward the light in this photo,
     // measured from the foreground (the sky itself is what we are
@@ -433,7 +465,42 @@ pub fn replace_sky(
                 .map(|&i| new_sky.as_raw()[i * 3 + c] as f32 / 255.0)
                 .sum::<f32>()
                 / confident.len() as f32;
-            *r = (new_mean + 1e-3) / (old_mean + 1e-3);
+            // At most about a stop either way: a midday plate over a dusk
+            // photo would otherwise wash the whole foreground out.
+            *r = ((new_mean + 1e-3) / (old_mean + 1e-3)).clamp(0.6, 1.6);
+        }
+    }
+
+    // Haze is the new sky's colour near the horizon, not its texture: mixed
+    // in pixel by pixel, the plate's clouds would show through buildings.
+    let mut haze_colour = [0.0f32; 3];
+    {
+        let band_top = horizon.saturating_sub((h / 6).max(1));
+        let mut n = 0.0f32;
+        for y in band_top..horizon.min(h) {
+            for x in 0..w {
+                let i = (y * w + x) as usize;
+                if alpha.as_raw()[i] > 128 {
+                    for (c, v) in haze_colour.iter_mut().enumerate() {
+                        *v += new_sky.as_raw()[i * 3 + c] as f32 / 255.0;
+                    }
+                    n += 1.0;
+                }
+            }
+        }
+        if n > 0.0 {
+            haze_colour.iter_mut().for_each(|v| *v /= n);
+        } else {
+            let all = new_sky.as_raw();
+            for (c, v) in haze_colour.iter_mut().enumerate() {
+                *v = all
+                    .iter()
+                    .skip(c)
+                    .step_by(3)
+                    .map(|&p| p as f32 / 255.0)
+                    .sum::<f32>()
+                    / (all.len() / 3).max(1) as f32;
+            }
         }
     }
 
@@ -479,7 +546,7 @@ pub fn replace_sky(
                         pixel
                     };
                     let lit = (fg * (1.0 + relight * (ratio[c] - 1.0))).clamp(0.0, 1.0);
-                    let hazed = lit * (1.0 - haze) + sky * haze;
+                    let hazed = lit * (1.0 - haze) + haze_colour[c] * haze;
                     // fade < 1 keeps some of the photo's own sky here
                     let sky = sky * fade + pixel * (1.0 - fade);
                     let value = a * sky + (1.0 - a) * hazed;
@@ -917,21 +984,47 @@ mod tests {
     }
 
     #[test]
-    fn a_short_plate_is_mirrored_rather_than_stretched() {
-        // A plate with a distinctive gradient: mirroring keeps its texture,
-        // stretching would smear it.
+    fn the_plate_reaches_a_narrow_gap_of_sky_below_the_horizon() {
+        // Sky across the top 30 rows, and one narrow gap reaching row 90.
+        let alpha = GrayImage::from_fn(100, 100, |x, y| {
+            Luma([if y < 30 || ((48..52).contains(&x) && y < 90) {
+                255
+            } else {
+                0
+            }])
+        });
+        assert_eq!(horizon_row(&alpha), 29);
+        assert_eq!(sky_bottom_row(&alpha), 89);
+    }
+
+    #[test]
+    fn a_short_plate_is_enlarged_to_cover_the_sky_not_repeated() {
+        // A wide plate with a gradient from top (0) to bottom (248), and a
+        // tall portrait sky: the plate must be enlarged to reach the top,
+        // keeping its proportions, never run backwards (mirrored) or flat.
         let plate = DynamicImage::ImageRgb8(RgbImage::from_fn(64, 32, |_, y| {
             Rgb([(y * 8) as u8, 100, 200])
         }));
         let placed = place_plate(&plate, (64, 400), 380, &SkyReplaceOptions::default());
-        // Bottom of the plate lands on the horizon.
-        assert_eq!(placed.get_pixel(10, 379).0[0], 248);
-        // Going up, it runs backwards then forwards again, never flat.
-        let column: Vec<u8> = (0..380).map(|y| placed.get_pixel(10, y)[0]).collect();
-        let distinct: std::collections::HashSet<u8> = column.iter().copied().collect();
+        let column: Vec<i32> = (0..380)
+            .map(|y| placed.get_pixel(10, y)[0] as i32)
+            .collect();
+        // Bottom of the plate on the horizon, top of the plate near the top.
+        assert!(
+            column[379] >= 240,
+            "bottom of the plate is not on the horizon"
+        );
+        assert!(
+            column[0] <= 8,
+            "the plate does not reach the top: {}",
+            column[0]
+        );
+        // Top to bottom it only ever brightens: no mirrored repeat.
+        assert!(column.windows(2).all(|p| p[1] >= p[0]), "the plate repeats");
+        let distinct: std::collections::HashSet<i32> = column.iter().copied().collect();
         assert!(
             distinct.len() >= 30,
-            "plate looks stretched: {} levels",
+            "plate looks smeared: {} levels",
             distinct.len()
         );
     }

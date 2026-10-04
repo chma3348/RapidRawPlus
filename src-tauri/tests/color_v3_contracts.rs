@@ -1986,6 +1986,7 @@ fn a_patch_of_the_photo_itself_is_invisible_on_a_p3_file() {
         &frame.color,
         frame.source_profile.as_deref(),
         None,
+        1.0,
     )
     .unwrap();
     for (a, b) in frame.pixels.pixels().zip(patched.pixels()) {

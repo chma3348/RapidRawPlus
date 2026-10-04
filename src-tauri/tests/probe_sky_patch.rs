@@ -82,6 +82,7 @@ fn sky_patch_round_trip() {
             &frame.color,
             frame.source_profile.as_deref(),
             None,
+            1.0,
         )
         .unwrap();
         assert_eq!(frame.color.reference, ReferenceDomain::Display);

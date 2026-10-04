@@ -796,6 +796,15 @@ pub fn get_full_image_for_processing(
     let loaded_image = original_image_lock
         .as_ref()
         .ok_or("No original image loaded")?;
+    // A RAW's patches are composited by v3 onto its own development, so they
+    // must be made from that, not from the previous engine's decode.
+    if loaded_image.is_raw {
+        let path = loaded_image.path.clone();
+        drop(original_image_lock);
+        let image = color_engine::application::raw_patch_base(state, &path)
+            .map_err(|e| format!("Could not develop the RAW for this tool: {e:#}"))?;
+        return Ok((image, true));
+    }
     Ok((
         loaded_image.image.clone().as_ref().clone(),
         loaded_image.is_raw,

@@ -50,6 +50,8 @@ pub struct SkySession {
     preview_base: Arc<RgbImage>,
     preview_alpha: Arc<GrayImage>,
     plate: Option<(String, Arc<DynamicImage>)>,
+    /// For a RAW, how its light comes out on screen (to bring a plate in).
+    look: Option<Arc<RawLook>>,
 }
 
 #[derive(Serialize)]
@@ -230,6 +232,23 @@ pub async fn prepare_sky_replacement(
     } else {
         image.to_rgb8()
     };
+    // How this RAW's light comes out on screen, from a quick neutral render,
+    // so sky plates can be brought into it.
+    let look = if is_raw {
+        let context = crate::gpu_processing::get_or_init_gpu_context(&state, &app_handle)?;
+        let shown = crate::color_engine::application::render_for_output(
+            &context,
+            &state,
+            &path,
+            &serde_json::json!({"processVersion": 3, "v3": {}}),
+            Some(1024),
+        )
+        .map_err(|e| format!("Could not render the photo to match the sky to it: {e:#}"))?;
+        let shown = DynamicImage::ImageRgba8(shown.preview_rgba8()).to_rgb8();
+        Some(Arc::new(RawLook::learn(&base, &shown)))
+    } else {
+        None
+    };
     let (w, h) = base.dimensions();
     let (pw, ph) = fit(w, h, PREVIEW_EDGE);
     let preview_base = imageops::resize(&base, pw, ph, imageops::FilterType::Triangle);
@@ -247,6 +266,7 @@ pub async fn prepare_sky_replacement(
         preview_base: Arc::new(preview_base),
         preview_alpha: Arc::new(preview_alpha),
         plate: None,
+        look,
     });
     Ok(result)
 }
@@ -261,8 +281,13 @@ pub async fn preview_sky_replacement(
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<String, String> {
-    let (base, alpha, gamma, plate_image) = session_inputs(&state, &app_handle, &plate, true)?;
+    let (base, alpha, gamma, plate_image, look) =
+        session_inputs(&state, &app_handle, &plate, true)?;
     tauri::async_runtime::spawn_blocking(move || {
+        let plate_image = match &look {
+            Some(look) => plate_in_raw_light(&plate_image, look),
+            None => (*plate_image).clone(),
+        };
         let result = replace_sky(
             &DynamicImage::ImageRgb8((*base).clone()),
             &alpha,
@@ -273,10 +298,11 @@ pub async fn preview_sky_replacement(
         .to_rgb8();
         // A RAW's stored encoding is not a display encoding; show it as one
         // for choosing, which is all this is for.
-        let shown = if gamma {
-            gamma_to_display(&result)
-        } else {
-            result
+        // A RAW shown as its rendering shows it, for choosing.
+        let shown = match &look {
+            Some(look) => look.to_display(&result),
+            None if gamma => gamma_to_display(&result),
+            None => result,
         };
         let mut bytes = Cursor::new(Vec::new());
         image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 85)
@@ -299,8 +325,13 @@ pub async fn apply_sky_replacement(
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let (base, alpha, gamma, plate_image) = session_inputs(&state, &app_handle, &plate, false)?;
+    let (base, alpha, gamma, plate_image, look) =
+        session_inputs(&state, &app_handle, &plate, false)?;
     tauri::async_runtime::spawn_blocking(move || {
+        let plate_image = match &look {
+            Some(look) => plate_in_raw_light(&plate_image, look),
+            None => (*plate_image).clone(),
+        };
         let result = replace_sky(
             &DynamicImage::ImageRgb8((*base).clone()),
             &alpha,
@@ -315,7 +346,13 @@ pub async fn apply_sky_replacement(
     .map_err(|e| e.to_string())?
 }
 
-type Inputs = (Arc<RgbImage>, Arc<GrayImage>, bool, Arc<DynamicImage>);
+type Inputs = (
+    Arc<RgbImage>,
+    Arc<GrayImage>,
+    bool,
+    Arc<DynamicImage>,
+    Option<Arc<RawLook>>,
+);
 
 fn session_inputs(
     state: &tauri::State<'_, AppState>,
@@ -348,6 +385,7 @@ fn session_inputs(
             session.preview_alpha.clone(),
             session.gamma,
             plate_image,
+            session.look.clone(),
         )
     } else {
         (
@@ -355,8 +393,145 @@ fn session_inputs(
             session.alpha.clone(),
             session.gamma,
             plate_image,
+            session.look.clone(),
         )
     })
+}
+
+/// How a RAW's light, as the sky tool holds it (linear, scaled to fit,
+/// stored through the 1/2.4 curve), comes out on screen: learnt by matching
+/// luminance quantiles between that picture and a neutral render of it. A
+/// rendering's tone curve never reverses, so this needs no pixel alignment.
+/// Pairs of (display linear luminance, the tool's linear luminance).
+pub struct RawLook(Vec<(f32, f32)>);
+
+fn srgb_to_linear(v: u8) -> f32 {
+    let v = v as f32 / 255.0;
+    if v <= 0.04045 {
+        v / 12.92
+    } else {
+        ((v + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn luma(p: [f32; 3]) -> f32 {
+    0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2]
+}
+
+impl RawLook {
+    pub fn learn(base: &RgbImage, shown: &RgbImage) -> Self {
+        let sorted = |v: Vec<f32>| {
+            let mut v = v;
+            v.sort_by(f32::total_cmp);
+            v
+        };
+        let base_l = sorted(
+            base.pixels()
+                .step_by(5)
+                .map(|p| luma(p.0.map(|v| (v as f32 / 255.0).powf(STORED_GAMMA))))
+                .collect(),
+        );
+        let shown_l = sorted(
+            shown
+                .pixels()
+                .map(|p| luma(p.0.map(srgb_to_linear)))
+                .collect(),
+        );
+        let at = |v: &[f32], q: f32| v[((v.len() - 1) as f32 * q).round() as usize];
+        let mut pairs: Vec<(f32, f32)> = (0..=200)
+            .map(|i| {
+                let q = i as f32 / 200.0;
+                (at(&shown_l, q), at(&base_l, q))
+            })
+            .collect();
+        // Strictly increasing in display luminance, for interpolation.
+        pairs.dedup_by(|b, a| b.0 <= a.0);
+        Self(pairs)
+    }
+
+    /// A picture in the tool's light, as the photo's rendering shows it.
+    pub fn to_display(&self, stored: &RgbImage) -> RgbImage {
+        let encode = |v: f32| {
+            let v = v.clamp(0.0, 1.0);
+            let e = if v <= 0.0031308 {
+                v * 12.92
+            } else {
+                1.055 * v.powf(1.0 / 2.4) - 0.055
+            };
+            (e * 255.0).round() as u8
+        };
+        RgbImage::from_fn(stored.width(), stored.height(), |x, y| {
+            let lin = stored
+                .get_pixel(x, y)
+                .0
+                .map(|v| (v as f32 / 255.0).powf(STORED_GAMMA));
+            let l = luma(lin);
+            let gain = if l > 1e-7 {
+                self.display_for(l) / l
+            } else {
+                0.0
+            };
+            Rgb(lin.map(|v| encode(v * gain)))
+        })
+    }
+
+    /// The display luminance for the tool's luminance.
+    fn display_for(&self, base: f32) -> f32 {
+        let p = &self.0;
+        if p.len() < 2 {
+            return base;
+        }
+        let (first, last) = (p[0], p[p.len() - 1]);
+        if base <= first.1 {
+            return first.0 * base / first.1.max(1e-9);
+        }
+        if base >= last.1 {
+            return last.0 * base / last.1.max(1e-9);
+        }
+        let i = p.partition_point(|q| q.1 < base).max(1);
+        let (a, b) = (p[i - 1], p[i]);
+        a.0 + (b.0 - a.0) * (base - a.1) / (b.1 - a.1).max(1e-12)
+    }
+
+    /// The tool's luminance for a display luminance.
+    fn base_for(&self, display: f32) -> f32 {
+        let p = &self.0;
+        if p.len() < 2 {
+            return display;
+        }
+        let first = p[0];
+        let last = p[p.len() - 1];
+        if display <= first.0 {
+            return first.1 * display / first.0.max(1e-6);
+        }
+        if display >= last.0 {
+            return last.1 * display / last.0.max(1e-6);
+        }
+        let i = p.partition_point(|q| q.0 < display).max(1);
+        let (a, b) = (p[i - 1], p[i]);
+        a.1 + (b.1 - a.1) * (display - a.0) / (b.0 - a.0).max(1e-9)
+    }
+}
+
+/// A sky plate is an ordinary display picture; a RAW is worked on in its
+/// own light. Bring the plate into that light so that, rendered, it looks as
+/// it does on its own (as it would pasted into a JPEG): each pixel scaled so
+/// its brightness lands where the photo's rendering puts that brightness,
+/// its colour kept.
+pub fn plate_in_raw_light(plate: &DynamicImage, look: &RawLook) -> DynamicImage {
+    let rgb = plate.to_rgb8();
+    let converted = RgbImage::from_fn(rgb.width(), rgb.height(), |x, y| {
+        let lin = rgb.get_pixel(x, y).0.map(srgb_to_linear);
+        let shown = luma(lin);
+        let gain = if shown > 1e-6 {
+            look.base_for(shown) / shown
+        } else {
+            0.0
+        };
+        Rgb(lin
+            .map(|v| ((v * gain).clamp(0.0, 1.0).powf(1.0 / STORED_GAMMA) * 255.0).round() as u8))
+    });
+    DynamicImage::ImageRgb8(converted)
 }
 
 /// Patch data in the shape the fill tool writes. Public for the end-to-end
