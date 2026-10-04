@@ -123,6 +123,10 @@ export default function SkyPanel() {
   const request = useRef(0);
   const photoRequest = useRef(0);
   const ownsOverride = useRef(false);
+  const [dragging, setDragging] = useState(false);
+  const [photoTick, setPhotoTick] = useState(0);
+  const photoBusy = useRef(false);
+  const photoAgain = useRef(false);
 
   useEffect(() => {
     if (plateCache) return;
@@ -204,8 +208,13 @@ export default function SkyPanel() {
     !!existing && (existing as any).sky?.plate === plate && sameOptions((existing as any).sky?.options, options);
 
   // The chosen sky on the photograph, debounced; a late answer never
-  // overwrites a newer one.
+  // overwrites a newer one. While the sky is being dragged, quick small ones
+  // follow the drag, one at a time; a sharp one comes when it is let go.
   useEffect(() => {
+    if (dragging && photoBusy.current) {
+      photoAgain.current = true;
+      return;
+    }
     const id = ++photoRequest.current;
     if (status !== 'ready' || !plate || !onPhoto || unchanged) {
       setPhotoPatch(null);
@@ -213,10 +222,11 @@ export default function SkyPanel() {
       return;
     }
     setPlacing(true);
-    const timer = window.setTimeout(() => {
+    const run = () => {
       // A new id each time: the editor sends a patch's pixels once per id.
       const patchId = uuidv4();
-      invoke(Invokes.PreviewSkyOnPhoto, { plate, options, id: patchId })
+      photoBusy.current = true;
+      invoke(Invokes.PreviewSkyOnPhoto, { plate, options, id: patchId, quick: dragging })
         .then((patchData) => {
           if (id !== photoRequest.current) return;
           setPhotoPatch({
@@ -239,12 +249,57 @@ export default function SkyPanel() {
           if (id === photoRequest.current) setMessage(String(e));
         })
         .finally(() => {
+          photoBusy.current = false;
           if (id === photoRequest.current) setPlacing(false);
+          if (photoAgain.current) {
+            photoAgain.current = false;
+            setPhotoTick((n) => n + 1);
+          }
         });
-    }, 200);
+    };
+    if (dragging) {
+      run();
+      return;
+    }
+    const timer = window.setTimeout(run, 200);
     return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [plate, options, status, onPhoto, unchanged]);
+  }, [plate, options, status, onPhoto, unchanged, dragging, photoTick]);
+
+  // A drag renders as a slider drag does: smaller and quicker until let go.
+  useEffect(() => {
+    useEditorStore.getState().setEditor({ isSliderDragging: dragging });
+  }, [dragging]);
+
+  // Dragging on the photo moves the sky: sideways slides it (Slide), up and
+  // down moves it against the horizon (Horizon).
+  const optionsRef = useRef(options);
+  optionsRef.current = options;
+  const skyShown = status === 'ready' && !!plate && onPhoto;
+  useEffect(() => {
+    if (!skyShown) {
+      useEditorStore.getState().setEditor({ skyDrag: null });
+      return;
+    }
+    const flips = adjustments;
+    const handler = (dx: number, dy: number, done: boolean) => {
+      if (done) {
+        setDragging(false);
+        return;
+      }
+      setDragging(true);
+      const o = optionsRef.current;
+      const sx = flips.flipHorizontal ? -dx : dx;
+      const sy = flips.flipVertical ? -dy : dy;
+      // Slide is a fraction of the plate's width, which covers the photo's
+      // width times Zoom; it wraps around.
+      let pan = o.pan - sx / Math.max(0.2, o.scale);
+      pan = ((((pan + 0.5) % 1) + 1) % 1) - 0.5;
+      const horizonOffset = Math.max(-0.3, Math.min(0.3, o.horizonOffset + sy));
+      setOptions({ ...o, pan, horizonOffset });
+    };
+    useEditorStore.getState().setEditor({ skyDrag: handler });
+  }, [skyShown, adjustments.flipHorizontal, adjustments.flipVertical]);
 
   // Show it through the edit without changing the edit: the editor renders
   // this instead (as it does for a LUT being tried), and saves nothing.
@@ -274,6 +329,7 @@ export default function SkyPanel() {
   useEffect(
     () => () => {
       setSkyOverlay(null);
+      useEditorStore.getState().setEditor({ skyDrag: null, isSliderDragging: false });
       if (ownsOverride.current) {
         ownsOverride.current = false;
         useEditorStore.getState().setEditor({ previewOverride: null });
@@ -467,6 +523,11 @@ export default function SkyPanel() {
       <label className="flex items-center gap-2 text-xs text-text-secondary">
         <input type="checkbox" checked={onPhoto} onChange={(e) => setOnPhoto(e.target.checked)} />
         {t('sky.onPhoto', { defaultValue: 'Show on photo' })}
+        {skyShown && (
+          <span className="ml-auto">
+            {t('sky.dragHint', { defaultValue: 'Drag the sky on the photo to place it' })}
+          </span>
+        )}
         {placing && <Loader2 size={12} className="animate-spin" />}
       </label>
 

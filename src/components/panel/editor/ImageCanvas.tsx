@@ -46,6 +46,8 @@ interface ImageCanvasProps {
   isRotationActive?: boolean;
   // Sky Replace open: the detected sky shows in red, as AI masks do.
   isSkyEditing?: boolean;
+  // Sky Replace: dragging on the photo moves the sky (see useEditorStore).
+  skyDrag?: ((dx: number, dy: number, done: boolean) => void) | null;
   maskOverlayUrl: string | null;
   onGenerateAiMask(id: string | null, start: Coord, end: Coord, exclude?: boolean): void;
   onGenerateAiPaintMask?(id: string | null, lines: any[]): void;
@@ -1058,6 +1060,7 @@ const ImageCanvas = memo(
     isStraightenActive,
     isRotationActive,
     isSkyEditing = false,
+    skyDrag = null,
     maskOverlayUrl,
     onGenerateAiMask,
     onGenerateAiPaintMask,
@@ -1090,6 +1093,7 @@ const ImageCanvas = memo(
     const [isCropViewVisible, setIsCropViewVisible] = useState(false);
     const cropImageRef = useRef<HTMLImageElement>(null);
     const [displayedMaskUrl, setDisplayedMaskUrl] = useState<string | null>(null);
+    const skyDragLast = useRef<{ x: number; y: number } | null>(null);
     const [originalLoaded, setOriginalLoaded] = useState<boolean>(false);
     const [localInitialDrawParams, setLocalInitialDrawParams] = useState<any>(null);
     const [isMaskInteractionActive, setIsMaskInteractionActive] = useState(false);
@@ -2751,6 +2755,52 @@ const ImageCanvas = memo(
                     width: `${imageRenderSize.width}px`,
                     imageRendering: isMaxZoom ? 'pixelated' : 'auto',
                     zIndex: 3,
+                  }}
+                />
+              )}
+              {skyDrag && !isShowingOriginal && imageRenderSize.width > 0 && (
+                <div
+                  title="Drag to place the sky"
+                  style={{
+                    position: 'absolute',
+                    left: `${imageRenderSize.offsetX}px`,
+                    top: `${imageRenderSize.offsetY}px`,
+                    width: `${imageRenderSize.width}px`,
+                    height: `${imageRenderSize.height}px`,
+                    cursor: 'move',
+                    touchAction: 'none',
+                    zIndex: 4,
+                  }}
+                  onPointerDown={(e) => {
+                    if (e.button !== 0) return;
+                    e.stopPropagation();
+                    e.currentTarget.setPointerCapture(e.pointerId);
+                    skyDragLast.current = { x: e.clientX, y: e.clientY };
+                  }}
+                  onPointerMove={(e) => {
+                    const last = skyDragLast.current;
+                    if (!last) return;
+                    // On screen, as zoomed, to a fraction of the whole photo:
+                    // the element is the (cropped) picture, `scale` is screen
+                    // pixels per photo pixel before zoom.
+                    const rect = e.currentTarget.getBoundingClientRect();
+                    const perPixel = rect.width / imageRenderSize.width;
+                    const s = imageRenderSize.scale || 1;
+                    const dx = (e.clientX - last.x) / perPixel / s / Math.max(1, selectedImage.width);
+                    const dy = (e.clientY - last.y) / perPixel / s / Math.max(1, selectedImage.height);
+                    skyDragLast.current = { x: e.clientX, y: e.clientY };
+                    if (dx || dy) skyDrag(dx, dy, false);
+                  }}
+                  onPointerUp={(e) => {
+                    if (!skyDragLast.current) return;
+                    skyDragLast.current = null;
+                    e.currentTarget.releasePointerCapture(e.pointerId);
+                    skyDrag(0, 0, true);
+                  }}
+                  onPointerCancel={() => {
+                    if (!skyDragLast.current) return;
+                    skyDragLast.current = null;
+                    skyDrag(0, 0, true);
                   }}
                 />
               )}

@@ -375,10 +375,16 @@ pub async fn preview_sky_on_photo(
     plate: String,
     options: SkyReplaceOptions,
     id: String,
+    quick: Option<bool>,
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    log::info!("sky: on the photo with {plate}");
+    // While the sky is dragged: small and quick, to follow the hand; the
+    // sharp one follows when it is let go.
+    let quick = quick == Some(true);
+    if !quick {
+        log::info!("sky: on the photo with {plate}");
+    }
     // Keep the last few (one may still be on screen while the next renders).
     const KEEP: usize = 3;
     if let Some(session) = state.sky_session.lock().unwrap().as_mut() {
@@ -390,7 +396,8 @@ pub async fn preview_sky_on_photo(
             cache.remove(&id);
         }
     }
-    sky_patch(plate, options, Size::Canvas, state, app_handle).await
+    let size = if quick { Size::Panel } else { Size::Canvas };
+    sky_patch(plate, options, size, state, app_handle).await
 }
 
 async fn sky_patch(

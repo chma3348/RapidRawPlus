@@ -78,6 +78,9 @@ interface EditorState {
   // Sky Replace's detected sky (a mask data URL), shown in red on the
   // canvas while a sky is being chosen.
   skyMaskOverlay: string | null;
+  // Set by Sky Replace while a sky is on the photo: dragging on the canvas
+  // moves it. Deltas are fractions of the whole photo's width and height.
+  skyDrag: ((dx: number, dy: number, done: boolean) => void) | null;
   isMaskControlHovered: boolean;
   isGeneratingAiMask: boolean;
   isGeneratingAi: boolean;
@@ -126,6 +129,7 @@ export const useEditorStore = create<EditorState>((set) => ({
   activeAiSubMaskId: null,
   hoveredAiPatchId: null,
   skyMaskOverlay: null,
+  skyDrag: null,
 
   zoom: 1,
   maskMatteView: false,

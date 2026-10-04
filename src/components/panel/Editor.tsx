@@ -116,6 +116,7 @@ export default function Editor({ onBackToLibrary, onContextMenu, transformWrappe
   const activeAiSubMaskId = useEditorStore((s) => s.activeAiSubMaskId);
   const hoveredAiPatchId = useEditorStore((s) => s.hoveredAiPatchId);
   const skyMaskOverlay = useEditorStore((s) => s.skyMaskOverlay);
+  const skyDragHandler = useEditorStore((s) => s.skyDrag);
   const isMaskControlHovered = useEditorStore((s) => s.isMaskControlHovered);
   const hasRenderedFirstFrame = useEditorStore((s) => s.hasRenderedFirstFrame);
 
@@ -292,6 +293,7 @@ export default function Editor({ onBackToLibrary, onContextMenu, transformWrappe
   const isMasking = activeRightPanel === Panel.Masks;
   const isAiEditing = activeRightPanel === Panel.Ai;
   const isSkyEditing = activeRightPanel === Panel.Sky && !!skyMaskOverlay;
+  const skyDrag = activeRightPanel === Panel.Sky ? skyDragHandler : null;
 
   const croppedDimensions = useMemo<ImageDimensions | null>(() => {
     if (!selectedImage?.width || !selectedImage?.height) {
@@ -618,6 +620,8 @@ export default function Editor({ onBackToLibrary, onContextMenu, transformWrappe
   }, [adjustments.masks, adjustments.aiPatches, activeMaskId, activeAiSubMaskId, isMasking, isAiEditing]);
 
   const isPanningDisabled =
+    // Dragging moves the new sky (the middle button still pans).
+    !!skyDrag ||
     isMaskHovered ||
     isMaskTouchInteracting ||
     isCropping ||
@@ -2119,6 +2123,7 @@ export default function Editor({ onBackToLibrary, onContextMenu, transformWrappe
               zoomTile={zoomTile && !showOriginal && !(isCropping && uncroppedAdjustedPreviewUrl) ? zoomTile : null}
               isAiEditing={isAiEditing}
               isSkyEditing={isSkyEditing}
+              skyDrag={skyDrag}
               isCropping={isCropping}
               isMaskControlHovered={isMaskControlHovered}
               isMasking={isMasking}
