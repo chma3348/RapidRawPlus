@@ -3,7 +3,7 @@ import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { useTranslation } from 'react-i18next';
 import { v4 as uuidv4 } from 'uuid';
 import { toast } from 'react-toastify';
-import { Cloud, FlipHorizontal2, Loader2, Trash2 } from 'lucide-react';
+import { Cloud, Eye, EyeOff, FlipHorizontal2, Loader2, Trash2 } from 'lucide-react';
 import Slider from '../../ui/Slider';
 import { Invokes } from '../../ui/AppProperties';
 import { useEditorStore } from '../../../store/useEditorStore';
@@ -215,7 +215,7 @@ export default function SkyPanel() {
       setSkyOverlay(null);
       toast.success(
         t('sky.applied', {
-          defaultValue: 'Sky applied. It is a patch: hide, fade or delete it from the Inpaint panel.',
+          defaultValue: 'Sky applied. Hide or delete it at the top of this panel; fade it in the Inpaint panel.',
         }),
       );
     } catch (e) {
@@ -230,6 +230,12 @@ export default function SkyPanel() {
     setAdjustments((prev: any) => ({
       ...prev,
       aiPatches: (prev.aiPatches || []).filter((p: any) => p.patchType !== 'sky'),
+    }));
+
+  const toggleVisible = () =>
+    setAdjustments((prev: any) => ({
+      ...prev,
+      aiPatches: (prev.aiPatches || []).map((p: any) => (p.patchType === 'sky' ? { ...p, visible: !p.visible } : p)),
     }));
 
   const set = (patch: Partial<SkyOptions>) => setOptions((o) => ({ ...o, ...patch }));
@@ -259,6 +265,37 @@ export default function SkyPanel() {
         <Cloud size={18} />
         <h2 className="text-base font-medium">{t('sky.title', { defaultValue: 'Sky Replace' })}</h2>
       </div>
+
+      {existing && (
+        // The sky in the edit, as a mask row: hide it or delete it here (it is
+        // also listed, with its opacity, in the Inpaint panel).
+        <div className="flex items-center gap-2 rounded-md bg-surface p-2">
+          <Cloud size={16} className="text-text-secondary" />
+          <span className={`flex-1 truncate ${(existing as any).visible === false ? 'text-text-secondary' : ''}`}>
+            {(existing as any).name}
+          </span>
+          <button
+            type="button"
+            onClick={toggleVisible}
+            title={
+              (existing as any).visible === false
+                ? t('sky.show', { defaultValue: 'Show the sky' })
+                : t('sky.hide', { defaultValue: 'Hide the sky' })
+            }
+            className="rounded p-1 text-text-secondary hover:bg-card-active hover:text-text-primary"
+          >
+            {(existing as any).visible === false ? <EyeOff size={16} /> : <Eye size={16} />}
+          </button>
+          <button
+            type="button"
+            onClick={remove}
+            title={t('sky.remove', { defaultValue: 'Remove the sky' })}
+            className="rounded p-1 text-text-secondary hover:bg-card-active hover:text-red-400"
+          >
+            <Trash2 size={16} />
+          </button>
+        </div>
+      )}
 
       <div className="flex items-center gap-2">
         <button
@@ -399,16 +436,6 @@ export default function SkyPanel() {
               ? t('sky.replace', { defaultValue: 'Replace sky' })
               : t('sky.apply', { defaultValue: 'Apply sky' })}
         </button>
-        {existing && (
-          <button
-            type="button"
-            onClick={remove}
-            title={t('sky.remove', { defaultValue: 'Remove the sky' })}
-            className="rounded-md bg-surface px-3 py-2 hover:bg-card-active"
-          >
-            <Trash2 size={14} />
-          </button>
-        )}
       </div>
     </div>
   );
