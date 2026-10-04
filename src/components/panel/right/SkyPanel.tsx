@@ -99,7 +99,8 @@ export default function SkyPanel() {
   const [look, setLook] = useState<string>('all');
   const [plate, setPlate] = useState<string | null>((existing as any)?.sky?.plate ?? null);
   const [options, setOptions] = useState<SkyOptions>((existing as any)?.sky?.options ?? AUTO);
-  const [status, setStatus] = useState<'finding' | 'ready' | 'none' | 'error'>('finding');
+  const [status, setStatus] = useState<'idle' | 'finding' | 'ready' | 'none' | 'error'>('idle');
+  const [coverage, setCoverage] = useState(0);
   const [message, setMessage] = useState('');
   const [preview, setPreview] = useState<string | null>(null);
   const [previewing, setPreviewing] = useState(false);
@@ -116,12 +117,22 @@ export default function SkyPanel() {
       .catch((e) => setMessage(String(e)));
   }, []);
 
-  // Find the sky once per photograph. The backend keeps it, so reopening
-  // the panel on the same photograph is instant.
+  // The sky is found when asked (the Detect sky button), not on opening the
+  // panel: it takes a few seconds and a photograph may have none. A new
+  // photograph or a new way up starts over.
+  const detection = useRef(0);
   useEffect(() => {
+    detection.current += 1;
+    setStatus('idle');
+    setMessage('');
+    setPreview(null);
+  }, [selectedImage?.path, adjustments.orientationSteps, adjustments.flipHorizontal, adjustments.flipVertical]);
+
+  const detect = () => {
     if (!selectedImage?.path || selectedImage.isVideo) return;
-    let cancelled = false;
+    const id = ++detection.current;
     setStatus('finding');
+    setMessage('');
     setPreview(null);
     invoke<{ coverage: number }>(Invokes.PrepareSkyReplacement, {
       path: selectedImage.path,
@@ -130,7 +141,8 @@ export default function SkyPanel() {
       flipVertical: adjustments.flipVertical ?? false,
     })
       .then((r) => {
-        if (cancelled) return;
+        if (id !== detection.current) return;
+        setCoverage(r.coverage);
         if (r.coverage < 0.005) {
           setStatus('none');
           setMessage(t('sky.noSky', { defaultValue: 'There is almost no sky in this photograph to replace.' }));
@@ -139,15 +151,11 @@ export default function SkyPanel() {
         }
       })
       .catch((e) => {
-        if (cancelled) return;
+        if (id !== detection.current) return;
         setStatus('error');
         setMessage(String(e));
       });
-    return () => {
-      cancelled = true;
-    };
-    // Orientation changes which way is up for the sky model.
-  }, [selectedImage?.path, adjustments.orientationSteps, adjustments.flipHorizontal, adjustments.flipVertical]);
+  };
 
   // Live preview, debounced; a late answer never overwrites a newer one.
   useEffect(() => {
@@ -241,12 +249,29 @@ export default function SkyPanel() {
         <h2 className="text-base font-medium">{t('sky.title', { defaultValue: 'Sky Replace' })}</h2>
       </div>
 
-      {status === 'finding' && (
-        <p className="flex items-center gap-2 text-text-secondary">
-          <Loader2 size={14} className="animate-spin" />
-          {t('sky.finding', { defaultValue: 'Finding the sky…' })}
-        </p>
-      )}
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={detect}
+          disabled={status === 'finding'}
+          className="flex items-center gap-2 rounded-md bg-accent px-3 py-1.5 text-button-text hover:opacity-90 disabled:opacity-60"
+        >
+          {status === 'finding' ? <Loader2 size={14} className="animate-spin" /> : <Cloud size={14} />}
+          {status === 'finding'
+            ? t('sky.finding', { defaultValue: 'Finding the sky…' })
+            : status === 'idle'
+              ? t('sky.detect', { defaultValue: 'Detect sky' })
+              : t('sky.detectAgain', { defaultValue: 'Detect again' })}
+        </button>
+        {status === 'ready' && (
+          <span className="text-xs text-text-secondary">
+            {t('sky.found', {
+              defaultValue: 'Sky found: {{percent}}% of the photo',
+              percent: Math.round(coverage * 100),
+            })}
+          </span>
+        )}
+      </div>
       {(status === 'none' || status === 'error' || message) && status !== 'finding' && (
         <p role="alert" className="text-text-secondary">
           {message}
@@ -260,7 +285,9 @@ export default function SkyPanel() {
           <div className="flex aspect-[3/2] items-center justify-center text-text-secondary">
             {status === 'ready'
               ? t('sky.pick', { defaultValue: 'Pick a sky below' })
-              : t('sky.waiting', { defaultValue: 'Preparing…' })}
+              : status === 'finding'
+                ? t('sky.waiting', { defaultValue: 'Preparing…' })
+                : t('sky.detectFirst', { defaultValue: 'Detect the sky to start' })}
           </div>
         )}
         {previewing && preview && <Loader2 size={16} className="absolute right-2 top-2 animate-spin" />}

@@ -115,8 +115,11 @@ pub async fn list_sky_plates(app_handle: tauri::AppHandle) -> Result<Vec<SkyPlat
                 .map_err(|e| format!("The sky library is not installed ({e})"))?,
         )
         .map_err(|e| format!("The sky library index is unreadable: {e}"))?;
-        let thumbs = dir.join(".thumbs");
+        // Not a hidden folder: the web view may only load files outside
+        // hidden folders (which keeps it out of the likes of ~/.ssh).
+        let thumbs = dir.join("thumbnails");
         std::fs::create_dir_all(&thumbs).map_err(|e| e.to_string())?;
+        let _ = std::fs::remove_dir_all(dir.join(".thumbs"));
         use rayon::prelude::*;
         let plates = library
             .plates
@@ -199,13 +202,23 @@ pub async fn prepare_sky_replacement(
     let session = registry
         .get_session(&model.manifest.id, None)
         .map_err(|e| e.to_string())?;
+    let name = std::path::Path::new(&path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    log::info!(
+        "sky: detecting in {name} (turns {orientation_steps}, flips {flip_horizontal}/{flip_vertical})"
+    );
     let found = tauri::async_runtime::spawn_blocking(move || {
         crate::scene_masks::sky_mask_scene(&for_mask, &session, o)
     })
     .await
     .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())?
-    .ok_or("No sky was found in this photograph.")?;
+    .ok_or(
+        "No sky was found in this photograph. If the photo is sideways or upside down, \
+         straighten it first (Crop & Rotate): the sky has to be at the top.",
+    )?;
     let base = if is_raw {
         let rgb = image.to_rgb32f();
         RgbImage::from_fn(rgb.width(), rgb.height(), |x, y| {
