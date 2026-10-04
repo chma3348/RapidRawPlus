@@ -281,8 +281,9 @@ pub async fn preview_sky_replacement(
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<String, String> {
-    let (base, alpha, gamma, plate_image, look) =
-        session_inputs(&state, &app_handle, &plate, true)?;
+    log::info!("sky: preview with {plate}");
+    let (base, alpha, gamma, plate_image, look) = session_inputs(&state, &app_handle, &plate, true)
+        .inspect_err(|e| log::warn!("sky: preview refused: {e}"))?;
     tauri::async_runtime::spawn_blocking(move || {
         let plate_image = match &look {
             Some(look) => plate_in_raw_light(&plate_image, look),
@@ -325,8 +326,11 @@ pub async fn apply_sky_replacement(
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
+    log::info!("sky: applying {plate} at full size");
+    let started = std::time::Instant::now();
     let (base, alpha, gamma, plate_image, look) =
-        session_inputs(&state, &app_handle, &plate, false)?;
+        session_inputs(&state, &app_handle, &plate, false)
+            .inspect_err(|e| log::warn!("sky: apply refused: {e}"))?;
     tauri::async_runtime::spawn_blocking(move || {
         let plate_image = match &look {
             Some(look) => plate_in_raw_light(&plate_image, look),
@@ -344,6 +348,14 @@ pub async fn apply_sky_replacement(
     })
     .await
     .map_err(|e| e.to_string())?
+    .inspect(|patch| {
+        log::info!(
+            "sky: applied in {:.1?}, patch {} KB",
+            started.elapsed(),
+            patch.to_string().len() / 1024
+        )
+    })
+    .inspect_err(|e| log::warn!("sky: apply failed: {e}"))
 }
 
 type Inputs = (

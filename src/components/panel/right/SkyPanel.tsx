@@ -142,6 +142,7 @@ export default function SkyPanel() {
     })
       .then((r) => {
         if (id !== detection.current) return;
+        console.warn(`[sky] detected: ${Math.round(r.coverage * 100)}% sky`);
         setCoverage(r.coverage);
         if (r.coverage < 0.005) {
           setStatus('none');
@@ -152,6 +153,7 @@ export default function SkyPanel() {
       })
       .catch((e) => {
         if (id !== detection.current) return;
+        console.error(`[sky] detection failed: ${e}`);
         setStatus('error');
         setMessage(String(e));
       });
@@ -168,6 +170,7 @@ export default function SkyPanel() {
           if (id === request.current) setPreview(url);
         })
         .catch((e) => {
+          console.error(`[sky] preview failed: ${e}`);
           if (id === request.current) setMessage(String(e));
         })
         .finally(() => {
@@ -209,6 +212,7 @@ export default function SkyPanel() {
         }),
       );
     } catch (e) {
+      console.error(`[sky] apply failed: ${e}`);
       toast.error(`${t('sky.failed', { defaultValue: 'Could not replace the sky' })}: ${e}`);
     } finally {
       setApplying(false);
