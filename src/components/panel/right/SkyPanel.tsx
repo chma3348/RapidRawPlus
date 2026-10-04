@@ -3,7 +3,7 @@ import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { useTranslation } from 'react-i18next';
 import { v4 as uuidv4 } from 'uuid';
 import { toast } from 'react-toastify';
-import { Cloud, Eye, EyeOff, FlipHorizontal2, Loader2, Trash2 } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Cloud, Eye, EyeOff, FlipHorizontal2, Loader2, Trash2 } from 'lucide-react';
 import Slider from '../../ui/Slider';
 import { Invokes } from '../../ui/AppProperties';
 import { useEditorStore } from '../../../store/useEditorStore';
@@ -17,8 +17,11 @@ import { useEditorActions } from '../../../hooks/useEditorActions';
  * fill makes — so it can be hidden, faded or deleted from the Inpaint panel,
  * and every adjustment in the edit applies on top of it.
  *
- * The preview here is the photograph as shot with the new sky, before the
- * edit's adjustments; the canvas shows the finished result once applied.
+ * While choosing, the chosen sky shows on the photograph in the editor,
+ * through the whole edit, at about screen size; another thumbnail swaps it.
+ * Nothing goes into the edit until Apply, which makes the full-size one.
+ * (With "Show on photo" off, the small preview here shows the photograph as
+ * shot with the new sky instead.)
  */
 
 interface Plate {
@@ -82,6 +85,10 @@ const AUTO: SkyOptions = {
   edgeShift: -0.0008,
 };
 
+/** Thumbnails per page: two across, big enough to judge a sky by. */
+const PAGE = 8;
+const sameOptions = (a: SkyOptions | undefined, b: SkyOptions) => !!a && JSON.stringify(a) === JSON.stringify(b);
+
 const LOOKS = ['blue-clear', 'blue-clouds', 'mixed', 'overcast', 'stormy', 'sunset', 'twilight'];
 let plateCache: Plate[] | null = null;
 
@@ -107,7 +114,15 @@ export default function SkyPanel() {
   const [preview, setPreview] = useState<string | null>(null);
   const [previewing, setPreviewing] = useState(false);
   const [applying, setApplying] = useState(false);
+  const [page, setPage] = useState(0);
+  // Show the chosen sky on the photograph in the editor.
+  const [onPhoto, setOnPhoto] = useState(true);
+  const [photoPatch, setPhotoPatch] = useState<any>(null);
+  const [placing, setPlacing] = useState(false);
+  const [skyMask, setSkyMask] = useState<string | null>(null);
   const request = useRef(0);
+  const photoRequest = useRef(0);
+  const ownsOverride = useRef(false);
 
   useEffect(() => {
     if (plateCache) return;
@@ -124,11 +139,29 @@ export default function SkyPanel() {
   // photograph or a new way up starts over.
   const detection = useRef(0);
   useEffect(() => {
-    detection.current += 1;
+    const id = ++detection.current;
     setStatus('idle');
     setMessage('');
     setPreview(null);
-    setSkyOverlay(null);
+    setPhotoPatch(null);
+    setSkyMask(null);
+    if (!selectedImage?.path || selectedImage.isVideo) return;
+    // Coming back to the panel: a sky already found for this photo is picked
+    // up at once (nothing is looked for until Detect sky is pressed).
+    invoke<{ coverage: number; mask: string } | null>(Invokes.PrepareSkyReplacement, {
+      path: selectedImage.path,
+      orientationSteps: adjustments.orientationSteps ?? 0,
+      flipHorizontal: adjustments.flipHorizontal ?? false,
+      flipVertical: adjustments.flipVertical ?? false,
+      cachedOnly: true,
+    })
+      .then((r) => {
+        if (id !== detection.current || !r || r.coverage < 0.005) return;
+        setCoverage(r.coverage);
+        setSkyMask(r.mask);
+        setStatus('ready');
+      })
+      .catch(() => {});
   }, [selectedImage?.path, adjustments.orientationSteps, adjustments.flipHorizontal, adjustments.flipVertical]);
 
   const detect = () => {
@@ -137,15 +170,17 @@ export default function SkyPanel() {
     setStatus('finding');
     setMessage('');
     setPreview(null);
-    setSkyOverlay(null);
-    invoke<{ coverage: number; mask: string }>(Invokes.PrepareSkyReplacement, {
+    setPhotoPatch(null);
+    setSkyMask(null);
+    invoke<{ coverage: number; mask: string } | null>(Invokes.PrepareSkyReplacement, {
       path: selectedImage.path,
       orientationSteps: adjustments.orientationSteps ?? 0,
       flipHorizontal: adjustments.flipHorizontal ?? false,
       flipVertical: adjustments.flipVertical ?? false,
+      cachedOnly: false,
     })
       .then((r) => {
-        if (id !== detection.current) return;
+        if (id !== detection.current || !r) return;
         console.warn(`[sky] detected: ${Math.round(r.coverage * 100)}% sky`);
         setCoverage(r.coverage);
         if (r.coverage < 0.005) {
@@ -153,7 +188,7 @@ export default function SkyPanel() {
           setMessage(t('sky.noSky', { defaultValue: 'There is almost no sky in this photograph to replace.' }));
         } else {
           setStatus('ready');
-          setSkyOverlay(r.mask);
+          setSkyMask(r.mask);
         }
       })
       .catch((e) => {
@@ -164,9 +199,94 @@ export default function SkyPanel() {
       });
   };
 
-  // Live preview, debounced; a late answer never overwrites a newer one.
+  // The applied sky, unchanged: the photograph already shows it.
+  const unchanged =
+    !!existing && (existing as any).sky?.plate === plate && sameOptions((existing as any).sky?.options, options);
+
+  // The chosen sky on the photograph, debounced; a late answer never
+  // overwrites a newer one.
   useEffect(() => {
-    if (status !== 'ready' || !plate) return;
+    const id = ++photoRequest.current;
+    if (status !== 'ready' || !plate || !onPhoto || unchanged) {
+      setPhotoPatch(null);
+      setPlacing(false);
+      return;
+    }
+    setPlacing(true);
+    const timer = window.setTimeout(() => {
+      // A new id each time: the editor sends a patch's pixels once per id.
+      const patchId = uuidv4();
+      invoke(Invokes.PreviewSkyOnPhoto, { plate, options, id: patchId })
+        .then((patchData) => {
+          if (id !== photoRequest.current) return;
+          setPhotoPatch({
+            id: patchId,
+            name: 'Sky (preview)',
+            isLoading: false,
+            invert: false,
+            prompt: '',
+            subMasks: [],
+            visible: true,
+            opacity: (existing as any)?.opacity ?? 100,
+            feather: 0,
+            patchType: 'sky',
+            sky: { plate, options },
+            patchData,
+          });
+        })
+        .catch((e) => {
+          console.error(`[sky] preview on photo failed: ${e}`);
+          if (id === photoRequest.current) setMessage(String(e));
+        })
+        .finally(() => {
+          if (id === photoRequest.current) setPlacing(false);
+        });
+    }, 200);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [plate, options, status, onPhoto, unchanged]);
+
+  // Show it through the edit without changing the edit: the editor renders
+  // this instead (as it does for a LUT being tried), and saves nothing.
+  useEffect(() => {
+    const { setEditor } = useEditorStore.getState();
+    if (photoPatch) {
+      ownsOverride.current = true;
+      setEditor({
+        previewOverride: {
+          ...adjustments,
+          aiPatches: [...(adjustments.aiPatches || []).filter((p: any) => p.patchType !== 'sky'), photoPatch],
+        },
+      });
+    } else if (ownsOverride.current) {
+      ownsOverride.current = false;
+      setEditor({ previewOverride: null });
+    }
+  }, [photoPatch, adjustments]);
+
+  // The detected sky in red, until a sky is chosen to look at on the photo.
+  useEffect(() => {
+    setSkyOverlay(status === 'ready' && !(plate && onPhoto) && !existing ? skyMask : null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status, plate, onPhoto, existing, skyMask]);
+
+  // Leaving the panel leaves the photograph as the edit has it.
+  useEffect(
+    () => () => {
+      setSkyOverlay(null);
+      if (ownsOverride.current) {
+        ownsOverride.current = false;
+        useEditorStore.getState().setEditor({ previewOverride: null });
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+
+  // The small preview here, when not shown on the photo; debounced, a late
+  // answer never overwrites a newer one.
+  useEffect(() => {
+    if (status !== 'ready' || !plate || onPhoto) return;
     const id = ++request.current;
     setPreviewing(true);
     const timer = window.setTimeout(() => {
@@ -183,7 +303,7 @@ export default function SkyPanel() {
         });
     }, 120);
     return () => window.clearTimeout(timer);
-  }, [plate, options, status]);
+  }, [plate, options, status, onPhoto]);
 
   const apply = async () => {
     if (!plate) return;
@@ -207,12 +327,18 @@ export default function SkyPanel() {
         sky: { plate, options },
         patchData,
       };
+      // The edit itself now has the sky: stop showing the stand-in first, so
+      // the edit is rendered and saved as it is.
+      photoRequest.current += 1;
+      setPhotoPatch(null);
+      if (ownsOverride.current) {
+        ownsOverride.current = false;
+        useEditorStore.getState().setEditor({ previewOverride: null });
+      }
       setAdjustments((prev: any) => ({
         ...prev,
         aiPatches: [...(prev.aiPatches || []).filter((p: any) => p.patchType !== 'sky'), patch],
       }));
-      // The red would hide the new sky; Detect again brings it back.
-      setSkyOverlay(null);
       toast.success(
         t('sky.applied', {
           defaultValue: 'Sky applied. Hide or delete it at the top of this panel; fade it in the Inpaint panel.',
@@ -253,10 +379,22 @@ export default function SkyPanel() {
     />
   );
   const shown = look === 'all' ? plates : plates.filter((p) => p.look === look);
+  const pages = Math.max(1, Math.ceil(shown.length / PAGE));
+  const onPage = shown.slice(page * PAGE, page * PAGE + PAGE);
   const chosen = plates.find((p) => p.file === plate);
+  /** The next or previous sky in the list, turning the page with it. */
+  const step = (by: number) => {
+    if (!shown.length) return;
+    const at = shown.findIndex((p) => p.file === plate);
+    const next = at < 0 ? 0 : (at + by + shown.length) % shown.length;
+    setPlate(shown[next].file);
+    setPage(Math.floor(next / PAGE));
+  };
 
   if (!selectedImage || selectedImage.isVideo) {
-    return <p className="p-4 text-sm text-text-secondary">{t('sky.noPhoto', { defaultValue: 'Open a photograph.' })}</p>;
+    return (
+      <p className="p-4 text-sm text-text-secondary">{t('sky.noPhoto', { defaultValue: 'Open a photograph.' })}</p>
+    );
   }
 
   return (
@@ -326,27 +464,45 @@ export default function SkyPanel() {
         </p>
       )}
 
-      <div className="relative overflow-hidden rounded-md bg-surface">
-        {preview ? (
-          <img src={preview} alt="" className={`w-full ${previewing ? 'opacity-70' : ''}`} />
-        ) : (
-          <div className="flex aspect-[3/2] items-center justify-center text-text-secondary">
-            {status === 'ready'
-              ? t('sky.pick', { defaultValue: 'Pick a sky below' })
-              : status === 'finding'
-                ? t('sky.waiting', { defaultValue: 'Preparing…' })
-                : t('sky.detectFirst', { defaultValue: 'Detect the sky to start' })}
-          </div>
-        )}
-        {previewing && preview && <Loader2 size={16} className="absolute right-2 top-2 animate-spin" />}
-      </div>
+      <label className="flex items-center gap-2 text-xs text-text-secondary">
+        <input type="checkbox" checked={onPhoto} onChange={(e) => setOnPhoto(e.target.checked)} />
+        {t('sky.onPhoto', { defaultValue: 'Show on photo' })}
+        {placing && <Loader2 size={12} className="animate-spin" />}
+      </label>
+
+      {!onPhoto && (
+        <div className="relative overflow-hidden rounded-md bg-surface">
+          {preview ? (
+            <img src={preview} alt="" className={`w-full ${previewing ? 'opacity-70' : ''}`} />
+          ) : (
+            <div className="flex aspect-[3/2] items-center justify-center text-text-secondary">
+              {status === 'ready'
+                ? t('sky.pick', { defaultValue: 'Pick a sky below' })
+                : status === 'finding'
+                  ? t('sky.waiting', { defaultValue: 'Preparing…' })
+                  : t('sky.detectFirst', { defaultValue: 'Detect the sky to start' })}
+            </div>
+          )}
+          {previewing && preview && <Loader2 size={16} className="absolute right-2 top-2 animate-spin" />}
+        </div>
+      )}
+      {onPhoto && status !== 'ready' && (
+        <p className="text-xs text-text-secondary">
+          {status === 'finding'
+            ? t('sky.waiting', { defaultValue: 'Preparing…' })
+            : t('sky.detectFirst', { defaultValue: 'Detect the sky to start' })}
+        </p>
+      )}
 
       <div className="flex flex-wrap gap-1">
         {['all', ...LOOKS].map((l) => (
           <button
             key={l}
             type="button"
-            onClick={() => setLook(l)}
+            onClick={() => {
+              setLook(l);
+              setPage(0);
+            }}
             aria-pressed={look === l}
             className={`rounded-md px-2 py-1 text-xs ${look === l ? 'bg-accent text-button-text' : 'bg-surface hover:bg-card-active'}`}
           >
@@ -355,8 +511,8 @@ export default function SkyPanel() {
         ))}
       </div>
 
-      <div className="grid max-h-64 grid-cols-3 gap-1 overflow-y-auto">
-        {shown.map((p) => (
+      <div className="grid grid-cols-2 gap-1.5">
+        {onPage.map((p) => (
           <button
             key={p.file}
             type="button"
@@ -364,16 +520,64 @@ export default function SkyPanel() {
             aria-pressed={plate === p.file}
             title={p.title}
             disabled={status !== 'ready'}
-            className={`overflow-hidden rounded ${plate === p.file ? 'ring-2 ring-accent' : ''} disabled:opacity-50`}
+            className={`overflow-hidden rounded ${plate === p.file ? 'ring-2 ring-accent' : 'hover:opacity-90'} disabled:opacity-50`}
           >
-            <img src={convertFileSrc(p.thumbnail)} alt={p.title} loading="lazy" className="aspect-[3/2] w-full object-cover" />
+            <img
+              src={convertFileSrc(p.thumbnail)}
+              alt={p.title}
+              loading="lazy"
+              className="aspect-[3/2] w-full object-cover"
+            />
           </button>
         ))}
       </div>
+      <div className="flex items-center justify-between text-xs text-text-secondary">
+        <button
+          type="button"
+          onClick={() => setPage((n) => Math.max(0, n - 1))}
+          disabled={page === 0}
+          title={t('sky.prevPage', { defaultValue: 'Previous page' })}
+          className="rounded p-1 hover:bg-card-active disabled:opacity-30"
+        >
+          <ChevronLeft size={16} />
+        </button>
+        <span>
+          {t('sky.page', { defaultValue: 'Page {{n}} of {{total}}', n: Math.min(page, pages - 1) + 1, total: pages })}
+        </span>
+        <button
+          type="button"
+          onClick={() => setPage((n) => Math.min(pages - 1, n + 1))}
+          disabled={page >= pages - 1}
+          title={t('sky.nextPage', { defaultValue: 'Next page' })}
+          className="rounded p-1 hover:bg-card-active disabled:opacity-30"
+        >
+          <ChevronRight size={16} />
+        </button>
+      </div>
       {chosen && (
-        <p className="text-xs text-text-secondary">
-          {chosen.author} · {chosen.licence}
-        </p>
+        <div className="flex items-center gap-1 text-xs text-text-secondary">
+          <button
+            type="button"
+            onClick={() => step(-1)}
+            disabled={status !== 'ready'}
+            title={t('sky.prevSky', { defaultValue: 'Previous sky' })}
+            className="rounded p-1 hover:bg-card-active disabled:opacity-30"
+          >
+            <ChevronLeft size={14} />
+          </button>
+          <span className="flex-1 truncate text-center">
+            {chosen.title} · {chosen.author} · {chosen.licence}
+          </span>
+          <button
+            type="button"
+            onClick={() => step(1)}
+            disabled={status !== 'ready'}
+            title={t('sky.nextSky', { defaultValue: 'Next sky' })}
+            className="rounded p-1 hover:bg-card-active disabled:opacity-30"
+          >
+            <ChevronRight size={14} />
+          </button>
+        </div>
       )}
 
       <div className="flex gap-1">
@@ -426,7 +630,7 @@ export default function SkyPanel() {
         <button
           type="button"
           onClick={apply}
-          disabled={!plate || status !== 'ready' || applying}
+          disabled={!plate || status !== 'ready' || applying || unchanged}
           className="flex flex-1 items-center justify-center gap-2 rounded-md bg-accent px-3 py-2 text-button-text disabled:opacity-50"
         >
           {applying && <Loader2 size={14} className="animate-spin" />}

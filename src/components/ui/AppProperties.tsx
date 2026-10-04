@@ -93,6 +93,7 @@ export enum Invokes {
   PrepareSkyReplacement = 'prepare_sky_replacement',
   PreviewSkyReplacement = 'preview_sky_replacement',
   ApplySkyReplacement = 'apply_sky_replacement',
+  PreviewSkyOnPhoto = 'preview_sky_on_photo',
   LoadMetadata = 'load_metadata',
   LoadPresets = 'load_presets',
   LoadSettings = 'load_settings',

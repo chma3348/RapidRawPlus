@@ -1912,6 +1912,7 @@ pub fn run() {
             sky_commands::prepare_sky_replacement,
             sky_commands::preview_sky_replacement,
             sky_commands::apply_sky_replacement,
+            sky_commands::preview_sky_on_photo,
             file_management::read_exif_for_paths,
             file_management::list_images_in_dir,
             file_management::list_images_recursive,

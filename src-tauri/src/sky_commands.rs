@@ -34,6 +34,10 @@ use std::sync::Arc;
 use tauri::Manager;
 
 const PREVIEW_EDGE: u32 = 960;
+/// Long edge of the sky shown on the photograph itself while choosing: about
+/// what the editor's view shows, so switching skies stays quick. Apply makes
+/// the full-size one.
+const CANVAS_EDGE: u32 = 2560;
 const THUMB_EDGE: u32 = 320;
 /// The curve patches from float sources are stored through.
 const STORED_GAMMA: f32 = crate::ai_processing::LAMA_GAMMA;
@@ -49,6 +53,11 @@ pub struct SkySession {
     alpha: Arc<GrayImage>,
     preview_base: Arc<RgbImage>,
     preview_alpha: Arc<GrayImage>,
+    canvas_base: Arc<RgbImage>,
+    canvas_alpha: Arc<GrayImage>,
+    /// Ids of the latest skies shown on the photo, newest last: older ones'
+    /// pixels are dropped from the patch cache as more are tried.
+    shown_on_photo: Vec<String>,
     plate: Option<(String, Arc<DynamicImage>)>,
     /// For a RAW, how its light comes out on screen (to bring a plate in).
     look: Option<Arc<RawLook>>,
@@ -181,19 +190,24 @@ pub async fn prepare_sky_replacement(
     orientation_steps: u8,
     flip_horizontal: bool,
     flip_vertical: bool,
+    cached_only: Option<bool>,
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
-) -> Result<SkyPreparation, String> {
+) -> Result<Option<SkyPreparation>, String> {
     let orientation = (orientation_steps, flip_horizontal, flip_vertical);
     if let Some(s) = state.sky_session.lock().unwrap().as_ref()
         && s.path == path
         && s.orientation == orientation
     {
-        return Ok(SkyPreparation {
+        return Ok(Some(SkyPreparation {
             coverage: coverage(&s.alpha),
             raw: s.gamma,
             mask: mask_data_url(&s.alpha)?,
-        });
+        }));
+    }
+    // Reopening the panel: pick up a sky already found, never start looking.
+    if cached_only == Some(true) {
+        return Ok(None);
     }
     let (image, is_raw) = crate::get_full_image_for_processing(&state)?;
     // The mask model wants something that looks like a photograph, which a
@@ -268,6 +282,9 @@ pub async fn prepare_sky_replacement(
     let (pw, ph) = fit(w, h, PREVIEW_EDGE);
     let preview_base = imageops::resize(&base, pw, ph, imageops::FilterType::Triangle);
     let preview_alpha = imageops::resize(&found.mask, pw, ph, imageops::FilterType::Triangle);
+    let (cw, ch) = fit(w, h, CANVAS_EDGE);
+    let canvas_base = imageops::resize(&base, cw, ch, imageops::FilterType::Triangle);
+    let canvas_alpha = imageops::resize(&found.mask, cw, ch, imageops::FilterType::Triangle);
     let result = SkyPreparation {
         coverage: found.coverage,
         raw: is_raw,
@@ -281,10 +298,13 @@ pub async fn prepare_sky_replacement(
         alpha: Arc::new(found.mask),
         preview_base: Arc::new(preview_base),
         preview_alpha: Arc::new(preview_alpha),
+        canvas_base: Arc::new(canvas_base),
+        canvas_alpha: Arc::new(canvas_alpha),
+        shown_on_photo: Vec::new(),
         plate: None,
         look,
     });
-    Ok(result)
+    Ok(Some(result))
 }
 
 /// A quick look at a plate in the photograph, for choosing. Returns a JPEG
@@ -298,8 +318,9 @@ pub async fn preview_sky_replacement(
     app_handle: tauri::AppHandle,
 ) -> Result<String, String> {
     log::info!("sky: preview with {plate}");
-    let (base, alpha, gamma, plate_image, look) = session_inputs(&state, &app_handle, &plate, true)
-        .inspect_err(|e| log::warn!("sky: preview refused: {e}"))?;
+    let (base, alpha, gamma, plate_image, look) =
+        session_inputs(&state, &app_handle, &plate, Size::Panel)
+            .inspect_err(|e| log::warn!("sky: preview refused: {e}"))?;
     tauri::async_runtime::spawn_blocking(move || {
         let plate_image = match &look {
             Some(look) => plate_in_raw_light(&plate_image, look),
@@ -343,10 +364,45 @@ pub async fn apply_sky_replacement(
     app_handle: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     log::info!("sky: applying {plate} at full size");
+    sky_patch(plate, options, Size::Full, state, app_handle).await
+}
+
+/// The replacement at about screen size, as patch data, to show on the
+/// photograph in the editor (through the whole edit) while choosing. The
+/// engine scales a patch to the photograph, so it goes in like any other.
+#[tauri::command]
+pub async fn preview_sky_on_photo(
+    plate: String,
+    options: SkyReplaceOptions,
+    id: String,
+    state: tauri::State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    log::info!("sky: on the photo with {plate}");
+    // Keep the last few (one may still be on screen while the next renders).
+    const KEEP: usize = 3;
+    if let Some(session) = state.sky_session.lock().unwrap().as_mut() {
+        session.shown_on_photo.push(id);
+        let excess = session.shown_on_photo.len().saturating_sub(KEEP);
+        let old: Vec<String> = session.shown_on_photo.drain(..excess).collect();
+        let mut cache = state.patch_cache.lock().unwrap();
+        for id in old {
+            cache.remove(&id);
+        }
+    }
+    sky_patch(plate, options, Size::Canvas, state, app_handle).await
+}
+
+async fn sky_patch(
+    plate: String,
+    options: SkyReplaceOptions,
+    size: Size,
+    state: tauri::State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
     let started = std::time::Instant::now();
-    let (base, alpha, gamma, plate_image, look) =
-        session_inputs(&state, &app_handle, &plate, false)
-            .inspect_err(|e| log::warn!("sky: apply refused: {e}"))?;
+    let (base, alpha, gamma, plate_image, look) = session_inputs(&state, &app_handle, &plate, size)
+        .inspect_err(|e| log::warn!("sky: refused: {e}"))?;
     tauri::async_runtime::spawn_blocking(move || {
         let plate_image = match &look {
             Some(look) => plate_in_raw_light(&plate_image, look),
@@ -366,12 +422,12 @@ pub async fn apply_sky_replacement(
     .map_err(|e| e.to_string())?
     .inspect(|patch| {
         log::info!(
-            "sky: applied in {:.1?}, patch {} KB",
+            "sky: patch made in {:.1?}, {} KB",
             started.elapsed(),
             patch.to_string().len() / 1024
         )
     })
-    .inspect_err(|e| log::warn!("sky: apply failed: {e}"))
+    .inspect_err(|e| log::warn!("sky: patch failed: {e}"))
 }
 
 type Inputs = (
@@ -382,11 +438,21 @@ type Inputs = (
     Option<Arc<RawLook>>,
 );
 
+#[derive(Clone, Copy)]
+enum Size {
+    /// The panel's small preview.
+    Panel,
+    /// On the photograph in the editor, while choosing.
+    Canvas,
+    /// Applied.
+    Full,
+}
+
 fn session_inputs(
     state: &tauri::State<'_, AppState>,
     app: &tauri::AppHandle,
     plate: &str,
-    preview: bool,
+    size: Size,
 ) -> Result<Inputs, String> {
     // A plate name is a file in the library, never a path.
     if plate.contains('/') || plate.contains('\\') || plate.starts_with('.') {
@@ -407,23 +473,18 @@ fn session_inputs(
             image
         }
     };
-    Ok(if preview {
-        (
-            session.preview_base.clone(),
-            session.preview_alpha.clone(),
-            session.gamma,
-            plate_image,
-            session.look.clone(),
-        )
-    } else {
-        (
-            session.base.clone(),
-            session.alpha.clone(),
-            session.gamma,
-            plate_image,
-            session.look.clone(),
-        )
-    })
+    let (base, alpha) = match size {
+        Size::Panel => (&session.preview_base, &session.preview_alpha),
+        Size::Canvas => (&session.canvas_base, &session.canvas_alpha),
+        Size::Full => (&session.base, &session.alpha),
+    };
+    Ok((
+        base.clone(),
+        alpha.clone(),
+        session.gamma,
+        plate_image,
+        session.look.clone(),
+    ))
 }
 
 /// How a RAW's light, as the sky tool holds it (linear, scaled to fit,
