@@ -81,6 +81,31 @@ Yellow 0.35, Green 0.42, Aqua 0.51, Blue 0.78, Purple 0.66, Magenta 0.27
 than Lightroom's. The most vivid reds on the photos darken somewhat less
 than Lightroom's at Red Luminance -100 (-23 vs -42 L*).
 
+## Color Grading
+
+Lightroom's exports of each wheel at saturation 50 (Shadows hue 220,
+Midtones 40, Highlights 40, Global 200), measured on 16 photos as the
+colour shift (Δa*b*) by base lightness:
+
+| L* | 0-10 | 10-20 | 20-35 | 35-50 | 50-65 | 65-80 | 80-95 |
+|---|---|---|---|---|---|---|---|
+| Shadows: LR / before / now | 6.3 / 9.9 / 8.3 | 11.9 / 14.2 / 12.0 | 12.3 / 13.8 / 11.1 | 8.3 / 7.6 / 8.0 | 4.3 / 0.0 / 4.3 | 2.3 / 0 / 1.5 | 0.8 / 0 / 0.1 |
+| Midtones: LR / before / now | 0.1 / 0 / 0 | 1.0 / 0.3 / 0.5 | 4.2 / 2.0 / 3.0 | 10.7 / 8.1 / 10.5 | 13.0 / 11.9 / 14.6 | 8.9 / 2.1 / 12.0 | 3.0 / 0 / 1.5 |
+| Highlights: LR / before / now | 0 / 0 / 0.2 | 0.3 / 0 / 0.7 | 0.9 / 0 / 1.3 | 2.3 / 0 / 2.6 | 4.2 / 1.3 / 4.4 | 9.1 / 6.7 / 10.9 | 10.5 / 4.4 / 9.4 |
+| Global: LR / before / now | 3.7 / 5.8 / 3.9 | 9.1 / 14.0 / 11.6 | 12.4 / 15.8 / 15.2 | 15.4 / 14.7 / 15.9 | 16.7 / 12.2 / 14.1 | 15.5 / 8.3 / 15.2 | 11.0 / 4.1 / 10.4 |
+
+Lightroom's wheels overlap rather than share the tones: Shadows fades
+gently all the way up, Midtones reaches well into the brights, Highlights
+builds toward white. Ours stopped Shadows dead at L* 50 and barely tinted
+the brightest tones (our output rendering mutes colour there), so the
+global wheel faded out in the highlights. The tint is now raised in the
+brightest tones to land as strongly, and the global wheel tints the
+darkest tones less, as Lightroom's.
+
+Our wheel's hue is our own: Lightroom's lands about 12 degrees further
+round at the same number (its 40 is a little more golden than ours), which
+the Lightroom import accounts for.
+
 ## Re-running
 
     adobe_sweep "<Originals>" OUT 1500 NAME=bands.I.C:V+detail.color_noise:25 ...

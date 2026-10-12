@@ -5,6 +5,12 @@ const MIXER_SATURATE: f32 = 0.8;
 const MIXER_LIGHTEN: f32 = 0.55;
 const MIXER_DARKEN: f32 = 0.85;
 
+// The grading wheels' strength against Lightroom's (see grade's wheels).
+const GRADE_SHADOWS: f32 = 0.87;
+const GRADE_MIDTONES: f32 = 1.1;
+const GRADE_HIGHLIGHTS: f32 = 0.9;
+const GRADE_GLOBAL: f32 = 1.1;
+
 // Oklab's cone-space -> Lab matrix and its inverse. These describe Oklab
 // itself, so they hold whatever RGB basis the cone values came from; only the
 // RGB -> LMS half depends on the primaries.
@@ -493,15 +499,27 @@ fn grade(input:vec3<f32>, tonal:vec3<f32>, structure:vec3<f32>, key:f32, detail_
     // Wheels key off the tone-mapped luminance, the same image the custom
     // ranges select from and the one on screen: set exposure and contrast
     // first, then tint the shadows you can actually see.
+    // The wheels' tonal ranges and strength, as Lightroom's Color Grading
+    // (measured on its exports, by tone): shadows fade gently a long way up,
+    // midtones reach well into the brights, highlights build toward white;
+    // they overlap rather than share. The output rendering mutes colour in
+    // the brightest tones, so the tint is raised there to land as strongly.
     let pos=max(graded_y,0.0);
-    let shadow=1.0-smoothstep(0.02,0.4,pos);
-    let highlight=smoothstep(0.25,1.2,pos);
-    let mid=max(0.0,1.0-shadow-highlight);
-    let g=parameters.grading[0]+parameters.grading[1]*shadow+parameters.grading[2]*mid+parameters.grading[3]*highlight;
+    let shadow=exp(-pos/0.42);
+    let from_mid=log(max(pos,0.0001))-log(0.5);
+    let mid=exp(-from_mid*from_mid/select(1.4,1.1,from_mid>0.0));
+    let highlight=clamp(pos/1.2,0.0,1.0);
+    let bright=1.0+1.3*smoothstep(0.3,1.5,pos);
     // Tinting pure black would colour the parts of the frame that carry no
     // colour, so the chroma terms fade out there. Lightness must not: lifting
-    // black off zero is the main thing a shadow wheel is for.
+    // black off zero is the main thing a shadow wheel is for. The global
+    // wheel, like Lightroom's, tints the darkest tones less.
     let tint_gate=smoothstep(0.0,0.02,abs(lab.x));
-    lab+=vec3<f32>(g.z,g.x*tint_gate,g.y*tint_gate);
+    let global_gate=smoothstep(0.0,0.6,abs(lab.x))*GRADE_GLOBAL;
+    let g=parameters.grading[0]*vec4<f32>(global_gate,global_gate,1.0,1.0)
+        +parameters.grading[1]*shadow*GRADE_SHADOWS
+        +parameters.grading[2]*mid*GRADE_MIDTONES
+        +parameters.grading[3]*highlight*GRADE_HIGHLIGHTS;
+    lab+=vec3<f32>(g.z,g.x*tint_gate*bright,g.y*tint_gate*bright);
     return from_lab_work(lab);
 }
