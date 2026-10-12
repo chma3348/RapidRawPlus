@@ -1053,8 +1053,16 @@ fn process(
         let y = (graded[i].exp2() - LOG_FLOOR).max(0.0);
         match &opponent {
             Some([o1, o2]) => {
-                let rgb = rebuild(o1[i], o2[i], y, weights);
-                px[..3].copy_from_slice(&rgb);
+                match rebuild(o1[i], o2[i], y, weights) {
+                    Some(rgb) => px[..3].copy_from_slice(&rgb),
+                    // Its own colour at the new luminance instead.
+                    None => {
+                        let ratio = y / luminance[i];
+                        for v in px.iter_mut().take(3) {
+                            *v *= ratio;
+                        }
+                    }
+                }
             }
             None => {
                 let ratio = y / luminance[i];
@@ -1070,16 +1078,27 @@ fn process(
 /// Light with opponent colour (`o1` = red less green, `o2` = blue less
 /// green, in cube-root light) and luminance exactly `y`: Newton on the green
 /// root, which the luminance grows with wherever the channels are positive.
-fn rebuild(o1: f32, o2: f32, y: f32, weights: [f32; 3]) -> [f32; 3] {
+///
+/// None when it does not find one: a source whose luminance weighs blue
+/// negatively (wide-gamut primaries) does not always grow with the green
+/// root, and on a deep blue Newton then runs away (the chart's blue patches
+/// reached 1e19, then infinity in half-float storage).
+fn rebuild(o1: f32, o2: f32, y: f32, weights: [f32; 3]) -> Option<[f32; 3]> {
     let mut g = y.max(0.0).cbrt();
+    let luminance = |g: f32| {
+        let (r, gg, b) = ((g + o1).max(0.0), g.max(0.0), (g + o2).max(0.0));
+        weights[0] * r * r * r + weights[1] * gg * gg * gg + weights[2] * b * b * b
+    };
     for _ in 0..8 {
         let (r, gg, b) = ((g + o1).max(0.0), g.max(0.0), (g + o2).max(0.0));
-        let f = weights[0] * r * r * r + weights[1] * gg * gg * gg + weights[2] * b * b * b - y;
+        let f = luminance(g) - y;
         let d = 3.0 * (weights[0] * r * r + weights[1] * gg * gg + weights[2] * b * b) + 1e-9;
         g -= f / d;
     }
     let (r, gg, b) = ((g + o1).max(0.0), g.max(0.0), (g + o2).max(0.0));
-    [r * r * r, gg * gg * gg, b * b * b]
+    let rgb = [r * r * r, gg * gg * gg, b * b * b];
+    let found = rgb.iter().all(|v| v.is_finite()) && (luminance(g) - y).abs() <= 1e-3 * y + 1e-6;
+    found.then_some(rgb)
 }
 
 /// The haze colour: the mean of the pixels whose darkest channel is
@@ -1369,11 +1388,19 @@ impl<'a> Guide2<'a> {
         let inverse = (0..w * h)
             .into_par_iter()
             .map(|k| {
-                let v11 = s11[k] - m1[k] * m1[k] + eps;
-                let v22 = s22[k] - m2[k] * m2[k] + eps;
+                // Rounding can leave a flat patch's variance a hair below
+                // zero; with a near-noiseless photo's tiny eps that made the
+                // determinant zero or negative, and the chart's flat patches
+                // came out as NaN. A flat patch keeps its own colour.
+                let v11 = (s11[k] - m1[k] * m1[k]).max(0.) + eps;
+                let v22 = (s22[k] - m2[k] * m2[k]).max(0.) + eps;
                 let v12 = s12[k] - m1[k] * m2[k];
                 let det = v11 * v22 - v12 * v12;
-                [v22 / det, -v12 / det, v11 / det]
+                if det > 1e-20 && det.is_finite() {
+                    [v22 / det, -v12 / det, v11 / det]
+                } else {
+                    [0., 0., 0.]
+                }
             })
             .collect();
         Self {
@@ -1808,6 +1835,68 @@ mod tests {
         assert!(
             edge_contrast(&after, 8) > edge_contrast(&before, 8) * 0.8,
             "edge was blurred away"
+        );
+    }
+
+    #[test]
+    fn colour_noise_reduction_keeps_flat_patches_finite() {
+        // A chart: flat colour patches and black, no noise at all. The
+        // colour-guided filter's covariance is zero there.
+        let mut img = image(192, 192, |x, y| match (x / 96, y / 96) {
+            (0, 0) => [0.0, 0.0, 0.0],
+            (1, 0) => [0.6, 0.1, 0.4],
+            (0, _) => [0.2, 0.2, 0.2],
+            _ => [0.05, 0.3, 0.7],
+        });
+        let before = img.clone();
+        apply(
+            &mut img,
+            &Detail {
+                color_noise: 25.,
+                ..Detail::default()
+            },
+            SRGB_Y,
+            1.0,
+            Whole::default(),
+        );
+        assert!(img.as_raw().iter().all(|v| v.is_finite()));
+        // Inside a patch, away from its edges, nothing changes.
+        let (a, b) = (before.get_pixel(144, 48), img.get_pixel(144, 48));
+        for c in 0..3 {
+            assert!((a[c] - b[c]).abs() < 1e-3, "{a:?} vs {b:?}");
+        }
+    }
+
+    #[test]
+    fn colour_noise_reduction_survives_a_negative_blue_weight() {
+        // Wide-gamut source primaries weigh blue negatively in luminance; a
+        // deep blue (the chart's) once made the rebuild run away.
+        let wide = [0.274_118_5, 0.873_631_9, -0.147_750_4];
+        let mut img = image(128, 128, |x, _| {
+            if x < 64 {
+                [0.160_888_7, 0.331_543, 2.087_890_6]
+            } else {
+                [0.3, 0.3, 0.3]
+            }
+        });
+        apply(
+            &mut img,
+            &Detail {
+                color_noise: 25.,
+                ..Detail::default()
+            },
+            wide,
+            1.0,
+            Whole {
+                noise: Some(0.0),
+                airlight: None,
+            },
+        );
+        assert!(
+            img.pixels()
+                .all(|p| p.0.iter().all(|v| v.is_finite() && v.abs() < 4.0)),
+            "{:?}",
+            img.get_pixel(32, 64)
         );
     }
 
