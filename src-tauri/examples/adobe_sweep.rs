@@ -113,9 +113,20 @@ fn main() -> Result<()> {
             let mut edits = edits_for("neutral", 0.0)?;
             for setting in settings.split('+') {
                 let (key, v) = setting.split_once(':').context("KEY:VALUE")?;
+                // The colour mixer's bands and the grading wheels are fixed
+                // arrays: start them neutral, then a part like `bands.3.1`
+                // sets one entry.
+                for (array, rows) in [("bands", 8), ("grading", 4)] {
+                    if key.starts_with(&format!("{array}.")) && edits["v3"][array].is_null() {
+                        edits["v3"][array] = serde_json::json!(vec![[0.0, 0.0, 0.0]; rows]);
+                    }
+                }
                 let mut at = &mut edits["v3"];
                 for part in key.split('.') {
-                    at = &mut at[part];
+                    at = match part.parse::<usize>() {
+                        Ok(i) => &mut at[i],
+                        Err(_) => &mut at[part],
+                    };
                 }
                 *at = serde_json::json!(v.parse::<f64>()?);
             }

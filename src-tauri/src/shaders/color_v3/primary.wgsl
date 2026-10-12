@@ -1,4 +1,10 @@
 fn cube_root(v: vec3<f32>) -> vec3<f32> { return sign(v)*pow(abs(v),vec3<f32>(1.0/3.0)); }
+// The colour mixer's strength (stops per unit of a band's slider/100):
+// fitted to Lightroom's Color Mixer exports of the chart.
+const MIXER_SATURATE: f32 = 0.8;
+const MIXER_LIGHTEN: f32 = 0.55;
+const MIXER_DARKEN: f32 = 0.85;
+
 // Oklab's cone-space -> Lab matrix and its inverse. These describe Oklab
 // itself, so they hold whatever RGB basis the cone values came from; only the
 // RGB -> LMS half depends on the primaries.
@@ -427,15 +433,24 @@ fn grade(input:vec3<f32>, tonal:vec3<f32>, structure:vec3<f32>, key:f32, detail_
     let chroma=length(lab.yz);
     let angle=atan2(lab.z,lab.y);
     let protect=smoothstep(0.005,0.05,chroma/max(abs(lab.x),0.01));
-    let centers=array<f32,8>(29.0,53.0,110.0,142.0,195.0,264.0,300.0,328.0);
+    // The colour mixer's bands, centred where Lightroom's are (measured on
+    // its exports of the chart, mapped to this hue), each colour shared
+    // between the two bands either side of it, so a band at its centre acts
+    // in full and fades out at its neighbours' centres, as Lightroom's do.
+    let centers=array<f32,8>(20.0,42.0,99.0,138.0,166.0,249.0,319.0,338.0);
     var delta=vec3<f32>(0.0);
-    var total=0.0;
+    let a_deg=degrees(angle);
     for(var i=0u;i<8u;i++) {
-        let dist=abs(atan2(sin(angle-radians(centers[i])),cos(angle-radians(centers[i]))));
-        let w=1.0-smoothstep(0.0,radians(65.0),dist);
-        delta+=parameters.bands[i].xyz*w; total+=w;
+        let c0=centers[i];
+        let c1=centers[(i+1u)%8u];
+        let span=(c1-c0+360.0)%360.0;
+        let along=(a_deg-c0+720.0)%360.0;
+        if along<span {
+            let t=smoothstep(0.0,1.0,along/span);
+            delta=parameters.bands[i].xyz*(1.0-t)+parameters.bands[(i+1u)%8u].xyz*t;
+        }
     }
-    delta=delta/max(total,0.00001)*protect;
+    delta*=protect;
     // All ranges sample the same pre-selective color: order-independent edits.
     // Normalize overlaps so adding ranges cannot multiply their strength.
     var custom=vec3<f32>(0.0); var coverage=0.0;
@@ -461,8 +476,20 @@ fn grade(input:vec3<f32>, tonal:vec3<f32>, structure:vec3<f32>, key:f32, detail_
         vibrance=max(1.0-0.97*pow(-v,0.82)*(1.0-0.52*(1.0-muted)),0.0);
     }
     // Saturation itself is Resolve's now (resolve_saturation, above).
-    let c=chroma*vibrance*exp2(delta.y);
-    lab=vec3<f32>(lab.x*exp2(delta.z*0.5),cos(h)*c,sin(h)*c);
+    // Saturation and Luminance as strong as Lightroom's: -100 takes a
+    // band's colour away entirely, +100 nearly doubles it; darkening goes
+    // further than lightening.
+    // Measured on photos too: Lightroom moves a muted colour's lightness far
+    // less than a vivid one's (skin hardly moves where a red flower does),
+    // and takes only part of a muted colour's saturation away. Its hue
+    // shift does not depend on it.
+    let vivid=pow(min(chroma/0.17,1.0),1.3);
+    let sat_reach=0.62+0.3*vivid;
+    var band_chroma=exp2(delta.y*MIXER_SATURATE*sat_reach);
+    if delta.y<0.0 { band_chroma=max(1.0+delta.y*sat_reach,0.0); }
+    let band_lightness=select(MIXER_LIGHTEN,MIXER_DARKEN,delta.z<0.0)*vivid;
+    let c=chroma*vibrance*band_chroma;
+    lab=vec3<f32>(lab.x*exp2(delta.z*band_lightness),cos(h)*c,sin(h)*c);
     // Wheels key off the tone-mapped luminance, the same image the custom
     // ranges select from and the one on screen: set exposure and contrast
     // first, then tint the shadows you can actually see.

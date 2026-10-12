@@ -363,9 +363,21 @@ impl RenderPlan {
                 c.hue.to_radians(),
                 0.,
             ],
-            bands: c
-                .bands
-                .map(|b| [b[0].to_radians(), b[1] / 100., b[2] / 100., 0.]),
+            bands: std::array::from_fn(|i| {
+                let b = c.bands[i];
+                // Each band as strong as Lightroom's own (measured on its
+                // Color Mixer exports of the chart): its colour mixer weighs
+                // the bands differently, darkening blue and purple far more
+                // than aqua, for instance.
+                let saturation = b[1] / 100. * if b[1] > 0. { MIXER_SATURATE[i] } else { 1. };
+                let lightness = b[2] / 100.
+                    * if b[2] < 0. {
+                        MIXER_DARKEN[i]
+                    } else {
+                        MIXER_LIGHTEN[i]
+                    };
+                [b[0].to_radians(), saturation, lightness, 0.]
+            }),
             grading: c.grading.map(|g| {
                 let h = g[0].to_radians();
                 [
@@ -635,3 +647,10 @@ impl RenderPlan {
         hash.finalize().to_hex().to_string()
     }
 }
+
+/// Per band (red, orange, yellow, green, aqua, blue, purple, magenta), how
+/// much stronger or weaker than the shader's mixer strength Lightroom's is:
+/// raising saturation, darkening and lightening.
+const MIXER_SATURATE: [f32; 8] = [1.35, 1.71, 1.81, 2.5, 2.5, 2.0, 1.24, 1.0];
+const MIXER_DARKEN: [f32; 8] = [1.02, 0.96, 1.04, 1.0, 0.8, 1.42, 2.07, 0.8];
+const MIXER_LIGHTEN: [f32; 8] = [0.88, 1.28, 1.14, 1.18, 0.86, 1.15, 1.38, 0.82];
