@@ -113,6 +113,46 @@ Neither changes tone (under 1 L*). Lightroom's grain carries faint colour
 speckle in deep shadows and near white (ab 1.0 vs our 0.6); ours stays
 colourless.
 
+## Wave 4 (11 October): grain size and roughness, vignette
+
+From Lightroom's exports of Grain 50 at Size 50 (Roughness 0) and at
+Roughness 100, and Post-Crop Vignette at -100, -50, +50 and +100 (`Adobe
+references #2`, with Color NR 25, so compared against Lightroom's Color NR
+25 export).
+
+**Grain Size.** Lightroom's grain grows far less than in proportion to
+Size, and gets stronger as it grows. Ours doubled the grain at Size 50 and
+kept its strength. Now the cell grows as (Size / 25)^0.7 and the strength
+as (Size / 25)^0.18 (`GRAIN_SIZE_POWER`, `GRAIN_SIZE_STRENGTH`).
+
+| Grain 50, median of 16 | L* spread | grain frequency (cycles/px) |
+|---|---|---|
+| Size 25 (default), Lightroom / ours | 3.31 / 3.40 | 0.201 / 0.213 |
+| Size 50, Lightroom / before / now | 5.44 / 4.80 / 5.44 | 0.173 / 0.136 / 0.165 |
+| Roughness 100, Lightroom / ours | 4.59 / 4.81 | 0.149 / 0.161 |
+
+Roughness already matched (strength, size and clumping at 8 and 24 px),
+so it is unchanged. Photo by photo, Lightroom's Size 50 strength varies
+more than ours (on the portrait DSC08016 it is weaker: 3.95 vs 5.25 L*),
+which this does not model.
+
+**Vignette: strength only, our look kept.** Lightroom's lightening
+vignette (its default Highlight Priority style) washes the shadows toward
+white (+70 L* in the darks at +50), which is not wanted here. Ours stays
+an exposure change, so lightened corners keep their colour and contrast.
+Only how far the midtones move was matched, by distance from the centre:
+
+| corners, stops on the midtones | -100 | -50 | +50 | +100 |
+|---|---|---|---|---|
+| Lightroom | -5.8 | -2.9 | +1.9 | +2.7 |
+| before | -4.2 | -1.3 | +1.0 | +2.2 |
+| now | -5.6 | -2.9 | +1.8 | +2.6 |
+
+Darkening is now nearly in proportion to the amount (before, -50 was a
+third of -100), and reaches a little further in. Lightroom's vignette is
+an ellipse that fits the frame (the middle of each edge darkens too); ours
+keeps its rounder shape.
+
 ## Re-running
 
 ```sh

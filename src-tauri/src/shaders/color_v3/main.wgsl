@@ -215,10 +215,26 @@ fn vignette(rgb: vec3<f32>, position: vec2<f32>, dims: vec2<f32>) -> vec3<f32> {
     let aspect = dims.y / dims.x;
     let reach = length(shaped * vec2<f32>(1.0, aspect)) / max(length(vec2<f32>(1.0, aspect)), 1e-4);
     let start = v.y * 0.6;
-    let falloff = pow(clamp((reach - start) / max(1.0 - start, 1e-4), 0.0, 1.0), 1.0 + v.w * 2.0);
-    let stops = v.x * (1.6 + 2.4 * abs(v.x));
+    // Lightroom's darkening reaches a little further into the frame than
+    // the previous engine's shape; its lightening does not.
+    let power = select(1.0, VIGNETTE_DARKEN_POWER, v.x < 0.0);
+    let falloff = pow(clamp((reach - start) / max(1.0 - start, 1e-4), 0.0, 1.0), power * (1.0 + v.w * 2.0));
+    // As strong as Lightroom's (measured on its exports, in stops on the
+    // midtones near the corners): darkening in proportion to the amount;
+    // lightening as far on the midtones, but still as exposure — its own
+    // lift washes the shadows toward white, which this deliberately does not.
+    var stops = v.x * (VIGNETTE_DARKEN + VIGNETTE_DARKEN_BEND * abs(v.x));
+    if v.x > 0.0 {
+        stops = v.x * (VIGNETTE_LIFT + VIGNETTE_LIFT_BEND * v.x);
+    }
     return rgb * exp2(stops * falloff);
 }
+
+const VIGNETTE_DARKEN: f32 = 4.88;
+const VIGNETTE_DARKEN_BEND: f32 = 1.34;
+const VIGNETTE_LIFT: f32 = 5.6;
+const VIGNETTE_LIFT_BEND: f32 = 0.6;
+const VIGNETTE_DARKEN_POWER: f32 = 0.9;
 
 // The previous engine's camera calibration, in the linear
 // sRGB primaries it was defined in: a hue matrix that leans each primary
@@ -314,6 +330,10 @@ fn grain_noise(p: vec2<f32>) -> f32 {
 // strength match Lightroom's at full resolution.
 const GRAIN_CELL: f32 = 0.00054;
 const GRAIN_STRENGTH: f32 = 35.2;
+// Size, measured against Lightroom's Size 50 (its default is 25): its grain
+// grows far less than in proportion, and gets stronger as it grows.
+const GRAIN_SIZE_POWER: f32 = 0.7;
+const GRAIN_SIZE_STRENGTH: f32 = 0.18;
 
 // Grain on the finished, display-encoded image, as Lightroom's is, measured
 // on its exports (tools/adobe_detail.py): sized relative to the photograph,
@@ -330,7 +350,7 @@ fn film_grain(encoded: vec3<f32>, position: vec2<f32>, dims: vec2<f32>) -> vec3<
     let scale = max(g.w, 1e-4);
     let short_full = min(dims.x, dims.y) / scale;
     // Cell size in full-resolution pixels, and on screen.
-    let cell = max(GRAIN_CELL * short_full * g.y, 0.25);
+    let cell = max(GRAIN_CELL * short_full * pow(max(g.y, 0.0), GRAIN_SIZE_POWER), 0.25);
     let cell_here = cell * scale;
     let shown = max(cell_here, 1.0);
     // A preview smaller than the photograph shows the grain averaged, as
@@ -338,7 +358,8 @@ fn film_grain(encoded: vec3<f32>, position: vec2<f32>, dims: vec2<f32>) -> vec3<
     // its per-pixel strength at 0.43 of the size, i.e. scale^0.62).
     let averaged = pow(min(scale, 1.0), 0.62);
     let coord = position / shown;
-    let strength = g.x * GRAIN_STRENGTH / sqrt(short_full) * averaged;
+    let strength = g.x * GRAIN_STRENGTH / sqrt(short_full) * averaged
+        * pow(max(g.y, 1e-3), GRAIN_SIZE_STRENGTH);
     let luma = max(dot(encoded, vec3<f32>(0.2126, 0.7152, 0.0722)), 0.0);
     let tones = smoothstep(0.0, 0.03, luma) * (1.0 - 0.12 * smoothstep(0.75, 1.0, luma));
     let fine = grain_noise(coord);
