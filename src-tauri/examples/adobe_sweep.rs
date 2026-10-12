@@ -131,6 +131,18 @@ fn main() -> Result<()> {
     let mut sources: Vec<PathBuf> = std::fs::read_dir(&source_dir)?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.is_file() && !p.file_name().unwrap().to_string_lossy().starts_with('.'))
+        // Edit files sit beside the photos.
+        .filter(|p| {
+            let ext = p.extension().map(|e| e.to_string_lossy().to_lowercase());
+            !matches!(ext.as_deref(), Some("dri" | "rrdata" | "rrexif" | "xmp"))
+        })
+        // ADOBE_SWEEP_ONLY=stem,stem renders just those photos.
+        .filter(|p| {
+            std::env::var("ADOBE_SWEEP_ONLY").map_or(true, |only| {
+                let stem = p.file_stem().unwrap().to_string_lossy().into_owned();
+                only.split(',').any(|o| o == stem)
+            })
+        })
         .collect();
     sources.sort();
     let context = gpu()?;

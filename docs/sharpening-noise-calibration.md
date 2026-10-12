@@ -132,17 +132,68 @@ within 0.04 at every scale (−100, finest: 0.73 vs 0.69).
   Lightroom knows the camera's noise profile. A scene full of real coloured
   points (the night city, DSC03545) reads to ours as noisier than it is, and
   gets more smoothing than Lightroom gives it.
-- **Measured only at 25.** Other Color NR amounts, its Detail and Smoothness,
-  luminance Noise Reduction (and its Detail and Contrast), and Sharpening
-  Radius away from 1.0 all follow Lightroom's documented behaviour but are not
-  yet fitted. The exports that would fit them are listed in the session notes:
-  Radius 0.5 and 2, Color NR Detail 100 and Smoothness 100, Noise Reduction
-  50, and 50 with Detail 100 and with Contrast 100.
+- **Still unmeasured:** Sharpening Detail and Masking away from 25/75 and
+  50, Luminance NR's Detail and Contrast, and Smoothness (its Lightroom
+  export changed too little to fit; ours is unchanged).
+- **Very high ISO.** On the ISO 12800 portrait Lightroom's Noise Reduction
+  50 smooths skin much more than ours (finest detail kept 0.34 vs 0.50).
+  Making ours follow each photo's noise was tried and barely helped. Our
+  noise there starts out different too (the demosaic: finer, more
+  maze-like than Lightroom's).
+- **Sharpened noise colour.** On that portrait, sharpened noise reads as
+  pale yellow and dark red speckles in ours, orange grain in Lightroom's:
+  ours sharpens before the colour rendering, Lightroom's after.
 - **Sharpening 80 is slightly under** Lightroom on the brightest fine strands
   (fur sparkle).
 - **Cost.** A 33 MP RAW's full-resolution render goes from 0.7 s to 1.8 s with
   the defaults on (colour NR is most of it). The result is cached, so other
   sliders don't pay it again.
+
+## Wave 4 (11 October): Radius, Color NR and Noise Reduction
+
+Lightroom exports of Radius 0.5 and 2 (Sharpening 40, Masking 50), Color NR
+50 and 100, Color NR 25 with Detail 100 and with Smoothness 100, Noise
+Reduction 50, and its RAW defaults (Sharpening 40 + Color NR 25), in
+`Adobe references #2`. Most carry Color NR 25 (Lightroom's RAW default),
+so each was compared against Lightroom's Color NR 25 export, and ours
+against our Color NR 25 render, so it cancels.
+
+- **Radius** changes which size of detail is sharpened far more than how
+  hard. Ours only moved its bands, so 0.5 barely sharpened and 2 drew twice
+  Lightroom's halo. Now Radius 0.5 and 2 each have their own fitted band
+  amounts and limit (`R05`, `R2`), blended by log radius.
+- **Color NR above 25** removes about the same share of the colour noise in
+  Lightroom and counts more as noise; ours closed in on all of it. Now
+  the mixes stay near 25's and what counts as noise grows (`COLOUR_A50`,
+  `COLOUR_A100`).
+- **Color NR Detail** is how much is removed: at 100 Lightroom removes a
+  fifth as much, and colour detail stays (`COLOUR_D100`). Ours barely
+  changed with it.
+- **Noise Reduction (luminance)** was far too gentle on texture and
+  edges: now a smaller, stronger guided filter, mixed in (`LUMINANCE_50`).
+
+Full resolution, central 2400 px, median of 16 photos, finest-detail gain
+(sharpening) or what is kept (noise reduction):
+
+| | Lightroom | before | now |
+|---|---|---|---|
+| Radius 0.5 | 1.35 | 1.12 | 1.35 |
+| Radius 2 (halo, L*) | 1.34 (0.33) | 1.58 (0.69) | 1.35 (0.24) |
+| Color NR 50, noisy photos | 0.13 | 0.05 | 0.11 |
+| Color NR 100, noisy photos | 0.11 | 0.02 | 0.11 |
+| Color NR 25 Detail 100 | 0.65 | 0.24 | 0.76 |
+| Noise Reduction 50 | 0.71 | 0.89 | 0.73 |
+| Noise Reduction 50, flat areas | 0.42 | 0.55 | 0.44 |
+| Sharpening 40 + Color NR 25 | 1.58 | 1.64 | 1.64 |
+
+Judged on 100% and 300% crops (fur, leaves, the night street, the ISO
+12800 portrait): Radius 2's halos and Noise Reduction's smoothing now look
+like Lightroom's, except on the ISO 12800 portrait (see Limits).
+
+    ADOBE_SWEEP_CROP=2400 adobe_sweep "<Originals>" OUT 16384 NAME=detail.KEY:V+...
+    ... tools/fit_sharpen.py radius LR.json BASE
+    ... tools/fit_sharpen.py colour-more LR.json BASE
+    ... tools/fit_sharpen.py luminance LR.json BASE
 
 ## Re-running
 

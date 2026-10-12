@@ -228,9 +228,23 @@ impl Sharpen {
         // the kernel's shape and the limit move in proportion.
         let along = ((detail.sharpen_detail - 25.) / 50.).clamp(-0.5, 1.5);
         let strength = (detail.sharpening / 40.).powf(t::POWER);
+        // Radius was measured at 0.5, 1 and 2. Lightroom's changes which size
+        // of detail is sharpened far more than how hard: by log radius, the
+        // kernel and limit move by the difference Radius 0.5 or 2 makes, and
+        // on past 2 in proportion.
+        let (radius_amounts, radius_limit, toward) = {
+            let r = detail.sharpen_radius.max(0.5).log2();
+            if r < 0. {
+                (t::R05, t::R05_LIMIT, -r)
+            } else {
+                (t::R2, t::R2_LIMIT, r)
+            }
+        };
         let full: Vec<(f32, f32)> = (0..3)
             .map(|j| {
-                let shape = t::D25[j] + (t::D75[j] - t::D25[j]) * along;
+                let shape = t::D25[j]
+                    + (t::D75[j] - t::D25[j]) * along
+                    + (radius_amounts[j] - t::D25[j]) * toward;
                 (t::SIGMAS[j] * detail.sharpen_radius, shape * strength)
             })
             .collect();
@@ -239,7 +253,10 @@ impl Sharpen {
         } else {
             preview_bands(&full, scale)
         };
-        let limit = (t::D25_LIMIT.ln() + (t::D75_LIMIT.ln() - t::D25_LIMIT.ln()) * along).exp();
+        let limit = (t::D25_LIMIT.ln()
+            + (t::D75_LIMIT.ln() - t::D25_LIMIT.ln()) * along
+            + (radius_limit.ln() - t::D25_LIMIT.ln()) * toward)
+            .exp();
         let mask = (detail.sharpen_masking > 0.)
             .then(|| t::MASKING_50.map(|v| v * detail.sharpen_masking / 50.));
         Some(Self {
@@ -351,6 +368,8 @@ fn preview_bands(full: &[(f32, f32)], scale: f32) -> Vec<(f32, f32)> {
 struct LuminanceNr {
     radius: usize,
     eps: f32,
+    /// How much of the smoothed luminance is mixed in.
+    mix: f32,
     contrast: Option<(Gaussian, f32)>,
 }
 
@@ -382,25 +401,59 @@ impl ColourNr {
         if detail.color_noise <= 0. {
             return None;
         }
-        // Measured at Lightroom's 25 with Detail and Smoothness at 50. Beyond
-        // 25 what counts as noise grows with the square root of the amount
-        // and the mixes close on all of it; below, the mixes scale down.
-        // Detail raises the bar for colour to be kept as detail (lower keeps
-        // less); Smoothness widens the adaptive stage. Not yet measured
-        // against Lightroom away from 25 / 50 / 50.
-        let [radius, eps, mix, radius2, k, mix2, power] = super::sharpen_table::COLOUR_25;
+        // Measured at Lightroom's 25, 50 and 100 (Detail and Smoothness 50),
+        // and at Detail 100. Above 25 Lightroom removes about the same share
+        // of the colour noise and counts more as noise; below, the mixes
+        // scale down. Detail is how much is removed: at 100 a fifth as much,
+        // so colour detail stays. Smoothness widens the adaptive stage (its
+        // export changed too little to fit).
+        use super::sharpen_table as t;
+        let [radius, eps, mix, radius2, k, mix2, power] = t::COLOUR_25;
         let c = detail.color_noise / 25.;
-        let toward = |m: f32| if c <= 1. { m * c } else { 1. - (1. - m) / c };
-        let detail_factor = 2f32.powf((50. - detail.color_noise_detail) / 50.);
+        // By log amount: 25, 50, 100.
+        let (k_amount, mix_amount, mix2_amount) = if c <= 1. {
+            (1., mix * c, mix2 * c)
+        } else {
+            let at = c.log2().min(2.);
+            let (from, to, along) = if at <= 1. {
+                ([1., mix, mix2], t::COLOUR_A50, at)
+            } else {
+                (t::COLOUR_A50, t::COLOUR_A100, at - 1.)
+            };
+            let lerp = |i: usize| from[i] + (to[i] - from[i]) * along;
+            (
+                (from[0].ln() + (to[0].ln() - from[0].ln()) * along).exp(),
+                lerp(1),
+                lerp(2),
+            )
+        };
+        let toward_detail = (detail.color_noise_detail - 50.) / 50.;
+        let [k_d100, mix_d100, mix2_d100] = t::COLOUR_D100;
+        let (k_detail, mix, mix2) = if toward_detail >= 0. {
+            (
+                k_d100.powf(toward_detail),
+                (mix_amount + (mix_d100 - mix) * toward_detail).clamp(0., 1.),
+                (mix2_amount + (mix2_d100 - mix2) * toward_detail).clamp(0., 1.),
+            )
+        } else {
+            // Below 50 (not measured): more of it goes, and more counts as
+            // noise, toward all of it at Detail 0.
+            let more = -toward_detail;
+            (
+                2f32.powf(more),
+                mix_amount + (1. - mix_amount) * more,
+                mix2_amount + (1. - mix2_amount) * more,
+            )
+        };
         let smooth = 0.5 + detail.color_noise_smoothness / 100.;
         Some(Self {
             radius: ((radius * scale).round() as usize).max(1),
-            eps: eps * detail_factor * detail_factor,
-            mix: toward(mix),
+            eps,
+            mix,
             adaptive: (
                 ((radius2 * smooth * scale).round() as usize).max(1),
-                k * c.max(1.).sqrt() * detail_factor,
-                toward(mix2),
+                k * k_amount * k_detail,
+                mix2,
                 power,
             ),
             guide_sigma: scale,
@@ -437,11 +490,17 @@ impl Plan {
             ),
             structure: band(detail.structure, STRUCTURE_SIGMA),
             luminance: (detail.luminance_noise > 0.).then(|| {
-                let s = detail.luminance_noise / 100.;
+                // Measured at Lightroom's 50 (Detail 50, Contrast 0): a guided
+                // filter by the log luminance itself. What counts as noise
+                // grows with the amount (its spread in proportion), and
+                // Detail lowers the bar (not yet measured away from 50).
+                let [radius, eps, mix] = super::sharpen_table::LUMINANCE_50;
+                let s = detail.luminance_noise / 50.;
                 LuminanceNr {
-                    radius: ((3.0 * scale).round() as usize).max(1),
-                    eps: (0.3 * s).powi(2) * 2f32.powf((50. - detail.luminance_noise_detail) / 25.)
+                    radius: ((radius * scale).round() as usize).max(1),
+                    eps: eps * s * s * 2f32.powf((50. - detail.luminance_noise_detail) / 25.)
                         + 1e-8,
+                    mix,
                     contrast: (detail.luminance_noise_contrast > 0.).then(|| {
                         (
                             Gaussian::new((1.5 * scale).max(MIN_SIGMA)),
@@ -813,6 +872,10 @@ fn process(
     let denoised = match &plan.luminance {
         Some(nr) => {
             let mut smooth = guided(&log, &log, width, height, nr.radius, nr.eps);
+            smooth
+                .par_iter_mut()
+                .zip(log.par_iter())
+                .for_each(|(s, l)| *s = l + (*s - l) * nr.mix);
             // Contrast: give back some of what was flattened, blurred first so
             // the pixel noise does not come back with it.
             if let Some((g, share)) = nr.contrast {
@@ -1682,7 +1745,10 @@ mod tests {
     #[test]
     fn a_larger_radius_reaches_further_from_the_edge() {
         let edge = |x: u32, _: u32| if x < 32 { [0.1f32; 3] } else { [0.4f32; 3] };
-        let reach = |radius: f32| {
+        // How far the bright side is lifted, summed over the first pixels
+        // past the step: Lightroom's larger radius sharpens wider detail, so
+        // its lift spreads further from the edge.
+        let lift = |radius: f32, from: u32, to: u32| {
             let mut img = image(64, 8, edge);
             apply(
                 &mut img,
@@ -1695,15 +1761,11 @@ mod tests {
                 1.0,
                 Whole::default(),
             );
-            // Overshoot four pixels from the step, on the bright side.
-            img.get_pixel(36, 4)[1] - 0.4
+            (from..to)
+                .map(|x| img.get_pixel(x, 4)[1] - 0.4)
+                .sum::<f32>()
         };
-        assert!(
-            reach(3.0) > reach(1.0) + 1e-3,
-            "{} vs {}",
-            reach(3.0),
-            reach(1.0)
-        );
+        assert!(lift(2.0, 33, 36) > lift(0.5, 33, 36) + 1e-3);
     }
 
     #[test]

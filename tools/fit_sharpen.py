@@ -29,6 +29,7 @@ corrected from real renders.
     uv run --with numpy --with scipy --with tifffile --with imagecodecs --with pillow \\
         tools/fit_sharpen.py fit LR.json BASE_DIR
     ... tools/fit_sharpen.py correct LR.json OURS.json BASE_DIR [DAMPING]
+    ... tools/fit_sharpen.py radius LR.json BASE_DIR
     ... tools/fit_sharpen.py write
 """
 import json
@@ -63,6 +64,10 @@ SETTINGS = {
     "d75": "adobe sharpening detail 75",
 }
 MASKING = "adobe sharpening masking 50"
+# Radius, measured at Sharpening 40 with Masking 50 (and Color NR 25, which
+# leaves lightness alone): each fitted with its own band amounts and limit
+# on bands at SIGMAS x Radius; the engine blends between them by log radius.
+RADII = {"r05": (0.5, "sharpening 40 radius 0.5"), "r2": (2.0, "sharpening 40 radius 2")}
 COLOUR = "adobe colour nr 25"
 FIT_CROP = 1600
 COLOUR_PHOTOS = 8
@@ -213,6 +218,103 @@ def fit(lr_path, base_dir):
     r = least_squares(f, [0.01, 0.02], bounds=([0, 1e-4], [0.5, 0.5]), diff_step=0.05, max_nfev=40)
     state["masking50"] = [float(r.x[0]), float(r.x[0] + abs(r.x[1]))]
     print(f"masking 50: thresholds {state['masking50']}  rms miss {np.sqrt(np.mean(r.fun ** 2)):.3f}")
+    json.dump(state, open(TARGETS, "w"), indent=1)
+    write(state)
+
+
+def fit_radius(lr_path, base_dir):
+    lr = json.load(open(lr_path))
+    state = json.load(open(TARGETS))
+    s = state["sharpen"]
+    tones, mask = np.array(s["tones"]), state["masking50"]
+    names = sorted(set.intersection(*[set(lr["settings"][f]["photos"]) for _, f in RADII.values()])
+                   & {f[:-len("__neutral_0.f32")] for f in os.listdir(base_dir) if f.endswith("__neutral_0.f32")})
+    photos = load_photos(base_dir, names)
+    x0 = list(s["d25"]["amounts"]) + [s["d25"]["limit"]]
+    for key, (radius, folder) in RADII.items():
+        want = target(lr, folder, names)
+        f = lambda p: residual(simulate(photos, lambda ph: sharpen(ph.log, np.array(p[:3]), p[3], radius=radius,
+                                                                  tones=tones, mask=mask)), want)
+        r = least_squares(f, x0, bounds=([-3, -3, -3, 0.01], [8, 8, 8, 3]), diff_step=0.05, max_nfev=40)
+        s[key] = {"amounts": r.x[:3].tolist(), "limit": float(r.x[3])}
+        print(f"radius {radius}: amounts {r.x[:3].round(3)} limit {r.x[3]:.3f}  rms miss {np.sqrt(np.mean(r.fun ** 2)):.3f}"
+              f"  (radius-1 bands would miss {np.sqrt(np.mean(f(x0) ** 2)):.3f})")
+    json.dump(state, open(TARGETS, "w"), indent=1)
+    write(state)
+
+
+LUMINANCE = "luminance nr 50"
+
+
+def luminance_nr(log, radius, eps, mix):
+    """detail.rs's luminance noise reduction: the log luminance through a
+    guided filter steered by itself, mixed in."""
+    return log + mix * (guided(log, log, radius, eps) - log)
+
+
+def fit_luminance(lr_path, base_dir):
+    """Noise Reduction 50 (Detail 50, Contrast 0): the guided filter's
+    radius (tried in turn), its regularisation and mix, against Lightroom's
+    export of it."""
+    lr = json.load(open(lr_path))
+    state = json.load(open(TARGETS))
+    e = lr["settings"][LUMINANCE]["photos"]
+    names = sorted(set(e) & {f[:-len("__neutral_0.f32")] for f in os.listdir(base_dir) if f.endswith("__neutral_0.f32")})
+    photos = load_photos(base_dir, names)
+    want = target(lr, LUMINANCE, names)
+    best = None
+    for radius in (2, 3, 4, 6):
+        f = lambda p: residual(simulate(photos, lambda ph: luminance_nr(ph.log, radius, p[0] ** 2, p[1])), want)
+        r = least_squares(f, [0.15, 1.0], bounds=([1e-3, 0.0], [2.0, 1.0]), diff_step=0.05, max_nfev=30)
+        miss = float(np.sqrt(np.mean(r.fun ** 2)))
+        now = float(np.sqrt(np.mean(f([0.15, 1.0]) ** 2))) if radius == 3 else None
+        print(f"radius {radius}: sqrt eps {r.x[0]:.4f} mix {r.x[1]:.3f}  rms miss {miss:.3f}" + (f" (as now: {now:.3f})" if now else ""))
+        if best is None or miss < best[0]:
+            best = (miss, radius, r.x)
+    _, radius, x = best
+    sim = simulate(photos, lambda ph: luminance_nr(ph.log, radius, x[0] ** 2, x[1]))
+    for name, sl in (("all", slice(0, 9)), ("flat", slice(9, 18)), ("edges", slice(27, 36)), ("tones", slice(36, 41))):
+        print(f"  {name:6} LR " + " ".join(f"{v:5.2f}" for v in want[sl]) + "\n         sim" + " ".join(f"{v:5.2f}" for v in sim[sl]))
+    state["luminance50"] = {"radius": radius, "eps": float(x[0] ** 2), "mix": float(x[1])}
+    json.dump(state, open(TARGETS, "w"), indent=1)
+    write(state)
+
+
+def fit_luminance_adaptive(lr_path, base_dir):
+    """Noise Reduction 50 per photo, its strength following the photo's
+    noise ((noise / 0.01) ^ power, noise being the photo's colour noise,
+    which the engine already estimates). Tried 2026-10-11: it barely helped
+    (rms 0.173 -> 0.148, power 0.12) and could not reach Lightroom on the ISO
+    12800 portrait either, so the pooled fit (`luminance`) is what is used."""
+    lr = json.load(open(lr_path))
+    state = json.load(open(TARGETS))
+    e = lr["settings"][LUMINANCE]["photos"]
+    names = sorted(set(e) & {f[:-len("__neutral_0.f32")] for f in os.listdir(base_dir) if f.endswith("__neutral_0.f32")})
+    photos = load_photos(base_dir, names)
+    noise = [chroma_noise(chroma_guide(ph[1])) for ph in colour_photos(base_dir, names)]
+    wants = []
+    for n in names:
+        a = e[n]["adobe"]
+        wants.append(np.concatenate([np.array([a["gain"]] + a["by_edge"], dtype=float).ravel(),
+                                     np.array([np.nan if v is None else v for v in a["by_tone"]], dtype=float)]))
+    radius = int(state["luminance50"]["radius"])
+
+    def f(p):
+        se, mix, power = p
+        rows = []
+        with ThreadPoolExecutor(8) as ex:
+            sims = list(ex.map(lambda i: photos[i].gains(luminance_nr(photos[i].log, radius,
+                                                                       (se * (noise[i] / 0.01) ** power) ** 2, mix)),
+                               range(len(photos))))
+        return np.concatenate([residual(sv, w) for sv, w in zip(sims, wants)])
+    l50 = state["luminance50"]
+    x0 = [np.sqrt(l50["eps"]), l50["mix"], 0.0]
+    r = least_squares(f, x0, bounds=([1e-3, 0.0, -1.0], [3.0, 1.0, 2.0]), diff_step=0.05, max_nfev=40)
+    print(f"sqrt eps {r.x[0]:.4f} mix {r.x[1]:.3f} power {r.x[2]:.3f}  rms miss {np.sqrt(np.mean(r.fun ** 2)):.3f}"
+          f" (not adaptive: {np.sqrt(np.mean(f(x0) ** 2)):.3f})")
+    for n, nz in zip(names, noise):
+        print(f"  {n[:13]:13} noise {nz:.4f}")
+    state["luminance50"] = {"radius": radius, "eps": float(r.x[0] ** 2), "mix": float(r.x[1]), "power": float(r.x[2])}
     json.dump(state, open(TARGETS, "w"), indent=1)
     write(state)
 
@@ -386,6 +488,80 @@ def fit_colour2(lr_path, base_dir):
     write(state)
 
 
+# Color NR away from 25 / 50 / 50, each against Lightroom's own export:
+# what Amount 50 and 100 change (how much counts as noise, how much of it
+# goes, how wide the adaptive stage reaches), what Detail 100 changes (how
+# readily colour is kept as detail) and Smoothness 100 (how wide).
+COLOUR_MORE = {
+    "a50": ("color nr 50", ["k", "mix", "mix2"]),
+    "a100": ("color nr 100", ["k", "mix", "mix2"]),
+    "d100": ("colour nr 25 detail 100", ["k", "mix", "mix2"]),
+    "s100": ("colour nr 25 smoothness 100", ["reach", "mix2"]),
+}
+
+
+def colour_photos(base_dir, names):
+    photos = []
+    for n in names:
+        p = f"{base_dir}/{n}__neutral_0.f32"
+        meta = json.load(open(p[:-4] + ".json"))
+        enc = np.fromfile(p, dtype="<f4").reshape(meta["height"], meta["width"], 3)
+        h, w = enc.shape[:2]
+        c = min(COLOUR_CROP, h, w)
+        enc = enc[(h - c) // 2:(h + c) // 2, (w - c) // 2:(w + c) // 2].astype(np.float64)
+        rgb = np.where(enc <= 0.04045, enc / 12.92, ((np.clip(enc, 0, None) + 0.055) / 1.055) ** 2.4)
+        photos.append((D.lab(rgb @ D.SRGB_TO_XYZ.T), rgb))
+    return photos
+
+
+def fit_colour_more(lr_path, base_dir):
+    """Multipliers on the Color NR 25 fit (eps, k, reach = radius2) and the
+    mixes themselves, per measured setting, per photo as fit_colour2."""
+    lr = json.load(open(lr_path))
+    state = json.load(open(TARGETS))
+    c = state["colour"]
+    base = [c["radius"], c["eps"], c["mix"], c["noise_k"], c["mix2"], c["noise_power"]]
+    have = {f[:-len("__neutral_0.f32")] for f in os.listdir(base_dir) if f.endswith("__neutral_0.f32")}
+    more = state.setdefault("colour_more", {})
+    for key, (folder, names_) in COLOUR_MORE.items():
+        e = lr["settings"][folder]["photos"]
+        names = sorted(set(e) & have)
+        wants = [np.array(e[n]["adobe"]["colour_gain"], dtype=float) for n in names]
+        photos = colour_photos(base_dir, names)
+        noise = [chroma_noise(chroma_guide(ph[1])) for ph in photos]
+        visible = [float(np.clip(np.sqrt(n / 0.005), 0.5, 3.0)) for n in noise]
+        start = {"k": 1.0, "eps": 1.0, "reach": 1.0, "mix": c["mix"], "mix2": c["mix2"]}
+
+        def params(x):
+            v = dict(zip(names_, x))
+            p = list(base)
+            p[1] *= v.get("eps", 1.0)
+            p[3] *= v.get("k", 1.0)
+            p[2] = v.get("mix", p[2])
+            p[4] = v.get("mix2", p[4])
+            return p, max(1, int(round(c["radius2"] * v.get("reach", 1.0))))
+
+        def sims(x):
+            p, r2 = params(x)
+            with ThreadPoolExecutor(8) as ex:
+                return list(ex.map(lambda ph: colour_gains(ph[0], colour_nr3(ph[1], p, r2)), photos))
+
+        def f(x):
+            return np.nan_to_num(np.concatenate([(s - w) * WEIGHTS * v for s, w, v in zip(sims(x), wants, visible)]))
+        lo = {"k": 0.1, "eps": 0.01, "reach": 0.3, "mix": 0.0, "mix2": 0.0}
+        hi = {"k": 20.0, "eps": 100.0, "reach": 4.0, "mix": 1.0, "mix2": 1.0}
+        x0 = [start[n] for n in names_]
+        r = least_squares(f, x0, bounds=([lo[n] for n in names_], [hi[n] for n in names_]), diff_step=0.05, max_nfev=30)
+        more[key] = dict(zip(names_, map(float, r.x)))
+        print(f"{key}: " + " ".join(f"{n} {v:.3f}" for n, v in more[key].items())
+              + f"  rms miss {np.sqrt(np.mean(r.fun ** 2)):.3f} (with the 25 fit: {np.sqrt(np.mean(f(x0) ** 2)):.3f})")
+        for n, s_, w in zip(names, sims(r.x), wants):
+            print(f"  {n[:12]:12} LR " + " ".join(f"{v:4.2f}" for v in w[[0, 2, 4, 6, 8]])
+                  + "   sim " + " ".join(f"{v:4.2f}" for v in s_[[0, 2, 4, 6, 8]]))
+    json.dump(state, open(TARGETS, "w"), indent=1)
+    write(state)
+
+
 def colour_gains(lab0, rgb1):
     lab1 = D.lab(rgb1 @ D.SRGB_TO_XYZ.T)
     g = []
@@ -453,7 +629,12 @@ def write(state=None):
     lines.append("/// sharpening is applied.")
     lines.append("pub const TONE_KNOTS: [f32; 5] = [" + ", ".join(f"{x:.4f}" for x in TONE_KNOTS) + "];")
     lines.append("pub const TONES: [f32; 5] = [" + ", ".join(f"{x:.4f}" for x in s["tones"]) + "];")
-    for key in ("d25", "d75"):
+    for key in ("d25", "d75", "r05", "r2"):
+        if key not in s:
+            continue
+        if key == "r05":
+            lines.append("/// At Radius 0.5 and 2 (Detail 25): the engine moves from Detail's")
+            lines.append("/// amounts and limit by the difference these make, by log radius.")
         a = s[key]["amounts"]
         lines.append(f"pub const {key.upper()}: [f32; 3] = [" + ", ".join(f"{x:.5f}" for x in a) + "];")
         lines.append(f"pub const {key.upper()}_LIMIT: f32 = {s[key]['limit']:.5f};")
@@ -471,6 +652,20 @@ def write(state=None):
         lines.append("/// to noise_k x noise x (noise / 0.01) ^ `noise_power`.")
         lines.append(f"pub const COLOUR_25: [f32; 7] = [{c['radius']:.4f}, {c['eps']:.6f}, {c['mix']:.4f}, "
                      f"{c['radius2']:.4f}, {c['noise_k']:.4f}, {c['mix2']:.4f}, {c['noise_power']:.4f}];")
+    l50 = state.get("luminance50")
+    if l50:
+        lines.append("/// Noise Reduction 50 (Detail 50, Contrast 0): the guided filter's radius")
+        lines.append("/// (full-resolution pixels), regularisation (log2 units squared) and mix.")
+        lines.append(f"pub const LUMINANCE_50: [f32; 3] = [{l50['radius']:.1f}, {l50['eps']:.6f}, {l50['mix']:.4f}];")
+    m = state.get("colour_more", {})
+    if m:
+        lines.append("/// Color NR away from 25 / 50 / 50, measured: at Amount 50 and 100 and")
+        lines.append("/// at Detail 100, [noise_k multiplier, mix, mix2].")
+        for key, order in (("a50", ["k", "mix", "mix2"]), ("a100", ["k", "mix", "mix2"]),
+                           ("d100", ["k", "mix", "mix2"]), ("s100", ["reach", "mix2"])):
+            if key in m:
+                vals = ", ".join(f"{m[key][o]:.4f}" for o in order)
+                lines.append(f"pub const COLOUR_{key.upper()}: [f32; {len(order)}] = [{vals}];")
     open(TABLE, "w").write("\n".join(lines) + "\n")
     import subprocess
     subprocess.run(["rustfmt", "--edition", "2024", TABLE], check=False)
@@ -480,6 +675,14 @@ def write(state=None):
 if __name__ == "__main__":
     if len(sys.argv) >= 4 and sys.argv[1] == "fit":
         fit(sys.argv[2], sys.argv[3])
+    elif len(sys.argv) >= 4 and sys.argv[1] == "luminance-adaptive":
+        fit_luminance_adaptive(sys.argv[2], sys.argv[3])
+    elif len(sys.argv) >= 4 and sys.argv[1] == "luminance":
+        fit_luminance(sys.argv[2], sys.argv[3])
+    elif len(sys.argv) >= 4 and sys.argv[1] == "colour-more":
+        fit_colour_more(sys.argv[2], sys.argv[3])
+    elif len(sys.argv) >= 4 and sys.argv[1] == "radius":
+        fit_radius(sys.argv[2], sys.argv[3])
     elif len(sys.argv) >= 4 and sys.argv[1] == "colour":
         fit_colour2(sys.argv[2], sys.argv[3])
     elif len(sys.argv) >= 2 and sys.argv[1] == "write":
