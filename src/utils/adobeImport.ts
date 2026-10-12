@@ -37,8 +37,13 @@ export const ADOBE_TUNING = {
   dehaze: 1,
   vibrance: 1,
   saturation: 1,
-  /** Colour mixer hue: degrees here per Adobe step (±100 → ±30°). */
-  hslHueDegrees: 0.3,
+  /**
+   * Colour mixer hue: degrees here per Adobe step, per band (red … magenta),
+   * measured on Lightroom's Color Mixer exports of the chart (2026-10-11).
+   * Saturation and Luminance are one-to-one: each band's strength was fitted
+   * to Lightroom's.
+   */
+  hslHueDegrees: [0.35, 0.45, 0.35, 0.42, 0.51, 0.78, 0.66, 0.27],
   hslSaturation: 1,
   hslLuminance: 1,
   /** Sharpening and noise reduction are Lightroom's own scales (fitted to its exports). */
@@ -50,6 +55,12 @@ export const ADOBE_TUNING = {
   /** For JPEG and TIFF, Adobe's temperature and tint are already relative. */
   jpegTemperature: 1,
   jpegTint: 1,
+  /**
+   * Colour grading: a Lightroom wheel's hue lands this many degrees further
+   * round than ours at the same number (measured, 2026-10-11). Saturation is
+   * one-to-one: the wheels' strength was fitted to Lightroom's.
+   */
+  gradingHueOffset: 12,
   /** The gamma Adobe's tone curve roughly works in. */
   curveGamma: 2.2,
   /** +1 if Adobe's crop angle turns the same way as ours, −1 if not. */
@@ -355,33 +366,26 @@ export function adobeToAdjustments(d: AdobeDevelop): Record<string, any> {
 
   v3.vibrance = clamp(n('Vibrance') * T.vibrance, -100, 100);
   v3.saturation = clamp(n('Saturation') * T.saturation, -100, 100);
-  v3.bands = HUES.map((h) => [
-    clamp(n(`HueAdjustment${h}`) * T.hslHueDegrees, -60, 60),
+  v3.bands = HUES.map((h, i) => [
+    clamp(n(`HueAdjustment${h}`) * T.hslHueDegrees[i], -60, 60),
     clamp(n(`SaturationAdjustment${h}`) * T.hslSaturation, -100, 100),
     clamp(n(`LuminanceAdjustment${h}`) * T.hslLuminance, -100, 100),
   ]);
 
-  // Colour grading (Lightroom 10 on), or the split toning before it.
-  const wheel = (prefix: string): number[] => [
-    clamp(n(`${prefix}Hue`), 0, 360),
-    clamp(n(`${prefix}Sat`), 0, 100),
-    clamp(n(`${prefix}Lum`), -100, 100),
+  // Colour grading. Lightroom 10 on keeps the shadow and highlight wheels'
+  // hue and saturation under the split-toning names it had before (only
+  // their luminance is ColorGrade…), and the midtone and global wheels as
+  // ColorGrade…; a file from before Lightroom 10 has only the split toning.
+  const wheel = (hue: string, sat: string, lum: string): number[] => {
+    const s = clamp(n(sat), 0, 100);
+    return [s ? (((n(hue) + T.gradingHueOffset) % 360) + 360) % 360 : 0, s, clamp(n(lum), -100, 100)];
+  };
+  v3.grading = [
+    wheel('ColorGradeGlobalHue', 'ColorGradeGlobalSat', 'ColorGradeGlobalLum'),
+    wheel('SplitToningShadowHue', 'SplitToningShadowSaturation', 'ColorGradeShadowLum'),
+    wheel('ColorGradeMidtoneHue', 'ColorGradeMidtoneSat', 'ColorGradeMidtoneLum'),
+    wheel('SplitToningHighlightHue', 'SplitToningHighlightSaturation', 'ColorGradeHighlightLum'),
   ];
-  if (['Global', 'Shadow', 'Midtone', 'Highlight'].some((w) => `ColorGrade${w}Hue` in d.values)) {
-    v3.grading = [
-      wheel('ColorGradeGlobal'),
-      wheel('ColorGradeShadow'),
-      wheel('ColorGradeMidtone'),
-      wheel('ColorGradeHighlight'),
-    ];
-  } else {
-    v3.grading = [
-      [0, 0, 0],
-      [clamp(n('SplitToningShadowHue'), 0, 360), clamp(n('SplitToningShadowSaturation'), 0, 100), 0],
-      [0, 0, 0],
-      [clamp(n('SplitToningHighlightHue'), 0, 360), clamp(n('SplitToningHighlightSaturation'), 0, 100), 0],
-    ];
-  }
 
   v3.curve = adobeCurveToKnots(d.curves.ToneCurvePV2012) ?? [...IDENTITY];
   v3.channel_curves = ['Red', 'Green', 'Blue'].map(
