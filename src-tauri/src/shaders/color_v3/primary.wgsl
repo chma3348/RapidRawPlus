@@ -450,7 +450,16 @@ fn grade(input:vec3<f32>, tonal:vec3<f32>, structure:vec3<f32>, key:f32, detail_
     }
     delta+=custom/max(1.0,coverage)*protect;
     let h=angle+parameters.color.z*protect+delta.x;
-    let vibrance=exp2(parameters.color.y*(1.0-smoothstep(0.0,0.4,chroma/max(abs(lab.x),0.01))));
+    // Vibrance, as strong as Lightroom's (measured on its exports by how
+    // colourful a pixel already was): muted colours move most. Raising it
+    // grows faster toward +100; lowering it fades muted colours nearly to
+    // grey at -100 while strong ones keep a quarter of theirs.
+    let muted=1.0-smoothstep(0.0,0.4,chroma/max(abs(lab.x),0.01));
+    let v=parameters.color.y;
+    var vibrance=exp2((0.7*v+0.6*v*v)*muted);
+    if v<0.0 {
+        vibrance=max(1.0-0.97*pow(-v,0.82)*(1.0-0.52*(1.0-muted)),0.0);
+    }
     // Saturation itself is Resolve's now (resolve_saturation, above).
     let c=chroma*vibrance*exp2(delta.y);
     lab=vec3<f32>(lab.x*exp2(delta.z*0.5),cos(h)*c,sin(h)*c);
