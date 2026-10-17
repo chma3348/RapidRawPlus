@@ -25,6 +25,7 @@ mod exif_processing;
 pub mod expansion;
 mod export_processing;
 mod file_management;
+pub mod fill_store;
 pub mod finder_tags;
 pub mod flat_field;
 mod flog2c;
@@ -1445,6 +1446,12 @@ pub fn run() {
                     }
         })
         .setup(|app| {
+            // Saved AI fill results past their age or size limits go at
+            // startup, in the background.
+            {
+                let app = app.handle().clone();
+                std::thread::spawn(move || fill_store::tidy(&app));
+            }
             #[cfg(any(windows, target_os = "linux"))]
             {
                 if let Some(arg) = std::env::args().nth(1) {
@@ -1913,6 +1920,9 @@ pub fn run() {
             sky_commands::preview_sky_replacement,
             sky_commands::apply_sky_replacement,
             sky_commands::preview_sky_on_photo,
+            fill_store::get_fill_results_usage,
+            fill_store::clear_fill_results,
+            fill_store::tidy_fill_results,
             file_management::read_exif_for_paths,
             file_management::list_images_in_dir,
             file_management::list_images_recursive,

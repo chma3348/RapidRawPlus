@@ -10,7 +10,6 @@ use image::{
     DynamicImage, GenericImageView, GrayImage, ImageFormat, Rgb, RgbImage, Rgba, RgbaImage,
 };
 use serde_json::Value;
-use tauri::Manager;
 
 use crate::ai_connector;
 use crate::ai_processing::{
@@ -2626,28 +2625,20 @@ fn safe_debug_id(id: &str) -> String {
     }
 }
 
+/// A fill's saved-results folder (see fill_store: kept for re-blending,
+/// tidied by age and size).
 fn ai_fill_debug_dir(app_handle: &tauri::AppHandle, debug_run_id: &str) -> Option<PathBuf> {
     if debug_run_id.is_empty() {
         return None;
     }
-    let dir = app_handle
-        .path()
-        .app_data_dir()
-        .ok()?
-        .join("ai-fill-debug")
-        .join(safe_debug_id(debug_run_id));
-    if let Err(e) = fs::create_dir_all(&dir) {
-        log::warn!(
-            "[fill] failed to create debug artifact dir {:?}: {}",
-            dir,
-            e
-        );
-        return None;
-    }
-    Some(dir)
+    crate::fill_store::run_dir(app_handle, &safe_debug_id(debug_run_id))
 }
 
 fn save_debug_rgba(app_handle: &tauri::AppHandle, debug_run_id: &str, name: &str, img: &RgbaImage) {
+    // Only what re-blending needs, unless diagnostics are on.
+    if debug_run_id.is_empty() || !crate::fill_store::keeps(app_handle, name) {
+        return;
+    }
     let Some(dir) = ai_fill_debug_dir(app_handle, debug_run_id) else {
         return;
     };
@@ -2658,6 +2649,10 @@ fn save_debug_rgba(app_handle: &tauri::AppHandle, debug_run_id: &str, name: &str
 }
 
 fn save_debug_gray(app_handle: &tauri::AppHandle, debug_run_id: &str, name: &str, img: &GrayImage) {
+    // Only what re-blending needs, unless diagnostics are on.
+    if debug_run_id.is_empty() || !crate::fill_store::keeps(app_handle, name) {
+        return;
+    }
     let Some(dir) = ai_fill_debug_dir(app_handle, debug_run_id) else {
         return;
     };
@@ -2668,6 +2663,10 @@ fn save_debug_gray(app_handle: &tauri::AppHandle, debug_run_id: &str, name: &str
 }
 
 fn save_debug_bytes(app_handle: &tauri::AppHandle, debug_run_id: &str, name: &str, bytes: &[u8]) {
+    // Only what re-blending needs, unless diagnostics are on.
+    if debug_run_id.is_empty() || !crate::fill_store::keeps(app_handle, name) {
+        return;
+    }
     let Some(dir) = ai_fill_debug_dir(app_handle, debug_run_id) else {
         return;
     };
@@ -2678,6 +2677,10 @@ fn save_debug_bytes(app_handle: &tauri::AppHandle, debug_run_id: &str, name: &st
 }
 
 fn save_debug_json(app_handle: &tauri::AppHandle, debug_run_id: &str, name: &str, value: &Value) {
+    // Only what re-blending needs, unless diagnostics are on.
+    if debug_run_id.is_empty() || !crate::fill_store::keeps(app_handle, name) {
+        return;
+    }
     let Some(dir) = ai_fill_debug_dir(app_handle, debug_run_id) else {
         return;
     };
@@ -4801,6 +4804,19 @@ pub async fn invoke_generative_replace_with_mask_def(
     } else {
         String::new()
     };
+    if !debug_run_id.is_empty() {
+        let image = state
+            .original_image
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|i| i.path.clone())
+            .unwrap_or_default();
+        crate::fill_store::register(&app_handle, &safe_debug_id(&debug_run_id), &image);
+        // Keep saved results within their age and size limits.
+        let app = app_handle.clone();
+        std::thread::spawn(move || crate::fill_store::tidy(&app));
+    }
     let debug_dir = if !debug_run_id.is_empty() {
         ai_fill_debug_dir(&app_handle, &debug_run_id).map(|dir| {
             log::info!("[fill] debug artifacts: {:?}", dir);
@@ -5268,12 +5284,8 @@ pub async fn reblend_replacement(
         .and_then(Value::as_str).filter(|s|!s.is_empty() && s.len()<160
             && s.bytes().all(|c|c.is_ascii_alphanumeric() || c==b'-'))
         .ok_or("This older result has no saved generation. Its existing blend has been left unchanged.")?.to_string();
-    let dir = app_handle
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?
-        .join("ai-fill-debug")
-        .join(&run_id);
+    let dir = crate::fill_store::find_run(&app_handle, &run_id).unwrap_or_default();
+    crate::fill_store::touch_run(&app_handle, &run_id);
     if !dir.join("replace-raw-output.png").is_file() {
         return Err("The saved AI output is unavailable. Your current result is unchanged; no generation was rerun.".into());
     }

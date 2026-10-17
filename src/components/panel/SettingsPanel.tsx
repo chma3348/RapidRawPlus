@@ -517,6 +517,13 @@ export default function SettingsPanel({
   const [clearMessage, setClearMessage] = useState('');
   const [isClearingCache, setIsClearingCache] = useState(false);
   const [cacheClearMessage, setCacheClearMessage] = useState('');
+  // Saved AI fill results (kept so a fill can be re-blended): their size,
+  // the limit and age they are kept to.
+  const [fillUsage, setFillUsage] = useState<{ bytes: number; runs: number } | null>(null);
+  const [isClearingFills, setIsClearingFills] = useState(false);
+  const [fillClearMessage, setFillClearMessage] = useState('');
+  const [fillLimitText, setFillLimitText] = useState(String(appSettings?.fillCacheLimitGb ?? 2));
+  const [fillDaysText, setFillDaysText] = useState(String(appSettings?.fillCacheDays ?? 30));
   const [isClearingAiTags, setIsClearingAiTags] = useState(false);
   const [aiTagsClearMessage, setAiTagsClearMessage] = useState('');
   const [isClearingTags, setIsClearingTags] = useState(false);
@@ -874,6 +881,52 @@ export default function SettingsPanel({
         setCacheClearMessage('');
       }, EXECUTE_TIMEOUT);
     }
+  };
+
+  useEffect(() => {
+    invoke<{ bytes: number; runs: number }>(Invokes.GetFillResultsUsage)
+      .then(setFillUsage)
+      .catch(() => setFillUsage(null));
+  }, []);
+
+  /** Save a fill-results setting, then apply it at once (a lower limit frees space now). */
+  const setFillSetting = async (key: 'fillCacheLimitGb' | 'fillCacheDays' | 'keepFillDiagnostics', value: any) => {
+    await onSettingsChange({ ...appSettings, [key]: value });
+    try {
+      setFillUsage(await invoke(Invokes.TidyFillResults));
+    } catch (err) {
+      console.error('Failed to tidy fill results:', err);
+    }
+  };
+
+  const executeClearFills = async () => {
+    setIsClearingFills(true);
+    setFillClearMessage(t('settings.data.statuses.clearingCache'));
+    try {
+      setFillUsage(await invoke(Invokes.ClearFillResults));
+      setFillClearMessage(t('settings.data.fillResultsCleared', { defaultValue: 'Saved AI fill results cleared.' }));
+    } catch (err: any) {
+      setFillClearMessage(`Error: ${err}`);
+    } finally {
+      setTimeout(() => {
+        setIsClearingFills(false);
+        setFillClearMessage('');
+      }, EXECUTE_TIMEOUT);
+    }
+  };
+
+  const handleClearFills = () => {
+    setConfirmModalState({
+      confirmText: t('settings.data.clearFillResultsButton', { defaultValue: 'Clear saved fill results' }),
+      confirmVariant: 'destructive',
+      isOpen: true,
+      message: t('settings.data.clearFillResultsMessage', {
+        defaultValue:
+          'Your photos keep every fill exactly as it is. Only re-blending an existing fill will need the fill run again.',
+      }),
+      onConfirm: executeClearFills,
+      title: t('settings.data.clearFillResultsTitle', { defaultValue: 'Clear saved AI fill results?' }),
+    });
   };
 
   const handleClearCache = () => {
@@ -2372,6 +2425,75 @@ export default function SettingsPanel({
                       isProcessing={isClearingCache}
                       message={cacheClearMessage}
                       title={t('settings.data.clearThumbnail')}
+                    />
+
+                    <DataActionItem
+                      buttonAction={handleClearFills}
+                      buttonText={t('settings.data.clearFillResultsButton', {
+                        defaultValue: 'Clear saved fill results',
+                      })}
+                      description={
+                        <Text as="span" variant={TextVariants.small}>
+                          {t('settings.data.fillResultsDesc', {
+                            defaultValue:
+                              "Each AI fill keeps its result so you can re-blend it without running it again. Your photos never need these: the finished fill is in each photo's edit. A photo's results are removed once it has not been opened for the number of days below, and the least recently used go first if all of them pass the size limit.",
+                          })}
+                          <span className="block mt-2 text-text-primary">
+                            {fillUsage
+                              ? t('settings.data.fillResultsUsage', {
+                                  defaultValue: 'Now using {{size}} for {{count}} fill(s).',
+                                  size:
+                                    fillUsage.bytes >= 1e9
+                                      ? `${(fillUsage.bytes / 1e9).toFixed(1)} GB`
+                                      : `${Math.round(fillUsage.bytes / 1e6)} MB`,
+                                  count: fillUsage.runs,
+                                })
+                              : t('settings.data.loading')}
+                          </span>
+                          <span className="flex flex-wrap items-center gap-3 mt-3">
+                            <label className="flex items-center gap-2">
+                              {t('settings.data.fillResultsLimit', { defaultValue: 'Size limit (GB)' })}
+                              <Input
+                                type="number"
+                                className="w-20"
+                                value={fillLimitText}
+                                onChange={(e: any) => setFillLimitText(e.target.value)}
+                                onBlur={() => {
+                                  const v = Number(fillLimitText);
+                                  if (Number.isFinite(v) && v > 0) setFillSetting('fillCacheLimitGb', v);
+                                }}
+                              />
+                            </label>
+                            <label className="flex items-center gap-2">
+                              {t('settings.data.fillResultsDays', { defaultValue: 'Remove after unused for (days)' })}
+                              <Input
+                                type="number"
+                                className="w-20"
+                                value={fillDaysText}
+                                onChange={(e: any) => setFillDaysText(e.target.value)}
+                                onBlur={() => {
+                                  const v = Math.round(Number(fillDaysText));
+                                  if (Number.isFinite(v) && v >= 1) setFillSetting('fillCacheDays', v);
+                                }}
+                              />
+                            </label>
+                          </span>
+                          <span className="block mt-3">
+                            <Switch
+                              checked={appSettings?.keepFillDiagnostics ?? false}
+                              id="keep-fill-diagnostics-toggle"
+                              label={t('settings.data.fillDiagnostics', {
+                                defaultValue: 'Keep diagnostic images too (for troubleshooting; large)',
+                              })}
+                              onChange={(checked) => setFillSetting('keepFillDiagnostics', checked)}
+                            />
+                          </span>
+                        </Text>
+                      }
+                      icon={<Trash2 size={16} className="mr-2" />}
+                      isProcessing={isClearingFills}
+                      message={fillClearMessage}
+                      title={t('settings.data.fillResults', { defaultValue: 'Saved AI fill results' })}
                     />
 
                     <DataActionItem

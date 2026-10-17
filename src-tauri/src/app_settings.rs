@@ -350,6 +350,15 @@ pub fn default_open_tree_sections() -> Vec<String> {
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
     pub last_root_path: Option<String>,
+    /// Saved AI fill results (kept for re-blending): the most to keep, in
+    /// GB, and how many days a photo's results last unused.
+    #[serde(default)]
+    pub fill_cache_limit_gb: Option<f64>,
+    #[serde(default)]
+    pub fill_cache_days: Option<u32>,
+    /// Keep every diagnostic image an AI fill makes (large).
+    #[serde(default)]
+    pub keep_fill_diagnostics: Option<bool>,
     #[serde(default)]
     pub root_folders: Vec<String>,
     #[serde(default)]
@@ -494,6 +503,9 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             last_root_path: None,
+            fill_cache_limit_gb: None,
+            fill_cache_days: None,
+            keep_fill_diagnostics: None,
             root_folders: Vec::new(),
             pinned_folders: Vec::new(),
             thumbnail_resolution: Some(720),

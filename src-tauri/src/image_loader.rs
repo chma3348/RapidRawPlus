@@ -621,6 +621,12 @@ pub async fn load_image(
 
     let (source_path, sidecar_path) = parse_virtual_path(&path);
     let source_path_str = source_path.to_string_lossy().to_string();
+    // This photo's saved AI fill results count as used now (theirs only).
+    {
+        let app = app_handle.clone();
+        let image = path.clone();
+        std::thread::spawn(move || crate::fill_store::touch_image(&app, &image));
+    }
 
     let metadata: ImageMetadata = crate::exif_processing::load_sidecar(&sidecar_path);
 
