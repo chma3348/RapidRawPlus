@@ -20,6 +20,7 @@ pub mod comfy_engine;
 pub mod convert;
 mod culling;
 mod denoising;
+pub mod engine_models;
 pub mod enhancement;
 mod exif_processing;
 pub mod expansion;
@@ -1923,6 +1924,12 @@ pub fn run() {
             fill_store::get_fill_results_usage,
             fill_store::clear_fill_results,
             fill_store::tidy_fill_results,
+            engine_models::list_engine_models,
+            engine_models::download_engine_model,
+            engine_models::cancel_engine_model_download,
+            engine_models::delete_engine_model,
+            engine_models::delete_other_engine_file,
+            engine_models::import_engine_models,
             file_management::read_exif_for_paths,
             file_management::list_images_in_dir,
             file_management::list_images_recursive,

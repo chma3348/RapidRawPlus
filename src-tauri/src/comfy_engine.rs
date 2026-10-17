@@ -654,7 +654,7 @@ pub async fn run_generative_fill(
 ) -> Result<Vec<u8>> {
     if !fill_files_present(app_handle, kind) {
         return Err(anyhow!(
-            "The selected fill model's files are missing from the engine's models folder."
+            "The selected fill model isn't downloaded. Download it in Settings → Model Library → Generative fill and upscaling models."
         ));
     }
     ensure_running(app_handle, &state.comfy_process).await?;
@@ -805,7 +805,7 @@ pub async fn run_free_generation(
 ) -> Result<Vec<u8>> {
     if !fill_files_present(app_handle, kind) {
         return Err(anyhow!(
-            "The selected fill model's files are missing from the engine's models folder."
+            "The selected fill model isn't downloaded. Download it in Settings → Model Library → Generative fill and upscaling models."
         ));
     }
     ensure_running(app_handle, &state.comfy_process).await?;
@@ -911,7 +911,7 @@ pub async fn run_seedvr2(
 ) -> Result<Vec<u8>> {
     if !seedvr2_model_present(app_handle, model_file) {
         return Err(anyhow!(
-            "SeedVR2 model weights are missing from the engine's models folder."
+            "The SeedVR2 upscaling model isn't downloaded. Download it in Settings → Model Library → Generative fill and upscaling models."
         ));
     }
     ensure_running(app_handle, &state.comfy_process).await?;

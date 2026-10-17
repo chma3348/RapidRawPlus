@@ -10,6 +10,7 @@ import Input from '../ui/Input';
 import Text from '../ui/Text';
 import { TextColors, TextVariants, TextWeights } from '../../types/typography';
 import { Invokes } from '../ui/AppProperties';
+import EngineModels from './EngineModels';
 
 interface LibraryModelInfo {
   id: string;
@@ -148,7 +149,11 @@ const ModelLibrary = () => {
     if (typeof selected === 'string') {
       setAddFile(selected);
       if (!addName) {
-        const stem = selected.split('/').pop()?.replace(/\.(onnx|pth|safetensors|ckpt)$/i, '') ?? '';
+        const stem =
+          selected
+            .split('/')
+            .pop()
+            ?.replace(/\.(onnx|pth|safetensors|ckpt)$/i, '') ?? '';
         setAddName(stem.replace(/[_-]+/g, ' ').trim());
       }
     }
@@ -194,7 +199,11 @@ const ModelLibrary = () => {
 
   const handleInstall = async (repo: RemoteModelRepo, file: RemoteModelFile) => {
     const key = `${repo.repoId}/${file.filename}`;
-    const stem = file.filename.split('/').pop()?.replace(/\.onnx$/i, '') ?? file.filename;
+    const stem =
+      file.filename
+        .split('/')
+        .pop()
+        ?.replace(/\.onnx$/i, '') ?? file.filename;
     setInstallingKey(key);
     setError(null);
     try {
@@ -251,14 +260,18 @@ const ModelLibrary = () => {
             {t('settings.modelLibrary.engineInstalled')}
           </Text>
         ) : (
-          <Button onClick={handleInstallEngine} disabled={engineInstalling || engineInstalled === null} className="shrink-0">
+          <Button
+            onClick={handleInstallEngine}
+            disabled={engineInstalling || engineInstalled === null}
+            className="shrink-0"
+          >
             {engineInstalling ? <Loader2 className="animate-spin mr-2" size={16} /> : null}
-            {engineInstalling
-              ? t('settings.modelLibrary.engineInstalling')
-              : t('settings.modelLibrary.engineInstall')}
+            {engineInstalling ? t('settings.modelLibrary.engineInstalling') : t('settings.modelLibrary.engineInstall')}
           </Button>
         )}
       </div>
+
+      {engineInstalled && <EngineModels />}
 
       <div className="flex items-center justify-between mb-4">
         <Text variant={TextVariants.heading}>{t('settings.modelLibrary.installedTitle')}</Text>
@@ -424,7 +437,11 @@ const ModelLibrary = () => {
       <div className="space-y-6">
         {grouped.map(({ task, items }) => (
           <div key={task}>
-            <Text variant={TextVariants.small} weight={TextWeights.semibold} className="uppercase tracking-wide mb-2 block">
+            <Text
+              variant={TextVariants.small}
+              weight={TextWeights.semibold}
+              className="uppercase tracking-wide mb-2 block"
+            >
               {taskLabel(task)}
             </Text>
             <div className="space-y-2">

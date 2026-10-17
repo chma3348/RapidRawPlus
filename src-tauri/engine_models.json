@@ -1,0 +1,164 @@
+[
+  {
+    "id": "flux-fill",
+    "name": "FLUX.1 Fill [dev] (Q8)",
+    "purpose": "The generative fill model",
+    "neededFor": [
+      "Generative fill (Flux)"
+    ],
+    "file": "unet/flux1-fill-dev-Q8_0.gguf",
+    "repo": "YarvixPA/FLUX.1-Fill-dev-GGUF",
+    "path": "flux1-fill-dev-Q8_0.gguf",
+    "sha256": "345ffd7acf39148e391133ae2a2fa7cc3f85e8dd0dbdb4636e760c3e7fe7952d",
+    "size": 12727035168,
+    "licence": "FLUX.1 [dev] Non-Commercial License",
+    "licenceUrl": "https://huggingface.co/black-forest-labs/FLUX.1-Fill-dev/blob/main/LICENSE.md",
+    "mustAccept": true
+  },
+  {
+    "id": "flux-t5",
+    "name": "T5-XXL text encoder (Q8)",
+    "purpose": "Reads the fill prompt for Flux",
+    "neededFor": [
+      "Generative fill (Flux)"
+    ],
+    "file": "clip/t5-v1_1-xxl-encoder-Q8_0.gguf",
+    "repo": "city96/t5-v1_1-xxl-encoder-gguf",
+    "path": "t5-v1_1-xxl-encoder-Q8_0.gguf",
+    "sha256": "9ec60f6028534b7fe5af439fcb535d75a68592a9ca3fcdeb175ef89e3ee99825",
+    "size": 5061584064,
+    "licence": "Apache 2.0",
+    "licenceUrl": "https://huggingface.co/city96/t5-v1_1-xxl-encoder-gguf",
+    "mustAccept": false
+  },
+  {
+    "id": "flux-clip-l",
+    "name": "CLIP-L text encoder",
+    "purpose": "Reads the fill prompt for Flux",
+    "neededFor": [
+      "Generative fill (Flux)"
+    ],
+    "file": "clip/clip_l.safetensors",
+    "repo": "comfyanonymous/flux_text_encoders",
+    "path": "clip_l.safetensors",
+    "sha256": "660c6f5b1abae9dc498ac2d21e1347d2abdb0cf6c0c0c8576cd796491d9a6cdd",
+    "size": 246144152,
+    "licence": "Apache 2.0",
+    "licenceUrl": "https://huggingface.co/comfyanonymous/flux_text_encoders",
+    "mustAccept": false
+  },
+  {
+    "id": "flux-vae",
+    "name": "Flux VAE",
+    "purpose": "Turns Flux's output into pixels",
+    "neededFor": [
+      "Generative fill (Flux)"
+    ],
+    "file": "vae/ae.safetensors",
+    "repo": "Comfy-Org/Lumina_Image_2.0_Repackaged",
+    "path": "split_files/vae/ae.safetensors",
+    "sha256": "afc8e28272cd15db3919bacdb6918ce9c1ed22e96cb12c4d5ed0fba823529e38",
+    "size": 335304388,
+    "licence": "Apache 2.0",
+    "licenceUrl": "https://huggingface.co/Comfy-Org/Lumina_Image_2.0_Repackaged",
+    "mustAccept": false
+  },
+  {
+    "id": "sdxl-base",
+    "name": "Stable Diffusion XL base",
+    "purpose": "The older generative fill model",
+    "neededFor": [
+      "Generative fill (SDXL)",
+      "Generative fill (SDXL + Fooocus)"
+    ],
+    "file": "checkpoints/sd_xl_base_1.0.safetensors",
+    "repo": "stabilityai/stable-diffusion-xl-base-1.0",
+    "path": "sd_xl_base_1.0.safetensors",
+    "sha256": "31e35c80fc4829d14f90153f4c74cd59c90b779f6afe05a74cd6120b893f7e5b",
+    "size": 6938078334,
+    "licence": "CreativeML Open RAIL++-M",
+    "licenceUrl": "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/blob/main/LICENSE.md",
+    "mustAccept": false
+  },
+  {
+    "id": "fooocus-patch",
+    "name": "Fooocus inpaint patch v2.6",
+    "purpose": "Makes SDXL better at filling",
+    "neededFor": [
+      "Generative fill (SDXL + Fooocus)"
+    ],
+    "file": "inpaint/inpaint_v26.fooocus.patch",
+    "repo": "lllyasviel/fooocus_inpaint",
+    "path": "inpaint_v26.fooocus.patch",
+    "sha256": "f8657a025104e22d70f9c060635d8e8c2196f433871a2f68dc40abd2171f0d59",
+    "size": 1323362033,
+    "licence": "OpenRAIL",
+    "licenceUrl": "https://huggingface.co/lllyasviel/fooocus_inpaint",
+    "mustAccept": false
+  },
+  {
+    "id": "fooocus-head",
+    "name": "Fooocus inpaint head",
+    "purpose": "Part of the Fooocus patch",
+    "neededFor": [
+      "Generative fill (SDXL + Fooocus)"
+    ],
+    "file": "inpaint/fooocus_inpaint_head.pth",
+    "repo": "lllyasviel/fooocus_inpaint",
+    "path": "fooocus_inpaint_head.pth",
+    "sha256": "32f7f838e0c6d8f13437ba8411e77a4688d77a2e34df8857e4ef4d51f6b97692",
+    "size": 52602,
+    "licence": "OpenRAIL",
+    "licenceUrl": "https://huggingface.co/lllyasviel/fooocus_inpaint",
+    "mustAccept": false
+  },
+  {
+    "id": "seedvr2-3b",
+    "name": "SeedVR2 3B",
+    "purpose": "AI upscaling (smaller, faster)",
+    "neededFor": [
+      "AI upscale (SeedVR2 3B)"
+    ],
+    "file": "SEEDVR2/seedvr2_ema_3b_fp16.safetensors",
+    "repo": "numz/SeedVR2_comfyUI",
+    "path": "seedvr2_ema_3b_fp16.safetensors",
+    "sha256": "2fd0e03a3dad24e07086750360727ca437de4ecd456f769856e960ae93e2b304",
+    "size": 6783018808,
+    "licence": "Apache 2.0",
+    "licenceUrl": "https://huggingface.co/numz/SeedVR2_comfyUI",
+    "mustAccept": false
+  },
+  {
+    "id": "seedvr2-7b",
+    "name": "SeedVR2 7B",
+    "purpose": "AI upscaling (larger, slower)",
+    "neededFor": [
+      "AI upscale (SeedVR2 7B)"
+    ],
+    "file": "SEEDVR2/seedvr2_ema_7b_fp16.safetensors",
+    "repo": "numz/SeedVR2_comfyUI",
+    "path": "seedvr2_ema_7b_fp16.safetensors",
+    "sha256": "7b8241aa957606ab6cfb66edabc96d43234f9819c5392b44d2492d9f0b0bbe4a",
+    "size": 16479334424,
+    "licence": "Apache 2.0",
+    "licenceUrl": "https://huggingface.co/numz/SeedVR2_comfyUI",
+    "mustAccept": false
+  },
+  {
+    "id": "seedvr2-vae",
+    "name": "SeedVR2 VAE",
+    "purpose": "Needed by either SeedVR2",
+    "neededFor": [
+      "AI upscale (SeedVR2 3B)",
+      "AI upscale (SeedVR2 7B)"
+    ],
+    "file": "SEEDVR2/ema_vae_fp16.safetensors",
+    "repo": "numz/SeedVR2_comfyUI",
+    "path": "ema_vae_fp16.safetensors",
+    "sha256": "20678548f420d98d26f11442d3528f8b8c94e57ee046ef93dbb7633da8612ca1",
+    "size": 501324814,
+    "licence": "Apache 2.0",
+    "licenceUrl": "https://huggingface.co/numz/SeedVR2_comfyUI",
+    "mustAccept": false
+  }
+]
