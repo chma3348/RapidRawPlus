@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
+  Cloud,
   Image as ImageIcon,
   Folder,
   FolderOpen,

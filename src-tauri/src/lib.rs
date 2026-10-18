@@ -15,6 +15,7 @@ mod app_settings;
 mod app_state;
 pub mod auto_level;
 mod cache_utils;
+pub mod cloud_files;
 pub mod color_engine;
 pub mod comfy_engine;
 pub mod convert;

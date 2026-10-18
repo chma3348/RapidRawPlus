@@ -151,6 +151,10 @@ pub struct ImageFile {
     /// Culling flag: "pick" or "reject".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     flag: Option<String>,
+    /// The photo is only in a cloud service, not on this Mac (see
+    /// cloud_files): shown with a cloud badge, and not read until opened.
+    #[serde(default)]
+    cloud_only: bool,
 }
 
 /// Fill in each listed file's original: from its sidecar where recorded,
@@ -235,6 +239,9 @@ pub async fn read_exif_for_paths(
                     crate::exif_processing::read_exif_sidecar(&source_path)
                 {
                     sidecar_exif
+                } else if crate::cloud_files::is_cloud_only(&source_path) {
+                    // Reading it would download the whole photo.
+                    HashMap::new()
                 } else if let Ok(mmap) = read_file_mapped(&source_path) {
                     crate::exif_processing::read_exif_data(&source_path_str, &mmap)
                 } else if let Ok(bytes) = fs::read(&source_path) {
@@ -417,6 +424,7 @@ pub fn list_images_in_dir(path: String, app_handle: AppHandle) -> Result<Vec<Ima
                 };
 
                 file_results.push(ImageFile {
+                    cloud_only: crate::cloud_files::is_cloud_only_str(&virtual_path),
                     path: virtual_path,
                     modified,
                     is_edited,
@@ -553,6 +561,7 @@ pub fn list_images_recursive(
                 };
 
                 file_results.push(ImageFile {
+                    cloud_only: crate::cloud_files::is_cloud_only_str(&virtual_path),
                     path: virtual_path,
                     modified,
                     is_edited,
@@ -829,6 +838,7 @@ pub fn get_album_images(
             };
 
             Some(ImageFile {
+                cloud_only: crate::cloud_files::is_cloud_only_str(&virtual_path),
                 path: virtual_path,
                 modified,
                 is_edited,
@@ -1230,6 +1240,13 @@ fn generate_single_thumbnail_and_cache(
             rating,
             is_edited,
         ));
+    }
+
+    // A photo only in the cloud would download in full to be read: it keeps
+    // its cloud placeholder (any thumbnail made while it was here, above,
+    // still shows).
+    if crate::cloud_files::is_cloud_only_str(path_str) {
+        return None;
     }
 
     let target_width = settings.thumbnail_resolution.unwrap_or(720);
