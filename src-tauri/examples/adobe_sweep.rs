@@ -145,7 +145,10 @@ fn main() -> Result<()> {
         // Edit files sit beside the photos.
         .filter(|p| {
             let ext = p.extension().map(|e| e.to_string_lossy().to_lowercase());
-            !matches!(ext.as_deref(), Some("dri" | "rrdata" | "rrexif" | "xmp"))
+            !matches!(
+                ext.as_deref(),
+                Some("dri" | "rrdata" | "rrexif" | "xmp" | "dripreview")
+            )
         })
         // ADOBE_SWEEP_ONLY=stem,stem renders just those photos.
         .filter(|p| {

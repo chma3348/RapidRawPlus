@@ -369,7 +369,25 @@ fn source_for(
     let (path, _) = crate::file_management::parse_virtual_path(path);
     let meta = std::fs::metadata(&path)?;
     let modified = meta.modified()?;
-    let (source_digest, bytes) = super::file_version::digest(&path, false)?;
+    // A photo only in the cloud is developed from its smart preview, which
+    // stands in for it at its own size: reading the photo would download it.
+    let wants_previews =
+        crate::smart_preview::mode_for(&path) == crate::smart_preview::Mode::Previews;
+    let preview = if wants_previews && crate::cloud_files::is_cloud_only(&path) {
+        crate::smart_preview::read_frame(&path).unwrap_or_else(|e| {
+            log::warn!(
+                "[preview] could not read {}'s preview: {e:#}",
+                path.display()
+            );
+            None
+        })
+    } else {
+        None
+    };
+    let (source_digest, bytes) = match &preview {
+        Some(frame) => (format!("preview:{}", frame.provenance.source_hash), None),
+        None => super::file_version::digest(&path, false)?,
+    };
     // Decode depends on the installed input transforms too, not just the
     // photo's filename. Do not silently keep old pixels after replacing one.
     let input = captured_input(pair)?;
@@ -393,15 +411,42 @@ fn source_for(
     {
         return Ok(frame);
     }
-    let bytes = match bytes {
-        Some(bytes) => bytes,
-        None => std::fs::read(&path)?,
-    };
     let is_raw = crate::formats::is_raw_file(&path);
-    let mut frame = if is_raw {
-        super::raw::decode_raw(&bytes, quality == Quality::Thumbnail, || Ok(()))?
-    } else {
-        super::input::decode_profiled_photo(&bytes)?
+    let mut frame = match preview {
+        Some(frame) => frame,
+        None => {
+            let bytes = match bytes {
+                Some(bytes) => bytes,
+                None => std::fs::read(&path)?,
+            };
+            let frame = if is_raw {
+                super::raw::decode_raw(&bytes, quality == Quality::Thumbnail, || Ok(()))?
+            } else {
+                super::input::decode_profiled_photo(&bytes)?
+            };
+            // A photo in a cloud folder, here for now: keep its preview (from
+            // this full decode, before recovery and look, as it is developed)
+            // so it can be shown once it is back in the cloud. Written off
+            // the render path.
+            if quality == Quality::Full
+                && wants_previews
+                && crate::smart_preview::in_cloud_folder(&path)
+                && !crate::smart_preview::is_current(&path)
+            {
+                let pending = crate::smart_preview::prepare(&path, &frame);
+                let photo = path.clone();
+                std::thread::spawn(move || {
+                    let exif = crate::exif_processing::read_exif_sidecar(&photo);
+                    if let Err(e) = crate::smart_preview::write_pending(pending, exif) {
+                        log::warn!(
+                            "[preview] could not write {}'s preview: {e:#}",
+                            photo.display()
+                        );
+                    }
+                });
+            }
+            frame
+        }
     };
     pair.recovery.apply(&mut frame);
     // A RAW opens as Lightroom's default rendering shows it (raw_look.rs);

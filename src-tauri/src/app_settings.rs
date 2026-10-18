@@ -359,6 +359,17 @@ pub struct AppSettings {
     /// Keep every diagnostic image an AI fill makes (large).
     #[serde(default)]
     pub keep_fill_diagnostics: Option<bool>,
+    /// Photos that are only in a cloud service: "previews" (a small preview
+    /// of each, synced; the default), "thumbnails" (a thumbnail only) or
+    /// "none" (nothing kept; downloaded when opened). See smart_preview.
+    #[serde(default)]
+    pub cloud_photos_mode: Option<String>,
+    /// The same, per folder (by path), where it differs from the default.
+    #[serde(default)]
+    pub cloud_folder_modes: Option<std::collections::HashMap<String, String>>,
+    /// The first-time card about cloud photos was dismissed.
+    #[serde(default)]
+    pub cloud_photos_card_seen: Option<bool>,
     #[serde(default)]
     pub root_folders: Vec<String>,
     #[serde(default)]
@@ -506,6 +517,9 @@ impl Default for AppSettings {
             fill_cache_limit_gb: None,
             fill_cache_days: None,
             keep_fill_diagnostics: None,
+            cloud_photos_mode: None,
+            cloud_folder_modes: None,
+            cloud_photos_card_seen: None,
             root_folders: Vec::new(),
             pinned_folders: Vec::new(),
             thumbnail_resolution: Some(720),
@@ -677,6 +691,7 @@ pub fn load_settings(app_handle: AppHandle) -> Result<AppSettings, String> {
         let _ = fs::write(&path, json_string);
     }
 
+    crate::smart_preview::set_modes(&settings);
     Ok(settings)
 }
 
@@ -694,6 +709,7 @@ pub fn save_settings(settings: AppSettings, app_handle: AppHandle) -> Result<(),
     let path = get_settings_path(&app_handle)?;
     let json_string = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
     fs::write(path, json_string).map_err(|e| e.to_string())?;
+    crate::smart_preview::set_modes(&settings);
 
     let state = app_handle.state::<AppState>();
     *state.output_space.lock().unwrap() = crate::color_engine::config::OutputSpace::from_setting(

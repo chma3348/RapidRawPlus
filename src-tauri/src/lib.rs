@@ -54,6 +54,7 @@ pub mod replacement_blend;
 pub mod scene_masks;
 pub mod sky_commands;
 pub mod sky_replace;
+pub mod smart_preview;
 pub mod subject_selection;
 mod tagging;
 mod tagging_utils;

@@ -18,7 +18,14 @@ const SF_DATALESS: u32 = 0x4000_0000;
 #[cfg(target_os = "macos")]
 pub fn is_cloud_only(path: &Path) -> bool {
     use std::os::macos::fs::MetadataExt;
-    std::fs::symlink_metadata(path).is_ok_and(|m| m.st_flags() & SF_DATALESS != 0)
+    treated_as_cloud(path)
+        || std::fs::symlink_metadata(path).is_ok_and(|m| m.st_flags() & SF_DATALESS != 0)
+}
+
+/// For checking previews without a cloud service: `DARKROOM_CLOUD_ONLY=<folder>`
+/// treats every photo in that folder as only in the cloud.
+fn treated_as_cloud(path: &Path) -> bool {
+    std::env::var_os("DARKROOM_CLOUD_ONLY").is_some_and(|dir| path.starts_with(dir))
 }
 
 #[cfg(not(target_os = "macos"))]
