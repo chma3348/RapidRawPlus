@@ -321,7 +321,7 @@ pub async fn update_exif_fields(
 
 #[tauri::command]
 pub fn list_images_in_dir(path: String, app_handle: AppHandle) -> Result<Vec<ImageFile>, String> {
-    let settings = load_settings(app_handle).unwrap_or_default();
+    let settings = load_settings(app_handle.clone()).unwrap_or_default();
     let enable_xmp_sync = settings.enable_xmp_sync.unwrap_or(true);
 
     let entries = fs::read_dir(&path).map_err(|e| e.to_string())?;
@@ -444,6 +444,16 @@ pub fn list_images_in_dir(path: String, app_handle: AppHandle) -> Result<Vec<Ima
 
     let mut result_list = result_list;
     link_versions(&mut result_list);
+    // Photos here that are only in the cloud get their previews (or
+    // thumbnails) built in the background, this folder first.
+    let cloud: Vec<PathBuf> = result_list
+        .iter()
+        .filter(|f| f.cloud_only && !f.is_virtual_copy)
+        .map(|f| PathBuf::from(&f.path))
+        .collect();
+    if !cloud.is_empty() {
+        crate::cloud_builder::enqueue(&app_handle, cloud);
+    }
     Ok(result_list)
 }
 
@@ -1197,7 +1207,20 @@ fn encode_thumbnail(image: &DynamicImage, target_width: u32) -> Result<Vec<u8>> 
     Ok(buf.into_inner())
 }
 
-fn generate_single_thumbnail_and_cache(
+/// Whether `path` already has a thumbnail cached for its current edit (reads
+/// only its edit file and the cache, never the photo).
+pub(crate) fn has_cached_thumbnail(path_str: &str, thumb_cache_dir: &Path) -> bool {
+    let (_, sidecar_path) = parse_virtual_path(path_str);
+    let adjustments_bytes = fs::read_to_string(&sidecar_path)
+        .ok()
+        .and_then(|c| serde_json::from_str::<ImageMetadata>(&c).ok())
+        .map(|m| serde_json::to_vec(&m.adjustments).unwrap_or_default())
+        .unwrap_or_default();
+    compute_thumbnail_cache_hash(path_str, &adjustments_bytes)
+        .is_some_and(|h| thumb_cache_dir.join(format!("{h}.jpg")).exists())
+}
+
+pub(crate) fn generate_single_thumbnail_and_cache(
     path_str: &str,
     thumb_cache_dir: &Path,
     gpu_context: Option<&GpuContext>,
@@ -1242,11 +1265,17 @@ fn generate_single_thumbnail_and_cache(
         ));
     }
 
-    // A photo only in the cloud would download in full to be read: it keeps
-    // its cloud placeholder (any thumbnail made while it was here, above,
-    // still shows).
+    // A photo only in the cloud would download in full to be read: it is
+    // drawn from its smart preview when it has one, and otherwise keeps its
+    // cloud placeholder (any thumbnail made while it was here, above, still
+    // shows).
     if crate::cloud_files::is_cloud_only_str(path_str) {
-        return None;
+        let (source, _) = parse_virtual_path(path_str);
+        if !(crate::smart_preview::may_stand_in(&source)
+            && crate::smart_preview::is_current(&source))
+        {
+            return None;
+        }
     }
 
     let target_width = settings.thumbnail_resolution.unwrap_or(720);

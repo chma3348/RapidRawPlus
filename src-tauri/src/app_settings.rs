@@ -710,6 +710,7 @@ pub fn save_settings(settings: AppSettings, app_handle: AppHandle) -> Result<(),
     let json_string = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
     fs::write(path, json_string).map_err(|e| e.to_string())?;
     crate::smart_preview::set_modes(&settings);
+    crate::cloud_builder::wake();
 
     let state = app_handle.state::<AppState>();
     *state.output_space.lock().unwrap() = crate::color_engine::config::OutputSpace::from_setting(

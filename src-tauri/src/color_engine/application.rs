@@ -338,6 +338,9 @@ fn captured_input(pair: &super::identity::Resolved) -> Result<Option<super::cube
 /// sky) must work from this, because v3 composites their pixels onto it:
 /// patches made from any other development would not match the photo.
 pub fn decoded_source(state: &AppState, path: &str) -> Result<Arc<DecodedFrame>> {
+    // Patches are made at full size: never from a cloud photo's preview.
+    let (source, _) = crate::file_management::parse_virtual_path(path);
+    let _original = crate::smart_preview::need_original(&source);
     let pair = super::identity::resolve(state, &serde_json::json!({}))?;
     source_for(&state.v3, path, &pair, Quality::Full)
 }
@@ -373,17 +376,18 @@ fn source_for(
     // stands in for it at its own size: reading the photo would download it.
     let wants_previews =
         crate::smart_preview::mode_for(&path) == crate::smart_preview::Mode::Previews;
-    let preview = if wants_previews && crate::cloud_files::is_cloud_only(&path) {
-        crate::smart_preview::read_frame(&path).unwrap_or_else(|e| {
-            log::warn!(
-                "[preview] could not read {}'s preview: {e:#}",
-                path.display()
-            );
+    let preview =
+        if crate::smart_preview::may_stand_in(&path) && crate::cloud_files::is_cloud_only(&path) {
+            crate::smart_preview::read_frame(&path).unwrap_or_else(|e| {
+                log::warn!(
+                    "[preview] could not read {}'s preview: {e:#}",
+                    path.display()
+                );
+                None
+            })
+        } else {
             None
-        })
-    } else {
-        None
-    };
+        };
     let (source_digest, bytes) = match &preview {
         Some(frame) => (format!("preview:{}", frame.provenance.source_hash), None),
         None => super::file_version::digest(&path, false)?,

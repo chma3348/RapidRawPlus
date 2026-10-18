@@ -110,7 +110,15 @@ impl Mode {
 type Modes = (Option<Mode>, Vec<(PathBuf, Mode)>);
 static MODES: std::sync::RwLock<Modes> = std::sync::RwLock::new((None, Vec::new()));
 
+/// Whether the first-time card about cloud photos has been answered: until
+/// it has, nothing is downloaded to build previews.
+pub static CARD_SEEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub fn set_modes(settings: &crate::app_settings::AppSettings) {
+    CARD_SEEN.store(
+        settings.cloud_photos_card_seen.unwrap_or(false),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     let default = settings.cloud_photos_mode.as_deref().and_then(Mode::parse);
     let mut folders: Vec<(PathBuf, Mode)> = settings
         .cloud_folder_modes
@@ -196,6 +204,45 @@ fn resize(img: &Rgba32FImage, w: u32, h: u32) -> Rgba32FImage {
             }
         });
     Rgba32FImage::from_raw(w, h, out).expect("sized to fit")
+}
+
+/// Photos that must be read from their original right now (exporting, or a
+/// tool that makes patches at full size), with how many uses want it: the
+/// engine does not stand a preview in for these, downloading the photo if
+/// it must. Everything else rendering at the time still uses previews.
+static NEED_ORIGINAL: std::sync::Mutex<Vec<(PathBuf, usize)>> = std::sync::Mutex::new(Vec::new());
+
+/// Held while `photo` must be read from its original.
+pub struct OriginalNeeded(PathBuf);
+
+pub fn need_original(photo: &Path) -> OriginalNeeded {
+    let mut list = NEED_ORIGINAL.lock().unwrap_or_else(|e| e.into_inner());
+    match list.iter_mut().find(|(p, _)| p == photo) {
+        Some(entry) => entry.1 += 1,
+        None => list.push((photo.to_path_buf(), 1)),
+    }
+    OriginalNeeded(photo.to_path_buf())
+}
+
+impl Drop for OriginalNeeded {
+    fn drop(&mut self) {
+        let mut list = NEED_ORIGINAL.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(i) = list.iter().position(|(p, _)| *p == self.0) {
+            list[i].1 -= 1;
+            if list[i].1 == 0 {
+                list.remove(i);
+            }
+        }
+    }
+}
+
+/// Whether `photo` may be shown from its preview now.
+pub fn may_stand_in(photo: &Path) -> bool {
+    mode_for(photo) == Mode::Previews
+        && !NEED_ORIGINAL
+            .lock()
+            .map(|l| l.iter().any(|(p, _)| p == photo))
+            .unwrap_or(false)
 }
 
 /// Where `photo`'s preview lives.
@@ -450,6 +497,42 @@ pub fn read_frame(photo: &Path) -> Result<Option<DecodedFrame>> {
         rendered_origin: false,
         input_domain: None,
     }))
+}
+
+/// The editor's working copy of a photo, from its preview's decoded
+/// picture: as the photo's own decode would give it (a RAW linear in sRGB
+/// primaries, as floats; any other photo display-encoded, 8-bit).
+pub fn pristine(frame: &DecodedFrame, is_raw: bool) -> image::DynamicImage {
+    let to_srgb = spaces::conversion(frame.color.primaries, Primaries::Srgb);
+    let (w, h) = frame.pixels.dimensions();
+    let linear: Vec<[f32; 3]> = frame
+        .pixels
+        .as_raw()
+        .par_chunks(4)
+        .map(|p| {
+            let v = to_srgb * glam::DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64);
+            [v.x as f32, v.y as f32, v.z as f32]
+        })
+        .collect();
+    if is_raw {
+        let data = linear
+            .iter()
+            .flat_map(|v| [v[0].max(0.0), v[1].max(0.0), v[2].max(0.0), 1.0])
+            .collect();
+        image::DynamicImage::ImageRgba32F(Rgba32FImage::from_raw(w, h, data).expect("sized to fit"))
+    } else {
+        let encode = |v: f32| {
+            let v = v.clamp(0.0, 1.0);
+            let e = if v <= 0.003_130_8 {
+                v * 12.92
+            } else {
+                1.055 * v.powf(1.0 / 2.4) - 0.055
+            };
+            (e * 255.0).round() as u8
+        };
+        let data = linear.iter().flat_map(|v| v.map(encode)).collect();
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_raw(w, h, data).expect("sized to fit"))
+    }
 }
 
 #[cfg(test)]

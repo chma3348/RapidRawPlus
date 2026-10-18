@@ -15,6 +15,7 @@ mod app_settings;
 mod app_state;
 pub mod auto_level;
 mod cache_utils;
+pub mod cloud_builder;
 pub mod cloud_files;
 pub mod color_engine;
 pub mod comfy_engine;
@@ -808,6 +809,28 @@ pub fn get_full_image_for_processing(
         let image = color_engine::application::raw_patch_base(state, &path)
             .map_err(|e| format!("Could not develop the RAW for this tool: {e:#}"))?;
         return Ok((image, true));
+    }
+    // Opened from its smart preview: tools work from the photo itself,
+    // downloaded now.
+    if loaded_image.from_preview {
+        let path = loaded_image.path.clone();
+        drop(original_image_lock);
+        let (source, _) = file_management::parse_virtual_path(&path);
+        let bytes = std::fs::read(&source).map_err(|e| e.to_string())?;
+        let image = image_loader::load_base_image_from_bytes(
+            &bytes,
+            &source.to_string_lossy(),
+            false,
+            &AppSettings::default(),
+            None,
+        )
+        .map_err(|e| e.to_string())?;
+        let mut lock = state.original_image.lock().unwrap();
+        if let Some(loaded) = lock.as_mut().filter(|l| l.path == path) {
+            loaded.image = Arc::new(image.clone());
+            loaded.from_preview = false;
+        }
+        return Ok((image, false));
     }
     Ok((
         loaded_image.image.clone().as_ref().clone(),
@@ -1932,6 +1955,8 @@ pub fn run() {
             engine_models::delete_engine_model,
             engine_models::delete_other_engine_file,
             engine_models::import_engine_models,
+            cloud_builder::get_cloud_previews_progress,
+            cloud_builder::set_cloud_previews_paused,
             file_management::read_exif_for_paths,
             file_management::list_images_in_dir,
             file_management::list_images_recursive,

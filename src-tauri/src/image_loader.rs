@@ -33,6 +33,9 @@ pub struct LoadImageResult {
     pub metadata: ImageMetadata,
     pub exif: HashMap<String, String>,
     pub is_raw: bool,
+    /// Opened from its smart preview: the photo itself is in the cloud.
+    #[serde(default)]
+    pub from_preview: bool,
 }
 
 #[derive(Deserialize)]
@@ -634,13 +637,40 @@ pub async fn load_image(
 
     let path_clone = source_path_str.clone();
 
-    let cached_data = state
-        .decoded_image_cache
-        .lock()
-        .unwrap()
-        .get(&source_path_str);
+    // A photo only in the cloud opens from its smart preview, when it has
+    // one, instead of downloading (see smart_preview).
+    let stand_in = crate::cloud_files::is_cloud_only(&source_path)
+        && crate::smart_preview::may_stand_in(&source_path)
+        && crate::smart_preview::is_current(&source_path);
+    let cached_data = if stand_in {
+        None
+    } else {
+        state
+            .decoded_image_cache
+            .lock()
+            .unwrap()
+            .get(&source_path_str)
+    };
 
-    let (pristine_arc, exif_data) = if let Some((cached_img, cached_exif)) = cached_data {
+    let (pristine_arc, exif_data) = if stand_in {
+        let photo = source_path.clone();
+        let exif = metadata
+            .exif
+            .clone()
+            .or_else(|| crate::smart_preview::exif(&photo))
+            .unwrap_or_default();
+        let raw = is_raw_file(&source_path_str);
+        let image = tokio::task::spawn_blocking(move || {
+            crate::smart_preview::read_frame(&photo)
+                .map_err(|e| format!("{e:#}"))?
+                .map(|frame| crate::smart_preview::pristine(&frame, raw))
+                .ok_or_else(|| "This photo's preview is missing.".to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+        log::info!("[preview] opened {source_path_str} from its smart preview");
+        (Arc::new(image), exif)
+    } else if let Some((cached_img, cached_exif)) = cached_data {
         (cached_img, cached_exif)
     } else {
         let (pristine_img, exif_data_loaded) = tokio::task::spawn_blocking(move || {
@@ -724,6 +754,7 @@ pub async fn load_image(
         path,
         image: pristine_arc,
         is_raw,
+        from_preview: stand_in,
     });
 
     Ok(LoadImageResult {
@@ -732,6 +763,7 @@ pub async fn load_image(
         metadata,
         exif: exif_data,
         is_raw,
+        from_preview: stand_in,
     })
 }
 

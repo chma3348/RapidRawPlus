@@ -35,6 +35,8 @@ pub struct LoadedImage {
     pub path: String,
     pub image: Arc<DynamicImage>,
     pub is_raw: bool,
+    /// Made from the photo's smart preview: the photo is in the cloud.
+    pub from_preview: bool,
 }
 
 #[cfg(any(test, feature = "legacy-reference"))]

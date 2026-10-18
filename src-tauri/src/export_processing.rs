@@ -704,6 +704,9 @@ pub async fn export_images(
 
                 let state = app_handle_clone.state::<AppState>();
                 let (source_path, sidecar_path) = parse_virtual_path(&image_path_str);
+                // An export is made from the photo itself, downloaded if it
+                // is only in the cloud, never from its preview.
+                let _original = crate::smart_preview::need_original(&source_path);
                 let source_path_str = source_path.to_string_lossy().to_string();
                 let is_current_edit = Some(&source_path_str) == current_edit_path.as_ref();
 
