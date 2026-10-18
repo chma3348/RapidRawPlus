@@ -1187,6 +1187,42 @@ export default function SettingsPanel({
                       />
                     </SettingItem>
 
+                    <SettingItem
+                      label={t('settings.general.cloudPhotos', { defaultValue: 'Photos stored in the cloud' })}
+                      description={t('settings.general.cloudPhotosDesc', {
+                        defaultValue:
+                          'For photos in Nextcloud, iCloud Drive, Dropbox and the like that aren’t on this Mac. A folder can choose differently (Change… above its photos).',
+                      })}
+                    >
+                      <Dropdown
+                        options={[
+                          {
+                            value: 'previews',
+                            label: t('cloud.previewsOption', {
+                              defaultValue: 'Small previews: browse and edit without downloading',
+                            }),
+                          },
+                          {
+                            value: 'thumbnails',
+                            label: t('cloud.thumbnailsOption', {
+                              defaultValue: 'Thumbnails only: opening a photo downloads it',
+                            }),
+                          },
+                          {
+                            value: 'none',
+                            label: t('cloud.noneOption', {
+                              defaultValue: 'Download when opened: nothing stored on this Mac',
+                            }),
+                          },
+                        ]}
+                        onChange={(value: any) =>
+                          onSettingsChange({ ...appSettings, cloudPhotosMode: value, cloudPhotosCardSeen: true })
+                        }
+                        value={appSettings?.cloudPhotosMode || 'previews'}
+                        triggerClassName="bg-bg-primary"
+                      />
+                    </SettingItem>
+
                     <div className="space-y-4">
                       <SettingItem
                         label={t('settings.general.xmpSync')}

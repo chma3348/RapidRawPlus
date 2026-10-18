@@ -1,9 +1,9 @@
 import { memo, useState, useEffect, useRef, useMemo } from 'react';
-import { Eye, EyeOff, ArrowLeft, Maximize, Loader2, Undo, Redo, Waves, History } from 'lucide-react';
+import { Eye, EyeOff, ArrowLeft, Maximize, Loader2, Undo, Redo, Waves, History, Cloud } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
-import { SelectedImage } from '../../ui/AppProperties';
+import { SelectedImage, cloudServiceName } from '../../ui/AppProperties';
 import { IconAperture, IconCalendar, IconClock, IconFocalLength, IconIso, IconShutter } from './ExifIcons';
 import Text from '../../ui/Text';
 import EditorLayoutMenu from './EditorLayoutMenu';
@@ -373,6 +373,23 @@ const EditorToolbar = memo(
               >
                 {baseName}
               </Text>
+
+              {selectedImage.fromPreview && (
+                <Text
+                  as="div"
+                  variant={TextVariants.small}
+                  color={TextColors.secondary}
+                  className="ml-2 shrink-0 bg-surface px-2 py-0.5 rounded-full flex items-center gap-1 cursor-default"
+                  data-tooltip={t('editor.toolbar.previewTooltip', {
+                    defaultValue:
+                      'Editing a preview: the original is in {{service}}. Exporting and AI tools use the original, downloading it.',
+                    service: cloudServiceName(selectedImage.path),
+                  })}
+                >
+                  <Cloud size={12} />
+                  <span>{t('editor.toolbar.preview', { defaultValue: 'Preview' })}</span>
+                </Text>
+              )}
 
               {isVirtualCopy && (
                 <Text

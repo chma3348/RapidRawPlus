@@ -103,6 +103,8 @@ export enum Invokes {
   DeleteEngineModel = 'delete_engine_model',
   DeleteOtherEngineFile = 'delete_other_engine_file',
   ImportEngineModels = 'import_engine_models',
+  GetCloudPreviewsProgress = 'get_cloud_previews_progress',
+  SetCloudPreviewsPaused = 'set_cloud_previews_paused',
   LoadMetadata = 'load_metadata',
   LoadPresets = 'load_presets',
   LoadSettings = 'load_settings',
@@ -323,6 +325,8 @@ export interface ImageFile {
   derived_kind?: string | null;
   /** Culling flag. */
   flag?: 'pick' | 'reject' | null;
+  /** Only in a cloud service (Nextcloud…), not on this Mac. */
+  cloud_only?: boolean;
 }
 
 export interface Option {
@@ -371,7 +375,17 @@ export interface SelectedImage {
   path: string;
   thumbnailUrl: string;
   width: number;
+  /** Opened from its smart preview: the photo itself is in the cloud. */
+  fromPreview?: boolean;
 }
+
+/** The cloud service a path is kept by, for messages ("in Nextcloud"). */
+export const cloudServiceName = (path: string): string => {
+  if (path.includes('/Library/Mobile Documents/')) return 'iCloud Drive';
+  const m = path.match(/\/Library\/CloudStorage\/([A-Za-z]+)/);
+  const known: Record<string, string> = { GoogleDrive: 'Google Drive', OneDrive: 'OneDrive' };
+  return m ? (known[m[1]] ?? m[1]) : 'the cloud';
+};
 
 export interface SortCriteria {
   key: string;

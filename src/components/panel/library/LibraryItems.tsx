@@ -43,6 +43,7 @@ const ThumbnailComponent = ({
   isEdited,
   exif,
   flag = null,
+  cloudOnly = false,
 }: any) => {
   const { t } = useTranslation();
   const data = useProcessStore((s) => s.thumbnails[path]);
@@ -200,7 +201,19 @@ const ThumbnailComponent = ({
 
         {layers.length === 0 && showPlaceholder && (
           <div className="absolute inset-0 w-full h-full flex items-center justify-center bg-surface">
-            <ImageIcon className="text-text-secondary animate-pulse" />
+            {cloudOnly ? (
+              <Cloud className="text-text-secondary opacity-60" />
+            ) : (
+              <ImageIcon className="text-text-secondary animate-pulse" />
+            )}
+          </div>
+        )}
+        {cloudOnly && (
+          <div
+            className="absolute left-1.5 bottom-1.5 z-10 rounded-full bg-black/45 p-1 text-white backdrop-blur-xs"
+            data-tooltip={t('library.cloudOnly', { defaultValue: 'In the cloud, not on this Mac' })}
+          >
+            <Cloud size={12} />
           </div>
         )}
         {flag && (
@@ -866,6 +879,7 @@ const RowComponent = ({
               flag={imageFile.flag ?? null}
               exif={imageFile.exif}
               isEdited={imageFile.is_edited}
+              cloudOnly={!!imageFile.cloud_only}
               aspectRatio={thumbnailAspectRatio}
             />
           )}
