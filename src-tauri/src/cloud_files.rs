@@ -69,6 +69,47 @@ pub fn free_local_copy(_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// The photo open in the editor, when it was only in the cloud as it was
+/// opened: if opening it, or a tool, downloaded it, it is given back when
+/// another photo is opened.
+static OPENED: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+
+/// A photo is being opened: give back the previous one if this app brought
+/// it down, and remember this one if it is only in the cloud.
+pub fn opening(photo: &Path) {
+    let previous = {
+        let mut opened = OPENED.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = opened.take();
+        if is_cloud_only(photo) {
+            *opened = Some(photo.to_path_buf());
+        }
+        previous
+    };
+    if let Some(previous) = previous.filter(|p| p != photo) {
+        give_back_later(previous);
+    }
+}
+
+/// Whether `photo` is the one open in the editor.
+pub fn is_open(photo: &Path) -> bool {
+    OPENED
+        .lock()
+        .map(|o| o.as_deref() == Some(photo))
+        .unwrap_or(false)
+}
+
+/// Give `photo` back to the cloud in the background, if it is here now.
+pub fn give_back_later(photo: std::path::PathBuf) {
+    std::thread::spawn(move || {
+        if !is_cloud_only(&photo) {
+            match free_local_copy(&photo) {
+                Ok(()) => log::info!("[cloud] gave {} back to the cloud", photo.display()),
+                Err(e) => log::warn!("[cloud] could not give {} back: {e}", photo.display()),
+            }
+        }
+    });
+}
+
 /// `is_cloud_only` for a library path, which may name a virtual copy
 /// (`photo.ARW?vc=1a2b3c`): the copy is in the cloud when its photo is.
 pub fn is_cloud_only_str(path: &str) -> bool {

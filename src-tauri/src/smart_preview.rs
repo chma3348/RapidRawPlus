@@ -212,8 +212,13 @@ fn resize(img: &Rgba32FImage, w: u32, h: u32) -> Rgba32FImage {
 /// it must. Everything else rendering at the time still uses previews.
 static NEED_ORIGINAL: std::sync::Mutex<Vec<(PathBuf, usize)>> = std::sync::Mutex::new(Vec::new());
 
-/// Held while `photo` must be read from its original.
-pub struct OriginalNeeded(PathBuf);
+/// Held while `photo` must be read from its original. If the photo was only
+/// in the cloud, it is given back once nothing needs it (unless it is the
+/// photo open in the editor, which is given back when another is opened).
+pub struct OriginalNeeded {
+    photo: PathBuf,
+    was_cloud_only: bool,
+}
 
 pub fn need_original(photo: &Path) -> OriginalNeeded {
     let mut list = NEED_ORIGINAL.lock().unwrap_or_else(|e| e.into_inner());
@@ -221,17 +226,30 @@ pub fn need_original(photo: &Path) -> OriginalNeeded {
         Some(entry) => entry.1 += 1,
         None => list.push((photo.to_path_buf(), 1)),
     }
-    OriginalNeeded(photo.to_path_buf())
+    OriginalNeeded {
+        photo: photo.to_path_buf(),
+        was_cloud_only: crate::cloud_files::is_cloud_only(photo),
+    }
 }
 
 impl Drop for OriginalNeeded {
     fn drop(&mut self) {
-        let mut list = NEED_ORIGINAL.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(i) = list.iter().position(|(p, _)| *p == self.0) {
-            list[i].1 -= 1;
-            if list[i].1 == 0 {
-                list.remove(i);
+        let last = {
+            let mut list = NEED_ORIGINAL.lock().unwrap_or_else(|e| e.into_inner());
+            match list.iter().position(|(p, _)| *p == self.photo) {
+                Some(i) => {
+                    list[i].1 -= 1;
+                    let last = list[i].1 == 0;
+                    if last {
+                        list.remove(i);
+                    }
+                    last
+                }
+                None => false,
             }
+        };
+        if last && self.was_cloud_only && !crate::cloud_files::is_open(&self.photo) {
+            crate::cloud_files::give_back_later(self.photo.clone());
         }
     }
 }

@@ -637,6 +637,9 @@ pub async fn load_image(
 
     let path_clone = source_path_str.clone();
 
+    // The photo opened before is given back to the cloud if opening it (or
+    // a tool) downloaded it.
+    crate::cloud_files::opening(&source_path);
     // A photo only in the cloud opens from its smart preview, when it has
     // one, instead of downloading (see smart_preview).
     let stand_in = crate::cloud_files::is_cloud_only(&source_path)
