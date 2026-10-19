@@ -13,6 +13,8 @@ import {
   PasteMode,
   LensAdjustment,
   normalizeLoadedAdjustments,
+  v3ForPaste,
+  mergePastedV3,
 } from '../utils/adjustments';
 import { calculateCenteredCrop } from '../utils/cropUtils';
 import { Invokes } from '../components/ui/AppProperties';
@@ -210,6 +212,8 @@ export function useEditorActions() {
       for (const key of includedAdjustments) {
         // Persisted copy settings may predate the photo-owned field exclusion.
         if (!COPYABLE_ADJUSTMENT_KEYS.includes(key)) continue;
+        // v3's settings are pasted part by part, below.
+        if (key === 'v3') continue;
         if (Object.prototype.hasOwnProperty.call(copiedAdjustments, key)) {
           const value = copiedAdjustments[key as keyof Adjustments];
           if (mode === PasteMode.Merge) {
@@ -221,6 +225,12 @@ export function useEditorActions() {
           }
         }
       }
+
+      // The new engine's settings that the chosen groups cover (Warmth with
+      // White balance, its sharpening with Sharpness…), merged into each
+      // photo's own: the backend merges them the same way.
+      const v3 = v3ForPaste(copiedAdjustments.v3, includedAdjustments, mode === PasteMode.Merge);
+      if (v3) (adjustmentsToApply as Record<string, unknown>).v3 = v3;
 
       if (includedAdjustments.includes(LensAdjustment.LensMaker)) {
         if (!adjustmentsToApply.lensMaker) {
@@ -240,7 +250,11 @@ export function useEditorActions() {
       pathsToUpdate.forEach((p) => globalImageCache.delete(p));
 
       if (selectedImage && pathsToUpdate.includes(selectedImage.path)) {
-        setAdjustments({ ...adjustments, ...adjustmentsToApply });
+        setAdjustments({
+          ...adjustments,
+          ...adjustmentsToApply,
+          ...(v3 ? { v3: mergePastedV3(adjustments.v3, v3) } : {}),
+        });
       }
 
       invoke(Invokes.ApplyAdjustmentsToPaths, { paths: pathsToUpdate, adjustments: adjustmentsToApply })

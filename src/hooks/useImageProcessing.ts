@@ -5,7 +5,7 @@ import { useEditorStore } from '../store/useEditorStore';
 import { useUIStore } from '../store/useUIStore';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { useLibraryStore } from '../store/useLibraryStore';
-import { Adjustments, COPYABLE_ADJUSTMENT_KEYS } from '../utils/adjustments';
+import { Adjustments, COPYABLE_ADJUSTMENT_KEYS, changedV3, v3ForPaste } from '../utils/adjustments';
 import { Invokes, Panel } from '../components/ui/AppProperties';
 import { debouncedSave } from './useEditorActions';
 import { globalImageCache } from '../utils/ImageLRUCache';
@@ -425,51 +425,54 @@ export function useImageProcessing(
   // tile, the before/after image); `wholePicture` for the preview of the
   // whole picture, which stays at the size it is shown unzoomed — when
   // zoomed in, the tile carries the detail.
-  const calculateTargetRes = useCallback((wholePicture: boolean = false) => {
-    const baseTargetRes = appSettings?.editorPreviewResolution || 1920;
-    if (!(appSettings?.enableZoomHifi ?? true) || displaySize.width === 0) {
-      return baseTargetRes;
-    }
-
-    const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
-    const native = appSettings?.useFullDpiRendering ?? true;
-    // At the screen's real pixels the preview is drawn 1:1; any oversize
-    // only makes the browser shrink it again, which softens it.
-    const sharpnessFactor = native ? 1.0 : 1.25;
-    const zoomMultiplier = appSettings?.highResZoomMultiplier || 1.0;
-    // The screen's real pixels by default, as Lightroom renders: a Retina
-    // screen otherwise shows a half-resolution preview stretched twice over.
-    const effectiveDpr = (appSettings?.useFullDpiRendering ?? true) ? dpr : 1;
-
-    const zoom = wholePicture ? Math.max(1, transformWrapperRef.current?.instance?.transformState?.scale ?? 1) : 1;
-    let targetRes =
-      (Math.max(displaySize.width, displaySize.height) / zoom) * effectiveDpr * sharpnessFactor * zoomMultiplier;
-    targetRes = Math.max(targetRes, 512);
-
-    if (originalSize && originalSize.width > 0 && originalSize.height > 0) {
-      const origMax = Math.max(originalSize.width, originalSize.height);
-      targetRes = Math.min(targetRes, origMax);
-      if (targetRes >= origMax * 0.8) {
-        targetRes = origMax;
+  const calculateTargetRes = useCallback(
+    (wholePicture: boolean = false) => {
+      const baseTargetRes = appSettings?.editorPreviewResolution || 1920;
+      if (!(appSettings?.enableZoomHifi ?? true) || displaySize.width === 0) {
+        return baseTargetRes;
       }
-    }
 
-    if (originalSize && targetRes !== Math.max(originalSize.width, originalSize.height)) {
-      const step = native ? 64 : 256;
-      targetRes = Math.ceil(targetRes / step) * step;
-    }
+      const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
+      const native = appSettings?.useFullDpiRendering ?? true;
+      // At the screen's real pixels the preview is drawn 1:1; any oversize
+      // only makes the browser shrink it again, which softens it.
+      const sharpnessFactor = native ? 1.0 : 1.25;
+      const zoomMultiplier = appSettings?.highResZoomMultiplier || 1.0;
+      // The screen's real pixels by default, as Lightroom renders: a Retina
+      // screen otherwise shows a half-resolution preview stretched twice over.
+      const effectiveDpr = (appSettings?.useFullDpiRendering ?? true) ? dpr : 1;
 
-    return Math.round(targetRes);
-  }, [
-    appSettings?.enableZoomHifi,
-    appSettings?.editorPreviewResolution,
-    appSettings?.highResZoomMultiplier,
-    appSettings?.useFullDpiRendering,
-    displaySize.width,
-    displaySize.height,
-    originalSize,
-    transformWrapperRef,
-  ]);
+      const zoom = wholePicture ? Math.max(1, transformWrapperRef.current?.instance?.transformState?.scale ?? 1) : 1;
+      let targetRes =
+        (Math.max(displaySize.width, displaySize.height) / zoom) * effectiveDpr * sharpnessFactor * zoomMultiplier;
+      targetRes = Math.max(targetRes, 512);
+
+      if (originalSize && originalSize.width > 0 && originalSize.height > 0) {
+        const origMax = Math.max(originalSize.width, originalSize.height);
+        targetRes = Math.min(targetRes, origMax);
+        if (targetRes >= origMax * 0.8) {
+          targetRes = origMax;
+        }
+      }
+
+      if (originalSize && targetRes !== Math.max(originalSize.width, originalSize.height)) {
+        const step = native ? 64 : 256;
+        targetRes = Math.ceil(targetRes / step) * step;
+      }
+
+      return Math.round(targetRes);
+    },
+    [
+      appSettings?.enableZoomHifi,
+      appSettings?.editorPreviewResolution,
+      appSettings?.highResZoomMultiplier,
+      appSettings?.useFullDpiRendering,
+      displaySize.width,
+      displaySize.height,
+      originalSize,
+      transformWrapperRef,
+    ],
+  );
 
   const isZoomedIn = useCallback(
     () => (transformWrapperRef.current?.instance?.transformState?.scale ?? 1) > 1.01,
@@ -507,7 +510,15 @@ export function useImageProcessing(
       // so a longer pan simply asks for the next one.
       await executeApplyAdjustments(currentAdjustments, false, calculateTargetRes(), aroundView(visible, 0.15));
     },
-    [selectedImage?.isReady, selectedImage?.isVideo, isZoomedIn, calculateROI, clearZoomTile, executeApplyAdjustments, calculateTargetRes],
+    [
+      selectedImage?.isReady,
+      selectedImage?.isVideo,
+      isZoomedIn,
+      calculateROI,
+      clearZoomTile,
+      executeApplyAdjustments,
+      calculateTargetRes,
+    ],
   );
 
   const requestHiFiZoom = useMemo(
@@ -622,7 +633,11 @@ export function useImageProcessing(
           // the whole picture blown up, and quick).
           const fraction = dragSlowRef.current ? DRAG_REGION_FRACTION_SLOW : DRAG_REGION_FRACTION;
           const res = Math.max(512, Math.round((calculateTargetRes() * fraction) / 64) * 64);
-          pendingApplyRef.current = { adjustments: renderAdjustments, targetRes: res, region: aroundView(visible, 0.05) };
+          pendingApplyRef.current = {
+            adjustments: renderAdjustments,
+            targetRes: res,
+            region: aroundView(visible, 0.05),
+          };
         } else {
           const cap = dragSlowRef.current ? DRAG_WHOLE_RES_SLOW : DRAG_WHOLE_RES;
           pendingApplyRef.current = { adjustments: renderAdjustments, targetRes: Math.min(targetRes, cap) };
@@ -659,12 +674,17 @@ export function useImageProcessing(
             const delta: Partial<Adjustments> = {};
             const includedKeys = appSettings?.copyPasteSettings?.includedAdjustments || COPYABLE_ADJUSTMENT_KEYS;
             for (const key of Object.keys(adjustments) as Array<keyof Adjustments>) {
+              // v3's settings go part by part, below.
+              if (key === 'v3') continue;
               if (includedKeys.includes(key as string)) {
                 if (JSON.stringify(adjustments[key]) !== JSON.stringify(prev.adjustments[key])) {
                   (delta as any)[key] = adjustments[key];
                 }
               }
             }
+            // Only the v3 settings just changed, and only those the paste choices cover.
+            const v3 = v3ForPaste(changedV3(prev.adjustments.v3, adjustments.v3), includedKeys, false);
+            if (v3) (delta as Record<string, unknown>).v3 = v3;
             if (Object.keys(delta).length > 0) {
               otherPaths.forEach((p) => globalImageCache.delete(p));
               invoke(Invokes.ApplyAdjustmentsToPaths, { paths: otherPaths, adjustments: delta }).catch((err) => {

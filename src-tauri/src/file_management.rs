@@ -2176,6 +2176,34 @@ pub fn save_metadata_and_update_thumbnail(
     Ok(())
 }
 
+/// Lay pasted v3 settings (only the ones chosen) over a photo's own, one
+/// level deeper for its detail and effects, so a paste never resets the
+/// photo's other v3 settings.
+fn merge_pasted_v3(target: &mut Value, pasted: &Value) {
+    let Some(pasted) = pasted.as_object() else {
+        return;
+    };
+    if !target.is_object() {
+        *target = serde_json::json!({});
+    }
+    let target = target.as_object_mut().expect("just made an object");
+    for (k, v) in pasted {
+        match (target.get_mut(k), v.as_object()) {
+            (Some(existing), Some(fields))
+                if (k == "detail" || k == "effects") && existing.is_object() =>
+            {
+                let existing = existing.as_object_mut().expect("checked");
+                for (field, value) in fields {
+                    existing.insert(field.clone(), value.clone());
+                }
+            }
+            _ => {
+                target.insert(k.clone(), v.clone());
+            }
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn apply_adjustments_to_paths(
     paths: Vec<String>,
@@ -2211,7 +2239,11 @@ pub async fn apply_adjustments_to_paths(
                 (new_adjustments.as_object_mut(), adjustments.as_object())
             {
                 for (k, v) in pasted_map {
-                    new_map.insert(k.clone(), v.clone());
+                    if k == "v3" {
+                        merge_pasted_v3(new_map.entry("v3").or_insert(Value::Null), v);
+                    } else {
+                        new_map.insert(k.clone(), v.clone());
+                    }
                 }
             }
 
@@ -3736,5 +3768,35 @@ mod folder_tree_tests {
         assert!(trip(true));
         assert!(!trip(false));
         let _ = fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod paste_tests {
+    use super::*;
+
+    /// Pasting Warmth keeps the photo's own sharpening and vignette, and a
+    /// pasted vignette amount keeps its own vignette shape.
+    #[test]
+    fn pasted_v3_settings_merge_into_the_photos_own() {
+        let mut photo = serde_json::json!({
+            "temperature": 0, "tint": 0,
+            "detail": {"sharpening": 40, "clarity": 10},
+            "effects": {"vignette_amount": -20, "vignette_feather": 80},
+        });
+        merge_pasted_v3(
+            &mut photo,
+            &serde_json::json!({"temperature": 25, "tint": -8, "effects": {"vignette_amount": -40}}),
+        );
+        assert_eq!(photo["temperature"], 25);
+        assert_eq!(photo["tint"], -8);
+        assert_eq!(photo["detail"]["sharpening"], 40);
+        assert_eq!(photo["detail"]["clarity"], 10);
+        assert_eq!(photo["effects"]["vignette_amount"], -40);
+        assert_eq!(photo["effects"]["vignette_feather"], 80);
+
+        let mut fresh = Value::Null;
+        merge_pasted_v3(&mut fresh, &serde_json::json!({"temperature": 25}));
+        assert_eq!(fresh, serde_json::json!({"temperature": 25}));
     }
 }

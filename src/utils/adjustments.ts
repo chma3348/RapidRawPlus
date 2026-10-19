@@ -1,6 +1,6 @@
 import { Crop } from 'react-image-crop';
 import { currentColorEngine } from './currentColorEngine';
-import type { V3Controls } from './colorV3';
+import { defaultV3Controls, type V3Controls } from './colorV3';
 import { v4 as uuidv4 } from 'uuid';
 import { SubMask, SubMaskMode } from '../components/panel/right/Masks';
 
@@ -802,7 +802,7 @@ export const ADJUSTMENT_GROUPS: Record<string, AdjustmentGroup[]> = {
   basic: [
     {
       label: 'modals.copyPaste.groups.exposureToneMapper',
-      keys: [BasicAdjustment.Exposure, 'toneMapper', 'v3'],
+      keys: [BasicAdjustment.Exposure, 'toneMapper'],
     },
     {
       label: 'modals.copyPaste.groups.tone',
@@ -909,9 +909,134 @@ export const ADJUSTMENT_GROUPS: Record<string, AdjustmentGroup[]> = {
   masks: [{ label: 'modals.copyPaste.groups.masks', keys: ['masks'] }],
 };
 
-export const COPYABLE_ADJUSTMENT_KEYS: string[] = Object.values(ADJUSTMENT_GROUPS)
-  .flat()
-  .flatMap((group) => group.keys);
+// `v3` holds the new engine's own settings for many of these choices at
+// once: it is always copied, and pasted part by part (see `v3ForPaste`).
+export const COPYABLE_ADJUSTMENT_KEYS: string[] = [
+  ...Object.values(ADJUSTMENT_GROUPS)
+    .flat()
+    .flatMap((group) => group.keys),
+  'v3',
+];
+
+/**
+ * Which paste choice (a key in ADJUSTMENT_GROUPS) carries each of v3's own
+ * settings: Warmth goes with White balance, v3 sharpening with Sharpness,
+ * and so on, so the choices mean the same in either engine.
+ */
+const V3_PASTE_CHOICES = {
+  top: {
+    temperature: ColorAdjustment.Temperature,
+    tint: ColorAdjustment.Tint,
+    saturation: ColorAdjustment.Saturation,
+    vibrance: ColorAdjustment.Vibrance,
+    hue: ColorAdjustment.Hue,
+    bands: ColorAdjustment.Hsl,
+    ranges: ColorAdjustment.Hsl,
+    grading: ColorAdjustment.ColorGrading,
+    curve: 'curves',
+    channel_curves: 'curves',
+    calibration: 'colorCalibration',
+  },
+  detail: {
+    sharpening: DetailsAdjustment.Sharpness,
+    sharpen_radius: DetailsAdjustment.Sharpness,
+    sharpen_detail: DetailsAdjustment.Sharpness,
+    sharpen_masking: DetailsAdjustment.Sharpness,
+    threshold: DetailsAdjustment.SharpnessThreshold,
+    texture: DetailsAdjustment.Clarity,
+    clarity: DetailsAdjustment.Clarity,
+    structure: DetailsAdjustment.Structure,
+    dehaze: DetailsAdjustment.Dehaze,
+    luminance_noise: DetailsAdjustment.LumaNoiseReduction,
+    luminance_noise_detail: DetailsAdjustment.LumaNoiseReduction,
+    luminance_noise_contrast: DetailsAdjustment.LumaNoiseReduction,
+    color_noise: DetailsAdjustment.ColorNoiseReduction,
+    color_noise_detail: DetailsAdjustment.ColorNoiseReduction,
+    color_noise_smoothness: DetailsAdjustment.ColorNoiseReduction,
+  },
+  effects: {
+    vignette_amount: Effect.VignetteAmount,
+    vignette_midpoint: Effect.VignetteMidpoint,
+    vignette_roundness: Effect.VignetteRoundness,
+    vignette_feather: Effect.VignetteFeather,
+    grain_amount: Effect.GrainAmount,
+    grain_size: Effect.GrainSize,
+    grain_roughness: Effect.GrainRoughness,
+    glow_amount: CreativeAdjustment.GlowAmount,
+    halation_amount: CreativeAdjustment.HalationAmount,
+    flare_amount: CreativeAdjustment.FlareAmount,
+    film_saturation: CreativeAdjustment.GlowAmount,
+    ca_red_cyan: DetailsAdjustment.ChromaticAberrationRedCyan,
+    ca_blue_yellow: DetailsAdjustment.ChromaticAberrationBlueYellow,
+    centre: DetailsAdjustment.Centré,
+  },
+} as const;
+
+const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+
+type Fields = Record<string, unknown>;
+/** Part of a photo's v3 settings, as pasted: detail and effects hold only some of their fields. */
+export type V3Paste = Fields & { detail?: Fields; effects?: Fields };
+
+/** `object[path[0]][path[1]]…`, or undefined. */
+const at = (object: unknown, ...path: string[]): unknown =>
+  path.reduce<unknown>((value, key) => (value as Fields | undefined)?.[key], object);
+
+/**
+ * The part of copied v3 settings that `included` pastes: only those
+ * settings, so a paste never resets the rest of the photo's v3 settings.
+ * Merge pastes only settings changed from their defaults (a RAW's own
+ * defaults, Sharpening 40 and Color NR 25, count as unchanged).
+ */
+export function v3ForPaste(
+  source: Partial<V3Controls> | undefined,
+  included: string[],
+  merge: boolean,
+): V3Paste | null {
+  if (!source) return null;
+  const defaults = [defaultV3Controls(false), defaultV3Controls(true)];
+  const wanted = (choice: string, value: unknown, ...path: string[]) =>
+    value !== undefined && included.includes(choice) && !(merge && defaults.some((d) => same(at(d, ...path), value)));
+  const out: V3Paste = {};
+  for (const [field, choice] of Object.entries(V3_PASTE_CHOICES.top)) {
+    const value = at(source, field);
+    if (wanted(choice, value, field)) out[field] = structuredClone(value);
+  }
+  for (const part of ['detail', 'effects'] as const) {
+    const picked: Fields = {};
+    for (const [field, choice] of Object.entries(V3_PASTE_CHOICES[part])) {
+      const value = at(source, part, field);
+      if (wanted(choice, value, part, field)) picked[field] = value;
+    }
+    if (Object.keys(picked).length) out[part] = picked;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+/** The v3 settings that differ between `before` and `after`, one level deeper for detail and effects. */
+export function changedV3(before: unknown, after: unknown): Partial<V3Controls> {
+  const out: V3Paste = {};
+  for (const [key, value] of Object.entries((after ?? {}) as Fields)) {
+    if (key === 'detail' || key === 'effects') {
+      const part = Object.fromEntries(
+        Object.entries((value ?? {}) as Fields).filter(([field, v]) => !same(v, at(before, key, field))),
+      );
+      if (Object.keys(part).length) out[key] = part;
+    } else if (!same(value, at(before, key))) {
+      out[key] = value;
+    }
+  }
+  return out as Partial<V3Controls>;
+}
+
+/** A photo's v3 settings with pasted ones (from `v3ForPaste`) laid over them. */
+export function mergePastedV3(target: V3Controls | undefined, pasted: V3Paste): V3Controls {
+  const merged: V3Paste = { ...(target as unknown as Fields | undefined), ...pasted };
+  for (const part of ['detail', 'effects'] as const) {
+    if (pasted[part]) merged[part] = { ...((target?.[part] ?? {}) as unknown as Fields), ...pasted[part] };
+  }
+  return merged as unknown as V3Controls;
+}
 
 export const ADJUSTMENT_SECTIONS: Sections = {
   basic: [

@@ -96,6 +96,12 @@ pub fn all_available_adjustments() -> HashSet<String> {
         "pointCurves",
         "parametricCurve",
         "curveMode",
+        // Added with later controls; they were missing here, so settings
+        // saved before never had them switched on for pasting.
+        "contrastPivot",
+        "hueCurves",
+        "colorWheels",
+        "v3",
         "highlights",
         "shadows",
         "whites",
