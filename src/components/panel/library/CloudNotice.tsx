@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { useTranslation } from 'react-i18next';
@@ -31,6 +31,21 @@ interface BuilderProgress {
 /** Per photo, roughly: a preview, a thumbnail. */
 const PREVIEW_BYTES = 1_000_000;
 const THUMBNAIL_BYTES = 80_000;
+
+/**
+ * Seconds left, from how fast photos have been finishing since building
+ * (re)started; null until a few have finished.
+ */
+const useTimeLeft = (progress: BuilderProgress) => {
+  const start = useRef<{ at: number; done: number } | null>(null);
+  const building = progress.total > progress.done && !progress.paused;
+  if (!building || (start.current && progress.done < start.current.done)) start.current = null;
+  else if (!start.current) start.current = { at: Date.now(), done: progress.done };
+  const s = start.current;
+  if (!s || progress.done - s.done < 3) return null;
+  const perPhoto = (Date.now() - s.at) / 1000 / (progress.done - s.done);
+  return (progress.total - progress.done) * perPhoto;
+};
 
 const size = (bytes: number) =>
   bytes >= 1e9 ? `${(bytes / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(bytes / 1e6))} MB`;
@@ -191,6 +206,23 @@ export default function CloudNotice({ photos, home = false }: { photos?: ImageFi
   const cloudPhotos = useMemo(() => imageList.filter((f) => f.cloud_only && !f.is_virtual_copy), [imageList]);
   const folder = !home && currentFolderPath && !currentFolderPath.startsWith('Album: ') ? currentFolderPath : null;
   const building = progress.total > progress.done;
+  const secondsLeft = useTimeLeft(progress);
+  // "about 1 h 20 min left", "about 5 min left", "under a minute left".
+  const minutesLeft = secondsLeft === null ? null : Math.round(secondsLeft / 60);
+  const timeLeft =
+    minutesLeft === null
+      ? null
+      : minutesLeft < 1
+        ? t('cloud.underAMinute', { defaultValue: 'under a minute left' })
+        : minutesLeft < 60
+          ? t('cloud.minutesLeft', { defaultValue: 'about {{minutes}} min left', minutes: minutesLeft })
+          : minutesLeft % 60
+            ? t('cloud.hoursMinutesLeft', {
+                defaultValue: 'about {{hours}} h {{minutes}} min left',
+                hours: Math.floor(minutesLeft / 60),
+                minutes: minutesLeft % 60,
+              })
+            : t('cloud.hoursLeft', { defaultValue: 'about {{hours}} h left', hours: minutesLeft / 60 });
   if (cloudPhotos.length === 0 && !building) return null;
 
   const service = cloudServiceName(cloudPhotos[0]?.path ?? folder ?? '');
@@ -268,6 +300,7 @@ export default function CloudNotice({ photos, home = false }: { photos?: ImageFi
                     done: progress.done,
                     total: progress.total,
                   })}
+              {!progress.paused && timeLeft && ` · ${timeLeft}`}
               <button
                 className={link}
                 onClick={() =>

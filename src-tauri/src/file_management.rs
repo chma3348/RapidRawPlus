@@ -1414,6 +1414,8 @@ pub fn update_thumbnail_queue(
             unique_paths.push(path);
         }
     }
+    // Cloud photos asked for here are on screen: their previews come first.
+    crate::cloud_builder::prioritise(&unique_paths);
 
     queue.retain(|p| !seen.contains(p));
 

@@ -884,18 +884,15 @@ function FolderSection({
     <section ref={ref} className={`relative ${top ? 'pt-8' : 'pt-1'} ${empty || collapsed ? 'pb-3' : 'pb-5'}`}>
       <GuideLines row={row} headerY={top ? 46 : 16} />
       <div className="flex items-center gap-2 min-w-0 mb-2.5" style={{ paddingLeft: left, paddingRight: PAGE_PAD }}>
-        {row.hasChildren ? (
-          <button
-            className="text-text-secondary hover:text-text-primary transition-colors shrink-0"
-            onClick={onToggle}
-            aria-label={collapsed ? t('library.home.expand') : t('library.home.collapse')}
-            aria-expanded={!collapsed}
-          >
-            {collapsed ? <Folder size={top ? 18 : 15} /> : <FolderOpen size={top ? 18 : 15} />}
-          </button>
-        ) : (
-          <Folder size={top ? 18 : 15} className="text-text-secondary shrink-0" />
-        )}
+        {/* Every folder can be closed, down to its heading: its photos as well as its folders. */}
+        <button
+          className="text-text-secondary hover:text-text-primary transition-colors shrink-0"
+          onClick={onToggle}
+          aria-label={collapsed ? t('library.home.expand') : t('library.home.collapse')}
+          aria-expanded={!collapsed}
+        >
+          {collapsed ? <Folder size={top ? 18 : 15} /> : <FolderOpen size={top ? 18 : 15} />}
+        </button>
         {/* Hide from Home only shows while the pointer is on the folder's name. */}
         <div className="group/name flex items-center gap-2 min-w-0">
           <Text
@@ -931,16 +928,14 @@ function FolderSection({
               {shownName(row.location)}
             </Text>
           )}
-          {row.hasChildren && (
-            <button
-              className="text-text-secondary hover:text-text-primary transition-colors shrink-0"
-              onClick={onToggle}
-              aria-hidden="true"
-              tabIndex={-1}
-            >
-              <ChevronDown size={14} className={`transition-transform ${collapsed ? '-rotate-90' : ''}`} />
-            </button>
-          )}
+          <button
+            className="text-text-secondary hover:text-text-primary transition-colors shrink-0"
+            onClick={onToggle}
+            aria-hidden="true"
+            tabIndex={-1}
+          >
+            <ChevronDown size={14} className={`transition-transform ${collapsed ? '-rotate-90' : ''}`} />
+          </button>
           <button
             className="ml-1 flex items-center gap-1 text-xs text-text-secondary hover:text-text-primary whitespace-nowrap opacity-0 group-hover/name:opacity-100 focus-visible:opacity-100 transition-opacity"
             onClick={onHide}

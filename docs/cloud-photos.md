@@ -42,17 +42,19 @@ anything reads it. `cloud_files::is_cloud_only` reads only the file's flags
   (`smart_preview::need_original`, per photo, so other renders at the time
   still use previews).
 
-**Building them** (`cloud_builder.rs`). In the background, one photo at a
-time:
+**Building them** (`cloud_builder.rs`). In the background, three photos at
+a time (most of the time is the download, which a service often does
+faster several at once):
 
 1. Download it.
 2. Make its preview (or, in the thumbnails mode, only its thumbnail).
 3. Draw its grid thumbnail.
 4. Give it back to the cloud (`NSFileManager evictUbiquitousItemAtURL`).
 
-It never holds more than one photo's worth of space.
+It never holds more than three photos' worth of space.
 
-- The folder just listed goes first.
+- Photos on screen go first (their thumbnails asked for, in the grid or on
+  Home), then the folder just listed.
 - A download that times out is tried again later (3 tries, pausing 15 s).
 - Nothing downloads until the first-time card has been answered, and
   building can be paused.
@@ -82,11 +84,14 @@ when opened**:
   folders). Nothing downloads until it is answered.
 - **Signals:** a cloud badge on cloud-only photos (the grid and Home's
   strips), one quiet line ("212 in
-  Nextcloud · Small previews · Making previews 12 of 340 · Pause"), and the
+  Nextcloud · Small previews · Making previews 12 of 340 · about 1 h 20 min
+  left · Pause"), the time from how fast photos have been finishing, and the
   Preview pill in the editor.
 
 ## Network and cloud folders on Home
 
+- Every folder on Home can be closed to its heading, with or without
+  folders inside it.
 - Folder lists are read off the main thread: a cloud or NAS folder slow to
   answer no longer freezes the window, and one that cannot be read says so,
   with Try again, instead of looking empty.
