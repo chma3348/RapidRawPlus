@@ -49,10 +49,15 @@ fn apply_filmic_exposure(color_in: vec3<f32>, brightness_adj: f32) -> vec3<f32> 
     let scale = pow(2.0, direct_adj);
     let k = pow(2.0, -rational_adj * MIDTONE_STRENGTH);
     let luma_abs = abs(original_luma);
-    let luma_floor = floor(luma_abs);
-    let luma_fract = luma_abs - luma_floor;
-    let shaped_fract = luma_fract / (luma_fract + (1.0 - luma_fract) * k);
-    let shaped_luma_abs = luma_floor + shaped_fract;
+    // The same curve as tone_v2.wgsl's brightness_curve (anchor 1): the
+    // rational curve to 1, then a smooth continuation, not repeated slices.
+    var shaped_luma_abs: f32;
+    if (luma_abs <= 1.0) {
+        shaped_luma_abs = luma_abs / (luma_abs + (1.0 - luma_abs) * k);
+    } else {
+        let s = min(1.0, 0.15 / max(abs(k - 1.0), 1e-4));
+        shaped_luma_abs = luma_abs * exp((k - 1.0) * s * tanh(min(log(luma_abs) / s, 10.0)));
+    }
     let new_luma = sign(original_luma) * shaped_luma_abs * scale;
     let chroma = color_in - vec3<f32>(original_luma);
     let total_luma_scale = new_luma / original_luma;

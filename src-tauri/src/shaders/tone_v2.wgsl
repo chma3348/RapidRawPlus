@@ -487,6 +487,27 @@ fn apply_linear_exposure(color_in: vec3<f32>, exposure_adj: f32) -> vec3<f32> {
     return color_in * pow(2.0, exposure_adj);
 }
 
+/// Brightness's curve on a luminance: on 0..`top`, the rational midtone
+/// curve (slope `k` at `top`, where it returns `top`); above, a smooth
+/// continuation. It used to repeat the curve over each further `top`-wide
+/// slice (`floor`), which a scene-referred RAW, whose highlights run far
+/// past 1, broke into rings: at strong settings each slice a hard band, a
+/// glow rendered as white, yellow and orange contours. The continuation
+/// meets the curve with its value and slope and settles to the luminance
+/// itself, a little over or under (at most 0.15 in natural log, about a
+/// fifth of a stop): monotone and seamless at any setting.
+fn brightness_curve(luma_abs: f32, k: f32, top: f32) -> f32 {
+    if (luma_abs <= top) {
+        let n = luma_abs / top;
+        return n / (n + (1.0 - n) * k) * top;
+    }
+    let u = log(luma_abs / top);
+    let s = min(1.0, 0.15 / max(abs(k - 1.0), 1e-4));
+    // tanh is 1 to f32 precision by 10; some GPUs compute it from exp(2x),
+    // which overflows to NaN (black) for the brightest pixels unclamped.
+    return luma_abs * exp((k - 1.0) * s * tanh(min(u / s, 10.0)));
+}
+
 fn apply_filmic_exposure(color_in: vec3<f32>, brightness_adj: f32) -> vec3<f32> {
     if (brightness_adj == 0.0) {
         return color_in;
@@ -503,10 +524,7 @@ fn apply_filmic_exposure(color_in: vec3<f32>, brightness_adj: f32) -> vec3<f32> 
     let scale = pow(2.0, direct_adj);
     let k = pow(2.0, -rational_adj * MIDTONE_STRENGTH);
     let luma_abs = abs(original_luma);
-    let luma_floor = floor(luma_abs / TOP_ANCHOR) * TOP_ANCHOR;
-    let luma_norm = (luma_abs - luma_floor) / TOP_ANCHOR;
-    let shaped_norm = luma_norm / (luma_norm + (1.0 - luma_norm) * k);
-    let shaped_luma_abs = luma_floor + (shaped_norm * TOP_ANCHOR);
+    let shaped_luma_abs = brightness_curve(luma_abs, k, TOP_ANCHOR);
     let new_luma = sign(original_luma) * shaped_luma_abs * scale;
     let chroma = color_in - vec3<f32>(original_luma);
     let total_luma_scale = new_luma / original_luma;
