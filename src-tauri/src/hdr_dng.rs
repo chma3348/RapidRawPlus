@@ -43,86 +43,195 @@ pub struct DngCamera {
     pub model: String,
 }
 
+/// How a merge's pixels are stored.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Compression {
+    /// Half floats, deflate with the floating-point predictor: exact (to
+    /// half-float precision), and large (about 145 MB for 33 MP).
+    Lossless,
+    /// JPEG XL in 512-pixel tiles (DNG 1.7, as Lightroom 13 writes its
+    /// merges): a tenth of the size or less, at `distance` (JPEG XL's
+    /// quality scale; 1.0 is "visually lossless" for viewing).
+    Compact { distance: f32 },
+}
+
+/// The compact setting merges use: chosen on real photos, pushed and
+/// zoomed in (docs/hdr-merge.md).
+pub const COMPACT: Compression = Compression::Compact { distance: 0.3 };
+
+const TILE: u32 = 512;
+const COMPRESSION_DEFLATE: u16 = 8;
+const COMPRESSION_JXL: u16 = 52546;
+
 /// Write `linear` (linear sRGB, white balanced, in the reference frame's
 /// units: 1.0 is where its sensor clipped) as a floating-point DNG.
 pub fn write_float_dng(
     path: &std::path::Path,
     linear: &Rgb32FImage,
     camera: &DngCamera,
+    compression: Compression,
+    preview: Option<&image::RgbImage>,
 ) -> Result<()> {
     let (width, height) = linear.dimensions();
     ensure!(width > 0 && height > 0, "Empty merge");
-    // Half floats reach 65504; scaling the brightest under 1.0 keeps every
-    // reader's white level (1.0 by default for floating point) above the
-    // data, and BaselineExposure gives the brightness back.
-    let peak = linear
-        .as_raw()
-        .par_iter()
-        .copied()
-        .filter(|v| v.is_finite())
-        .reduce(|| 0.0f32, f32::max)
-        .max(1e-6);
-    let scale = if peak > 1.0 { 1.0 / peak } else { 1.0 };
-    let baseline_exposure = -(scale as f64).log2();
+    // Stored as it is, in the reference frame's units: its midtones near
+    // 0.18, highlights past 1.0 kept (half floats reach 65504). Scaling the
+    // brightest light under 1.0 instead made JPEG XL take a sunset for deep
+    // shadow and spend almost nothing on it (28% of pixels off by more than
+    // 4 levels with Exposure +3), and pushed half floats' shadows toward
+    // their coarse subnormal range.
+    let scale = 1.0f32;
+    let baseline_exposure = 0.0f64;
 
-    let strips: Vec<Vec<u8>> = (0..height.div_ceil(ROWS_PER_STRIP))
-        .into_par_iter()
-        .map(|strip| -> Result<Vec<u8>> {
-            let first = strip * ROWS_PER_STRIP;
-            let rows = ROWS_PER_STRIP.min(height - first);
-            let row_len = width as usize * 3;
-            let mut raw = Vec::with_capacity(row_len * 2 * rows as usize);
-            for y in first..first + rows {
-                let start = y as usize * row_len;
-                raw.extend(encode_row_f16(
-                    &linear.as_raw()[start..start + row_len],
-                    3,
-                    scale,
-                ));
-            }
-            let mut encoder =
-                flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(6));
-            encoder.write_all(&raw)?;
-            Ok(encoder.finish()?)
-        })
-        .collect::<Result<_>>()?;
+    let mut tiff = TiffWriter::new();
+    let ifd = match compression {
+        Compression::Lossless => {
+            let strips: Vec<Vec<u8>> = (0..height.div_ceil(ROWS_PER_STRIP))
+                .into_par_iter()
+                .map(|strip| -> Result<Vec<u8>> {
+                    let first = strip * ROWS_PER_STRIP;
+                    let rows = ROWS_PER_STRIP.min(height - first);
+                    let row_len = width as usize * 3;
+                    let mut raw = Vec::with_capacity(row_len * 2 * rows as usize);
+                    for y in first..first + rows {
+                        let start = y as usize * row_len;
+                        raw.extend(encode_row_f16(
+                            &linear.as_raw()[start..start + row_len],
+                            3,
+                            scale,
+                        ));
+                    }
+                    let mut encoder =
+                        flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(6));
+                    encoder.write_all(&raw)?;
+                    Ok(encoder.finish()?)
+                })
+                .collect::<Result<_>>()?;
+            let offsets: Vec<u32> = strips.iter().map(|s| tiff.data(s)).collect();
+            let counts: Vec<u32> = strips.iter().map(|s| s.len() as u32).collect();
+            vec![
+                Tag::short(259, &[COMPRESSION_DEFLATE]),
+                Tag::long(273, &offsets),
+                Tag::long(278, &[ROWS_PER_STRIP]),
+                Tag::long(279, &counts),
+                Tag::short(317, &[3]),
+            ]
+        }
+        Compression::Compact { distance } => {
+            let across = width.div_ceil(TILE);
+            let tiles: Vec<Vec<u8>> = (0..across * height.div_ceil(TILE))
+                .into_par_iter()
+                .map(|i| -> Result<Vec<u8>> {
+                    let (x0, y0) = ((i % across) * TILE, (i / across) * TILE);
+                    // Every tile is a full tile, as DNG lays them out; past
+                    // the picture's edge it repeats the last pixel.
+                    let (tw, th) = (TILE, TILE);
+                    let mut data = Vec::with_capacity((tw * th * 12) as usize);
+                    for dy in 0..th {
+                        let y = (y0 + dy).min(height - 1);
+                        for dx in 0..tw {
+                            let x = (x0 + dx).min(width - 1);
+                            for v in linear.get_pixel(x, y).0 {
+                                let v = v * scale;
+                                let v = if v.is_finite() { v.max(0.0) } else { 0.0 };
+                                data.extend_from_slice(&v.to_ne_bytes());
+                            }
+                        }
+                    }
+                    // No HDR intensity target: decoders tone-map a picture
+                    // that declares one, which pulled its brightest values
+                    // down (measured: 0.85 read back as 0.78).
+                    jxl_encoder::LossyConfig::new(distance)
+                        .with_threads(1)
+                        .encode(&data, tw, th, jxl_encoder::PixelLayout::RgbLinearF32)
+                        .map_err(|e| anyhow::anyhow!("JPEG XL: {e}"))
+                })
+                .collect::<Result<_>>()?;
+            let offsets: Vec<u32> = tiles.iter().map(|t| tiff.data(t)).collect();
+            let counts: Vec<u32> = tiles.iter().map(|t| t.len() as u32).collect();
+            vec![
+                Tag::short(259, &[COMPRESSION_JXL]),
+                Tag::long(322, &[TILE]),
+                Tag::long(323, &[TILE]),
+                Tag::long(324, &offsets),
+                Tag::long(325, &counts),
+                Tag::float(52553, &[distance]),
+                Tag::long(52554, &[7]),
+                Tag::long(52555, &[4]),
+            ]
+        }
+    };
 
     let unique = format!("Darkroom Index HDR ({} {})", camera.make, camera.model);
-    let mut tiff = TiffWriter::new();
-    let strip_offsets: Vec<u32> = strips.iter().map(|s| tiff.data(s)).collect();
-    let strip_counts: Vec<u32> = strips.iter().map(|s| s.len() as u32).collect();
     let srational = |v: f64| {
         let d = 1_000_000i32;
         ((v * d as f64).round() as i32, d)
     };
-    let mut ifd = vec![
+    // The linear pixels: their own directory (a SubIFD) when there is a
+    // preview to head the file, as Lightroom lays a DNG out; otherwise the
+    // file's only directory.
+    let mut raw = ifd;
+    raw.extend([
         Tag::long(254, &[0]),
         Tag::long(256, &[width]),
         Tag::long(257, &[height]),
         Tag::short(258, &[16, 16, 16]),
-        Tag::short(259, &[8]),
         Tag::short(262, &[PHOTOMETRIC_LINEAR_RAW as u16]),
+        Tag::short(277, &[3]),
+        Tag::short(284, &[1]),
+        Tag::short(339, &[3, 3, 3]),
+    ]);
+    // What the whole file says: the camera, the DNG version, the colour.
+    let mut root = vec![
         Tag::ascii(271, &camera.make),
         Tag::ascii(272, &camera.model),
-        Tag::long(273, &strip_offsets),
         Tag::short(274, &[1]),
-        Tag::short(277, &[3]),
-        Tag::long(278, &[ROWS_PER_STRIP]),
-        Tag::long(279, &strip_counts),
-        Tag::short(284, &[1]),
         Tag::ascii(305, "Darkroom Index"),
-        Tag::short(317, &[3]),
-        Tag::short(339, &[3, 3, 3]),
-        Tag::byte(50706, &[1, 4, 0, 0]),
-        Tag::byte(50707, &[1, 4, 0, 0]),
+        Tag::byte(50706, &[1, 7, 0, 0]),
+        Tag::byte(
+            50707,
+            &if matches!(compression, Compression::Compact { .. }) {
+                [1, 7, 0, 0]
+            } else {
+                [1, 4, 0, 0]
+            },
+        ),
         Tag::ascii(50708, &unique),
         Tag::srational(50721, &XYZ_TO_SRGB.map(srational)),
         Tag::rational(50728, &[(1, 1), (1, 1), (1, 1)]),
         Tag::srational(50730, &[srational(baseline_exposure)]),
         Tag::short(50778, &[ILLUMINANT_D65 as u16]),
     ];
-    ifd.sort_by_key(|t| t.code);
-    std::fs::write(path, tiff.finish(&ifd))?;
+    if let Some(preview) = preview {
+        // A rendered preview heads the file (what Finder, Quick Look and
+        // Nextcloud's web view show): baseline JPEG in one strip.
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 88)
+            .encode_image(preview)
+            .context("Encoding the DNG's preview")?;
+        let at = tiff.data(&jpeg);
+        raw.sort_by_key(|t| t.code);
+        let sub = tiff.directory(&raw);
+        root.extend([
+            Tag::long(254, &[1]),
+            Tag::long(256, &[preview.width()]),
+            Tag::long(257, &[preview.height()]),
+            Tag::short(258, &[8, 8, 8]),
+            Tag::short(259, &[7]),
+            Tag::short(262, &[6]),
+            Tag::long(273, &[at]),
+            Tag::short(277, &[3]),
+            Tag::long(278, &[preview.height()]),
+            Tag::long(279, &[jpeg.len() as u32]),
+            Tag::short(284, &[1]),
+            Tag::short(530, &[2, 2]),
+            Tag::long(330, &[sub]),
+        ]);
+    } else {
+        root.extend(raw);
+    }
+    root.sort_by_key(|t| t.code);
+    std::fs::write(path, tiff.finish(&root))?;
     Ok(())
 }
 
@@ -201,6 +310,14 @@ impl Tag {
             bytes,
         }
     }
+    fn float(code: u16, v: &[f32]) -> Self {
+        Self {
+            code,
+            kind: 11,
+            count: v.len() as u32,
+            bytes: v.iter().flat_map(|x| x.to_le_bytes()).collect(),
+        }
+    }
     fn srational(code: u16, v: &[(i32, i32)]) -> Self {
         let bytes = v
             .iter()
@@ -237,7 +354,16 @@ impl TiffWriter {
         self.buf.extend_from_slice(bytes);
         offset
     }
+    /// The first directory (the header points to it), last.
     fn finish(mut self, tags: &[Tag]) -> Vec<u8> {
+        let ifd = self.directory(tags);
+        self.buf[4..8].copy_from_slice(&ifd.to_le_bytes());
+        self.buf
+    }
+
+    /// Append a directory (tags sorted, next-directory offset 0) and return
+    /// its offset.
+    fn directory(&mut self, tags: &[Tag]) -> u32 {
         // Values too long to sit in an entry go before the IFD.
         let mut placed: Vec<Option<u32>> = Vec::with_capacity(tags.len());
         for tag in tags {
@@ -247,7 +373,6 @@ impl TiffWriter {
             self.buf.push(0);
         }
         let ifd = self.buf.len() as u32;
-        self.buf[4..8].copy_from_slice(&ifd.to_le_bytes());
         self.buf
             .extend_from_slice(&(tags.len() as u16).to_le_bytes());
         for (tag, offset) in tags.iter().zip(placed) {
@@ -264,7 +389,7 @@ impl TiffWriter {
             }
         }
         self.buf.extend_from_slice(&0u32.to_le_bytes());
-        self.buf
+        ifd
     }
 }
 
@@ -442,10 +567,13 @@ fn float_linear_dng(bytes: &[u8]) -> Option<(Reader<'_>, Ifd, Ifd)> {
     let reader = Reader { bytes, little };
     let (root, _) = reader.ifd(reader.u32(4)? as usize)?;
     root.get(&50706)?; // DNGVersion: a DNG at all
+    // Floating-point samples, or JPEG XL tiles (which rawler cannot read
+    // either, whatever their sample format).
     let is_main = |ifd: &Ifd| {
         ifd.get(&254).and_then(|v| v.int(0)).unwrap_or(0) == 0
             && ifd.get(&262).and_then(|v| v.int(0)) == Some(PHOTOMETRIC_LINEAR_RAW as u64)
-            && ifd.get(&339).and_then(|v| v.int(0)) == Some(3)
+            && (ifd.get(&339).and_then(|v| v.int(0)) == Some(3)
+                || ifd.get(&259).and_then(|v| v.int(0)) == Some(COMPRESSION_JXL as u64))
     };
     if is_main(&root) {
         return Some((reader, root.clone(), root));
@@ -482,14 +610,27 @@ pub fn decode_float_dng(bytes: &[u8]) -> Result<DecodedFrame> {
     );
     let bits = get(258).and_then(|v| v.int(0)).unwrap_or(32) as usize;
     ensure!(
-        matches!(bits, 16 | 24 | 32),
-        "Unsupported floating-point depth {bits}"
+        matches!(bits, 8 | 10 | 12 | 14 | 16 | 24 | 32),
+        "Unsupported sample depth {bits}"
     );
     let compression = get(259).and_then(|v| v.int(0)).unwrap_or(1);
     ensure!(
-        matches!(compression, 1 | 8 | 32946),
+        matches!(compression, 1 | 8 | 32946 | 52546),
         "Unsupported DNG compression {compression} for floating-point data"
     );
+    let jxl = compression == COMPRESSION_JXL as u64;
+    let float = get(339).and_then(|v| v.int(0)) == Some(3);
+    ensure!(
+        float || jxl,
+        "Integer samples are read here only from JPEG XL tiles"
+    );
+    // JPEG XL hands integer samples back as 0..1: back to the file's scale,
+    // which its black and white levels are given in.
+    let integer_scale = if jxl && !float {
+        ((1u64 << bits.min(32)) - 1) as f32
+    } else {
+        1.0
+    };
     let predictor = get(317).and_then(|v| v.int(0)).unwrap_or(1);
     let factor = match predictor {
         1 => 0,
@@ -548,6 +689,33 @@ pub fn decode_float_dng(bytes: &[u8]) -> Result<DecodedFrame> {
             let raw = bytes
                 .get(offset as usize..(offset + count) as usize)
                 .context("DNG block outside the file")?;
+            if jxl {
+                // One JPEG XL codestream per tile, decoded as linear light.
+                let mut image = jxl_oxide::JxlImage::read_with_defaults(raw)
+                    .map_err(|e| anyhow::anyhow!("JPEG XL tile: {e}"))?;
+                image.request_color_encoding(jxl_oxide::EnumColourEncoding::srgb_linear(
+                    jxl_oxide::RenderingIntent::Relative,
+                ));
+                let render = image
+                    .render_frame(0)
+                    .map_err(|e| anyhow::anyhow!("JPEG XL tile: {e}"))?;
+                let buffer = render.image_all_channels();
+                let (jw, ch) = (buffer.width(), buffer.channels());
+                ensure!(ch >= 3, "JPEG XL tile without three channels");
+                let rows = bh.min(buffer.height());
+                let cols = bw.min(jw);
+                let mut values = vec![0.0f32; bw * bh * spp];
+                for y in 0..rows {
+                    for x in 0..cols {
+                        let p = &buffer.buf()[(y * jw + x) * ch..];
+                        for c in 0..3 {
+                            let v = p[c] * integer_scale;
+                            values[(y * bw + x) * 3 + c] = if v.is_finite() { v } else { 0.0 };
+                        }
+                    }
+                }
+                return Ok((bx, by, bw, bh, values));
+            }
             let mut data = if compression == 1 {
                 raw.to_vec()
             } else {
@@ -757,7 +925,7 @@ mod tests {
             make: "Sony".into(),
             model: "ILCE-7M3".into(),
         };
-        write_float_dng(&path, &linear, &camera).unwrap();
+        write_float_dng(&path, &linear, &camera, Compression::Lossless, None).unwrap();
         let bytes = std::fs::read(&path).unwrap();
         assert!(is_float_linear_dng(&bytes));
         let frame = decode_float_dng(&bytes).unwrap();
@@ -779,6 +947,51 @@ mod tests {
         }
         assert!(worst < 1e-3, "round trip differs by {worst}");
         assert!(worst_deep < 0.05, "deepest shadows differ by {worst_deep}");
+    }
+
+    /// A compact merge reads back close to the original, past white too,
+    /// at a fraction of the size.
+    #[test]
+    fn a_compact_dng_round_trips() {
+        let (w, h) = (700u32, 530u32);
+        let linear = Rgb32FImage::from_fn(w, h, |x, y| {
+            let v = 0.08 + 3.0 * (x as f32 / w as f32).powi(2) + 0.05 * ((y as f32) * 0.05).sin();
+            image::Rgb([v * 0.8, v, v * 1.2])
+        });
+        let dir = std::env::temp_dir().join("darkroom-float-dng-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let camera = DngCamera {
+            make: "Sony".into(),
+            model: "ILCE-7M3".into(),
+        };
+        let (lossless, compact) = (dir.join("lossless.dng"), dir.join("compact.dng"));
+        write_float_dng(&lossless, &linear, &camera, Compression::Lossless, None).unwrap();
+        write_float_dng(
+            &compact,
+            &linear,
+            &camera,
+            COMPACT,
+            Some(&image::RgbImage::new(64, 48)),
+        )
+        .unwrap();
+        let bytes = std::fs::read(&compact).unwrap();
+        assert!(is_float_linear_dng(&bytes));
+        assert!(bytes.len() * 4 < std::fs::metadata(&lossless).unwrap().len() as usize);
+        let frame = decode_float_dng(&bytes).unwrap();
+        assert_eq!(frame.pixels.dimensions(), (w, h));
+        // Lossy: judged on the typical pixel and the 99th percentile.
+        let mut errors: Vec<f32> = linear
+            .enumerate_pixels()
+            .map(|(x, y, p)| (frame.pixels.get_pixel(x, y)[1] / p[1]).log2().abs())
+            .collect();
+        errors.sort_by(f32::total_cmp);
+        let mean = errors.iter().sum::<f32>() / errors.len() as f32;
+        let p99 = errors[errors.len() * 99 / 100];
+        eprintln!("compact: mean {mean:.4}, p99 {p99:.4} stops");
+        assert!(
+            mean < 0.02 && p99 < 0.08,
+            "compact differs: mean {mean}, p99 {p99} stops"
+        );
     }
 
     #[test]

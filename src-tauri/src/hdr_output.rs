@@ -21,17 +21,157 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
-use image::{Rgb, Rgb32FImage};
+use image::Rgb32FImage;
 use rayon::prelude::*;
 
-/// A merge waiting to be saved.
+/// A merge (HDR or panorama) waiting to be saved.
 pub struct HdrResult {
     /// The merged file, in a temporary folder.
     pub file: PathBuf,
-    /// "dng" or "tif".
+    /// "dng", "jxl" or "tif".
     pub extension: &'static str,
     /// The frames it was made from, real paths.
     pub sources: Vec<PathBuf>,
+    /// "HDR" or "Pano": the saved file's suffix and its stack's label.
+    pub kind: &'static str,
+}
+
+/// What a merge's pixels are.
+pub enum Merged {
+    /// Linear light from RAW frames, in the reference frame's units: a DNG.
+    Raw(crate::hdr_dng::DngCamera),
+    /// A finished picture, sRGB-encoded 0..1: a JPEG XL or a TIFF.
+    Rendered,
+}
+
+/// Merges are kept compact (lossy JPEG XL, as Lightroom 13 keeps its
+/// merges) unless the setting asks for lossless.
+pub fn compact_from_settings(settings: &crate::app_settings::AppSettings) -> bool {
+    settings.merge_compression.as_deref() != Some("lossless")
+}
+
+/// The JPEG XL distance for compact finished-picture merges: the same as
+/// the DNG's, chosen on real photos pushed three stops and zoomed in.
+const RENDERED_DISTANCE: f32 = 0.3;
+/// Its effort: 3 against the default 7 measured within 0.04 levels on
+/// real photos, at half the memory (a whole picture is encoded at once:
+/// 7 needed 19 GB for a 131-megapixel panorama, 3 needs 8).
+const RENDERED_EFFORT: u8 = 3;
+/// Beyond this a finished-picture merge is saved lossless (a compressed
+/// TIFF) even when compact is chosen: one JPEG XL of it would need more
+/// memory than a Mac can be expected to spare. (A DNG's JPEG XL is tiled,
+/// so RAW merges have no such limit.)
+const COMPACT_MAX_PIXELS: u64 = 150_000_000;
+
+/// Write a merge to a temporary file, render its preview through the
+/// editor's pipeline (at 1600 px, for the merge window), and for a DNG
+/// embed that preview in the file (Finder, Quick Look and Nextcloud's web
+/// view show it). Returns the merge and the preview as a JPEG data URL.
+pub fn finish(
+    context: &crate::image_processing::GpuContext,
+    state: &crate::AppState,
+    pixels: &Rgb32FImage,
+    merged: &Merged,
+    compact: bool,
+    sources: Vec<PathBuf>,
+    kind: &'static str,
+) -> Result<(HdrResult, String)> {
+    let dng_compression = if compact {
+        crate::hdr_dng::COMPACT
+    } else {
+        crate::hdr_dng::Compression::Lossless
+    };
+    let pixel_count = pixels.width() as u64 * pixels.height() as u64;
+    let compact_rendered = compact && pixel_count <= COMPACT_MAX_PIXELS;
+    let extension = match merged {
+        Merged::Raw(_) => "dng",
+        Merged::Rendered if compact_rendered => "jxl",
+        Merged::Rendered => "tif",
+    };
+    let file = temporary_path(extension)?;
+    let result = HdrResult {
+        file: file.clone(),
+        extension,
+        sources,
+        kind,
+    };
+    match merged {
+        Merged::Raw(camera) => {
+            crate::hdr_dng::write_float_dng(&file, pixels, camera, dng_compression, None)?
+        }
+        Merged::Rendered => write_rendered(&file, pixels, compact_rendered)?,
+    }
+    let preview = crate::color_engine::application::render_aside(
+        context,
+        state,
+        &file.to_string_lossy(),
+        &serde_json::Value::Null,
+        Some(1600),
+    )
+    .context("Previewing the merge")?
+    .preview_rgba8();
+    let preview = image::DynamicImage::ImageRgba8(preview).to_rgb8();
+    if let Merged::Raw(camera) = merged {
+        let embedded = image::imageops::thumbnail(
+            &preview,
+            preview.width().min(1024),
+            ((preview.height() as u64 * preview.width().min(1024) as u64)
+                / preview.width().max(1) as u64) as u32,
+        );
+        crate::hdr_dng::write_float_dng(&file, pixels, camera, dng_compression, Some(&embedded))?;
+    }
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 90).encode_image(&preview)?;
+    use base64::Engine as _;
+    let url = format!(
+        "data:image/jpeg;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(&jpeg)
+    );
+    Ok((result, url))
+}
+
+/// A finished-picture merge (sRGB-encoded 0..1): JPEG XL at 16 bits when
+/// compact, otherwise a 16-bit TIFF, deflate-compressed with the
+/// horizontal predictor (an uncompressed float TIFF made a 144-megapixel
+/// panorama 1.65 GB).
+pub fn write_rendered(path: &Path, encoded: &Rgb32FImage, compact: bool) -> Result<()> {
+    let (w, h) = encoded.dimensions();
+    let data: Vec<u16> = encoded
+        .as_raw()
+        .par_iter()
+        .map(|v| (v.clamp(0.0, 1.0) * 65535.0).round() as u16)
+        .collect();
+    if compact {
+        let bytes: Vec<u8> = data.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let jxl = jxl_encoder::LossyConfig::new(RENDERED_DISTANCE)
+            .with_effort(RENDERED_EFFORT)
+            .encode(&bytes, w, h, jxl_encoder::PixelLayout::Rgb16)
+            .map_err(|e| anyhow::anyhow!("JPEG XL: {e}"))?;
+        std::fs::write(path, jxl)?;
+        return Ok(());
+    }
+    let file = std::io::BufWriter::new(std::fs::File::create(path)?);
+    tiff::encoder::TiffEncoder::new(file)?
+        .with_compression(tiff::encoder::Compression::Deflate(
+            tiff::encoder::DeflateLevel::Balanced,
+        ))
+        .with_predictor(tiff::tags::Predictor::Horizontal)
+        .write_image::<tiff::encoder::colortype::RGB16>(w, h, &data)
+        .context("Writing the merged TIFF")?;
+    Ok(())
+}
+
+/// Linear display light to sRGB-encoded values, for a finished-picture
+/// merge.
+pub fn encode_srgb(img: &mut Rgb32FImage) {
+    img.par_iter_mut().for_each(|v| {
+        let x = v.clamp(0.0, 1.0);
+        *v = if x <= 0.0031308 {
+            x * 12.92
+        } else {
+            1.055 * x.powf(1.0 / 2.4) - 0.055
+        };
+    });
 }
 
 impl Drop for HdrResult {
@@ -104,29 +244,6 @@ pub fn fold_highlights(merged: &mut Rgb32FImage) {
     merged.par_iter_mut().for_each(|v| *v = v.clamp(0.0, 1.0));
 }
 
-/// A finished-picture merge as a 16-bit sRGB TIFF.
-pub fn write_rendered_tiff(path: &Path, display_linear: &Rgb32FImage) -> Result<()> {
-    let encode = |v: f32| {
-        let v = v.clamp(0.0, 1.0);
-        if v <= 0.0031308 {
-            v * 12.92
-        } else {
-            1.055 * v.powf(1.0 / 2.4) - 0.055
-        }
-    };
-    let (w, h) = display_linear.dimensions();
-    let data: Vec<u16> = display_linear
-        .as_raw()
-        .par_iter()
-        .map(|v| (encode(*v) * 65535.0).round() as u16)
-        .collect();
-    let image = image::ImageBuffer::<Rgb<u16>, _>::from_raw(w, h, data)
-        .context("Merged picture has the wrong size")?;
-    image
-        .save_with_format(path, image::ImageFormat::Tiff)
-        .context("Writing the merged TIFF")
-}
-
 /// The camera named in a RAW's metadata, for the merged DNG.
 pub fn camera_of(bytes: &[u8]) -> crate::hdr_dng::DngCamera {
     let source = rawler::rawsource::RawSource::new_from_slice(bytes);
@@ -156,7 +273,7 @@ pub fn temporary_path(extension: &str) -> Result<PathBuf> {
 /// another volume, as a cloud folder is), and return where it went.
 pub fn save(result: &HdrResult) -> Result<PathBuf> {
     let first = result.sources.first().context("A merge without frames")?;
-    let target = crate::versions::free_version_path(first, "HDR", result.extension);
+    let target = crate::versions::free_version_path(first, result.kind, result.extension);
     if std::fs::rename(&result.file, &target).is_err() {
         std::fs::copy(&result.file, &target).context("Saving the merge")?;
         let _ = std::fs::remove_file(&result.file);
@@ -168,6 +285,7 @@ pub fn save(result: &HdrResult) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::Rgb;
 
     /// Folding keeps everything up to the knee, puts the brightest light at
     /// white, and never reverses an order of brightness.

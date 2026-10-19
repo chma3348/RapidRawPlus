@@ -1,17 +1,14 @@
 use crate::app_settings::load_settings;
 use crate::app_state::AppState;
 use crate::file_management::parse_virtual_path;
-use base64::{Engine as _, engine::general_purpose};
-use image::ImageFormat;
-use image::{DynamicImage, GenericImageView, GrayImage, Rgb32FImage};
+use image::{DynamicImage, GrayImage, Rgb32FImage};
 use nalgebra::{Matrix3, Vector3};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
-use std::io::Cursor;
 use std::path::Path;
 use std::time::Instant;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::formats::is_raw_file;
 use crate::image_processing::apply_cpu_default_raw_processing;
@@ -68,44 +65,52 @@ pub async fn stitch_panorama(
         .collect();
 
     let panorama_result_handle = state.panorama_result.clone();
+    // A new panorama replaces an unsaved one (and its temporary file).
+    *panorama_result_handle.lock().unwrap() = None;
 
     let task = tokio::task::spawn_blocking(move || {
+        let sources: Vec<std::path::PathBuf> =
+            source_paths.iter().map(std::path::PathBuf::from).collect();
         let panorama_result = stitch_images(source_paths, app_handle.clone());
 
         match panorama_result {
             Ok(panorama_image) => {
                 let _ = app_handle.emit("panorama-progress", "Creating preview...");
-
-                let (w, h) = panorama_image.dimensions();
-                let (new_w, new_h) = if w > h {
-                    (800, (800.0 * h as f32 / w as f32).round() as u32)
-                } else {
-                    ((800.0 * w as f32 / h as f32).round() as u32, 800)
-                };
-
-                let preview_f32 =
-                    crate::image_processing::downscale_f32_image(&panorama_image, new_w, new_h);
-
-                let preview_u8 = preview_f32.to_rgb8();
-
-                let mut buf = Cursor::new(Vec::new());
-
-                if let Err(e) = preview_u8.write_to(&mut buf, ImageFormat::Png) {
-                    return Err(format!("Failed to encode panorama preview: {}", e));
+                // Written as the merge it is (compact JPEG XL, or a
+                // compressed 16-bit TIFF), and previewed by rendering that
+                // file through the editor's pipeline.
+                let state = app_handle.state::<AppState>();
+                let finished = crate::gpu_processing::get_or_init_gpu_context(&state, &app_handle)
+                    .map_err(|e| format!("The preview needs the GPU: {e}"))
+                    .and_then(|context| {
+                        let settings = load_settings(app_handle.clone()).unwrap_or_default();
+                        crate::hdr_output::finish(
+                            &context,
+                            &state,
+                            &panorama_image.into_rgb32f(),
+                            &crate::hdr_output::Merged::Rendered,
+                            crate::hdr_output::compact_from_settings(&settings),
+                            sources,
+                            "Pano",
+                        )
+                        .map_err(|e| format!("Failed to write the panorama: {e:#}"))
+                    });
+                match finished {
+                    Ok((result, final_base64)) => {
+                        *panorama_result_handle.lock().unwrap() = Some(result);
+                        let _ = app_handle.emit(
+                            "panorama-complete",
+                            serde_json::json!({
+                                "base64": final_base64,
+                            }),
+                        );
+                        Ok(())
+                    }
+                    Err(e) => {
+                        let _ = app_handle.emit("panorama-error", e.clone());
+                        Err(e)
+                    }
                 }
-
-                let base64_str = general_purpose::STANDARD.encode(buf.get_ref());
-                let final_base64 = format!("data:image/png;base64,{}", base64_str);
-
-                *panorama_result_handle.lock().unwrap() = Some(panorama_image);
-
-                let _ = app_handle.emit(
-                    "panorama-complete",
-                    serde_json::json!({
-                        "base64": final_base64,
-                    }),
-                );
-                Ok(())
             }
             Err(e) => {
                 let _ = app_handle.emit("panorama-error", e.clone());
@@ -126,7 +131,7 @@ pub async fn save_panorama(
     first_path_str: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
-    let panorama_image = state
+    let result = state
         .panorama_result
         .lock()
         .unwrap()
@@ -135,40 +140,11 @@ pub async fn save_panorama(
             "No panorama image found in memory to save. It might have already been saved."
                 .to_string()
         })?;
-
-    let (first_path, _) = parse_virtual_path(&first_path_str);
-    let parent_dir = first_path
-        .parent()
-        .ok_or_else(|| "Could not determine parent directory of the first image.".to_string())?;
-    let stem = first_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("panorama");
-
-    let (output_filename, image_to_save): (String, DynamicImage) =
-        if panorama_image.color().has_alpha() {
-            (
-                format!("{}_Pano.png", stem),
-                DynamicImage::ImageRgba8(panorama_image.to_rgba8()),
-            )
-        } else if panorama_image.as_rgb32f().is_some() {
-            (format!("{}_Pano.tiff", stem), panorama_image)
-        } else {
-            (
-                format!("{}_Pano.png", stem),
-                DynamicImage::ImageRgb8(panorama_image.to_rgb8()),
-            )
-        };
-
-    let output_path = parent_dir.join(output_filename);
-
-    image_to_save
-        .save(&output_path)
-        .map_err(|e| format!("Failed to save panorama image: {}", e))?;
-
-    let (real_path, _) = crate::file_management::parse_virtual_path(&first_path_str);
+    let output_path = crate::hdr_output::save(&result).map_err(|e| format!("{e:#}"))?;
+    let (real_path, _) = parse_virtual_path(&first_path_str);
     let _ = crate::exif_processing::write_exif_sidecar(&real_path.to_string_lossy(), &output_path);
-
+    // One stack in the library: the panorama on top, its frames inside.
+    crate::versions::record_merge(&output_path, &result.sources, result.kind);
     Ok(output_path.to_string_lossy().to_string())
 }
 

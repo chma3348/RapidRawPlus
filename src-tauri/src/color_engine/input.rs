@@ -111,6 +111,34 @@ pub fn decode_profiled_photo(bytes: &[u8]) -> Result<DecodedFrame> {
         );
         return Ok(frame);
     }
+    // JPEG XL (compact merges, and .jxl files generally): decoded by
+    // jxl-oxide in the colour encoding it renders to, whose ICC profile then
+    // goes through the same interpretation as any other photo's.
+    if bytes.starts_with(&[0xff, 0x0a]) || bytes.starts_with(b"\0\0\0\x0cJXL \r\n\x87\n") {
+        let image = jxl_oxide::JxlImage::read_with_defaults(bytes)
+            .map_err(|e| anyhow::anyhow!("JPEG XL: {e}"))?;
+        let icc = image.rendered_icc();
+        let render = image
+            .render_frame(0)
+            .map_err(|e| anyhow::anyhow!("JPEG XL: {e}"))?;
+        let buffer = render.image_all_channels();
+        let (w, h, channels) = (
+            buffer.width() as u32,
+            buffer.height() as u32,
+            buffer.channels(),
+        );
+        ensure!(channels >= 3, "JPEG XL without colour channels");
+        let rgb: Vec<f32> = buffer
+            .buf()
+            .chunks(channels)
+            .flat_map(|p| [p[0], p[1], p[2]])
+            .collect();
+        let image = DynamicImage::ImageRgb32F(
+            image::Rgb32FImage::from_raw(w, h, rgb).context("JPEG XL pixels")?,
+        );
+        // (Only a PNG gets further format checks there.)
+        return finish_profiled(image, Some(icc), ImageFormat::Tiff, bytes);
+    }
     let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
     // The default allocation limit is sized by pixel count, and on a small
     // TIFF it is smaller than the embedded ICC profile, which then silently

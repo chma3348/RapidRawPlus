@@ -376,6 +376,10 @@ pub struct AppSettings {
     /// The first-time card about cloud photos was dismissed.
     #[serde(default)]
     pub cloud_photos_card_seen: Option<bool>,
+    /// How HDR merges and panoramas are saved: "compact" (lossy JPEG XL,
+    /// as Lightroom 13 saves its merges; the default) or "lossless".
+    #[serde(default)]
+    pub merge_compression: Option<String>,
     #[serde(default)]
     pub root_folders: Vec<String>,
     #[serde(default)]
@@ -526,6 +530,7 @@ impl Default for AppSettings {
             cloud_photos_mode: None,
             cloud_folder_modes: None,
             cloud_photos_card_seen: None,
+            merge_compression: None,
             root_folders: Vec::new(),
             pinned_folders: Vec::new(),
             thumbnail_resolution: Some(720),

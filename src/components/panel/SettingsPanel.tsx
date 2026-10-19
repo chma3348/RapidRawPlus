@@ -1223,6 +1223,36 @@ export default function SettingsPanel({
                       />
                     </SettingItem>
 
+                    <SettingItem
+                      label={t('settings.general.mergeCompression', {
+                        defaultValue: 'Merged photos (HDR and panoramas)',
+                      })}
+                      description={t('settings.general.mergeCompressionDesc', {
+                        defaultValue:
+                          'Compact saves merges with high-quality JPEG XL, as Lightroom does: about a tenth of the size, with the full range kept for editing. Lossless keeps every last bit, at many times the size, and opens in apps that do not read JPEG XL yet.',
+                      })}
+                    >
+                      <Dropdown
+                        options={[
+                          {
+                            value: 'compact',
+                            label: t('settings.general.mergeCompact', {
+                              defaultValue: 'Compact (recommended): about 11 MB per 33 MP',
+                            }),
+                          },
+                          {
+                            value: 'lossless',
+                            label: t('settings.general.mergeLossless', {
+                              defaultValue: 'Lossless: about 145 MB per 33 MP',
+                            }),
+                          },
+                        ]}
+                        onChange={(value: any) => onSettingsChange({ ...appSettings, mergeCompression: value })}
+                        value={appSettings?.mergeCompression || 'compact'}
+                        triggerClassName="bg-bg-primary"
+                      />
+                    </SettingItem>
+
                     <div className="space-y-4">
                       <SettingItem
                         label={t('settings.general.xmpSync')}

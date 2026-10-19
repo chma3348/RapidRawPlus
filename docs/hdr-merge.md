@@ -19,23 +19,43 @@
 
 ## What it writes
 
+Merges (HDR and panoramas) are saved **compact** by default, as Lightroom
+13 saves its merges (lossy JPEG XL); Settings → General → "Merged photos"
+can choose **lossless**. Measured on a 33-megapixel frame:
+
+| | Compact | Lossless |
+|---|---|---|
+| RAW bracket → DNG | 11 MB | 146 MB |
+| JPEG bracket → .jxl / .tif | 5 MB | 32 MB |
+| 131 MP panorama (JPEG) | 22 MB | 130 MB |
+
+(The panorama this replaced, an uncompressed 32-bit float TIFF, was
+1.65 GB.) Lightroom's own: 3 × 76 MB RAWs → an 18 MB panorama DNG, a 5-frame
+HDR → 14 MB, since version 13; 200–460 MB before.
+
 **A RAW bracket → `<first>_HDR.dng`** (`hdr_dng`):
-- **Pixels:** a floating-point LinearRaw DNG, the form Lightroom's HDR merges take. 16-bit half floats, deflate with the floating-point predictor.
-- **Colour:** linear sRGB primaries (the colour matrix says so, so every DNG reader agrees), white balanced.
-- **Brightness:** scaled under 1.0, with `BaselineExposure` restoring the middle frame's brightness.
-- **In the app:** it opens like any RAW, with the RAW look and the full merged range under every control.
-- **Size:** about 145 MB for a 33-megapixel merge.
-- **Checked:** a RAW written as such a DNG renders within 0.02 levels of the RAW itself.
+- **Pixels:** a floating-point LinearRaw DNG in linear sRGB primaries (the colour matrix says so), white balanced, in the middle frame's units with highlights past 1.0 kept.
+- **Compact:** JPEG XL in 512-pixel tiles (DNG 1.7: Compression 52546, JXLDistance 52553, JXLEffort 52554, JXLDecodeSpeed 52555), distance 0.3. Chosen on real photos with Exposure +3, zoomed in, where it matched lossless (1.0 smoothed grain).
+- **Lossless:** half floats, deflate with the floating-point predictor.
+- **Layout:** a rendered JPEG preview heads the file, with the pixels in a SubIFD, as Lightroom lays a DNG out.
+- **No scaling:** the pixels are not scaled under 1.0. That made JPEG XL take a sunset for deep shadow (28% of pixels off by more than 4 levels pushed), and declaring an HDR intensity target instead made decoders tone-map the highlights.
+- **In the app:** it opens like any RAW. It renders within 0.09 levels of the RAW itself (compact).
+- **Elsewhere:** darktable reads the lossless one. macOS (Finder, Quick Look) shows both black, apparently not developing floating-point LinearRaw. Untested in Lightroom.
 
-**A bracket of finished pictures → `<first>_HDR.tif`**, 16-bit sRGB:
+**A bracket of finished pictures → `<first>_HDR.jxl`** (compact; JPEG XL at 16 bits, distance 0.3, effort 3) **or `.tif`** (lossless; 16-bit, deflate + horizontal predictor):
 - **Why not a DNG:** their look is baked in, so a DNG would lay the RAW look over it twice.
-- **Why not a float TIFF:** the input transform treats a finished picture's white as its ceiling, so light above white has nowhere to go.
-- **What it does instead:** light above white is folded under it (`fold_highlights`). The picture is unchanged up to 0.8 on the brightest channel, then a smooth shoulder reaches white at the merge's brightest light, easing toward neutral at the very top. The Highlights slider brings that range back.
+- **Highlights:** light above white is folded under it (`fold_highlights`), unchanged up to 0.8, so Highlights brings it back.
+- **Memory:** a JPEG XL of a whole picture needs its memory at once. Effort 3 measured within 0.04 levels of the default 7 at half the memory (8 GB rather than 19 GB for 131 MP). Above 150 megapixels a compact merge is saved as the lossless TIFF instead. A DNG's JPEG XL is tiled, so it has no such limit.
 
-**Reading float DNGs:** rawler reads neither floating-point nor LinearRaw DNGs. `hdr_dng::decode_float_dng` reads them for the colour engine's RAW path. That covers ours and Lightroom's (SubIFD layout, tiles, 16/24/32-bit floats, predictors 3, 34894 and 34895).
+**Reading:**
+- **Float DNGs:** rawler reads neither floating-point, LinearRaw nor JPEG XL DNGs. `hdr_dng::decode_float_dng` reads them for the colour engine's RAW path: ours and Lightroom's (SubIFDs, tiles, 16/24/32-bit floats, predictors 3/34894/34895, JPEG XL tiles).
+- **`.jxl` files:** opened by the colour engine through jxl-oxide and their colour profile.
+
+**Panoramas** (`panorama_stitching`) are saved the same way, as finished pictures, until stitching moves to linear RAW frames.
 
 ## The merge window
 
 - **Preview:** a render of the merged file itself, through the editor's pipeline, at 1600 px. The full-size picture sent to the page as one image was too big to draw and showed black.
-- **Saving:** moves the file beside the first frame.
-- **Stack:** `versions::record_merge` makes the merge head a stack holding its frames ("HDR", "Bracket 1…").
+- **Saving:** moves the file beside the first frame (`_HDR` or `_Pano`).
+- **Stack:** `versions::record_merge` makes the merge head a stack holding its frames ("HDR" or "Pano", then "Bracket 1…").
+- **Panoramas:** go through the same finishing (`hdr_output::finish`): written, previewed by rendering the file, stacked.

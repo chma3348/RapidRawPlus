@@ -85,7 +85,7 @@ use std::time::Duration;
 
 use base64::{Engine as _, engine::general_purpose};
 use image::codecs::jpeg::JpegEncoder;
-use image::{DynamicImage, GenericImageView, ImageFormat, RgbImage, Rgba};
+use image::{DynamicImage, GenericImageView, RgbImage, Rgba};
 use imageproc::drawing::draw_line_segment_mut;
 use imageproc::edges::canny;
 use imageproc::hough::{LineDetectionOptions, detect_lines};
@@ -1131,52 +1131,37 @@ async fn merge_hdr(
     );
 
     let _ = app_handle.emit("hdr-progress", "Saving the merge...");
-    let (extension, written) = if let Some(camera) = &camera {
-        let file = crate::hdr_output::temporary_path("dng").map_err(|e| e.to_string())?;
-        let written = crate::hdr_dng::write_float_dng(&file, &merged, camera).map(|_| file);
-        ("dng", written)
-    } else {
-        crate::hdr_output::fold_highlights(&mut merged);
-        let file = crate::hdr_output::temporary_path("tif").map_err(|e| e.to_string())?;
-        let written = crate::hdr_output::write_rendered_tiff(&file, &merged).map(|_| file);
-        ("tif", written)
+    let merged_kind = match camera {
+        Some(camera) => crate::hdr_output::Merged::Raw(camera),
+        None => {
+            crate::hdr_output::fold_highlights(&mut merged);
+            crate::hdr_output::encode_srgb(&mut merged);
+            crate::hdr_output::Merged::Rendered
+        }
     };
-    drop(merged);
-    let file = written.map_err(|e| format!("Failed to write the merge: {e:#}"))?;
-    let result = crate::hdr_output::HdrResult {
-        file: file.clone(),
-        extension,
-        sources: names
-            .iter()
-            .map(|p| crate::file_management::parse_virtual_path(p).0)
-            .collect(),
-    };
-    log::info!("HDR merge completed");
-
+    let sources: Vec<std::path::PathBuf> = names
+        .iter()
+        .map(|p| crate::file_management::parse_virtual_path(p).0)
+        .collect();
     // The preview is the merged file itself, rendered as the editor will
     // show it, at a size the window can hold (the full picture as one
     // image in the page was too big to draw, and showed black).
     let _ = app_handle.emit("hdr-progress", "Creating preview...");
     let context = crate::gpu_processing::get_or_init_gpu_context(&state, &app_handle)
         .map_err(|e| format!("The preview needs the GPU: {e}"))?;
-    let preview = crate::color_engine::application::render_aside(
+    let settings = load_settings(app_handle.clone()).unwrap_or_default();
+    let (result, final_base64) = crate::hdr_output::finish(
         &context,
         &state,
-        &file.to_string_lossy(),
-        &serde_json::Value::Null,
-        Some(1600),
+        &merged,
+        &merged_kind,
+        crate::hdr_output::compact_from_settings(&settings),
+        sources,
+        "HDR",
     )
-    .map_err(|e| format!("Failed to preview the merge: {e:#}"))?
-    .preview_rgba8();
-    let mut buf = Cursor::new(Vec::new());
-    DynamicImage::ImageRgba8(preview)
-        .to_rgb8()
-        .write_to(&mut buf, ImageFormat::Jpeg)
-        .map_err(|e| format!("Failed to encode hdr preview: {}", e))?;
-    let final_base64 = format!(
-        "data:image/jpeg;base64,{}",
-        general_purpose::STANDARD.encode(buf.get_ref())
-    );
+    .map_err(|e| format!("Failed to write the merge: {e:#}"))?;
+    drop(merged);
+    log::info!("HDR merge completed ({})", result.extension);
 
     *state.hdr_result.lock().unwrap() = Some(result);
 
@@ -1201,7 +1186,7 @@ async fn save_hdr(
     let (real_path, _) = crate::file_management::parse_virtual_path(&first_path_str);
     let _ = crate::exif_processing::write_exif_sidecar(&real_path.to_string_lossy(), &output_path);
     // One stack in the library: the merge on top, its frames inside.
-    crate::versions::record_merge(&output_path, &result.sources, "HDR");
+    crate::versions::record_merge(&output_path, &result.sources, result.kind);
     Ok(output_path.to_string_lossy().to_string())
 }
 

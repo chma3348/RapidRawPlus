@@ -175,7 +175,8 @@ pub struct AppState {
     pub export_task_handle: Mutex<Option<JoinHandle<()>>>,
     /// A merge made and previewed, waiting to be saved (hdr_output).
     pub hdr_result: Arc<Mutex<Option<crate::hdr_output::HdrResult>>>,
-    pub panorama_result: Arc<Mutex<Option<DynamicImage>>>,
+    /// A panorama made and previewed, waiting to be saved (hdr_output).
+    pub panorama_result: Arc<Mutex<Option<crate::hdr_output::HdrResult>>>,
     pub denoise_result: Arc<Mutex<Option<DynamicImage>>>,
     pub enhancement_result: Arc<Mutex<Option<DynamicImage>>>,
     /// Raw (un-blended, native-scale) model output of the last enhancement
