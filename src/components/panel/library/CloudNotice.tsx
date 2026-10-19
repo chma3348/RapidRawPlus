@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { useTranslation } from 'react-i18next';
@@ -7,17 +7,18 @@ import { useShallow } from 'zustand/react/shallow';
 
 import { useLibraryStore } from '../../../store/useLibraryStore';
 import { useSettingsStore } from '../../../store/useSettingsStore';
-import { cloudServiceName, ImageFile, Invokes } from '../../ui/AppProperties';
+import { AppSettings, cloudServiceName, ImageFile, Invokes } from '../../ui/AppProperties';
 
 /**
- * Photos in this folder that are only in a cloud service (Nextcloud…).
+ * Photos that are only in a cloud service (Nextcloud…), not on this Mac.
  *
- * The first time such a folder is shown, a small card says what happens
- * (a small preview of each is kept) with "Sounds good" and "Change…"; until
- * it is answered nothing is downloaded. After that, a quiet line: how many
- * photos here are in the cloud, what is kept for them, and while previews
- * are being made, the progress with Pause. "Change…" opens the one choice:
- * small previews, thumbnails only, or nothing kept.
+ * The first time a folder (or Home) shows such photos, and nothing has been
+ * chosen yet, a window explains what is happening — they cannot be shown
+ * until something is downloaded — and offers the one choice: small
+ * previews, thumbnails only, or nothing kept. Nothing downloads until it is
+ * answered. After that a quiet line above the photos says how this
+ * folder's are coming along, with the time left and Pause; "Change…"
+ * reopens the choice.
  */
 
 export type CloudMode = 'previews' | 'thumbnails' | 'none';
@@ -26,109 +27,206 @@ interface BuilderProgress {
   done: number;
   total: number;
   paused: boolean;
+  /** Seconds per photo lately, all workers together; null at first. */
+  secondsPerPhoto?: number | null;
 }
+
+interface FolderSummary {
+  photos: number;
+  bytes: number;
+  withPreviews: number;
+}
+
+/** The cloud fields of the settings (not in the AppSettings type). */
+interface CloudSettings {
+  cloudPhotosMode?: string | null;
+  cloudFolderModes?: Record<string, string> | null;
+  cloudPhotosCardSeen?: boolean | null;
+}
+
+const cloudSettings = (settings: AppSettings | null): CloudSettings => (settings ?? {}) as unknown as CloudSettings;
 
 /** Per photo, roughly: a preview, a thumbnail. */
 const PREVIEW_BYTES = 1_000_000;
 const THUMBNAIL_BYTES = 80_000;
 
-/**
- * Seconds left, from how fast photos have been finishing since building
- * (re)started; null until a few have finished.
- */
-const useTimeLeft = (progress: BuilderProgress) => {
-  const start = useRef<{ at: number; done: number } | null>(null);
-  const building = progress.total > progress.done && !progress.paused;
-  if (!building || (start.current && progress.done < start.current.done)) start.current = null;
-  else if (!start.current) start.current = { at: Date.now(), done: progress.done };
-  const s = start.current;
-  if (!s || progress.done - s.done < 3) return null;
-  const perPhoto = (Date.now() - s.at) / 1000 / (progress.done - s.done);
-  return (progress.total - progress.done) * perPhoto;
-};
-
 const size = (bytes: number) =>
   bytes >= 1e9 ? `${(bytes / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(bytes / 1e6))} MB`;
 
 /** The mode for a folder: its own choice, an enclosing folder's, or the default. */
-export const modeFor = (folder: string | null, settings: any): CloudMode => {
-  const folders: Record<string, string> = settings?.cloudFolderModes ?? {};
+export const modeFor = (folder: string | null, settings: AppSettings | null): CloudMode => {
+  const cloud = cloudSettings(settings);
+  const folders: Record<string, string> = cloud.cloudFolderModes ?? {};
   const match = Object.keys(folders)
     .filter((f) => folder && (folder === f || folder.startsWith(`${f}/`)))
     .sort((a, b) => b.length - a.length)[0];
-  return ((match && folders[match]) || settings?.cloudPhotosMode || 'previews') as CloudMode;
+  return ((match && folders[match]) || cloud.cloudPhotosMode || 'previews') as CloudMode;
 };
 
+/** Previews made this session (the listing's has_preview is read once). */
+const madeThisSession = new Set<string>();
+/** "Not now" in the first-time window: not asked again until the app restarts. */
+let postponed = false;
+
+const useMade = () => {
+  const [, setCount] = useState(0);
+  useEffect(() => {
+    const unlisten = listen<string>('cloud-preview-made', (e) => {
+      madeThisSession.add(e.payload);
+      setCount((c) => c + 1);
+    });
+    return () => {
+      unlisten.then((f) => f());
+    };
+  }, []);
+  return madeThisSession;
+};
+
+/**
+ * The choice of what to keep for cloud photos. `firstTime` is the window
+ * shown before anything has been chosen: it says why nothing shows, and
+ * offers "Not now".
+ */
 export function CloudPhotosChoice({
   folder,
   photoCount,
+  summary,
+  firstTime = false,
+  service: named,
   onClose,
 }: {
   folder: string | null;
   photoCount: number;
+  summary?: FolderSummary | null;
+  firstTime?: boolean;
+  /** The cloud service's name, where the caller knows it better than the folder does. */
+  service?: string;
   onClose: () => void;
 }) {
   const { t } = useTranslation();
   const appSettings = useSettingsStore((s) => s.appSettings);
   const current = modeFor(folder, appSettings);
   const [mode, setMode] = useState<CloudMode>(current);
-  const [everywhere, setEverywhere] = useState(!folder);
+  const [everywhere, setEverywhere] = useState(firstTime || !folder);
+  const service = named ?? cloudServiceName(folder ?? '');
+  const count = summary?.photos ?? photoCount;
+  const toMake = summary ? summary.photos - summary.withPreviews : photoCount;
 
-  const options: { value: CloudMode; title: string; desc: string; bytes: number }[] = [
+  const options: { value: CloudMode; title: string; desc: string; cost: string | null }[] = [
     {
       value: 'previews',
-      title: t('cloud.previews', { defaultValue: 'Small previews' }),
-      desc: t('cloud.previewsDesc', { defaultValue: 'Browse and edit without downloading.' }),
-      bytes: photoCount * PREVIEW_BYTES,
+      title: t('cloud.previews', { defaultValue: 'Make small previews' }),
+      desc: t('cloud.previewsDescLong', {
+        defaultValue:
+          'Downloads each photo once, makes a small preview of it (about 1 MB), then removes the download. The preview is saved next to the photo in {{service}}, so you can browse and edit here without keeping the full photos on this Mac.',
+        service,
+      }),
+      cost:
+        folder && toMake > 0
+          ? t('cloud.previewsCost', {
+              defaultValue: 'This folder: downloads {{download}} once, keeps about {{kept}}.',
+              download: summary ? size(summary.bytes) : t('cloud.eachPhoto', { defaultValue: 'each photo' }),
+              kept: size(toMake * PREVIEW_BYTES),
+            })
+          : null,
     },
     {
       value: 'thumbnails',
       title: t('cloud.thumbnails', { defaultValue: 'Thumbnails only' }),
-      desc: t('cloud.thumbnailsDesc', {
-        defaultValue: 'Browse without downloading; opening a photo downloads it.',
+      desc: t('cloud.thumbnailsDescLong', {
+        defaultValue:
+          'Downloads each photo once to make a thumbnail for browsing, then removes it. Opening a photo downloads it again.',
       }),
-      bytes: photoCount * THUMBNAIL_BYTES,
+      cost:
+        folder && count > 0
+          ? t('cloud.thumbnailsCost', {
+              defaultValue: 'This folder: downloads {{download}} once, keeps about {{kept}}.',
+              download: summary ? size(summary.bytes) : t('cloud.eachPhoto', { defaultValue: 'each photo' }),
+              kept: size(count * THUMBNAIL_BYTES),
+            })
+          : null,
     },
     {
       value: 'none',
-      title: t('cloud.none', { defaultValue: 'Download when opened' }),
-      desc: t('cloud.noneDesc', {
-        defaultValue: 'Nothing stored on this Mac; photos take a moment to open.',
+      title: t('cloud.none', { defaultValue: "Don't download anything" }),
+      desc: t('cloud.noneDescLong', {
+        defaultValue: 'Photos show as cloud icons. Opening one downloads it, which takes a moment.',
       }),
-      bytes: 0,
+      cost: null,
     },
   ];
 
   const save = async () => {
-    const s: any = useSettingsStore.getState().appSettings ?? {};
-    const folders = { ...(s.cloudFolderModes ?? {}) };
-    let next: any;
+    const settings = useSettingsStore.getState().appSettings;
+    const cloud = cloudSettings(settings);
+    const folders = { ...(cloud.cloudFolderModes ?? {}) };
+    let changes: CloudSettings;
     if (everywhere || !folder) {
       if (folder) delete folders[folder];
-      next = { ...s, cloudPhotosMode: mode, cloudFolderModes: folders, cloudPhotosCardSeen: true };
+      changes = { cloudPhotosMode: mode, cloudFolderModes: folders, cloudPhotosCardSeen: true };
     } else {
-      if (mode === (s.cloudPhotosMode ?? 'previews')) delete folders[folder];
+      if (mode === (cloud.cloudPhotosMode ?? 'previews')) delete folders[folder];
       else folders[folder] = mode;
-      next = { ...s, cloudFolderModes: folders, cloudPhotosCardSeen: true };
+      changes = { cloudFolderModes: folders, cloudPhotosCardSeen: true };
     }
-    await useSettingsStore.getState().handleSettingsChange(next);
+    await useSettingsStore.getState().handleSettingsChange({ ...settings, ...changes } as AppSettings);
     onClose();
   };
 
+  const later = () => {
+    postponed = true;
+    onClose();
+  };
+
+  const start =
+    mode === 'previews'
+      ? t('cloud.startPreviews', { defaultValue: 'Make previews' })
+      : mode === 'thumbnails'
+        ? t('cloud.startThumbnails', { defaultValue: 'Make thumbnails' })
+        : t('common.done', { defaultValue: 'Done' });
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+      onClick={firstTime ? undefined : onClose}
+    >
       <div
-        className="w-[420px] max-w-[90vw] rounded-xl bg-surface p-5 text-sm text-text-primary shadow-xl"
+        className="w-[520px] max-w-[92vw] rounded-xl bg-surface p-6 text-sm text-text-primary shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="mb-3 flex items-center justify-between">
-          <span className="text-base font-medium">
-            {t('cloud.choiceTitle', { defaultValue: 'Photos that aren’t on this Mac' })}
-          </span>
-          <button onClick={onClose} className="rounded p-1 text-text-secondary hover:bg-card-active">
-            <X size={16} />
-          </button>
+        <div className="mb-2 flex items-start justify-between gap-4">
+          <div className="flex items-center gap-2.5">
+            <Cloud size={20} className="shrink-0 text-accent" />
+            <span className="text-base font-medium">
+              {firstTime
+                ? count > 0
+                  ? t('cloud.firstTitle', {
+                      defaultValue: '{{count}} photos here are only in {{service}}',
+                      count,
+                      service,
+                    })
+                  : t('cloud.firstTitleSome', { defaultValue: 'Some photos here are only in {{service}}', service })
+                : t('cloud.choiceTitle', { defaultValue: 'Photos stored in {{service}}', service })}
+            </span>
+          </div>
+          {!firstTime && (
+            <button onClick={onClose} className="rounded p-1 text-text-secondary hover:bg-card-active">
+              <X size={16} />
+            </button>
+          )}
         </div>
+        <p className="mb-4 text-text-secondary">
+          {firstTime
+            ? t('cloud.firstBody', {
+                defaultValue:
+                  "They haven't been downloaded to this Mac, so there is nothing to show yet. How should Darkroom Index handle photos stored in {{service}}?",
+                service,
+              })
+            : t('cloud.choiceBody', {
+                defaultValue: 'What Darkroom Index keeps on this Mac for photos that are only in {{service}}.',
+                service,
+              })}
+        </p>
         <div className="space-y-2">
           {options.map((o) => (
             <label
@@ -147,14 +245,8 @@ export function CloudPhotosChoice({
                     </span>
                   )}
                 </span>
-                <span className="block text-text-secondary">{o.desc}</span>
-                {folder && photoCount > 0 && (
-                  <span className="block text-xs text-text-secondary">
-                    {o.bytes > 0
-                      ? t('cloud.estimate', { defaultValue: 'About {{size}} for this folder.', size: size(o.bytes) })
-                      : t('cloud.estimateNone', { defaultValue: 'Nothing for this folder.' })}
-                  </span>
-                )}
+                <span className="mt-0.5 block text-text-secondary">{o.desc}</span>
+                {o.cost && <span className="mt-1 block text-xs text-text-secondary">{o.cost}</span>}
               </span>
             </label>
           ))}
@@ -162,15 +254,23 @@ export function CloudPhotosChoice({
         {folder && (
           <label className="mt-3 flex cursor-pointer items-center gap-2 text-text-secondary">
             <input type="checkbox" checked={everywhere} onChange={(e) => setEverywhere(e.target.checked)} />
-            {t('cloud.everywhere', { defaultValue: 'Use this for all cloud folders' })}
+            {t('cloud.everywhereService', { defaultValue: 'Use this for all my {{service}} folders', service })}
           </label>
         )}
-        <div className="mt-4 flex justify-end gap-2">
-          <button onClick={onClose} className="rounded-md px-3 py-1.5 hover:bg-card-active">
-            {t('common.cancel', { defaultValue: 'Cancel' })}
+        <p className="mt-3 text-xs text-text-secondary">
+          {t('cloud.backgroundNote', {
+            defaultValue:
+              'This runs in the background, a few photos at a time, starting with the ones on screen. You can pause it at any time, and change this later with Change… above the photos or in Settings.',
+          })}
+        </p>
+        <div className="mt-5 flex justify-end gap-2">
+          <button onClick={firstTime ? later : onClose} className="rounded-md px-3 py-1.5 hover:bg-card-active">
+            {firstTime
+              ? t('cloud.notNow', { defaultValue: 'Not now' })
+              : t('common.cancel', { defaultValue: 'Cancel' })}
           </button>
-          <button onClick={save} className="rounded-md bg-accent px-3 py-1.5 text-button-text">
-            {t('common.done', { defaultValue: 'Done' })}
+          <button onClick={save} className="rounded-md bg-accent px-4 py-1.5 font-medium text-button-text">
+            {start}
           </button>
         </div>
       </div>
@@ -189,9 +289,12 @@ export default function CloudNotice({ photos, home = false }: { photos?: ImageFi
     useShallow((s) => ({ libraryList: s.imageList, currentFolderPath: s.currentFolderPath })),
   );
   const imageList = photos ?? libraryList;
-  const appSettings: any = useSettingsStore((s) => s.appSettings);
+  const appSettings = useSettingsStore((s) => s.appSettings);
   const [progress, setProgress] = useState<BuilderProgress>({ done: 0, total: 0, paused: false });
   const [choosing, setChoosing] = useState(false);
+  const [summary, setSummary] = useState<FolderSummary | null>(null);
+  const [, setPostponedTick] = useState(0);
+  const made = useMade();
 
   useEffect(() => {
     invoke<BuilderProgress>(Invokes.GetCloudPreviewsProgress)
@@ -205,10 +308,33 @@ export default function CloudNotice({ photos, home = false }: { photos?: ImageFi
 
   const cloudPhotos = useMemo(() => imageList.filter((f) => f.cloud_only && !f.is_virtual_copy), [imageList]);
   const folder = !home && currentFolderPath && !currentFolderPath.startsWith('Album: ') ? currentFolderPath : null;
+
+  // What this folder's cloud photos come to, for the choice.
+  useEffect(() => {
+    setSummary(null);
+    if (!folder || cloudPhotos.length === 0) return;
+    invoke<FolderSummary>(Invokes.CloudFolderSummary, { path: folder })
+      .then(setSummary)
+      .catch(() => {});
+  }, [folder, cloudPhotos.length]);
+
   const building = progress.total > progress.done;
-  const secondsLeft = useTimeLeft(progress);
-  // "about 1 h 20 min left", "about 5 min left", "under a minute left".
+  if (cloudPhotos.length === 0 && !building) return null;
+
+  const service = cloudServiceName(cloudPhotos[0]?.path ?? folder ?? '');
+  const mode = modeFor(folder, appSettings);
+  const chosen = !!cloudSettings(appSettings).cloudPhotosCardSeen;
+  const link = 'inline-flex items-center gap-1.5 hover:text-text-primary transition-colors';
+
+  // This folder's previews: made before (listed) or since (events).
+  const waiting = cloudPhotos.filter((f) => !f.has_preview && !made.has(f.path)).length;
+  const ready = cloudPhotos.length - waiting;
+  const secondsLeft =
+    progress.secondsPerPhoto && !progress.paused
+      ? (folder ? waiting : progress.total - progress.done) * progress.secondsPerPhoto
+      : null;
   const minutesLeft = secondsLeft === null ? null : Math.round(secondsLeft / 60);
+  // "about 1 h 20 min left", "about 5 min left", "under a minute left".
   const timeLeft =
     minutesLeft === null
       ? null
@@ -223,108 +349,101 @@ export default function CloudNotice({ photos, home = false }: { photos?: ImageFi
                 minutes: minutesLeft % 60,
               })
             : t('cloud.hoursLeft', { defaultValue: 'about {{hours}} h left', hours: minutesLeft / 60 });
-  if (cloudPhotos.length === 0 && !building) return null;
 
-  const service = cloudServiceName(cloudPhotos[0]?.path ?? folder ?? '');
-  const mode = modeFor(folder, appSettings);
-  const cardSeen = !!appSettings?.cloudPhotosCardSeen;
-  const link = 'inline-flex items-center gap-1.5 hover:text-text-primary transition-colors';
+  const pauseButton = building && (
+    <button
+      className={link}
+      onClick={() =>
+        invoke<BuilderProgress>(Invokes.SetCloudPreviewsPaused, { paused: !progress.paused }).then(setProgress)
+      }
+    >
+      {progress.paused ? <Play size={12} /> : <Pause size={12} />}
+      {progress.paused ? t('cloud.resume', { defaultValue: 'Resume' }) : t('cloud.pause', { defaultValue: 'Pause' })}
+    </button>
+  );
 
-  const answer = () =>
-    useSettingsStore.getState().handleSettingsChange({ ...(appSettings ?? {}), cloudPhotosCardSeen: true });
+  // What is happening, in one line.
+  let status: string;
+  if (!chosen) {
+    status = t('cloud.notSetUp', { defaultValue: 'Not downloading anything yet' });
+  } else if (mode === 'none') {
+    status = t('cloud.noneStatus', { defaultValue: 'Downloaded when opened' });
+  } else if (mode === 'thumbnails') {
+    status = building
+      ? t('cloud.makingThumbnails', {
+          defaultValue: 'Making thumbnails, {{left}} to go',
+          left: progress.total - progress.done,
+        })
+      : t('cloud.thumbnailsStatus', { defaultValue: 'Thumbnails only' });
+  } else if (folder && waiting > 0) {
+    status = progress.paused
+      ? t('cloud.pausedFolder', {
+          defaultValue: 'Previews paused, {{ready}} of {{total}} ready',
+          ready,
+          total: cloudPhotos.length,
+        })
+      : t('cloud.makingFolder', {
+          defaultValue: 'Making previews for this folder: {{ready}} of {{total}}',
+          ready,
+          total: cloudPhotos.length,
+        });
+  } else if (folder) {
+    status = building
+      ? t('cloud.readyHereMore', {
+          defaultValue: 'Previews ready · making {{left}} more for other folders',
+          left: progress.total - progress.done,
+        })
+      : t('cloud.readyHere', { defaultValue: 'Previews ready' });
+  } else {
+    status = building
+      ? t('cloud.makingHome', { defaultValue: 'Making previews, {{left}} to go', left: progress.total - progress.done })
+      : t('cloud.previewsStatus', { defaultValue: 'Small previews' });
+  }
+
+  const askNow = !chosen && !postponed && cloudPhotos.length > 0;
 
   return (
     <>
-      {!cardSeen && cloudPhotos.length > 0 ? (
-        <div
-          className={`shrink-0 flex items-start gap-3 rounded-lg border border-border-color bg-surface p-3 text-sm ${
-            home ? 'mx-8 mb-4' : 'mx-4 mt-3 mb-1'
-          }`}
-        >
-          <Cloud size={18} className="mt-0.5 shrink-0 text-text-secondary" />
-          <div className="flex-1">
-            <div className="font-medium">
-              {t('cloud.cardTitle', {
-                defaultValue: 'Some of these photos are only in {{service}}.',
-                service,
-              })}
-            </div>
-            <div className="text-text-secondary">
-              {t('cloud.cardBody', {
-                defaultValue:
-                  'Darkroom Index keeps a small preview of each (about 1 MB) so you can browse and edit them without downloading them.',
-              })}
-            </div>
-            <div className="mt-2 flex gap-2">
-              <button onClick={answer} className="rounded-md bg-accent px-3 py-1 text-button-text">
-                {t('cloud.soundsGood', { defaultValue: 'Sounds good' })}
-              </button>
-              <button onClick={() => setChoosing(true)} className="rounded-md px-3 py-1 hover:bg-card-active">
-                {t('cloud.change', { defaultValue: 'Change…' })}
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : (
-        <div
-          className={`shrink-0 flex items-center gap-4 text-xs text-text-secondary ${
-            home ? 'px-8 pb-4' : 'px-4 py-1.5 border-b border-surface'
-          }`}
-        >
-          {cloudPhotos.length > 0 && (
-            <span className="inline-flex items-center gap-1.5">
-              <Cloud size={13} />
-              {t('cloud.line', {
-                count: cloudPhotos.length,
-                defaultValue: '{{count}} in {{service}}',
-                service,
-              })}
-              {' · '}
-              {mode === 'previews'
-                ? t('cloud.previews', { defaultValue: 'Small previews' })
-                : mode === 'thumbnails'
-                  ? t('cloud.thumbnails', { defaultValue: 'Thumbnails only' })
-                  : t('cloud.none', { defaultValue: 'Download when opened' })}
-            </span>
-          )}
-          {building && (
-            <span className="inline-flex items-center gap-1.5">
-              {progress.paused
-                ? t('cloud.paused', {
-                    defaultValue: 'Previews paused, {{done}} of {{total}}',
-                    done: progress.done,
-                    total: progress.total,
-                  })
-                : t('cloud.making', {
-                    defaultValue: 'Making previews {{done}} of {{total}}',
-                    done: progress.done,
-                    total: progress.total,
-                  })}
-              {!progress.paused && timeLeft && ` · ${timeLeft}`}
-              <button
-                className={link}
-                onClick={() =>
-                  invoke<BuilderProgress>(Invokes.SetCloudPreviewsPaused, { paused: !progress.paused }).then(
-                    setProgress,
-                  )
-                }
-              >
-                {progress.paused ? <Play size={12} /> : <Pause size={12} />}
-                {progress.paused
-                  ? t('cloud.resume', { defaultValue: 'Resume' })
-                  : t('cloud.pause', { defaultValue: 'Pause' })}
-              </button>
-            </span>
-          )}
-          {cloudPhotos.length > 0 && (
-            <button className={link} onClick={() => setChoosing(true)}>
-              {t('cloud.change', { defaultValue: 'Change…' })}
-            </button>
-          )}
-        </div>
-      )}
-      {choosing && (
-        <CloudPhotosChoice folder={folder} photoCount={cloudPhotos.length} onClose={() => setChoosing(false)} />
+      <div
+        className={`shrink-0 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-text-secondary ${
+          home ? 'px-8 pb-4' : 'px-4 py-1.5 border-b border-surface'
+        }`}
+      >
+        {cloudPhotos.length > 0 && (
+          <span className="inline-flex items-center gap-1.5">
+            <Cloud size={13} />
+            {t('cloud.line', {
+              count: cloudPhotos.length,
+              defaultValue: '{{count}} in {{service}}',
+              service,
+            })}
+          </span>
+        )}
+        <span>
+          {status}
+          {timeLeft && (mode === 'previews' || mode === 'thumbnails') && (folder ? waiting > 0 : building)
+            ? ` · ${timeLeft}`
+            : ''}
+        </span>
+        {pauseButton}
+        {cloudPhotos.length > 0 && (
+          <button className={link} onClick={() => setChoosing(true)}>
+            {chosen ? t('cloud.change', { defaultValue: 'Change…' }) : t('cloud.setUp', { defaultValue: 'Set up…' })}
+          </button>
+        )}
+      </div>
+      {(choosing || askNow) && (
+        <CloudPhotosChoice
+          folder={folder}
+          photoCount={cloudPhotos.length}
+          summary={summary}
+          firstTime={!chosen}
+          service={service}
+          onClose={() => {
+            setChoosing(false);
+            setPostponedTick((n) => n + 1);
+          }}
+        />
       )}
     </>
   );

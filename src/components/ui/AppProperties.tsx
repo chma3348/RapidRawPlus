@@ -81,6 +81,7 @@ export enum Invokes {
   InvokeSpotEnhanceWithMaskDef = 'invoke_spot_enhance_with_mask_def',
   RespotEnhance = 'respot_enhance',
   ListImagesInDir = 'list_images_in_dir',
+  CloudFolderSummary = 'cloud_folder_summary',
   ListImagesRecursive = 'list_images_recursive',
   ListEngineLoras = 'list_engine_loras',
   ListRegisteredModels = 'list_registered_models',
@@ -327,6 +328,8 @@ export interface ImageFile {
   flag?: 'pick' | 'reject' | null;
   /** Only in a cloud service (Nextcloud…), not on this Mac. */
   cloud_only?: boolean;
+  /** A cloud-only photo whose small preview has been made. */
+  has_preview?: boolean;
 }
 
 export interface Option {

@@ -155,6 +155,51 @@ pub struct ImageFile {
     /// cloud_files): shown with a cloud badge, and not read until opened.
     #[serde(default)]
     cloud_only: bool,
+    /// A cloud-only photo whose smart preview has been made (the file
+    /// exists; its contents are not read).
+    #[serde(default)]
+    has_preview: bool,
+}
+
+/// Whether a cloud-only photo's smart preview exists (only the file's
+/// presence: reading a cloud file would download it).
+fn cloud_preview_exists(path: &str) -> bool {
+    let source = path.split("?vc=").next().unwrap_or(path);
+    crate::cloud_files::is_cloud_only_str(source)
+        && crate::smart_preview::path_for(Path::new(source)).exists()
+}
+
+/// What a folder's cloud-only photos come to, for the choice of what to
+/// keep: how many, how much they would download, how many have previews
+/// already. Reads only file metadata.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudFolderSummary {
+    photos: usize,
+    bytes: u64,
+    with_previews: usize,
+}
+
+#[tauri::command(async)]
+pub fn cloud_folder_summary(path: String) -> Result<CloudFolderSummary, String> {
+    let mut summary = CloudFolderSummary {
+        photos: 0,
+        bytes: 0,
+        with_previews: 0,
+    };
+    for entry in fs::read_dir(&path).map_err(|e| e.to_string())?.flatten() {
+        let file = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !is_supported_media_file(&name) || !crate::cloud_files::is_cloud_only(&file) {
+            continue;
+        }
+        summary.photos += 1;
+        summary.bytes += entry.metadata().map(|m| m.len()).unwrap_or(0);
+        if crate::smart_preview::path_for(&file).exists() {
+            summary.with_previews += 1;
+        }
+    }
+    Ok(summary)
 }
 
 /// Fill in each listed file's original: from its sidecar where recorded,
@@ -322,7 +367,11 @@ pub async fn update_exif_fields(
 // Off the main thread: reading a folder kept by a cloud service can wait on
 // the server, and the window must not freeze meanwhile.
 #[tauri::command(async)]
-pub fn list_images_in_dir(path: String, app_handle: AppHandle) -> Result<Vec<ImageFile>, String> {
+pub fn list_images_in_dir(
+    path: String,
+    app_handle: AppHandle,
+    build_cloud: Option<bool>,
+) -> Result<Vec<ImageFile>, String> {
     let settings = load_settings(app_handle.clone()).unwrap_or_default();
     let enable_xmp_sync = settings.enable_xmp_sync.unwrap_or(true);
 
@@ -427,6 +476,7 @@ pub fn list_images_in_dir(path: String, app_handle: AppHandle) -> Result<Vec<Ima
 
                 file_results.push(ImageFile {
                     cloud_only: crate::cloud_files::is_cloud_only_str(&virtual_path),
+                    has_preview: cloud_preview_exists(&virtual_path),
                     path: virtual_path,
                     modified,
                     is_edited,
@@ -447,7 +497,13 @@ pub fn list_images_in_dir(path: String, app_handle: AppHandle) -> Result<Vec<Ima
     let mut result_list = result_list;
     link_versions(&mut result_list);
     // Photos here that are only in the cloud get their previews (or
-    // thumbnails) built in the background, this folder first.
+    // thumbnails) built in the background, this folder first — when the
+    // folder is being opened in the library (`build_cloud`). Home and the
+    // import dialogs list folders without that: Home's photos are built as
+    // they come on screen (cloud_builder::request).
+    if !build_cloud.unwrap_or(false) {
+        return Ok(result_list);
+    }
     let cloud: Vec<PathBuf> = result_list
         .iter()
         .filter(|f| f.cloud_only && !f.is_virtual_copy)
@@ -574,6 +630,7 @@ pub fn list_images_recursive(
 
                 file_results.push(ImageFile {
                     cloud_only: crate::cloud_files::is_cloud_only_str(&virtual_path),
+                    has_preview: cloud_preview_exists(&virtual_path),
                     path: virtual_path,
                     modified,
                     is_edited,
@@ -851,6 +908,7 @@ pub fn get_album_images(
 
             Some(ImageFile {
                 cloud_only: crate::cloud_files::is_cloud_only_str(&virtual_path),
+                has_preview: cloud_preview_exists(&virtual_path),
                 path: virtual_path,
                 modified,
                 is_edited,
@@ -1414,8 +1472,7 @@ pub fn update_thumbnail_queue(
             unique_paths.push(path);
         }
     }
-    // Cloud photos asked for here are on screen: their previews come first.
-    crate::cloud_builder::prioritise(&unique_paths);
+    let requested = unique_paths.clone();
 
     queue.retain(|p| !seen.contains(p));
 
@@ -1438,6 +1495,9 @@ pub fn update_thumbnail_queue(
 
     let queue_len = queue.len();
     drop(queue);
+    // Cloud photos asked for here are on screen: their previews come first
+    // (outside the queue's lock: this reads each one's file flags).
+    crate::cloud_builder::request(&app_handle, &requested);
 
     let mut tracker = state.thumbnail_progress.lock().unwrap();
     tracker.total = tracker.completed + queue_len;

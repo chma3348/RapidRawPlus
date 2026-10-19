@@ -1990,6 +1990,7 @@ pub fn run() {
             cloud_builder::set_cloud_previews_paused,
             file_management::read_exif_for_paths,
             file_management::list_images_in_dir,
+            file_management::cloud_folder_summary,
             file_management::list_images_recursive,
             file_management::get_folder_tree,
             file_management::get_folder_children,

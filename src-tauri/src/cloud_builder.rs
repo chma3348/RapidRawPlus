@@ -24,7 +24,13 @@ struct Queue {
     /// Failed tries per photo: a download can time out (the service busy,
     /// or offline); it is tried again later, a few times.
     failures: std::collections::HashMap<PathBuf, u8>,
+    /// When the latest photos finished, for the pace shown as time left.
+    finished: VecDeque<std::time::Instant>,
 }
+
+/// Photos the pace is measured over: recent enough to follow the service's
+/// speed, enough to smooth the batches the workers finish in.
+const PACE_WINDOW: usize = 13;
 
 const TRIES: u8 = 3;
 
@@ -41,6 +47,7 @@ static QUEUE: LazyLock<(Mutex<Queue>, Condvar)> = LazyLock::new(|| {
             done: 0,
             started: false,
             failures: std::collections::HashMap::new(),
+            finished: VecDeque::new(),
         }),
         Condvar::new(),
     )
@@ -53,14 +60,27 @@ pub struct Progress {
     done: usize,
     total: usize,
     paused: bool,
+    /// Seconds per photo lately (all workers together), once a few have
+    /// finished: the first photos include starting up, and timing those
+    /// made the estimate wildly long.
+    seconds_per_photo: Option<f32>,
 }
 
 fn progress() -> Progress {
     let q = QUEUE.0.lock().unwrap();
+    let seconds_per_photo = (q.finished.len() >= 4).then(|| {
+        let span = q
+            .finished
+            .back()
+            .unwrap()
+            .duration_since(*q.finished.front().unwrap());
+        span.as_secs_f32() / (q.finished.len() - 1) as f32
+    });
     Progress {
         done: q.done,
         total: q.done + q.building.len() + q.items.len(),
         paused: PAUSED.load(Ordering::Relaxed),
+        seconds_per_photo,
     }
 }
 
@@ -124,16 +144,25 @@ fn worker(app: tauri::AppHandle) {
                 }
                 if q.items.is_empty() && q.building.is_empty() {
                     q.done = 0;
+                    q.finished.clear();
                 }
                 q = QUEUE.1.wait(q).unwrap();
             }
         };
         match build(&app, &photo) {
             Ok(()) => {
-                let mut q = QUEUE.0.lock().unwrap();
-                q.building.remove(&photo);
-                q.failures.remove(&photo);
-                q.done += 1;
+                {
+                    let mut q = QUEUE.0.lock().unwrap();
+                    q.building.remove(&photo);
+                    q.failures.remove(&photo);
+                    q.done += 1;
+                    q.finished.push_back(std::time::Instant::now());
+                    if q.finished.len() > PACE_WINDOW {
+                        q.finished.pop_front();
+                    }
+                }
+                // The library counts this folder's previews as they land.
+                let _ = app.emit("cloud-preview-made", photo.to_string_lossy());
             }
             Err(e) => {
                 log::warn!("[cloud] {}: {e}", photo.display());
@@ -216,22 +245,60 @@ fn build(app: &tauri::AppHandle, photo: &Path) -> Result<(), String> {
 }
 
 /// Photos asked to be shown (their thumbnails requested: on screen in the
-/// grid or on Home): those waiting here move to the front.
-pub fn prioritise(photos: &[String]) {
+/// grid or on Home) go to the front: those already waiting, and cloud-only
+/// ones not yet queued that have no preview (or, in the thumbnails mode, no
+/// thumbnail). Home lists folders without queueing them, so this is how
+/// what it shows gets built. Only file metadata is read here.
+pub fn request(app: &tauri::AppHandle, photos: &[String]) {
+    let thumbs = crate::file_management::get_thumb_cache_dir(app).ok();
+    let wanted: Vec<PathBuf> = photos
+        .iter()
+        .filter(|p| !p.contains("?vc="))
+        .map(PathBuf::from)
+        .filter(|p| crate::cloud_files::is_cloud_only(p))
+        .filter(|p| match smart_preview::mode_for(p) {
+            Mode::Previews => !smart_preview::path_for(p).exists(),
+            Mode::Thumbnails => thumbs.as_deref().is_some_and(|t| {
+                !crate::file_management::has_cached_thumbnail(&p.to_string_lossy(), t)
+            }),
+            Mode::Nothing => false,
+        })
+        .collect();
+    let wanted_set: HashSet<&Path> = wanted.iter().map(PathBuf::as_path).collect();
     let mut q = QUEUE.0.lock().unwrap();
-    if q.items.is_empty() {
+    let mut changed = false;
+    let mut front: VecDeque<PathBuf> = VecDeque::new();
+    q.items.retain(|p| {
+        if wanted_set.contains(p.as_path()) {
+            front.push_back(p.clone());
+            false
+        } else {
+            true
+        }
+    });
+    for p in &wanted {
+        if !front.contains(p) && !q.building.contains(p) {
+            front.push_back(p.clone());
+            changed = true;
+        }
+    }
+    if front.is_empty() {
         return;
     }
-    let wanted: HashSet<&Path> = photos
-        .iter()
-        .map(|p| Path::new(p.split("?vc=").next().unwrap_or(p)))
-        .collect();
-    let (front, rest): (VecDeque<PathBuf>, VecDeque<PathBuf>) = q
-        .items
-        .drain(..)
-        .partition(|p| wanted.contains(p.as_path()));
+    front.extend(q.items.drain(..));
     q.items = front;
-    q.items.extend(rest);
+    if !q.started {
+        q.started = true;
+        for _ in 0..WORKERS {
+            let app = app.clone();
+            std::thread::spawn(move || worker(app));
+        }
+    }
+    drop(q);
+    if changed {
+        QUEUE.1.notify_all();
+        emit(app);
+    }
 }
 
 /// Settings changed (the first-time card answered, a mode changed): wake

@@ -53,8 +53,14 @@ faster several at once):
 
 It never holds more than three photos' worth of space.
 
-- Photos on screen go first (their thumbnails asked for, in the grid or on
-  Home), then the folder just listed.
+- What gets built: the folder opened in the library (`list_images_in_dir`
+  with `buildCloud`), and photos on screen anywhere, which go first (their
+  thumbnails asked for: `cloud_builder::request`). Home and the import
+  dialogs list folders without queueing them; queueing every folder Home
+  lists put 4,811 photos in line at once.
+- Speed is the service's: each photo downloads whole (9 MB on average for
+  Chris's) to make its 1 MB preview. His Nextcloud serves about 1.4 MB/s
+  with three at a time, about 8 s a photo.
 - A download that times out is tried again later (3 tries, pausing 15 s).
 - Nothing downloads until the first-time card has been answered, and
   building can be paused.
@@ -78,14 +84,18 @@ when opened**:
 - **The default:** Settings → General → "Photos stored in the cloud".
 - **Per folder:** "Change…" above a folder's photos, which shows what each
   choice would take for that folder.
-- **First time:** a card says what happens, with "Sounds good" and
-  "Change…": above a folder's photos, and at the top of Home when any photo
-  it shows is only in the cloud (Change… there sets it for all cloud
-  folders). Nothing downloads until it is answered.
+- **First time:** a window, when a folder (or Home) shows cloud-only photos
+  and nothing has been chosen: why nothing shows, the three choices with
+  what this folder would download and keep (`cloud_folder_summary`, from
+  file sizes only), "Use this for all my Nextcloud folders", and "Not now"
+  (asked again next launch; the line says "Not downloading anything yet ·
+  Set up…"). Nothing downloads until it is answered.
 - **Signals:** a cloud badge on cloud-only photos (the grid and Home's
-  strips), one quiet line ("212 in
-  Nextcloud · Small previews · Making previews 12 of 340 · about 1 h 20 min
-  left · Pause"), the time from how fast photos have been finishing, and the
+  strips), one quiet line ("151 in Nextcloud · Making previews for this folder: 23 of
+  151 · about 17 min left · Pause"): this folder's count (`has_preview` from
+  the listing, plus `cloud-preview-made` events), the time from the pace of
+  the last dozen photos (the first ones include starting up, and timing
+  them read 71 hours), and the
   Preview pill in the editor.
 
 ## Network and cloud folders on Home

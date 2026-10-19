@@ -369,7 +369,8 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
         if (preloadedImages) {
           files = preloadedImages;
         } else {
-          files = await invoke(command, { path });
+          // Opening a folder in the library builds its cloud photos' previews.
+          files = await invoke(command, { path, buildCloud: true });
         }
 
         const initialRatings: Record<string, number> = {};
