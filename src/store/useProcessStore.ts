@@ -8,6 +8,8 @@ interface ProcessState {
   isIndexing: boolean;
   indexingProgress: Progress;
   thumbnails: Record<string, string>;
+  /** Bumped when the thumbnail queue drops requests, so photos still shown ask again. */
+  thumbnailsDropped: number;
   thumbnailProgress: Progress;
   aiModelDownloadStatus: string | null;
   copiedFilePaths: Array<string>;
@@ -31,6 +33,7 @@ export const useProcessStore = create<ProcessState>((set, get) => ({
   isIndexing: false,
   indexingProgress: { current: 0, total: 0 },
   thumbnails: {},
+  thumbnailsDropped: 0,
   thumbnailProgress: { current: 0, total: 0 },
   aiModelDownloadStatus: null,
   copiedFilePaths: [],

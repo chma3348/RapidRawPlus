@@ -45,6 +45,7 @@ import { startCulling } from './library/CullView';
 import LibraryFilterBar from './library/LibraryFilterBar';
 import RejectsNotice from './library/RejectsNotice';
 import CloudNotice from './library/CloudNotice';
+import { shownName } from '../../utils/names';
 import { useUIStore } from '../../store/useUIStore';
 import { getStacks } from '../../hooks/useStacks';
 
@@ -474,7 +475,7 @@ export default function MainLibrary(props: MainLibraryProps) {
           {!props.isAndroid && (
             <div className="flex items-center gap-2">
               {props.currentFolderPath ? (
-                <Text className="truncate">{props.currentFolderPath}</Text>
+                <Text className="truncate">{shownName(props.currentFolderPath)}</Text>
               ) : (
                 <p className="text-sm invisible select-none pointer-events-none h-5 overflow-hidden"></p>
               )}

@@ -34,6 +34,7 @@ import { invoke } from '@tauri-apps/api/core';
 import Text from '../ui/Text';
 import { TEXT_COLOR_KEYS, TextColors, TextVariants, TextWeights } from '../../types/typography';
 import { useLibraryStore } from '../../store/useLibraryStore';
+import { shownName } from '../../utils/names';
 import { useSettingsStore } from '../../store/useSettingsStore';
 import {
   AlbumItem,
@@ -580,7 +581,7 @@ function TreeNode({
         </div>
 
         <span onDoubleClick={handleNameDoubleClick} className="truncate select-none flex-1">
-          <span className="truncate">{node.name}</span>
+          <span className="truncate">{shownName(node.name)}</span>
           {typeof node.imageCount === 'number' && node.imageCount > 0 && (
             <Text
               as="span"

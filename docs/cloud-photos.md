@@ -76,11 +76,27 @@ when opened**:
 - **The default:** Settings → General → "Photos stored in the cloud".
 - **Per folder:** "Change…" above a folder's photos, which shows what each
   choice would take for that folder.
-- **First time:** a card in the folder says what happens, with "Sounds good"
-  and "Change…".
-- **Signals:** a cloud badge on cloud-only photos, one quiet line ("212 in
+- **First time:** a card says what happens, with "Sounds good" and
+  "Change…": above a folder's photos, and at the top of Home when any photo
+  it shows is only in the cloud (Change… there sets it for all cloud
+  folders). Nothing downloads until it is answered.
+- **Signals:** a cloud badge on cloud-only photos (the grid and Home's
+  strips), one quiet line ("212 in
   Nextcloud · Small previews · Making previews 12 of 340 · Pause"), and the
   Preview pill in the editor.
+
+## Network and cloud folders on Home
+
+- Folder lists are read off the main thread: a cloud or NAS folder slow to
+  answer no longer freezes the window, and one that cannot be read says so,
+  with Try again, instead of looking empty.
+- Home's folder tree does not look inside its second level (each look makes
+  the service list that folder from its server).
+- Strips ask for their first 12 thumbnails, the rest as they drift into
+  view. The thumbnail queue (500) tells the app which requests it drops, and
+  photos still on screen ask again.
+- Names a network drive stores with U+F028 / U+F029 (a trailing space or
+  period) are shown with the space or period, not a box.
 
 ## Not yet
 

@@ -1,4 +1,4 @@
-import { ReactNode, RefObject, useEffect, useMemo, useRef, useState } from 'react';
+import { ReactNode, RefObject, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { useTranslation } from 'react-i18next';
@@ -7,6 +7,7 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  Cloud,
   Download,
   EyeOff,
   Folder,
@@ -28,9 +29,18 @@ import { TextColors, TextVariants, TextWeights } from '../../../types/typography
 import { isVideoPath } from '../../../utils/media';
 import { isRejectsFolder } from '../../../utils/flags';
 import { useAdobeImport } from '../../modals/AdobeImportModal';
+import { shownName } from '../../../utils/names';
+import CloudNotice from './CloudNotice';
 
 /** How many photos a shelf shows before "See all". */
 const SHELF_LENGTH = 40;
+
+/**
+ * How many of a strip's photos ask for their thumbnails as soon as it is
+ * read; the rest ask as they drift into view. Asking for every photo of
+ * every strip at once overflowed the thumbnail queue.
+ */
+const EAGER_THUMBNAILS = 12;
 
 /** Drift speeds in pixels a second, shelf by shelf, so neighbours never move in step. */
 const DRIFT_SPEEDS = [16, 23, 19, 27, 14, 21, 25, 17];
@@ -43,7 +53,7 @@ const PAGE_PAD = 32;
 const INDENT = 26;
 
 const realPath = (path: string) => path.split('?vc=')[0];
-const baseName = (path: string) => realPath(path).split(/[\\/]/).pop() || path;
+const baseName = (path: string) => shownName(realPath(path).split(/[\\/]/).pop() || path);
 const parentOf = (path: string) => realPath(path).replace(/[\\/][^\\/]*$/, '');
 const isWithin = (path: string, folder: string) =>
   path === folder || path.startsWith(folder + '/') || path.startsWith(folder + '\\');
@@ -132,34 +142,65 @@ const shelfPhotos = (files: ImageFile[]) =>
     .filter((f) => f.flag !== 'reject')
     .sort((a, b) => b.modified - a.modified);
 
-const useThumbnail = (path: string | undefined, requestThumbnails: (paths: string[]) => void) => {
+/** The photos of `files` that are only in a cloud service. */
+const cloudSet = (files: ImageFile[] | null) => new Set((files ?? []).filter((f) => f.cloud_only).map((f) => f.path));
+
+/**
+ * A photo's thumbnail, asked for while `wanted` (on screen), and asked for
+ * again if the thumbnail queue dropped the request.
+ */
+const useThumbnail = (path: string | undefined, requestThumbnails: (paths: string[]) => void, wanted = true) => {
   const url = useProcessStore((state) => (path ? state.thumbnails[path] : undefined));
+  const dropped = useProcessStore((state) => state.thumbnailsDropped);
   useEffect(() => {
-    if (path && !url) requestThumbnails([path]);
-  }, [path, url, requestThumbnails]);
+    if (path && wanted && !url) requestThumbnails([path]);
+  }, [path, url, wanted, dropped, requestThumbnails]);
   return url;
 };
 
-/** Read a folder once its element comes near the screen. */
-const useFolderPhotos = (path: string, ref: RefObject<HTMLElement | null>) => {
+/**
+ * A folder's photos, read once it comes near the screen. `failed` when it
+ * could not be read (a cloud or network folder that did not answer), with
+ * `retry` to read it again.
+ */
+const useFolderPhotos = (
+  path: string,
+  ref: RefObject<HTMLElement | null>,
+  onListed?: (folder: string, photos: ImageFile[]) => void,
+) => {
   const [photos, setPhotos] = useState<ImageFile[] | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  const listed = useRef(onListed);
+  listed.current = onListed;
   useEffect(() => {
     const el = ref.current;
-    if (!el || photos) return;
+    if (!el || photos || failed) return;
     const observer = new IntersectionObserver(
       (entries) => {
         if (!entries.some((e) => e.isIntersecting)) return;
         observer.disconnect();
         invoke<ImageFile[]>(Invokes.ListImagesInDir, { path })
-          .then((files) => setPhotos(shelfPhotos(files)))
-          .catch(() => setPhotos([]));
+          .then((files) => {
+            const shelf = shelfPhotos(files);
+            setPhotos(shelf);
+            listed.current?.(path, shelf);
+          })
+          .catch((err) => {
+            console.error(`Could not read ${path}:`, err);
+            setFailed(true);
+          });
       },
       { rootMargin: '400px 0px' },
     );
     observer.observe(el);
     return () => observer.disconnect();
-  }, [path, photos, ref]);
-  return photos;
+  }, [path, photos, failed, attempt, ref]);
+  const retry = useCallback(() => {
+    setFailed(false);
+    setAttempt((a) => a + 1);
+  }, []);
+  return { photos, failed, retry };
 };
 
 /**
@@ -258,6 +299,8 @@ function StripPhoto({
   path,
   height,
   copy,
+  eager,
+  cloudOnly,
   highlighted,
   onOpen,
   requestThumbnails,
@@ -266,14 +309,30 @@ function StripPhoto({
   height: number;
   /** The repeat that lets a drifting strip loop: hidden from keyboard and screen readers. */
   copy?: boolean;
+  /** Among the first in its strip: its thumbnail is asked for straight away, not once it drifts into view. */
+  eager?: boolean;
+  /** Only in a cloud service: a cloud stands in until its preview is made. */
+  cloudOnly?: boolean;
   highlighted?: boolean;
   onOpen(): void;
   requestThumbnails(paths: string[]): void;
 }) {
-  const url = useThumbnail(path, requestThumbnails);
+  const { t } = useTranslation();
+  const ref = useRef<HTMLButtonElement>(null);
+  // On screen: inside its strip (which clips it) and the page's view.
+  const [onScreen, setOnScreen] = useState(false);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || eager) return;
+    const observer = new IntersectionObserver((entries) => setOnScreen(entries.some((e) => e.isIntersecting)));
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [eager]);
+  const url = useThumbnail(path, requestThumbnails, eager || onScreen);
   const video = isVideoPath(path);
   return (
     <button
+      ref={ref}
       className={`relative shrink-0 rounded-md overflow-hidden bg-surface group/photo focus:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
         highlighted ? 'ring-2 ring-inset ring-accent' : ''
       }`}
@@ -291,12 +350,28 @@ function StripPhoto({
           className="h-full w-auto object-cover transition-transform duration-300 group-hover/photo:scale-[1.03]"
           style={{ maxWidth: height * 2.4 }}
         />
+      ) : cloudOnly ? (
+        <div className="h-full flex items-center justify-center" style={{ width: height * 1.4 }}>
+          <Cloud className="text-text-secondary opacity-60" />
+        </div>
       ) : (
         <div className="h-full animate-pulse" style={{ width: height * 1.4 }} />
       )}
-      {video && (
-        <span className="absolute bottom-1.5 left-1.5 rounded-full bg-black/60 p-1">
-          <Play size={10} className="text-white" fill="white" />
+      {(video || cloudOnly) && (
+        <span className="absolute bottom-1.5 left-1.5 flex gap-1">
+          {cloudOnly && (
+            <span
+              className="rounded-full bg-black/60 p-1"
+              data-tooltip={t('library.cloudOnly', { defaultValue: 'In the cloud, not on this Mac' })}
+            >
+              <Cloud size={10} className="text-white" />
+            </span>
+          )}
+          {video && (
+            <span className="rounded-full bg-black/60 p-1">
+              <Play size={10} className="text-white" fill="white" />
+            </span>
+          )}
         </span>
       )}
     </button>
@@ -316,11 +391,14 @@ function DriftStrip({
   arrows = true,
   fadeLeft = true,
   highlight,
+  cloudOnly,
   onOpenPhoto,
   requestThumbnails,
 }: {
   /** null while the folder is still being read. */
   photos: string[] | null;
+  /** Those of `photos` that are only in a cloud service. */
+  cloudOnly?: Set<string>;
   height: number;
   /** Pixels a second; negative drifts the other way. */
   speed: number;
@@ -351,12 +429,14 @@ function DriftStrip({
   }, [photos]);
 
   const set = (copy: boolean) =>
-    photos!.map((p) => (
+    photos!.map((p, i) => (
       <StripPhoto
         key={p}
         path={p}
         height={height}
         copy={copy}
+        eager={!copy && i < EAGER_THUMBNAILS}
+        cloudOnly={cloudOnly?.has(p)}
         highlighted={p === highlight}
         onOpen={() => onOpenPhoto(p)}
         requestThumbnails={requestThumbnails}
@@ -417,7 +497,7 @@ const crumbsFor = (folder: string, roots: string[]) => {
   let path = root;
   for (const part of folder.slice(root.length).split(/[\\/]/).filter(Boolean)) {
     path = `${path}/${part}`;
-    crumbs.push({ name: part, path });
+    crumbs.push({ name: shownName(part), path });
   }
   return crumbs;
 };
@@ -470,6 +550,7 @@ function ContinueBanner({
   roots,
   showPicture,
   onOpen,
+  onListed,
   requestThumbnails,
 }: {
   folder: string;
@@ -478,6 +559,8 @@ function ContinueBanner({
   /** Off when the folder is hidden from Home: the banner then shows no photos. */
   showPicture: boolean;
   onOpen(target: HomeTarget): void;
+  /** The folder's photos once read, for the cloud notice. */
+  onListed(folder: string, photos: ImageFile[]): void;
   requestThumbnails(paths: string[]): void;
 }) {
   const { t } = useTranslation();
@@ -487,11 +570,19 @@ function ContinueBanner({
   useEffect(() => {
     setAll(null);
     invoke<ImageFile[]>(Invokes.ListImagesInDir, { path: folder })
-      .then((list) => setAll(realPhotos(list)))
-      .catch(() => setAll([]));
+      .then((list) => {
+        const photos = realPhotos(list);
+        setAll(photos);
+        onListed(folder, photos);
+      })
+      .catch((err) => {
+        console.error(`Could not read ${folder}:`, err);
+        setAll([]);
+      });
   }, [folder]);
   // Progress counts every photo; the filmstrip leaves rejects out.
   const files = useMemo(() => (all ? shelfPhotos(all) : null), [all]);
+  const cloudOnly = useMemo(() => cloudSet(all), [all]);
 
   // Without a remembered photo, the folder's newest one stands in.
   const cover = image || files?.find((f) => !isVideoPath(f.path))?.path;
@@ -707,6 +798,7 @@ function ContinueBanner({
             speed={BANNER_DRIFT_SPEED}
             arrows={false}
             highlight={image}
+            cloudOnly={cloudOnly}
             onOpenPhoto={(p) => onOpen({ folder, image: p })}
             requestThumbnails={requestThumbnails}
           />
@@ -762,6 +854,7 @@ function FolderSection({
   onToggle,
   onHide,
   onOpen,
+  onListed,
   requestThumbnails,
 }: {
   row: FolderRow;
@@ -771,11 +864,14 @@ function FolderSection({
   onToggle(): void;
   onHide(): void;
   onOpen(target: HomeTarget): void;
+  /** The folder's photos once read, for the cloud notice. */
+  onListed(folder: string, photos: ImageFile[]): void;
   requestThumbnails(paths: string[]): void;
 }) {
   const { t } = useTranslation();
   const ref = useRef<HTMLElement>(null);
-  const photos = useFolderPhotos(row.path, ref);
+  const { photos, failed, retry } = useFolderPhotos(row.path, ref, onListed);
+  const cloudOnly = useMemo(() => cloudSet(photos), [photos]);
   const left = PAGE_PAD + row.depth * INDENT;
   const top = row.depth === 0;
   const height = top ? 150 : 120;
@@ -807,20 +903,32 @@ function FolderSection({
             weight={top ? undefined : TextWeights.semibold}
             className="truncate"
           >
-            {row.name}
+            {shownName(row.name)}
           </Text>
           <Text variant={TextVariants.small} color={TextColors.secondary} className="whitespace-nowrap">
-            {photos === null
-              ? ''
-              : empty
-                ? row.hasChildren
-                  ? ''
-                  : t('library.home.noPhotos')
-                : t('library.home.photoCount', { count: photos.length })}
+            {failed ? (
+              <>
+                {t('library.home.unreadable', { defaultValue: 'Couldn’t read this folder' })}
+                {' · '}
+                <button className="text-accent hover:underline" onClick={retry}>
+                  {t('library.home.tryAgain', { defaultValue: 'Try again' })}
+                </button>
+              </>
+            ) : photos === null ? (
+              ''
+            ) : empty ? (
+              row.hasChildren ? (
+                ''
+              ) : (
+                t('library.home.noPhotos')
+              )
+            ) : (
+              t('library.home.photoCount', { count: photos.length })
+            )}
           </Text>
           {row.location && (
             <Text variant={TextVariants.small} color={TextColors.secondary} className="truncate opacity-70">
-              {row.location}
+              {shownName(row.location)}
             </Text>
           )}
           {row.hasChildren && (
@@ -842,7 +950,8 @@ function FolderSection({
           </button>
         </div>
       </div>
-      {!empty && !(top && collapsed) && (
+      {/* A closed folder shows only its heading, at every level. */}
+      {!empty && !failed && !collapsed && (
         <div className="flex gap-2.5" style={{ paddingLeft: left }}>
           {/* See all stays put at the start of the shelf while the photos drift past it. */}
           <button
@@ -866,6 +975,7 @@ function FolderSection({
             height={height}
             speed={speed}
             fadeLeft
+            cloudOnly={cloudOnly}
             onOpenPhoto={(p) => onOpen({ folder: row.path, image: p })}
             requestThumbnails={requestThumbnails}
           />
@@ -1009,6 +1119,8 @@ export default function HomeScreen({
       paths: roots,
       expandedFolders: roots,
       showImageCounts: false,
+      // Home shows two levels: no need to look inside the folders below.
+      shallow: true,
     })
       .then(setTrees)
       .catch((err) => {
@@ -1018,6 +1130,18 @@ export default function HomeScreen({
   }, [roots]);
 
   const rows = useMemo(() => (trees ? folderRows(trees, hidden, collapsed) : []), [trees, hidden, collapsed]);
+
+  // The photos of each folder read so far, for the cloud notice at the top.
+  const [listed, setListed] = useState<Record<string, ImageFile[]>>({});
+  const onListed = useCallback(
+    (folder: string, photos: ImageFile[]) => setListed((prev) => ({ ...prev, [folder]: photos })),
+    [],
+  );
+  const listedPhotos = useMemo(() => {
+    const byPath = new Map<string, ImageFile>();
+    Object.values(listed).forEach((photos) => photos.forEach((f) => byPath.set(f.path, f)));
+    return [...byPath.values()];
+  }, [listed]);
 
   const folderState = appSettings.lastFolderState;
   const lastImage: string | undefined = folderState?.lastEditedImage || undefined;
@@ -1046,6 +1170,8 @@ export default function HomeScreen({
           </div>
         </header>
 
+        <CloudNotice photos={listedPhotos} home />
+
         {lastFolder && (
           <ContinueBanner
             folder={lastFolder}
@@ -1053,6 +1179,7 @@ export default function HomeScreen({
             roots={roots}
             showPicture={!hidden.some((h) => isWithin(lastFolder, h))}
             onOpen={onOpen}
+            onListed={onListed}
             requestThumbnails={requestThumbnails}
           />
         )}
@@ -1067,6 +1194,7 @@ export default function HomeScreen({
               onToggle={() => toggleCollapsed(row.path)}
               onHide={() => setHidden([...hidden, row.path])}
               onOpen={onOpen}
+              onListed={onListed}
               requestThumbnails={requestThumbnails}
             />
           ))}

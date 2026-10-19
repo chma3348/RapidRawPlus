@@ -1,6 +1,9 @@
 import { useRef, useCallback, useMemo, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import debounce from 'lodash.debounce';
+
+import { useProcessStore } from '../store/useProcessStore';
 
 export function useThumbnails() {
   const generatedRef = useRef<Set<string>>(new Set());
@@ -63,6 +66,18 @@ export function useThumbnails() {
   useEffect(() => {
     return () => flushQueueToBackend.cancel();
   }, [flushQueueToBackend]);
+
+  // The backend's queue is bounded: requests it drops are no longer pending,
+  // and photos still on screen ask for them again.
+  useEffect(() => {
+    const unlisten = listen<string[]>('thumbnails-dropped', (event) => {
+      event.payload.forEach((p) => pendingQueueRef.current.delete(p));
+      useProcessStore.getState().setProcess((s) => ({ thumbnailsDropped: s.thumbnailsDropped + 1 }));
+    });
+    return () => {
+      unlisten.then((f) => f());
+    };
+  }, []);
 
   return { requestThumbnails, clearThumbnailQueue, markGenerated };
 }

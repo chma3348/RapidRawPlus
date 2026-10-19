@@ -7,7 +7,7 @@ import { useShallow } from 'zustand/react/shallow';
 
 import { useLibraryStore } from '../../../store/useLibraryStore';
 import { useSettingsStore } from '../../../store/useSettingsStore';
-import { cloudServiceName, Invokes } from '../../ui/AppProperties';
+import { cloudServiceName, ImageFile, Invokes } from '../../ui/AppProperties';
 
 /**
  * Photos in this folder that are only in a cloud service (Nextcloud…).
@@ -163,11 +163,17 @@ export function CloudPhotosChoice({
   );
 }
 
-export default function CloudNotice() {
+/**
+ * In the library, for the folder open there. Home passes the photos of every
+ * folder it shows (`photos`) and no folder: Change… there sets the choice for
+ * all cloud folders.
+ */
+export default function CloudNotice({ photos, home = false }: { photos?: ImageFile[]; home?: boolean } = {}) {
   const { t } = useTranslation();
-  const { imageList, currentFolderPath } = useLibraryStore(
-    useShallow((s) => ({ imageList: s.imageList, currentFolderPath: s.currentFolderPath })),
+  const { libraryList, currentFolderPath } = useLibraryStore(
+    useShallow((s) => ({ libraryList: s.imageList, currentFolderPath: s.currentFolderPath })),
   );
+  const imageList = photos ?? libraryList;
   const appSettings: any = useSettingsStore((s) => s.appSettings);
   const [progress, setProgress] = useState<BuilderProgress>({ done: 0, total: 0, paused: false });
   const [choosing, setChoosing] = useState(false);
@@ -183,7 +189,7 @@ export default function CloudNotice() {
   }, []);
 
   const cloudPhotos = useMemo(() => imageList.filter((f) => f.cloud_only && !f.is_virtual_copy), [imageList]);
-  const folder = currentFolderPath && !currentFolderPath.startsWith('Album: ') ? currentFolderPath : null;
+  const folder = !home && currentFolderPath && !currentFolderPath.startsWith('Album: ') ? currentFolderPath : null;
   const building = progress.total > progress.done;
   if (cloudPhotos.length === 0 && !building) return null;
 
@@ -198,7 +204,11 @@ export default function CloudNotice() {
   return (
     <>
       {!cardSeen && cloudPhotos.length > 0 ? (
-        <div className="shrink-0 mx-4 mt-3 mb-1 flex items-start gap-3 rounded-lg border border-border-color bg-surface p-3 text-sm">
+        <div
+          className={`shrink-0 flex items-start gap-3 rounded-lg border border-border-color bg-surface p-3 text-sm ${
+            home ? 'mx-8 mb-4' : 'mx-4 mt-3 mb-1'
+          }`}
+        >
           <Cloud size={18} className="mt-0.5 shrink-0 text-text-secondary" />
           <div className="flex-1">
             <div className="font-medium">
@@ -224,7 +234,11 @@ export default function CloudNotice() {
           </div>
         </div>
       ) : (
-        <div className="shrink-0 flex items-center gap-4 px-4 py-1.5 text-xs text-text-secondary border-b border-surface">
+        <div
+          className={`shrink-0 flex items-center gap-4 text-xs text-text-secondary ${
+            home ? 'px-8 pb-4' : 'px-4 py-1.5 border-b border-surface'
+          }`}
+        >
           {cloudPhotos.length > 0 && (
             <span className="inline-flex items-center gap-1.5">
               <Cloud size={13} />

@@ -319,7 +319,9 @@ pub async fn update_exif_fields(
     .map_err(|e| format!("Task failed: {}", e))?
 }
 
-#[tauri::command]
+// Off the main thread: reading a folder kept by a cloud service can wait on
+// the server, and the window must not freeze meanwhile.
+#[tauri::command(async)]
 pub fn list_images_in_dir(path: String, app_handle: AppHandle) -> Result<Vec<ImageFile>, String> {
     let settings = load_settings(app_handle.clone()).unwrap_or_default();
     let enable_xmp_sync = settings.enable_xmp_sync.unwrap_or(true);
@@ -457,7 +459,7 @@ pub fn list_images_in_dir(path: String, app_handle: AppHandle) -> Result<Vec<Ima
     Ok(result_list)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_images_recursive(
     path: String,
     app_handle: AppHandle,
@@ -897,11 +899,16 @@ fn has_subdirs(path: &Path) -> bool {
     false
 }
 
+/// `check_unscanned`: whether folders not scanned are each looked into to
+/// say whether they have subfolders. Home leaves it off: it does not show
+/// that, and in a cloud service each look makes it list the folder from
+/// the server.
 fn scan_dir_lazy(
     path: &Path,
     expanded_folders: &HashSet<&str>,
     show_image_counts: bool,
     prefetch_one_level: bool,
+    check_unscanned: bool,
 ) -> Result<(Vec<FolderNode>, usize), std::io::Error> {
     let mut children_folders = Vec::new();
     let mut current_dir_image_count = 0;
@@ -957,6 +964,7 @@ fn scan_dir_lazy(
                     expanded_folders,
                     show_image_counts,
                     next_prefetch,
+                    check_unscanned,
                 )?
             } else {
                 let count = if show_image_counts {
@@ -977,7 +985,7 @@ fn scan_dir_lazy(
             let has_any_subdirs = if should_scan {
                 grand_children.iter().any(|c| c.is_dir)
             } else {
-                has_subdirs(&current_path)
+                check_unscanned && has_subdirs(&current_path)
             };
 
             let grand_children_sum: usize = grand_children.iter().map(|c| c.image_count).sum();
@@ -1010,6 +1018,7 @@ fn get_folder_tree_sync(
     path: String,
     expanded_folders: Vec<String>,
     show_image_counts: bool,
+    check_unscanned: bool,
 ) -> Result<FolderNode, String> {
     let root_path = Path::new(&path);
     if !root_path.is_dir() {
@@ -1036,8 +1045,14 @@ fn get_folder_tree_sync(
 
     let expanded_set: HashSet<&str> = expanded_folders.iter().map(|s| s.as_str()).collect();
 
-    let (children, own_count) = scan_dir_lazy(root_path, &expanded_set, show_image_counts, true)
-        .map_err(|e| e.to_string())?;
+    let (children, own_count) = scan_dir_lazy(
+        root_path,
+        &expanded_set,
+        show_image_counts,
+        true,
+        check_unscanned,
+    )
+    .map_err(|e| e.to_string())?;
 
     let children_sum: usize = children.iter().map(|c| c.image_count).sum();
     let has_subdirs = children.iter().any(|c| c.is_dir);
@@ -1077,7 +1092,7 @@ pub async fn get_folder_children(
             return Err(format!("Directory does not exist: {}", path));
         }
         let empty_set = HashSet::new();
-        let (children, _) = scan_dir_lazy(root_path, &empty_set, show_image_counts, false)
+        let (children, _) = scan_dir_lazy(root_path, &empty_set, show_image_counts, false, true)
             .map_err(|e| e.to_string())?;
 
         Ok(children)
@@ -1097,7 +1112,7 @@ pub async fn get_folder_tree(
     show_image_counts: bool,
 ) -> Result<FolderNode, String> {
     match tauri::async_runtime::spawn_blocking(move || {
-        get_folder_tree_sync(path, expanded_folders, show_image_counts)
+        get_folder_tree_sync(path, expanded_folders, show_image_counts, true)
     })
     .await
     {
@@ -1112,12 +1127,19 @@ pub async fn get_pinned_folder_trees(
     paths: Vec<String>,
     expanded_folders: Vec<String>,
     show_image_counts: bool,
+    shallow: Option<bool>,
 ) -> Result<Vec<FolderNode>, String> {
+    let check_unscanned = !shallow.unwrap_or(false);
     let result = tauri::async_runtime::spawn_blocking(move || {
         let results: Vec<Result<FolderNode, String>> = paths
             .par_iter()
             .map(|path| {
-                get_folder_tree_sync(path.clone(), expanded_folders.clone(), show_image_counts)
+                get_folder_tree_sync(
+                    path.clone(),
+                    expanded_folders.clone(),
+                    show_image_counts,
+                    check_unscanned,
+                )
             })
             .collect();
 
@@ -1395,8 +1417,17 @@ pub fn update_thumbnail_queue(
 
     queue.retain(|p| !seen.contains(p));
 
+    // The oldest requests make way; the app is told, so it asks again for
+    // any it still shows.
+    let mut dropped = Vec::new();
     while queue.len() + unique_paths.len() > 500 {
-        queue.pop_front();
+        match queue.pop_front() {
+            Some(path) => dropped.push(path),
+            None => break,
+        }
+    }
+    if !dropped.is_empty() {
+        let _ = app_handle.emit("thumbnails-dropped", &dropped);
     }
 
     for path in unique_paths {
@@ -3672,5 +3703,36 @@ mod companion_tests {
         relink_versions(&p("DSC1.ARW"), &p("Tahiti_001.ARW"));
         let meta = crate::exif_processing::load_sidecar(&p("DSC1_Restored.png.dri"));
         assert_eq!(meta.derived_from.as_deref(), Some("Tahiti_001.ARW"));
+    }
+}
+
+#[cfg(test)]
+mod folder_tree_tests {
+    use super::*;
+
+    /// Home's shallow tree lists two levels below a library folder without
+    /// looking inside the second level (each look lists a cloud folder from
+    /// its server); the full tree still says which have subfolders.
+    #[test]
+    fn a_shallow_tree_does_not_look_below_two_levels() {
+        let root = std::env::temp_dir().join("darkroom-folder-tree-test");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("2022/trip/day one")).unwrap();
+        let root_str = root.to_string_lossy().into_owned();
+        let trip = |check_unscanned| {
+            let tree = get_folder_tree_sync(
+                root_str.clone(),
+                vec![root_str.clone()],
+                false,
+                check_unscanned,
+            )
+            .unwrap();
+            let year = tree.children.iter().find(|c| c.name == "2022").unwrap();
+            let trip = year.children.iter().find(|c| c.name == "trip").unwrap();
+            trip.has_subdirs
+        };
+        assert!(trip(true));
+        assert!(!trip(false));
+        let _ = fs::remove_dir_all(&root);
     }
 }
