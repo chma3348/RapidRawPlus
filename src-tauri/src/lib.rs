@@ -67,7 +67,7 @@ pub mod white_balance;
 mod window_customizer;
 pub mod xmp;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Cursor;
 use std::io::Write;
@@ -996,6 +996,29 @@ async fn merge_hdr(
 ) -> Result<(), String> {
     if paths.len() < 2 {
         return Err("Please select at least two images to merge.".to_string());
+    }
+
+    // A RAW and the camera's JPEG of the same shot are one frame: merge the
+    // RAW, which holds more range, not both. The JPEG is the camera's
+    // rendering, tone curve and all, so its light only roughly matches.
+    let raw_stems: HashSet<PathBuf> = paths
+        .iter()
+        .filter(|p| crate::formats::is_raw_file(p))
+        .map(|p| Path::new(p).with_extension(""))
+        .collect();
+    let paths: Vec<String> = paths
+        .into_iter()
+        .filter(|p| {
+            let twin = !crate::formats::is_raw_file(p)
+                && raw_stems.contains(&Path::new(p).with_extension(""));
+            if twin {
+                log::info!("[hdr] using the RAW of {p}, not its JPEG");
+            }
+            !twin
+        })
+        .collect();
+    if paths.len() < 2 {
+        return Err("Please select at least two different shots to merge.".to_string());
     }
 
     let hdr_result_handle = state.hdr_result.clone();

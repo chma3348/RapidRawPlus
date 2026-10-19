@@ -6,11 +6,11 @@
 //!      bracket needs: frames differing by several stops still align.
 //!   2. `merge_frames` — per-pixel weighted radiance average. Each frame
 //!      contributes `value / exposure`, weighted by how well exposed that
-//!      pixel is, so blown and crushed samples drop out instead of
-//!      poisoning the result.
-//!   3. deghosting — samples that disagree with the best-exposed frame by
-//!      more than a stop are rejected, so something that moved between
-//!      frames resolves to one state instead of smearing.
+//!      pixel is (all three channels together, so colour holds), so blown
+//!      and crushed samples drop out instead of poisoning the result.
+//!   3. deghosting — samples that disagree with the frames' consensus by
+//!      more than a stop fade out, so something that moved between frames
+//!      resolves to one state instead of smearing.
 //!
 //! Everything works in LINEAR light; the caller is responsible for
 //! encoding for display.
@@ -25,6 +25,9 @@ const ALIGN_LEVELS: u32 = 6;
 const MTB_NOISE_TOLERANCE: u8 = 4;
 /// Deghost rejection threshold, in stops of disagreement.
 const DEGHOST_STOPS: f32 = 1.0;
+/// Rejection fades in over this many stops past the threshold, so frames
+/// never switch on and off in steps across a smooth gradient.
+const DEGHOST_FADE_STOPS: f32 = 1.0;
 
 fn luma_u8(img: &Rgb32FImage) -> GrayImage {
     let mut out = GrayImage::new(img.width(), img.height());
@@ -218,50 +221,85 @@ pub fn merge_frames(
         return Err("Exposure times must be positive".to_string());
     }
 
+    let luma = |p: [f32; 3]| 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
     let mut out = Rgb32FImage::new(w, h);
+    let mut weights = vec![0.0f32; frames.len()];
     for y in 0..h {
         for x in 0..w {
-            let mut merged = [0.0f32; 3];
-            for (c, merged_value) in merged.iter_mut().enumerate() {
-                // Best-exposed sample anchors both the fallback value and
-                // the deghost comparison.
-                let mut best_w = -1.0f32;
-                let mut best_radiance = 0.0f32;
-                for (frame, exposure) in frames.iter().zip(exposures) {
-                    let v = frame.get_pixel(x, y)[c].max(0.0);
-                    let wgt = weight(v);
-                    if wgt > best_w {
-                        best_w = wgt;
-                        best_radiance = v / exposure;
+            // One weight per frame for the whole pixel, set by its
+            // brightest channel: a frame whose blue has clipped drops out
+            // for red and green too. Weighing channels apart let each come
+            // from a different mix of frames, which turned smooth skies
+            // into magenta, green and cyan arcs.
+            let samples: Vec<[f32; 3]> = frames
+                .iter()
+                .map(|f| f.get_pixel(x, y).0.map(|v| v.max(0.0)))
+                .collect();
+            for (wgt, sample) in weights.iter_mut().zip(&samples) {
+                *wgt = weight(sample[0].max(sample[1]).max(sample[2]));
+            }
+
+            if options.deghost {
+                // The frames' consensus, leaning on the best-exposed ones
+                // (squared weights). Moving the reference smoothly with the
+                // weights, rather than jumping to whichever frame is best,
+                // keeps the rejection below from switching abruptly.
+                let (mut log_sum, mut log_w) = (0.0f32, 0.0f32);
+                for ((sample, exposure), wgt) in samples.iter().zip(exposures).zip(&weights) {
+                    let y = luma(*sample) / exposure;
+                    if y > 1e-6 {
+                        log_sum += wgt * wgt * y.log2();
+                        log_w += wgt * wgt;
                     }
                 }
-
-                let mut acc = 0.0f32;
-                let mut acc_w = 0.0f32;
-                for (frame, exposure) in frames.iter().zip(exposures) {
-                    let v = frame.get_pixel(x, y)[c].max(0.0);
-                    let wgt = weight(v);
-                    if wgt <= 0.0 {
-                        continue;
-                    }
-                    let radiance = v / exposure;
-                    if options.deghost && best_radiance > 1e-6 && radiance > 1e-6 {
-                        // Something that moved reads as a large radiance
-                        // disagreement with the best-exposed sample.
-                        let stops = (radiance / best_radiance).log2().abs();
-                        if stops > DEGHOST_STOPS {
-                            continue;
+                if log_w > 0.0 {
+                    let reference = log_sum / log_w;
+                    for ((sample, exposure), wgt) in
+                        samples.iter().zip(exposures).zip(weights.iter_mut())
+                    {
+                        let y = luma(*sample) / exposure;
+                        if y > 1e-6 {
+                            // Something that moved disagrees by over a stop;
+                            // rejection fades in over the next stop, since a
+                            // camera's tone curve alone makes bright frames
+                            // disagree by about that much.
+                            let stops = (y.log2() - reference).abs();
+                            let t = ((stops - DEGHOST_STOPS) / DEGHOST_FADE_STOPS).clamp(0.0, 1.0);
+                            *wgt *= 1.0 - t * t * (3.0 - 2.0 * t);
                         }
                     }
-                    acc += radiance * wgt;
-                    acc_w += wgt;
                 }
-                *merged_value = if acc_w > 0.0 {
-                    acc / acc_w
-                } else {
-                    best_radiance
-                };
             }
+
+            let mut acc = [0.0f32; 3];
+            let mut acc_w = 0.0f32;
+            for ((sample, exposure), wgt) in samples.iter().zip(exposures).zip(&weights) {
+                if *wgt <= 0.0 {
+                    continue;
+                }
+                for c in 0..3 {
+                    acc[c] += sample[c] / exposure * wgt;
+                }
+                acc_w += wgt;
+            }
+            let merged = if acc_w > 0.0 {
+                acc.map(|v| v / acc_w)
+            } else {
+                // Nothing usable: blown in every frame (take the shortest
+                // exposure) or black in every frame (take the longest).
+                let shortest = (0..frames.len())
+                    .min_by(|&a, &b| exposures[a].total_cmp(&exposures[b]))
+                    .unwrap_or(0);
+                let longest = (0..frames.len())
+                    .max_by(|&a, &b| exposures[a].total_cmp(&exposures[b]))
+                    .unwrap_or(0);
+                let pick = if luma(samples[shortest]) >= 0.5 {
+                    shortest
+                } else {
+                    longest
+                };
+                samples[pick].map(|v| v / exposures[pick])
+            };
             out.put_pixel(x, y, Rgb(merged));
         }
     }
@@ -467,6 +505,86 @@ mod tests {
             ghosted_ratio > 1.25,
             "without deghosting the moving object should contaminate the merge (ratio {ghosted_ratio:.2})"
         );
+    }
+
+    /// A smooth sky, bracketed as a camera's JPEGs (clipped, then through a
+    /// tone curve, so the frames' radiances only roughly agree): the merge
+    /// must keep its colour steady across the gradient. Weighing each
+    /// channel on its own let red, green and blue each come from a
+    /// different mix of frames, drawing magenta, green and cyan arcs.
+    #[test]
+    fn a_smooth_sky_keeps_its_colour() {
+        let (w, h) = (400u32, 4u32);
+        let sky = [0.55f32, 0.75, 1.0];
+        let exposures = [0.25f32, 1.0, 4.0];
+        // A camera's highlight shoulder: the sensor clips, then highlights
+        // are compressed hard (a quarter of full scale renders at 0.63).
+        let camera = |v: f32| {
+            let v = v.clamp(0.0, 1.0);
+            5.0 * v / (1.0 + 4.0 * v)
+        };
+        let frames: Vec<Rgb32FImage> = exposures
+            .iter()
+            .map(|e| {
+                Rgb32FImage::from_fn(w, h, |x, _| {
+                    // 0.15 to 3.0 in radiance: from well exposed to blown.
+                    let l = 0.15 * 20f32.powf(x as f32 / (w - 1) as f32);
+                    Rgb(sky.map(|c| camera(c * l * e)))
+                })
+            })
+            .collect();
+        // The same bracket as RAW frames (linear) besides the JPEGs, as when
+        // a RAW and its JPEG are both selected.
+        let raws: Vec<Rgb32FImage> = exposures
+            .iter()
+            .map(|e| {
+                Rgb32FImage::from_fn(w, h, |x, _| {
+                    let l = 0.15 * 20f32.powf(x as f32 / (w - 1) as f32);
+                    Rgb(sky.map(|c| (c * l * e).min(1.0)))
+                })
+            })
+            .collect();
+        let both: Vec<Rgb32FImage> = frames.iter().chain(&raws).cloned().collect();
+        let both_exposures: Vec<f32> = exposures.iter().chain(&exposures).copied().collect();
+        for (name, frames, exposures) in [
+            ("JPEGs", &frames, &exposures[..]),
+            ("RAWs", &raws, &exposures[..]),
+            ("RAWs with their JPEGs", &both, &both_exposures[..]),
+        ] {
+            let merged = merge_frames(frames, exposures, &MergeOptions::default()).unwrap();
+            let chroma = |x: u32| {
+                let p = merged.get_pixel(x, 1);
+                let sum = p[0] + p[1] + p[2];
+                [p[0] / sum, p[1] / sum, p[2] / sum]
+            };
+            let brightness = |x: u32| {
+                let p = merged.get_pixel(x, 1);
+                (0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2]).log2()
+            };
+            let (mut colour_jump, mut brightness_step) = (0.0f32, 0.0f32);
+            for x in 1..w {
+                let (a, b) = (chroma(x - 1), chroma(x));
+                for c in 0..3 {
+                    colour_jump = colour_jump.max((a[c] - b[c]).abs());
+                }
+                // The gradient climbs 4.3 stops over 400 pixels, about 0.011
+                // a pixel: a step would stand out against that.
+                brightness_step = brightness_step
+                    .max(brightness(x) - brightness(x - 1))
+                    .max(brightness(x - 1) - brightness(x));
+            }
+            eprintln!(
+                "{name}: colour jump {colour_jump:.4}, brightness step {brightness_step:.4} stops"
+            );
+            assert!(
+                colour_jump < 0.004,
+                "{name}: the sky's colour jumps by {colour_jump:.4} between neighbouring pixels"
+            );
+            assert!(
+                brightness_step < 0.05,
+                "{name}: the sky's brightness steps by {brightness_step:.3} stops"
+            );
+        }
     }
 
     #[test]
