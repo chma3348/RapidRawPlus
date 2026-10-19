@@ -1007,6 +1007,13 @@ async fn merge_hdr(
         .filter(|p| crate::formats::is_raw_file(p))
         .map(|p| Path::new(p).with_extension(""))
         .collect();
+    let name = |p: &str| {
+        Path::new(p)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| p.to_string())
+    };
+    let mut twins: Vec<String> = Vec::new();
     let paths: Vec<String> = paths
         .into_iter()
         .filter(|p| {
@@ -1014,12 +1021,20 @@ async fn merge_hdr(
                 && raw_stems.contains(&Path::new(p).with_extension(""));
             if twin {
                 log::info!("[hdr] using the RAW of {p}, not its JPEG");
+                twins.push(name(p));
             }
             !twin
         })
         .collect();
     if paths.len() < 2 {
-        return Err("Please select at least two different shots to merge.".to_string());
+        // Selecting a RAW and its JPEG is selecting one photo twice.
+        return Err(match (paths.first(), twins.first()) {
+            (Some(raw), Some(jpeg)) => format!(
+                "{} and {jpeg} are the RAW and the JPEG of the same photo, so there is only one exposure to merge. An HDR merge needs two or more photos of the same scene taken at different exposures (a bracket).",
+                name(raw)
+            ),
+            _ => "Please select at least two photos taken at different exposures.".to_string(),
+        });
     }
 
     // A RAW bracket merges to a DNG, finished pictures to a TIFF in their
