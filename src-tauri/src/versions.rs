@@ -51,6 +51,42 @@ pub fn free_version_path(source: &Path, kind: &str, ext: &str) -> PathBuf {
     candidate
 }
 
+/// Record a merge (HDR, panorama): `output` heads a stack holding the
+/// frames it was made from, so the library shows one photo for the bracket,
+/// the merge on top. Each frame's sidecar names the merge as the file it
+/// belongs with (`derivedFrom`, kind "Bracket"); a frame already a version
+/// of something else keeps that.
+pub fn record_merge(output: &Path, sources: &[PathBuf], kind: &str) {
+    let write = |path: &Path, from: Option<String>, kind: &str| {
+        let sidecar = crate::exif_processing::get_primary_sidecar_path(path);
+        let mut metadata = crate::exif_processing::load_sidecar(&sidecar);
+        if from.is_some()
+            && metadata.derived_from.is_some()
+            && metadata.derived_kind.as_deref() != Some(BRACKET_KIND)
+        {
+            return;
+        }
+        metadata.derived_from = from;
+        metadata.derived_kind = Some(kind.to_string());
+        match serde_json::to_string_pretty(&metadata) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(&sidecar, json) {
+                    log::warn!("could not record the merge for {path:?}: {e}");
+                }
+            }
+            Err(e) => log::warn!("could not record the merge for {path:?}: {e}"),
+        }
+    };
+    write(output, None, kind);
+    let name = output.file_name().map(|n| n.to_string_lossy().into_owned());
+    for source in sources {
+        write(source, name.clone(), BRACKET_KIND);
+    }
+}
+
+/// The kind recorded for a frame a merge was made from.
+pub const BRACKET_KIND: &str = "Bracket";
+
 /// Record in `output`'s sidecar that it was made from `source` (a real
 /// path, not a virtual copy's) by `kind`. Runs after anything else that
 /// writes the sidecar, so it is the last word.
@@ -265,5 +301,38 @@ mod tests {
         );
         assert_eq!(meta.derived_from.as_deref(), Some("DSC1.ARW"));
         assert_eq!(meta.derived_kind.as_deref(), Some("Restored"));
+    }
+
+    /// A merge heads its stack: it records its kind and no original, and
+    /// each frame names the merge; a frame that is already a version of
+    /// something else keeps that.
+    #[test]
+    fn a_merge_heads_a_stack_of_its_frames() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = |n: &str| dir.path().join(n);
+        for n in ["DSC1.ARW", "DSC2.ARW", "DSC3_Denoised.tif", "DSC1_HDR.dng"] {
+            std::fs::write(p(n), b"x").unwrap();
+        }
+        record_version(&p("DSC3_Denoised.tif"), &p("DSC3.ARW"), "Denoised");
+        record_merge(
+            &p("DSC1_HDR.dng"),
+            &[p("DSC1.ARW"), p("DSC2.ARW"), p("DSC3_Denoised.tif")],
+            "HDR",
+        );
+        let meta = |n: &str| {
+            crate::exif_processing::load_sidecar(&crate::exif_processing::get_primary_sidecar_path(
+                &p(n),
+            ))
+        };
+        assert_eq!(meta("DSC1_HDR.dng").derived_from, None);
+        assert_eq!(meta("DSC1_HDR.dng").derived_kind.as_deref(), Some("HDR"));
+        for frame in ["DSC1.ARW", "DSC2.ARW"] {
+            assert_eq!(meta(frame).derived_from.as_deref(), Some("DSC1_HDR.dng"));
+            assert_eq!(meta(frame).derived_kind.as_deref(), Some(BRACKET_KIND));
+        }
+        assert_eq!(
+            meta("DSC3_Denoised.tif").derived_from.as_deref(),
+            Some("DSC3.ARW")
+        );
     }
 }

@@ -10,6 +10,10 @@ import type { ImageFile } from '../components/ui/AppProperties';
  * came from (`derived_from`, see versions.rs); a version made from a
  * version joins the same stack.
  *
+ * A merge (HDR) is the other way round: the merged file heads the stack
+ * and the frames it was made from sit inside it (kind "Bracket"), so a
+ * bracket shows as one photo, its result.
+ *
  * Frames saved from a video are not stacked: they stay pictures of their
  * own, placed straight after their clip whatever the sort order.
  */
@@ -24,6 +28,8 @@ export interface Stacks {
 }
 
 export const FRAME_KIND = 'Frame';
+/** A frame a merge (HDR) was made from; see versions.rs `record_merge`. */
+export const BRACKET_KIND = 'Bracket';
 
 /** Dispatched on `window` by views that write a file into the open folder
  *  (a saved video frame) so the library lists it without a manual refresh. */
@@ -91,9 +97,13 @@ export const stackRootOf = (stacks: Stacks, path: string | null | undefined) =>
 export function versionLabels(group: ImageFile[]): Map<string, string> {
   const labels = new Map<string, string>();
   let copies = 0;
+  // A merge heads its own stack (HDR), holding the frames it was made from.
+  const brackets = group.filter((f) => f.derived_kind === BRACKET_KIND);
   group.forEach((f, i) => {
     if (i === 0) {
-      labels.set(f.path, 'Original');
+      labels.set(f.path, f.derived_kind || 'Original');
+    } else if (f.derived_kind === BRACKET_KIND) {
+      labels.set(f.path, brackets.length > 1 ? `${BRACKET_KIND} ${brackets.indexOf(f) + 1}` : BRACKET_KIND);
     } else if (f.path.includes('?vc=')) {
       copies += 1;
       labels.set(f.path, `Copy ${copies}`);

@@ -44,6 +44,11 @@ pub fn decode_raw(
     check_cancel: impl Fn() -> Result<()>,
 ) -> Result<DecodedFrame> {
     check_cancel()?;
+    // Floating-point LinearRaw DNGs (HDR merges, ours or Lightroom's) are
+    // already demosaiced linear light, which rawler does not read.
+    if crate::hdr_dng::is_float_linear_dng(bytes) {
+        return crate::hdr_dng::decode_float_dng(bytes);
+    }
     let source = RawSource::new_from_slice(bytes);
     let decoder = rawler::get_decoder(&source)?;
     let raw = decoder.raw_image(&source, &RawDecodeParams::default(), false)?;

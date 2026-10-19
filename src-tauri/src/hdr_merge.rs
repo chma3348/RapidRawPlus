@@ -191,11 +191,17 @@ fn weight(linear: f32) -> f32 {
 
 pub struct MergeOptions {
     pub deghost: bool,
+    /// Scale the result so its bright end lands near 1.0. Off, it is
+    /// radiance: value / exposure, for the caller to place.
+    pub normalise: bool,
 }
 
 impl Default for MergeOptions {
     fn default() -> Self {
-        Self { deghost: true }
+        Self {
+            deghost: true,
+            normalise: true,
+        }
     }
 }
 
@@ -304,6 +310,9 @@ pub fn merge_frames(
         }
     }
 
+    if !options.normalise {
+        return Ok(out);
+    }
     // Normalise by a high percentile so the result sits in a familiar
     // range without clipping speculars to white.
     let mut lumas: Vec<f32> = out
@@ -465,7 +474,15 @@ mod tests {
         }
         let exposures = [0.25f32, 1.0, 4.0];
         let frames: Vec<Rgb32FImage> = exposures.iter().map(|e| expose(&truth, *e)).collect();
-        let merged = merge_frames(&frames, &exposures, &MergeOptions { deghost: false }).unwrap();
+        let merged = merge_frames(
+            &frames,
+            &exposures,
+            &MergeOptions {
+                deghost: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         let bright = merged.get_pixel(10, 32)[0];
         let dark = merged.get_pixel(w - 10, 32)[0];
@@ -490,8 +507,16 @@ mod tests {
                 frames[1].put_pixel(x, y, Rgb([0.95, 0.95, 0.95]));
             }
         }
-        let ghosted = merge_frames(&frames, &exposures, &MergeOptions { deghost: false }).unwrap();
-        let clean = merge_frames(&frames, &exposures, &MergeOptions { deghost: true }).unwrap();
+        let ghosted = merge_frames(
+            &frames,
+            &exposures,
+            &MergeOptions {
+                deghost: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let clean = merge_frames(&frames, &exposures, &MergeOptions::default()).unwrap();
 
         // Each merge is normalised independently, so compare the patch
         // against its OWN background rather than across images.

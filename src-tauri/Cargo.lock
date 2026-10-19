@@ -1116,6 +1116,7 @@ dependencies = [
  "chrono",
  "fern",
  "filetime",
+ "flate2",
  "futures",
  "futures-util",
  "fuzzy-matcher",

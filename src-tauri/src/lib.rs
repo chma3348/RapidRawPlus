@@ -34,7 +34,9 @@ pub mod flat_field;
 mod flog2c;
 pub mod formats;
 pub mod gpu_processing;
+pub mod hdr_dng;
 pub mod hdr_merge;
+pub mod hdr_output;
 pub mod heal_blend;
 pub mod image_loader;
 pub mod image_processing;
@@ -97,11 +99,10 @@ use tempfile::NamedTempFile;
 use crate::cache_utils::{GEOMETRY_KEYS, calculate_geometry_hash, calculate_visual_hash};
 use crate::exif_processing::{read_exposure_time_secs, read_iso};
 use crate::file_management::parse_virtual_path;
-use crate::image_loader::load_base_image_from_bytes;
 use crate::image_processing::{
     GeometryParams, apply_coarse_rotation, apply_cpu_default_raw_processing, apply_flip,
-    apply_geometry_warp, apply_linear_to_srgb, apply_srgb_to_linear, get_or_init_gpu_context,
-    render_adjustments_for_empty, warp_image_geometry,
+    apply_geometry_warp, get_or_init_gpu_context, render_adjustments_for_empty,
+    warp_image_geometry,
 };
 use crate::mask_generation::resolve_warped_image_for_masks;
 use crate::window_customizer::PinchZoomDisablePlugin;
@@ -1021,10 +1022,19 @@ async fn merge_hdr(
         return Err("Please select at least two different shots to merge.".to_string());
     }
 
-    let hdr_result_handle = state.hdr_result.clone();
-    let settings = load_settings(app_handle.clone()).unwrap_or_default();
+    // A RAW bracket merges to a DNG, finished pictures to a TIFF in their
+    // own rendering (hdr_output); the two kinds' light does not mix.
+    let raw = paths.iter().all(crate::formats::is_raw_file);
+    if !raw && paths.iter().any(crate::formats::is_raw_file) {
+        return Err(
+            "These frames mix RAW and JPEG (or other finished) files. Merge the RAWs on their own, or the JPEGs on their own."
+                .to_string(),
+        );
+    }
+    // A merge replacing an unsaved one discards it (and its temporary file).
+    *state.hdr_result.lock().unwrap() = None;
 
-    let loaded_items: Vec<(String, DynamicImage, Duration, f32)> = paths
+    let loaded_items: Vec<(String, image::Rgb32FImage, f32, Vec<u8>)> = paths
         .iter()
         .map(|path| {
             let _ = app_handle.emit(
@@ -1037,37 +1047,28 @@ async fn merge_hdr(
                         .to_string_lossy()
                 ),
             );
-
             let file_bytes =
                 fs::read(path).map_err(|e| format!("Failed to read image {}: {}", path, e))?;
-            let mut dynamic_image =
-                load_base_image_from_bytes(&file_bytes, path, false, &settings, None)
-                    .map_err(|e| format!("Failed to load image {}: {}", path, e))?;
-
-            if !crate::formats::is_raw_file(path) {
-                dynamic_image = apply_srgb_to_linear(dynamic_image);
-            }
-
+            // The colour engine's own decoders: linear light, which a
+            // merge needs (the previous engine's RAW development compressed
+            // highlights, so frames disagreed exactly where they overlap).
+            let frame = crate::hdr_output::load_frame(path, &file_bytes)
+                .map_err(|e| format!("Failed to load image {}: {:#}", path, e))?;
             // ISO only scales effective exposure; a missing value is no
             // longer fatal, it just means "same sensitivity as the others".
             let gains = read_iso(path, &file_bytes)
                 .map(|v| v as f32)
                 .unwrap_or(100.0);
-
-            let exposure = match read_exposure_time_secs(path, &file_bytes) {
-                None => return Err(format!("Image {} is missing ExposureTime data", path)),
-                Some(exp) => Duration::from_secs_f32(exp),
-            };
-
-            Ok((path.clone(), dynamic_image, exposure, gains))
+            let exposure = read_exposure_time_secs(path, &file_bytes)
+                .ok_or_else(|| format!("Image {} is missing ExposureTime data", path))?;
+            Ok((path.clone(), frame, exposure * gains, file_bytes))
         })
         .collect::<Result<Vec<_>, String>>()?;
 
     if let Some((first_path, first_img, _, _)) = loaded_items.first() {
-        let (width, height) = (first_img.width(), first_img.height());
-
+        let (width, height) = first_img.dimensions();
         for (path, img, _, _) in loaded_items.iter().skip(1) {
-            if img.width() != width || img.height() != height {
+            if img.dimensions() != (width, height) {
                 return Err(format!(
                     "Dimension mismatch detected.\n\nBase image ({}): {}x{}\nTarget image ({}): {}x{}\n\nHDR merge requires all images to be exactly the same size.",
                     Path::new(first_path)
@@ -1088,24 +1089,19 @@ async fn merge_hdr(
     }
 
     // Effective exposure folds ISO in, so ISO-varied brackets merge
-    // correctly too; the reference frame's ISO sets the scale.
-    let reference_iso = loaded_items
-        .first()
-        .map(|(_, _, _, g)| *g)
-        .unwrap_or(100.0)
-        .max(1.0);
-    let exposures: Vec<f32> = loaded_items
-        .iter()
-        .map(|(_, _, exposure, gains)| exposure.as_secs_f32() * (gains / reference_iso))
-        .collect();
-    let mut frames: Vec<image::Rgb32FImage> = loaded_items
-        .iter()
-        .map(|(_, img, _, _)| img.to_rgb32f())
-        .collect();
+    // correctly too; only ratios matter.
+    let exposures: Vec<f32> = loaded_items.iter().map(|(_, _, e, _)| *e).collect();
+    let camera = raw.then(|| crate::hdr_output::camera_of(&loaded_items[0].3));
+    let mut frames: Vec<image::Rgb32FImage> = Vec::with_capacity(loaded_items.len());
+    let mut names = Vec::with_capacity(loaded_items.len());
+    for (path, frame, _, _) in loaded_items {
+        names.push(path);
+        frames.push(frame);
+    }
 
     let _ = app_handle.emit("hdr-progress", "Aligning frames...");
     let shifts = crate::hdr_merge::align_frames(&mut frames, &exposures);
-    for ((path, _, _, _), (dx, dy)) in loaded_items.iter().zip(&shifts) {
+    for (path, (dx, dy)) in names.iter().zip(&shifts) {
         if *dx != 0 || *dy != 0 {
             log::info!(
                 "[hdr] aligned '{}' by ({dx}, {dy}) px",
@@ -1119,28 +1115,70 @@ async fn merge_hdr(
 
     let _ = app_handle.emit("hdr-progress", "Merging exposures...");
     log::info!("Starting HDR merge of {} images", frames.len());
-    let merged_linear = crate::hdr_merge::merge_frames(
+    let mut merged = crate::hdr_merge::merge_frames(
         &frames,
         &exposures,
-        &crate::hdr_merge::MergeOptions::default(),
+        &crate::hdr_merge::MergeOptions {
+            normalise: false,
+            ..Default::default()
+        },
     )?;
-    // 16-bit output: an 8-bit PNG threw away most of the range the merge
-    // just recovered, leaving nothing for the editor's tonal controls.
-    let hdr_merged = apply_linear_to_srgb(DynamicImage::ImageRgb32F(merged_linear));
-    let hdr_merged = DynamicImage::ImageRgb16(hdr_merged.to_rgb16());
+    drop(frames);
+    // Midtones as the middle frame had them.
+    crate::hdr_output::place_at(
+        &mut merged,
+        crate::hdr_output::reference_exposure(&exposures),
+    );
+
+    let _ = app_handle.emit("hdr-progress", "Saving the merge...");
+    let (extension, written) = if let Some(camera) = &camera {
+        let file = crate::hdr_output::temporary_path("dng").map_err(|e| e.to_string())?;
+        let written = crate::hdr_dng::write_float_dng(&file, &merged, camera).map(|_| file);
+        ("dng", written)
+    } else {
+        crate::hdr_output::fold_highlights(&mut merged);
+        let file = crate::hdr_output::temporary_path("tif").map_err(|e| e.to_string())?;
+        let written = crate::hdr_output::write_rendered_tiff(&file, &merged).map(|_| file);
+        ("tif", written)
+    };
+    drop(merged);
+    let file = written.map_err(|e| format!("Failed to write the merge: {e:#}"))?;
+    let result = crate::hdr_output::HdrResult {
+        file: file.clone(),
+        extension,
+        sources: names
+            .iter()
+            .map(|p| crate::file_management::parse_virtual_path(p).0)
+            .collect(),
+    };
     log::info!("HDR merge completed");
 
-    let mut buf = Cursor::new(Vec::new());
-    if let Err(e) = hdr_merged.to_rgb8().write_to(&mut buf, ImageFormat::Png) {
-        return Err(format!("Failed to encode hdr preview: {}", e));
-    }
-
-    let base64_str = general_purpose::STANDARD.encode(buf.get_ref());
-    let final_base64 = format!("data:image/png;base64,{}", base64_str);
-
+    // The preview is the merged file itself, rendered as the editor will
+    // show it, at a size the window can hold (the full picture as one
+    // image in the page was too big to draw, and showed black).
     let _ = app_handle.emit("hdr-progress", "Creating preview...");
+    let context = crate::gpu_processing::get_or_init_gpu_context(&state, &app_handle)
+        .map_err(|e| format!("The preview needs the GPU: {e}"))?;
+    let preview = crate::color_engine::application::render_aside(
+        &context,
+        &state,
+        &file.to_string_lossy(),
+        &serde_json::Value::Null,
+        Some(1600),
+    )
+    .map_err(|e| format!("Failed to preview the merge: {e:#}"))?
+    .preview_rgba8();
+    let mut buf = Cursor::new(Vec::new());
+    DynamicImage::ImageRgba8(preview)
+        .to_rgb8()
+        .write_to(&mut buf, ImageFormat::Jpeg)
+        .map_err(|e| format!("Failed to encode hdr preview: {}", e))?;
+    let final_base64 = format!(
+        "data:image/jpeg;base64,{}",
+        general_purpose::STANDARD.encode(buf.get_ref())
+    );
 
-    *hdr_result_handle.lock().unwrap() = Some(hdr_merged);
+    *state.hdr_result.lock().unwrap() = Some(result);
 
     let _ = app_handle.emit(
         "hdr-complete",
@@ -1156,44 +1194,14 @@ async fn save_hdr(
     first_path_str: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
-    let hdr_image = state.hdr_result.lock().unwrap().take().ok_or_else(|| {
+    let result = state.hdr_result.lock().unwrap().take().ok_or_else(|| {
         "No hdr image found in memory to save. It might have already been saved.".to_string()
     })?;
-
-    let (first_path, _) = parse_virtual_path(&first_path_str);
-    let parent_dir = first_path
-        .parent()
-        .ok_or_else(|| "Could not determine parent directory of the first image.".to_string())?;
-    let stem = first_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("hdr");
-
-    let (output_filename, image_to_save): (String, DynamicImage) = if hdr_image.color().has_alpha()
-    {
-        (
-            format!("{}_Hdr.png", stem),
-            DynamicImage::ImageRgba8(hdr_image.to_rgba8()),
-        )
-    } else if hdr_image.as_rgb32f().is_some() || hdr_image.as_rgb16().is_some() {
-        // TIFF keeps the merged bit depth; PNG-8 would discard it.
-        (format!("{}_Hdr.tiff", stem), hdr_image)
-    } else {
-        (
-            format!("{}_Hdr.png", stem),
-            DynamicImage::ImageRgb8(hdr_image.to_rgb8()),
-        )
-    };
-
-    let output_path = parent_dir.join(output_filename);
-
-    image_to_save
-        .save(&output_path)
-        .map_err(|e| format!("Failed to save hdr image: {}", e))?;
-
+    let output_path = crate::hdr_output::save(&result).map_err(|e| format!("{e:#}"))?;
     let (real_path, _) = crate::file_management::parse_virtual_path(&first_path_str);
     let _ = crate::exif_processing::write_exif_sidecar(&real_path.to_string_lossy(), &output_path);
-
+    // One stack in the library: the merge on top, its frames inside.
+    crate::versions::record_merge(&output_path, &result.sources, "HDR");
     Ok(output_path.to_string_lossy().to_string())
 }
 

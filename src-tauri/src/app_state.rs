@@ -173,7 +173,8 @@ pub struct AppState {
     pub ai_state: Mutex<Option<AiState>>,
     pub ai_init_lock: TokioMutex<()>,
     pub export_task_handle: Mutex<Option<JoinHandle<()>>>,
-    pub hdr_result: Arc<Mutex<Option<DynamicImage>>>,
+    /// A merge made and previewed, waiting to be saved (hdr_output).
+    pub hdr_result: Arc<Mutex<Option<crate::hdr_output::HdrResult>>>,
     pub panorama_result: Arc<Mutex<Option<DynamicImage>>>,
     pub denoise_result: Arc<Mutex<Option<DynamicImage>>>,
     pub enhancement_result: Arc<Mutex<Option<DynamicImage>>>,
