@@ -18,7 +18,10 @@ export default function AdjustmentSection({
   sectionRef,
   style,
   highlight = false,
+  sectionId,
 }: {
+  /** Which section this is, for keys that open one and scroll to it (⌘1–6). */
+  sectionId?: string;
   /** For drag-and-drop: the element that moves, and how it is styled. */
   sectionRef?: (el: HTMLElement | null) => void;
   style?: React.CSSProperties;
@@ -37,6 +40,7 @@ export default function AdjustmentSection({
     <section
       ref={sectionRef}
       style={style}
+      data-adjustment-section={sectionId}
       className={clsx(
         'border-b border-surface last:border-b-0 bg-bg-secondary',
         highlight && 'shadow-[inset_0_2px_0_0_var(--color-accent)]',

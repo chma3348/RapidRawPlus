@@ -13,6 +13,22 @@ import { stackRootOf } from '../utils/stacks';
 import { undoFileOperation } from '../utils/fileUndo';
 import { flagTargets, setFlagForPaths } from '../utils/flags';
 import { startCulling } from '../components/panel/library/CullView';
+import { useShortcutSheet } from '../components/modals/ShortcutSheet';
+import { useEditorRequests } from '../store/useEditorRequests';
+import { resolveEditorLayout } from '../utils/editorLayout';
+import { LIBRARY_REFRESH_EVENT } from '../utils/stacks';
+import { Invokes } from '../components/ui/AppProperties';
+import { invoke } from '@tauri-apps/api/core';
+import type { OverlayMode } from '../components/panel/right/CropPanel';
+
+/** The stores, as the shortcut handlers read them. */
+interface StoreState {
+  editor: ReturnType<typeof useEditorStore.getState>;
+  library: ReturnType<typeof useLibraryStore.getState>;
+  ui: ReturnType<typeof useUIStore.getState>;
+  settings: ReturnType<typeof useSettingsStore.getState>;
+  process: ReturnType<typeof useProcessStore.getState>;
+}
 
 interface KeyboardShortcutsProps {
   sortedImageList: Array<ImageFile>;
@@ -33,7 +49,8 @@ export const useKeyboardShortcuts = ({
   handleToggleFullScreen,
   handleZoomChange,
 }: KeyboardShortcutsProps) => {
-  const { handleRotate, handleCopyAdjustments, handlePasteAdjustments } = useEditorActions();
+  const { handleRotate, handleCopyAdjustments, handlePasteAdjustments, handleAutoAdjustments, setAdjustments } =
+    useEditorActions();
   const { handleRate, handleSetColorLabel } = useLibraryActions();
 
   const sortedListRef = useRef(sortedImageList);
@@ -50,16 +67,95 @@ export const useKeyboardShortcuts = ({
       process: useProcessStore.getState(),
     });
 
-    const comboMap = new Map<string, string>();
+    // A key can carry more than one action (\\ shows the original in the
+    // editor and toggles the filter bar in the grid): the first whose
+    // moment it is runs. An action keeps its extra keys (aliases) while it
+    // keeps its default.
+    const comboMap = new Map<string, string[]>();
     const keybinds = useSettingsStore.getState().appSettings?.keybinds;
+    const bind = (combo: string[], action: string) => {
+      if (combo.length === 0) return;
+      const key = combo.join('+');
+      comboMap.set(key, [...(comboMap.get(key) ?? []), action]);
+    };
 
     for (const def of KEYBIND_DEFINITIONS) {
       const userCombo = keybinds?.[def.action];
-      const effective = userCombo && userCombo.length > 0 ? userCombo : def.defaultCombo;
-      if (effective) {
-        comboMap.set(effective.join('+'), def.action);
+      if (userCombo && userCombo.length > 0) {
+        bind(userCombo, def.action);
+      } else {
+        bind(def.defaultCombo, def.action);
+        def.aliases?.forEach((alias) => bind(alias, def.action));
       }
     }
+
+    /** Open a right-hand panel (setRightPanel toggles; this only opens). */
+    const openPanel = (s: StoreState, panel: Panel) => {
+      if (s.ui.activeRightPanel !== panel) s.ui.setRightPanel(panel);
+    };
+
+    /** Lightroom's ⌘1–6: open (or, when all are open, close) Advanced sections. */
+    const toggleSections = (s: StoreState, ids: string[], onlyOpen = false) => {
+      const { appSettings, handleSettingsChange } = s.settings;
+      if (!appSettings) return;
+      const layout = resolveEditorLayout((appSettings as unknown as { editorLayout?: unknown }).editorLayout as never);
+      const allOpen =
+        layout.adjustmentsMode === 'advanced' &&
+        s.ui.activeRightPanel === Panel.Adjustments &&
+        ids.every((id) => layout.openSections[id]);
+      const opening = onlyOpen || !allOpen;
+      const openSections = { ...layout.openSections };
+      ids.forEach((id) => (openSections[id] = opening));
+      // (editorLayout is not in the AppSettings type; see useEditorLayout.)
+      const next = {
+        ...appSettings,
+        editorLayout: {
+          ...layout,
+          adjustmentsMode: 'advanced',
+          openSections,
+          hiddenSections: layout.hiddenSections.filter((h: string) => !ids.includes(h)),
+        },
+      };
+      void handleSettingsChange(next);
+      openPanel(s, Panel.Adjustments);
+      if (opening) {
+        window.setTimeout(
+          () =>
+            document
+              .querySelector(`[data-adjustment-section="${ids[0]}"]`)
+              ?.scrollIntoView({ block: 'start', behavior: 'smooth' }),
+          120,
+        );
+      }
+    };
+
+    /** Open a merge window on the selection, as the context menu does. */
+    const openMerge = (s: StoreState, which: 'hdrModalState' | 'panoramaModalState') => {
+      s.ui.setUI({
+        [which]: {
+          error: null,
+          finalImageBase64: null,
+          isOpen: true,
+          isProcessing: false,
+          progressMessage: null,
+          stitchingSourcePaths: s.library.multiSelectedPaths,
+        },
+      });
+    };
+
+    const overlays: OverlayMode[] = [
+      'thirds',
+      'goldenTriangle',
+      'goldenSpiral',
+      'phiGrid',
+      'armature',
+      'diagonal',
+      'none',
+    ];
+    const inBrushPanel = (s: StoreState) =>
+      !!s.editor.selectedImage &&
+      !!s.editor.brushSettings &&
+      (s.ui.activeRightPanel === Panel.Masks || s.ui.activeRightPanel === Panel.Ai);
 
     const actions: Record<string, any> = {
       open_image: {
@@ -495,8 +591,7 @@ export const useKeyboardShortcuts = ({
         },
       },
       brush_size_up: {
-        shouldFire: (s: any) =>
-          !!s.editor.selectedImage && !!s.editor.brushSettings && s.ui.activeRightPanel === Panel.Masks,
+        shouldFire: inBrushPanel,
         execute: (e: any, s: any) => {
           e.preventDefault();
           const newSize = Math.min((s.editor.brushSettings.size || 50) + 10, 200);
@@ -504,12 +599,205 @@ export const useKeyboardShortcuts = ({
         },
       },
       brush_size_down: {
-        shouldFire: (s: any) =>
-          !!s.editor.selectedImage && !!s.editor.brushSettings && s.ui.activeRightPanel === Panel.Masks,
+        shouldFire: inBrushPanel,
         execute: (e: any, s: any) => {
           e.preventDefault();
           const newSize = Math.max((s.editor.brushSettings.size || 50) - 10, 1);
           s.editor.setEditor({ brushSettings: { ...s.editor.brushSettings, size: newSize } });
+        },
+      },
+      // Lightroom's (the Lightroom desktop app's) own shortcuts.
+      brush_feather_up: {
+        shouldFire: inBrushPanel,
+        execute: (e: KeyboardEvent, s: StoreState) => {
+          e.preventDefault();
+          const feather = Math.min((s.editor.brushSettings!.feather ?? 50) + 10, 100);
+          s.editor.setEditor({ brushSettings: { ...s.editor.brushSettings!, feather } });
+        },
+      },
+      brush_feather_down: {
+        shouldFire: inBrushPanel,
+        execute: (e: KeyboardEvent, s: StoreState) => {
+          e.preventDefault();
+          const feather = Math.max((s.editor.brushSettings!.feather ?? 50) - 10, 0);
+          s.editor.setEditor({ brushSettings: { ...s.editor.brushSettings!, feather } });
+        },
+      },
+      auto_tone: {
+        shouldFire: (s: StoreState) => !!s.editor.selectedImage,
+        execute: (e: KeyboardEvent) => {
+          e.preventDefault();
+          handleAutoAdjustments();
+        },
+      },
+      toggle_clipping: {
+        shouldFire: (s: StoreState) => !!s.editor.selectedImage,
+        execute: (e: KeyboardEvent) => {
+          e.preventDefault();
+          setAdjustments((prev) => ({ ...prev, showClipping: !prev.showClipping }));
+        },
+      },
+      wb_picker: {
+        shouldFire: (s: StoreState) => !!s.editor.selectedImage,
+        execute: (e: KeyboardEvent, s: StoreState) => {
+          e.preventDefault();
+          openPanel(s, Panel.Adjustments);
+          s.editor.setEditor({ isWbPickerActive: !s.editor.isWbPickerActive });
+        },
+      },
+      crop_overlay_cycle: {
+        shouldFire: (s: StoreState) => !!s.editor.selectedImage && s.ui.activeRightPanel === Panel.Crop,
+        execute: (e: KeyboardEvent, s: StoreState) => {
+          e.preventDefault();
+          const next = overlays[(overlays.indexOf(s.editor.overlayMode) + 1) % overlays.length];
+          s.editor.setEditor({ overlayMode: next });
+        },
+      },
+      mask_linear: {
+        shouldFire: (s: StoreState) => !!s.editor.selectedImage,
+        execute: (e: KeyboardEvent, s: StoreState) => {
+          e.preventDefault();
+          openPanel(s, Panel.Masks);
+          useEditorRequests.getState().send({ kind: 'mask', mask: 'linear' });
+        },
+      },
+      mask_radial: {
+        shouldFire: (s: StoreState) => !!s.editor.selectedImage,
+        execute: (e: KeyboardEvent, s: StoreState) => {
+          e.preventDefault();
+          openPanel(s, Panel.Masks);
+          useEditorRequests.getState().send({ kind: 'mask', mask: 'radial' });
+        },
+      },
+      mask_brush: {
+        shouldFire: (s: StoreState) => !!s.editor.selectedImage,
+        execute: (e: KeyboardEvent, s: StoreState) => {
+          e.preventDefault();
+          openPanel(s, Panel.Masks);
+          useEditorRequests.getState().send({ kind: 'mask', mask: 'brush' });
+        },
+      },
+      heal_brush: {
+        shouldFire: (s: StoreState) => !!s.editor.selectedImage,
+        execute: (e: KeyboardEvent, s: StoreState) => {
+          e.preventDefault();
+          openPanel(s, Panel.Ai);
+          useEditorRequests.getState().send({ kind: 'heal' });
+        },
+      },
+      create_version: {
+        shouldFire: (s: StoreState) => !!(s.editor.selectedImage?.path ?? s.library.libraryActivePath),
+        execute: (e: KeyboardEvent, s: StoreState) => {
+          e.preventDefault();
+          const source = s.editor.selectedImage?.path ?? s.library.libraryActivePath;
+          invoke(Invokes.CreateVirtualCopy, {
+            sourceVirtualPath: source,
+            targetAlbumId: s.library.activeAlbumId || null,
+          })
+            .then(() => window.dispatchEvent(new Event(LIBRARY_REFRESH_EVENT)))
+            .catch((err) => console.error('Could not create a version:', err));
+        },
+      },
+      paste_selected: {
+        shouldFire: (s: StoreState) => !!s.editor.copiedAdjustments,
+        execute: (e: KeyboardEvent, s: StoreState) => {
+          e.preventDefault();
+          s.ui.setUI({ isCopyPasteSettingsModalOpen: true });
+        },
+      },
+      export_previous: {
+        shouldFire: (s: StoreState) => !!s.editor.selectedImage,
+        execute: (e: KeyboardEvent, s: StoreState) => {
+          e.preventDefault();
+          openPanel(s, Panel.Export);
+          useEditorRequests.getState().send({ kind: 'exportPrevious' });
+        },
+      },
+      merge_hdr: {
+        shouldFire: (s: StoreState) => s.library.multiSelectedPaths.length >= 2,
+        execute: (e: KeyboardEvent, s: StoreState) => {
+          e.preventDefault();
+          openMerge(s, 'hdrModalState');
+        },
+      },
+      merge_pano: {
+        shouldFire: (s: StoreState) => s.library.multiSelectedPaths.length >= 2,
+        execute: (e: KeyboardEvent, s: StoreState) => {
+          e.preventDefault();
+          openMerge(s, 'panoramaModalState');
+        },
+      },
+      select_none: {
+        shouldFire: (s: StoreState) => !s.editor.selectedImage && s.library.multiSelectedPaths.length > 0,
+        execute: (e: KeyboardEvent, s: StoreState) => {
+          e.preventDefault();
+          s.library.setLibrary({ multiSelectedPaths: [] });
+        },
+      },
+      toggle_filmstrip: {
+        shouldFire: (s: StoreState) => !!s.editor.selectedImage,
+        execute: (e: KeyboardEvent, s: StoreState) => {
+          e.preventDefault();
+          s.ui.setUI((state) => ({
+            uiVisibility: { ...state.uiVisibility, filmstrip: !state.uiVisibility.filmstrip },
+          }));
+        },
+      },
+      panel_detail: {
+        shouldFire: (s: StoreState) => !!s.editor.selectedImage,
+        execute: (e: KeyboardEvent, s: StoreState) => {
+          e.preventDefault();
+          toggleSections(s, ['detail'], true);
+        },
+      },
+      panel_light: {
+        shouldFire: (s: StoreState) => !!s.editor.selectedImage,
+        execute: (e: KeyboardEvent, s: StoreState) => {
+          e.preventDefault();
+          toggleSections(s, ['light', 'toneCurve']);
+        },
+      },
+      panel_color: {
+        shouldFire: (s: StoreState) => !!s.editor.selectedImage,
+        execute: (e: KeyboardEvent, s: StoreState) => {
+          e.preventDefault();
+          toggleSections(s, ['whiteBalance', 'presence', 'colorMixer', 'colorGrading']);
+        },
+      },
+      panel_effects: {
+        shouldFire: (s: StoreState) => !!s.editor.selectedImage,
+        execute: (e: KeyboardEvent, s: StoreState) => {
+          e.preventDefault();
+          toggleSections(s, ['effects']);
+        },
+      },
+      panel_details: {
+        shouldFire: (s: StoreState) => !!s.editor.selectedImage,
+        execute: (e: KeyboardEvent, s: StoreState) => {
+          e.preventDefault();
+          toggleSections(s, ['detail']);
+        },
+      },
+      panel_optics: {
+        shouldFire: (s: StoreState) => !!s.editor.selectedImage,
+        execute: (e: KeyboardEvent, s: StoreState) => {
+          e.preventDefault();
+          toggleSections(s, ['optics']);
+        },
+      },
+      panel_geometry: {
+        shouldFire: (s: StoreState) => !!s.editor.selectedImage,
+        execute: (e: KeyboardEvent, s: StoreState) => {
+          e.preventDefault();
+          s.ui.setRightPanel(Panel.Crop);
+        },
+      },
+      shortcut_sheet: {
+        shouldFire: () => true,
+        execute: (e: KeyboardEvent) => {
+          e.preventDefault();
+          const sheet = useShortcutSheet.getState();
+          sheet.setOpen(!sheet.open);
         },
       },
     };
@@ -609,9 +897,7 @@ export const useKeyboardShortcuts = ({
       }
 
       const normalized = normalizeCombo(event, state.settings.osPlatform);
-      const action = comboMap.get(normalized.join('+'));
-
-      if (action) {
+      for (const action of comboMap.get(normalized.join('+')) ?? []) {
         const handler = actions[action];
         if (handler && (!handler.shouldFire || handler.shouldFire(state))) {
           handler.execute(event, state);
@@ -636,5 +922,7 @@ export const useKeyboardShortcuts = ({
     handlePasteAdjustments,
     handleRate,
     handleSetColorLabel,
+    handleAutoAdjustments,
+    setAdjustments,
   ]);
 };

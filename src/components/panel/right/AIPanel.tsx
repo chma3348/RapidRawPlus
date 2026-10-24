@@ -71,6 +71,7 @@ import { useProcessStore } from '../../../store/useProcessStore';
 import { useUIStore } from '../../../store/useUIStore';
 import { useEditorActions } from '../../../hooks/useEditorActions';
 import { useAiMasking } from '../../../hooks/useAiMasking';
+import { useEditorRequests } from '../../../store/useEditorRequests';
 
 interface DragData {
   type: 'Container' | 'SubMask' | 'Creation';
@@ -612,6 +613,13 @@ export default function AIPanel() {
 
     if (type === Mask.AiForeground) handleGenerateAiForegroundMask(subMask.id);
   };
+
+  // The healing brush asked for by key (H, as Lightroom).
+  const pendingRequest = useEditorRequests((r) => r.request);
+  useEffect(() => {
+    if (!useEditorRequests.getState().take('heal')) return;
+    handleAddAiPatchContainer(Mask.Brush, { heal: true });
+  }, [pendingRequest]);
 
   const handleAddSubMask = (
     containerId: string,
@@ -1905,7 +1913,7 @@ function SettingsPanel({
   useEffect(() => {
     if (!container || (container as any).patchType !== 'heal') return;
     const strokes = (container.subMasks || []).reduce(
-      (n: number, sm: any) => n + (((sm.parameters as any)?.lines || []).length),
+      (n: number, sm: any) => n + ((sm.parameters as any)?.lines || []).length,
       0,
     );
     // Nothing painted and nothing left over to clear.
@@ -1971,19 +1979,19 @@ function SettingsPanel({
   }, []);
 
   // Mirror ModelPicker's fallback so this matches what actually runs.
-  const selectedInpaintId =
-    inpaintModels.some((m) => m.id === appSettings?.preferredModels?.inpaint && m.available)
-      ? appSettings?.preferredModels?.inpaint
-      : inpaintModels.find((m) => m.available)?.id;
+  const selectedInpaintId = inpaintModels.some((m) => m.id === appSettings?.preferredModels?.inpaint && m.available)
+    ? appSettings?.preferredModels?.inpaint
+    : inpaintModels.find((m) => m.available)?.id;
   const selectedInpaint = inpaintModels.find((m) => m.id === selectedInpaintId);
   const isEngineFill = selectedInpaint?.params?.engine === 'comfy';
   // LoRAs here are Flux-architecture adapters; they will not load onto SDXL,
   // so the picker only appears when a Flux engine is selected.
   const isFluxSelected = selectedInpaint?.params?.fill_workflow === 'flux';
-  const reconstructVariants = ((displayContainer.patchData?.reconstructVariants || []) as AiPatchResultVariant[]).filter(
-    (variant) => variant?.id?.startsWith('attempt-') && variant?.color && variant?.mask,
-  );
-  const activeReconstructVariantId = displayContainer.patchData?.reconstructActiveVariantId || reconstructVariants[0]?.id;
+  const reconstructVariants = (
+    (displayContainer.patchData?.reconstructVariants || []) as AiPatchResultVariant[]
+  ).filter((variant) => variant?.id?.startsWith('attempt-') && variant?.color && variant?.mask);
+  const activeReconstructVariantId =
+    displayContainer.patchData?.reconstructActiveVariantId || reconstructVariants[0]?.id;
   const hasReconstructHistory = reconstructVariants.length > 1;
 
   const handleInpaintModelChange = (modelId: string) => {
@@ -2143,283 +2151,284 @@ function SettingsPanel({
         </div>
       )}
       {(container as any)?.patchType === 'heal' && (
-      <div className="p-2 bg-bg-tertiary rounded-md">
-        <Text variant={TextVariants.heading} className="mb-2">
-          {t('editor.ai.settings.cloneTitle')}
-        </Text>
-        <Text variant={TextVariants.small} className="block text-text-secondary">
-          {t('editor.ai.settings.cloneHint')}
-        </Text>
-      </div>
+        <div className="p-2 bg-bg-tertiary rounded-md">
+          <Text variant={TextVariants.heading} className="mb-2">
+            {t('editor.ai.settings.cloneTitle')}
+          </Text>
+          <Text variant={TextVariants.small} className="block text-text-secondary">
+            {t('editor.ai.settings.cloneHint')}
+          </Text>
+        </div>
       )}
 
       {(container as any)?.patchType === 'sky' && (
-      <div className="p-2 bg-bg-tertiary rounded-md">
-        <Text variant={TextVariants.heading} className="mb-2">
-          {t('editor.ai.settings.skyTitle', { defaultValue: 'Replaced sky' })}
-        </Text>
-        <Text variant={TextVariants.small} className="block text-text-secondary">
-          {t('editor.ai.settings.skyHint', {
-            defaultValue:
-              'Made by Sky Replace. Hide or fade it here; to change the sky itself, open the Sky panel.',
-          })}
-        </Text>
-      </div>
+        <div className="p-2 bg-bg-tertiary rounded-md">
+          <Text variant={TextVariants.heading} className="mb-2">
+            {t('editor.ai.settings.skyTitle', { defaultValue: 'Replaced sky' })}
+          </Text>
+          <Text variant={TextVariants.small} className="block text-text-secondary">
+            {t('editor.ai.settings.skyHint', {
+              defaultValue: 'Made by Sky Replace. Hide or fade it here; to change the sky itself, open the Sky panel.',
+            })}
+          </Text>
+        </div>
       )}
 
       {(container as any)?.patchType !== 'heal' && (container as any)?.patchType !== 'sky' && (
-      <CollapsibleSection
-        title={t('editor.ai.settings.generativeReplaceTitle')}
-        isOpen={collapsibleState.generative}
-        onToggle={() => handleToggleSection('generative')}
-        canToggleVisibility={false}
-        isContentVisible={true}
-      >
-        <div className="space-y-4 pt-2">
-          {aiModelDownloadStatus && aiModelDownloadStatus.includes('Inpainting') && (
-            <Text
-              as="div"
-              variant={TextVariants.small}
-              color={TextColors.accent}
-              weight={TextWeights.medium}
-              className="p-3 bg-card-active rounded-md border border-surface flex items-center gap-3"
-            >
-              <Loader2 size={16} className="animate-spin shrink-0" />
-              <div className="leading-relaxed">
-                <Text variant={TextVariants.small}>{t('editor.ai.settings.downloading')}</Text>
-                <span>{aiModelDownloadStatus}</span>
-              </div>
-            </Text>
-          )}
-
-          <Text variant={TextVariants.small}>
-            {isQuickErasePatch
-              ? t('editor.ai.settings.quickEraseDesc')
-              : useFastInpaint
-                ? t('editor.ai.settings.fastInpaintDesc')
-                : t('editor.ai.settings.generativeDesc')}
-          </Text>
-
-          <div>
-            <div className="mb-3">
-              <Text variant={TextVariants.small} weight={TextWeights.medium} className="mb-1 block">
-                {t('modelRegistry.model')}
-              </Text>
-              <ModelPicker
-                taskType={ModelTaskType.Inpaint}
-                value={appSettings?.preferredModels?.inpaint ?? null}
-                onChange={handleInpaintModelChange}
-              />
-            </div>
-
-            {!isEngineFill && !generateMode && (
-              <Switch
-                checked={useFastInpaint}
-                disabled={!isGenerativeAvailable}
-                label={t('editor.ai.settings.useBasicInpaint')}
-                onChange={setUseFastInpaint}
-                tooltip={
-                  !isGenerativeAvailable
-                    ? t('editor.ai.settings.basicInpaintTooltipDisabled')
-                    : t('editor.ai.settings.basicInpaintTooltipEnabled')
-                }
-              />
-            )}
-
-            <div className="mt-3">
-              <Switch
-                checked={generateMode}
-                disabled={isGeneratingAi || displayContainer.isLoading}
-                label="Replace selected content"
-                onChange={setGenerateMode}
-                tooltip="Generate a replacement using the selection and surrounding scene. Leave the prompt blank for automatic content, or describe what should replace the selection. Turn off and clear the prompt for fast texture repair."
-              />
-            </div>
-
-            {generateMode && (
-              <div className="mt-3 p-2 bg-bg-tertiary rounded-md">
-                <Text variant={TextVariants.small} className="block text-text-secondary mt-1">
-                  The model sees your selection with surrounding scene context and replaces it in one pass.
-                  Describe the new content, or leave the prompt blank for an automatic fill.
-                  Lighting and perspective come from the photo; only the selected area is applied.
-                </Text>
-              </div>
-            )}
-
-            {isFluxSelected && (
-              <div className="mt-3 p-2 bg-bg-tertiary rounded-md">
-                <div className="flex items-center justify-between mb-1">
-                  <Text variant={TextVariants.heading}>LoRAs</Text>
-                  <button
-                    className="text-xs px-2 py-1 rounded-md bg-bg-primary text-text-secondary hover:text-text-primary transition-colors"
-                    onClick={refreshLoras}
-                    title="Re-read the loras folder"
-                  >
-                    Refresh
-                  </button>
+        <CollapsibleSection
+          title={t('editor.ai.settings.generativeReplaceTitle')}
+          isOpen={collapsibleState.generative}
+          onToggle={() => handleToggleSection('generative')}
+          canToggleVisibility={false}
+          isContentVisible={true}
+        >
+          <div className="space-y-4 pt-2">
+            {aiModelDownloadStatus && aiModelDownloadStatus.includes('Inpainting') && (
+              <Text
+                as="div"
+                variant={TextVariants.small}
+                color={TextColors.accent}
+                weight={TextWeights.medium}
+                className="p-3 bg-card-active rounded-md border border-surface flex items-center gap-3"
+              >
+                <Loader2 size={16} className="animate-spin shrink-0" />
+                <div className="leading-relaxed">
+                  <Text variant={TextVariants.small}>{t('editor.ai.settings.downloading')}</Text>
+                  <span>{aiModelDownloadStatus}</span>
                 </div>
-                <Text variant={TextVariants.small} className="mb-2 block text-text-secondary">
-                  Flux only. Each one nudges the model's style; strength 0.5–0.8 is
-                  usually plenty.
-                </Text>
-                {availableLoras.length === 0 && (
-                  <Text variant={TextVariants.small} className="block text-text-secondary">
-                    None installed. Drop <code>.safetensors</code> files into{' '}
-                    <span className="break-all">{loraFolder || 'the engine models/loras folder'}</span>{' '}
-                    and switch the model picker away and back to refresh.
-                  </Text>
-                )}
-                {availableLoras.map((name: string) => {
-                  const active = loras.find((l) => l.name === name);
-                  return (
-                    <div key={name} className="mb-2">
-                      <Switch
-                        checked={!!active}
-                        disabled={isGeneratingAi || displayContainer.isLoading}
-                        label={name.replace(/\.(safetensors|ckpt|pt)$/i, '')}
-                        onChange={(on: boolean) =>
-                          setLoras((prev) =>
-                            on
-                              ? [...prev, { name, strength: 0.8 }]
-                              : prev.filter((l) => l.name !== name),
-                          )
-                        }
-                      />
-                      {active && (
-                        <Slider
-                          label="Strength"
-                          min={0}
-                          max={150}
-                          step={5}
-                          defaultValue={80}
-                          value={Math.round(active.strength * 100)}
-                          onChange={(e: any) =>
-                            setLoras((prev) =>
-                              prev.map((l) =>
-                                l.name === name
-                                  ? { ...l, strength: Number(e.target.value) / 100 }
-                                  : l,
-                              ),
-                            )
-                          }
-                          onDragStateChange={(dragging: boolean) => {
-                            if (dragging) {
-                              loraDrag.current = true;
-                              return;
-                            }
-                            if (!loraDrag.current) return;
-                            loraDrag.current = false;
-                            if (container) updateContainer(container.id, { loras });
-                          }}
-                          suffix="%"
-                        />
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
+              </Text>
             )}
 
-            {isReconstructPatch && !generateMode && !prompt.trim() && (
-              <div className="mt-3">
-                <Switch
-                  checked={reconstructSinglePath}
-                  disabled={isGeneratingAi || displayContainer.isLoading}
-                  label="Single path test"
-                  onChange={setReconstructSinglePath}
-                  tooltip="Experimental: run this Reconstruct selection as one prompt-conditioned engine pass, without fast cleanup or fallback substitution."
+            <Text variant={TextVariants.small}>
+              {isQuickErasePatch
+                ? t('editor.ai.settings.quickEraseDesc')
+                : useFastInpaint
+                  ? t('editor.ai.settings.fastInpaintDesc')
+                  : t('editor.ai.settings.generativeDesc')}
+            </Text>
+
+            <div>
+              <div className="mb-3">
+                <Text variant={TextVariants.small} weight={TextWeights.medium} className="mb-1 block">
+                  {t('modelRegistry.model')}
+                </Text>
+                <ModelPicker
+                  taskType={ModelTaskType.Inpaint}
+                  value={appSettings?.preferredModels?.inpaint ?? null}
+                  onChange={handleInpaintModelChange}
                 />
               </div>
-            )}
 
-            <AnimatePresence>
-              {(generateMode || isEngineFill || !useFastInpaint) && (
-                <motion.div
-                  animate={{ opacity: 1, height: 'auto', marginTop: '0.75rem' }}
-                  className="overflow-hidden"
-                  exit={{ opacity: 0, height: 0, marginTop: 0 }}
-                  initial={{ opacity: 0, height: 0, marginTop: 0 }}
-                  transition={{ duration: 0.2 }}
-                >
-                  <div className="flex items-center gap-2">
-                    <Input
-                      className="grow"
-                      disabled={isGeneratingAi || displayContainer.isLoading}
-                      onChange={(e: any) => {
-                        setPrompt(e.target.value);
-                      }}
-                      onBlur={() => isActive && updateContainer(container.id, { prompt })}
-                      onKeyDown={(e: any) => {
-                        if (e.key === 'Enter') handleGenerateClick();
-                      }}
-                      placeholder={generateMode ? 'Optional: blue sky with soft clouds, a red linen shirt…' : t('editor.ai.settings.placeholder')}
-                      type="text"
-                      value={prompt}
-                    />
-                  </div>
-                </motion.div>
+              {!isEngineFill && !generateMode && (
+                <Switch
+                  checked={useFastInpaint}
+                  disabled={!isGenerativeAvailable}
+                  label={t('editor.ai.settings.useBasicInpaint')}
+                  onChange={setUseFastInpaint}
+                  tooltip={
+                    !isGenerativeAvailable
+                      ? t('editor.ai.settings.basicInpaintTooltipDisabled')
+                      : t('editor.ai.settings.basicInpaintTooltipEnabled')
+                  }
+                />
               )}
-            </AnimatePresence>
-          </div>
 
-          <Button
-            className="w-full"
-            disabled={isGeneratingAi || displayContainer.isLoading || displayContainer.subMasks.length === 0}
-            onClick={handleGenerateClick}
-          >
-            {isGeneratingAi || displayContainer.isLoading ? (
-              <Loader2 size={16} className="animate-spin" />
-            ) : (
-              <Send size={16} />
+              <div className="mt-3">
+                <Switch
+                  checked={generateMode}
+                  disabled={isGeneratingAi || displayContainer.isLoading}
+                  label="Replace selected content"
+                  onChange={setGenerateMode}
+                  tooltip="Generate a replacement using the selection and surrounding scene. Leave the prompt blank for automatic content, or describe what should replace the selection. Turn off and clear the prompt for fast texture repair."
+                />
+              </div>
+
+              {generateMode && (
+                <div className="mt-3 p-2 bg-bg-tertiary rounded-md">
+                  <Text variant={TextVariants.small} className="block text-text-secondary mt-1">
+                    The model sees your selection with surrounding scene context and replaces it in one pass. Describe
+                    the new content, or leave the prompt blank for an automatic fill. Lighting and perspective come from
+                    the photo; only the selected area is applied.
+                  </Text>
+                </div>
+              )}
+
+              {isFluxSelected && (
+                <div className="mt-3 p-2 bg-bg-tertiary rounded-md">
+                  <div className="flex items-center justify-between mb-1">
+                    <Text variant={TextVariants.heading}>LoRAs</Text>
+                    <button
+                      className="text-xs px-2 py-1 rounded-md bg-bg-primary text-text-secondary hover:text-text-primary transition-colors"
+                      onClick={refreshLoras}
+                      title="Re-read the loras folder"
+                    >
+                      Refresh
+                    </button>
+                  </div>
+                  <Text variant={TextVariants.small} className="mb-2 block text-text-secondary">
+                    Flux only. Each one nudges the model's style; strength 0.5–0.8 is usually plenty.
+                  </Text>
+                  {availableLoras.length === 0 && (
+                    <Text variant={TextVariants.small} className="block text-text-secondary">
+                      None installed. Drop <code>.safetensors</code> files into{' '}
+                      <span className="break-all">{loraFolder || 'the engine models/loras folder'}</span> and switch the
+                      model picker away and back to refresh.
+                    </Text>
+                  )}
+                  {availableLoras.map((name: string) => {
+                    const active = loras.find((l) => l.name === name);
+                    return (
+                      <div key={name} className="mb-2">
+                        <Switch
+                          checked={!!active}
+                          disabled={isGeneratingAi || displayContainer.isLoading}
+                          label={name.replace(/\.(safetensors|ckpt|pt)$/i, '')}
+                          onChange={(on: boolean) =>
+                            setLoras((prev) =>
+                              on ? [...prev, { name, strength: 0.8 }] : prev.filter((l) => l.name !== name),
+                            )
+                          }
+                        />
+                        {active && (
+                          <Slider
+                            label="Strength"
+                            min={0}
+                            max={150}
+                            step={5}
+                            defaultValue={80}
+                            value={Math.round(active.strength * 100)}
+                            onChange={(e: any) =>
+                              setLoras((prev) =>
+                                prev.map((l) =>
+                                  l.name === name ? { ...l, strength: Number(e.target.value) / 100 } : l,
+                                ),
+                              )
+                            }
+                            onDragStateChange={(dragging: boolean) => {
+                              if (dragging) {
+                                loraDrag.current = true;
+                                return;
+                              }
+                              if (!loraDrag.current) return;
+                              loraDrag.current = false;
+                              if (container) updateContainer(container.id, { loras });
+                            }}
+                            suffix="%"
+                          />
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {isReconstructPatch && !generateMode && !prompt.trim() && (
+                <div className="mt-3">
+                  <Switch
+                    checked={reconstructSinglePath}
+                    disabled={isGeneratingAi || displayContainer.isLoading}
+                    label="Single path test"
+                    onChange={setReconstructSinglePath}
+                    tooltip="Experimental: run this Reconstruct selection as one prompt-conditioned engine pass, without fast cleanup or fallback substitution."
+                  />
+                </div>
+              )}
+
+              <AnimatePresence>
+                {(generateMode || isEngineFill || !useFastInpaint) && (
+                  <motion.div
+                    animate={{ opacity: 1, height: 'auto', marginTop: '0.75rem' }}
+                    className="overflow-hidden"
+                    exit={{ opacity: 0, height: 0, marginTop: 0 }}
+                    initial={{ opacity: 0, height: 0, marginTop: 0 }}
+                    transition={{ duration: 0.2 }}
+                  >
+                    <div className="flex items-center gap-2">
+                      <Input
+                        className="grow"
+                        disabled={isGeneratingAi || displayContainer.isLoading}
+                        onChange={(e: any) => {
+                          setPrompt(e.target.value);
+                        }}
+                        onBlur={() => isActive && updateContainer(container.id, { prompt })}
+                        onKeyDown={(e: any) => {
+                          if (e.key === 'Enter') handleGenerateClick();
+                        }}
+                        placeholder={
+                          generateMode
+                            ? 'Optional: blue sky with soft clouds, a red linen shirt…'
+                            : t('editor.ai.settings.placeholder')
+                        }
+                        type="text"
+                        value={prompt}
+                      />
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+
+            <Button
+              className="w-full"
+              disabled={isGeneratingAi || displayContainer.isLoading || displayContainer.subMasks.length === 0}
+              onClick={handleGenerateClick}
+            >
+              {isGeneratingAi || displayContainer.isLoading ? (
+                <Loader2 size={16} className="animate-spin" />
+              ) : (
+                <Send size={16} />
+              )}
+              <span className="ml-2">
+                {isGeneratingAi || displayContainer.isLoading
+                  ? t('editor.ai.settings.generating')
+                  : generateMode || prompt.trim()
+                    ? 'Replace selection'
+                    : isEngineFill
+                      ? prompt.trim()
+                        ? t('editor.ai.settings.generateWithAiButton')
+                        : t('editor.ai.settings.inpaintSelectionButton')
+                      : useFastInpaint
+                        ? t('editor.ai.settings.inpaintSelectionButton')
+                        : t('editor.ai.settings.generateWithAiButton')}
+              </span>
+            </Button>
+
+            {!generateMode &&
+              !prompt.trim() &&
+              displayContainer.needsPromptReason !== undefined &&
+              !displayContainer.patchData && (
+                <Text variant={TextVariants.small} className="block mt-2 text-text-secondary">
+                  Only {displayContainer.needsPromptReason}% of the area around this selection has usable detail, so
+                  there is nothing to rebuild from. Describe what should be here and run it again.
+                </Text>
+              )}
+
+            {(displayContainer.patchData?.replacementRunId ||
+              displayContainer.patchData?.reconstructActiveKind === 'context-replace') && (
+              <ReplacementBlendControls
+                key={`${displayContainer.id}-${displayContainer.patchData?.replacementRunId ?? displayContainer.patchData?.reconstructDebugRunId}`}
+                patch={displayContainer}
+                disabled={isGeneratingAi || displayContainer.isLoading}
+                onApply={onReblendReplacement}
+              />
             )}
-            <span className="ml-2">
-              {isGeneratingAi || displayContainer.isLoading
-                ? t('editor.ai.settings.generating')
-                : generateMode || prompt.trim()
-                  ? 'Replace selection'
-                  : isEngineFill
-                  ? prompt.trim()
-                    ? t('editor.ai.settings.generateWithAiButton')
-                    : t('editor.ai.settings.inpaintSelectionButton')
-                  : useFastInpaint
-                    ? t('editor.ai.settings.inpaintSelectionButton')
-                    : t('editor.ai.settings.generateWithAiButton')}
-            </span>
-          </Button>
 
-          {!generateMode && !prompt.trim() && displayContainer.needsPromptReason !== undefined && !displayContainer.patchData && (
-            <Text variant={TextVariants.small} className="block mt-2 text-text-secondary">
-              Only {displayContainer.needsPromptReason}% of the area around this selection has
-              usable detail, so there is nothing to rebuild from. Describe what should be here and
-              run it again.
-            </Text>
-          )}
-
-          {(displayContainer.patchData?.replacementRunId || displayContainer.patchData?.reconstructActiveKind === 'context-replace') && (
-            <ReplacementBlendControls
-              key={`${displayContainer.id}-${displayContainer.patchData?.replacementRunId ?? displayContainer.patchData?.reconstructDebugRunId}`}
-              patch={displayContainer}
-              disabled={isGeneratingAi || displayContainer.isLoading}
-              onApply={onReblendReplacement}
-            />
-          )}
-
-          {displayContainer.patchData && onAdjustFillArea && (
-            <>
-              <button
-                className="w-full mt-2 px-3 py-2 bg-bg-primary text-text-secondary rounded-md hover:text-text-primary transition-colors text-sm"
-                onClick={() => container && onAdjustFillArea(container.id)}
-              >
-                Adjust this area
-              </button>
-              <Text variant={TextVariants.small} className="block mt-1 text-text-secondary">
-                Adds a mask over the filled area so you can set its exposure, colour and contrast
-                by eye in the Masks panel.
-              </Text>
-            </>
-          )}
-        </div>
-      </CollapsibleSection>
+            {displayContainer.patchData && onAdjustFillArea && (
+              <>
+                <button
+                  className="w-full mt-2 px-3 py-2 bg-bg-primary text-text-secondary rounded-md hover:text-text-primary transition-colors text-sm"
+                  onClick={() => container && onAdjustFillArea(container.id)}
+                >
+                  Adjust this area
+                </button>
+                <Text variant={TextVariants.small} className="block mt-1 text-text-secondary">
+                  Adds a mask over the filled area so you can set its exposure, colour and contrast by eye in the Masks
+                  panel.
+                </Text>
+              </>
+            )}
+          </div>
+        </CollapsibleSection>
       )}
 
       <CollapsibleSection
@@ -2497,7 +2506,9 @@ function SettingsPanel({
           <Button
             className="w-full"
             disabled={isGeneratingAi || displayContainer.isLoading || displayContainer.subMasks.length === 0}
-            onClick={() => container && onSpotEnhance(container.id, spotTask, spotStrength / 100, spotTexture / 100, spotGrain / 100)}
+            onClick={() =>
+              container && onSpotEnhance(container.id, spotTask, spotStrength / 100, spotTexture / 100, spotGrain / 100)
+            }
           >
             {isGeneratingAi || displayContainer.isLoading ? (
               <Loader2 size={16} className="animate-spin" />
@@ -2538,8 +2549,11 @@ function SettingsPanel({
           {isComponentMode && (
             <>
               {(activeSubMask.type === Mask.AiSubject || activeSubMask.type === Mask.AiPaint) && (
-                <SubjectSelectionControls parameters={activeSubMask.parameters} paint={activeSubMask.type === Mask.AiPaint}
-                  onChange={(parameters) => updateSubMask(activeSubMask.id, { parameters })} />
+                <SubjectSelectionControls
+                  parameters={activeSubMask.parameters}
+                  paint={activeSubMask.type === Mask.AiPaint}
+                  onChange={(parameters) => updateSubMask(activeSubMask.id, { parameters })}
+                />
               )}
               {isAiMask && aiModelDownloadStatus && (
                 <Text

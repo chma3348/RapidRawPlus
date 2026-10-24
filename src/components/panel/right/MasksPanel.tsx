@@ -83,6 +83,7 @@ import { useAiMasking } from '../../../hooks/useAiMasking';
 import { useEditorActions } from '../../../hooks/useEditorActions';
 import { useUIStore } from '../../../store/useUIStore';
 import { useWaveformControls } from '../../../hooks/useWaveformControls';
+import { useEditorRequests } from '../../../store/useEditorRequests';
 
 interface DragData {
   type: 'Container' | 'SubMask' | 'Creation';
@@ -850,6 +851,16 @@ export default function MasksPanel() {
     else if (type === Mask.AiSubject) handleGenerateAiAutoSubjectMask(subMask.id);
     else if (type === Mask.AiDepth) handleGenerateAiDepthMask(subMask.id, subMask.parameters);
   };
+
+  // A new mask asked for by key (L linear, R radial, B brush, as Lightroom).
+  const pendingRequest = useEditorRequests((r) => r.request);
+  useEffect(() => {
+    const request = useEditorRequests.getState().take('mask');
+    if (!request) return;
+    handleAddMaskContainer(
+      request.mask === 'linear' ? Mask.Linear : request.mask === 'radial' ? Mask.Radial : Mask.Brush,
+    );
+  }, [pendingRequest]);
 
   const handleAddSubMask = (
     containerId: string,

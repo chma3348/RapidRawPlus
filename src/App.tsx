@@ -47,6 +47,7 @@ import { isLightTheme as isLightThemeId } from './utils/themes';
 import { listenForFinderDrops } from './utils/fileDrag';
 import FileDragGhost from './components/ui/FileDragGhost';
 import CullView from './components/panel/library/CullView';
+import ShortcutSheet from './components/modals/ShortcutSheet';
 import ConvertModal from './components/modals/ConvertModal';
 import { useAppNavigation } from './hooks/useAppNavigation';
 
@@ -897,6 +898,7 @@ function App() {
         />
         <FileDragGhost />
         <CullView onEdit={handleImageSelect} />
+        <ShortcutSheet />
         <RejectsPrompt />
         <AdobeImportModal />
         <ConvertModal />

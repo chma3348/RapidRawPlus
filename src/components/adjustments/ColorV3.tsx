@@ -319,6 +319,7 @@ function MovableSection({
     : undefined;
   return (
     <AdjustmentSection
+      sectionId={id}
       title={title}
       modified={modified}
       open={open && !drag.isDragging}
@@ -736,7 +737,12 @@ export default function ColorV3Controls({
           {detailSlider('threshold', t('colorV3.threshold', { defaultValue: 'Threshold' }), 0, 80)}
           <BasicGroupTitle>{t('colorV3.noiseGroup', { defaultValue: 'Noise reduction' })}</BasicGroupTitle>
           {detailSlider('luminance_noise', t('colorV3.luminanceNoise', { defaultValue: 'Noise reduction' }), 0, 100)}
-          {detailSlider('luminance_noise_detail', t('colorV3.luminanceNoiseDetail', { defaultValue: 'Detail' }), 0, 100)}
+          {detailSlider(
+            'luminance_noise_detail',
+            t('colorV3.luminanceNoiseDetail', { defaultValue: 'Detail' }),
+            0,
+            100,
+          )}
           {detailSlider(
             'luminance_noise_contrast',
             t('colorV3.luminanceNoiseContrast', { defaultValue: 'Contrast' }),

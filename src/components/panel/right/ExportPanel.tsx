@@ -29,6 +29,7 @@ import Text from '../../ui/Text';
 import { TextColors, TextVariants, TextWeights } from '../../../types/typography';
 import { useShallow } from 'zustand/react/shallow';
 import { useEditorStore } from '../../../store/useEditorStore';
+import { useEditorRequests } from '../../../store/useEditorRequests';
 
 interface ExportPanelProps {
   exportState: ExportState;
@@ -442,7 +443,9 @@ export default function ExportPanel({
     }, 0);
   };
 
-  const handleExport = async () => {
+  /** `previous`: Lightroom's Export with Previous (⌘E): the last-used settings
+   *  and folder, without asking where (asking only if there is no folder yet). */
+  const handleExport = async (previous = false) => {
     if (numImages === 0 || isExporting) return;
 
     let finalFilenameTemplate = filenameTemplate;
@@ -492,25 +495,29 @@ export default function ExportPanel({
 
         outputFolderOrFile = isAndroid
           ? outputFileName
-          : ((await save({
-              title: t('export.dialog.saveEditedImageTitle'),
-              defaultPath: lastExportPath ? `${lastExportPath}/${outputFileName}` : outputFileName,
-              filters: [
-                { name: selectedFormat.name, extensions: selectedFormat.extensions },
-                ...FILE_FORMATS.filter((f: FileFormat) => f.id !== fileFormat).map((f: FileFormat) => ({
-                  name: f.name,
-                  extensions: f.extensions,
-                })),
-              ],
-            })) as string);
+          : previous && lastExportPath
+            ? `${lastExportPath}/${outputFileName}`
+            : ((await save({
+                title: t('export.dialog.saveEditedImageTitle'),
+                defaultPath: lastExportPath ? `${lastExportPath}/${outputFileName}` : outputFileName,
+                filters: [
+                  { name: selectedFormat.name, extensions: selectedFormat.extensions },
+                  ...FILE_FORMATS.filter((f: FileFormat) => f.id !== fileFormat).map((f: FileFormat) => ({
+                    name: f.name,
+                    extensions: f.extensions,
+                  })),
+                ],
+              })) as string);
       } else {
         outputFolderOrFile = isAndroid
           ? ''
-          : ((await open({
-              title: t('export.dialog.selectFolderTitle', { count: numImages }),
-              directory: true,
-              defaultPath: lastExportPath ?? undefined,
-            })) as string);
+          : previous && lastExportPath
+            ? lastExportPath
+            : ((await open({
+                title: t('export.dialog.selectFolderTitle', { count: numImages }),
+                directory: true,
+                defaultPath: lastExportPath ?? undefined,
+              })) as string);
       }
 
       if (isAndroid || outputFolderOrFile) {
@@ -545,6 +552,20 @@ export default function ExportPanel({
       });
     }
   };
+
+  // ⌘E: export with the previous settings. The panel applies the last-used
+  // settings as it opens, so the export waits a render for them.
+  const [exportPrevious, setExportPrevious] = useState(false);
+  const pendingRequest = useEditorRequests((r) => r.request);
+  useEffect(() => {
+    if (!isVisible || !initDone.current) return;
+    if (useEditorRequests.getState().take('exportPrevious')) setExportPrevious(true);
+  }, [pendingRequest, isVisible, appSettings]);
+  useEffect(() => {
+    if (!exportPrevious) return;
+    setExportPrevious(false);
+    void handleExport(true);
+  }, [exportPrevious]);
 
   const handleCancel = async () => {
     try {
@@ -972,7 +993,7 @@ export default function ExportPanel({
                     : ''
           }`}
           disabled={status === Status.Exporting ? false : !canExport}
-          onClick={status === Status.Exporting ? handleCancel : handleExport}
+          onClick={status === Status.Exporting ? handleCancel : () => void handleExport()}
           size="lg"
         >
           {status === Status.Exporting ? (

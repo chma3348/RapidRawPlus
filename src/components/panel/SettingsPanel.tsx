@@ -48,6 +48,7 @@ import {
   formatKeyCode,
   KeybindDefinition,
   KEYBIND_DEFINITIONS,
+  keybindsCollide,
   KEYBIND_SECTIONS,
   normalizeCombo,
 } from '../../utils/keyboardUtils';
@@ -1027,8 +1028,14 @@ export default function SettingsPanel({
       map.get(key)!.add(def.action);
     }
     const keys = new Set<string>();
+    const byAction = new Map(KEYBIND_DEFINITIONS.map((d) => [d.action, d]));
     for (const [, actions] of map) {
-      if (actions.size > 1) actions.forEach((k) => keys.add(k));
+      const defs = [...actions].map((a) => byAction.get(a)!);
+      defs.forEach((d, i) =>
+        defs.forEach((other, j) => {
+          if (i !== j && keybindsCollide(d, other)) keys.add(d.action);
+        }),
+      );
     }
     return keys;
   }, [appSettings?.keybinds]);
