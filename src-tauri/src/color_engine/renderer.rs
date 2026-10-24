@@ -99,6 +99,23 @@ impl RenderedFrame {
         self.encode_png(encoder, DynamicImage::ImageRgba8(self.display_rgba8()))
     }
 
+    /// As `write_display_png`, as a JPEG: a tenth of the data, for views
+    /// that go through many photos quickly (Cull).
+    pub fn write_display_jpeg(&self, writer: impl std::io::Write, quality: u8) -> Result<()> {
+        use image::ImageEncoder;
+        let rgba = self.display_rgba8();
+        let rgb = DynamicImage::ImageRgba8(rgba).to_rgb8();
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(writer, quality);
+        encoder.set_icc_profile(self.space.icc_profile()?)?;
+        encoder.write_image(
+            rgb.as_raw(),
+            rgb.width(),
+            rgb.height(),
+            image::ExtendedColorType::Rgb8,
+        )?;
+        Ok(())
+    }
+
     fn encode_png<W: std::io::Write>(
         &self,
         mut encoder: image::codecs::png::PngEncoder<W>,

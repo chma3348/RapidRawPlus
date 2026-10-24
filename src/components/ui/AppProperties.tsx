@@ -82,6 +82,7 @@ export enum Invokes {
   RespotEnhance = 'respot_enhance',
   ListImagesInDir = 'list_images_in_dir',
   CloudFolderSummary = 'cloud_folder_summary',
+  GenerateCullPreview = 'generate_cull_preview',
   ListImagesRecursive = 'list_images_recursive',
   ListEngineLoras = 'list_engine_loras',
   ListRegisteredModels = 'list_registered_models',

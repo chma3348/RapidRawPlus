@@ -3,7 +3,17 @@ import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
-import { Columns2, Flag, FlagOff, Image as ImageIcon, Keyboard, Star, X, ArrowRightLeft } from 'lucide-react';
+import {
+  Columns2,
+  Flag,
+  FlagOff,
+  Image as ImageIcon,
+  Keyboard,
+  SlidersHorizontal,
+  Star,
+  X,
+  ArrowRightLeft,
+} from 'lucide-react';
 import { toast } from 'react-toastify';
 import { ImageFile, Invokes } from '../../ui/AppProperties';
 import { useLibraryStore } from '../../../store/useLibraryStore';
@@ -67,52 +77,86 @@ export function startCulling(sortedList: ImageFile[]) {
 
 const LABEL_KEYS: Record<string, string> = { '6': 'red', '7': 'yellow', '8': 'green', '9': 'blue' };
 
-/** Sharp previews of the photos around the current one, with edits applied. */
-function usePreviews(paths: string[], index: number) {
+/** Previews loading at once: the backend makes several in parallel. */
+const PARALLEL = 3;
+
+/**
+ * Previews of the photos around the current one, quick to make (see
+ * cull_preview.rs): the camera's JPEG inside a RAW, or a JPEG at screen
+ * size; developed with its edits when `showEdits` is on. The current photo
+ * comes first, then the next six (so the next ones are always ready at a
+ * decision a second), then the two before; three load at once.
+ */
+function usePreviews(paths: string[], index: number, showEdits: boolean) {
   const [urls, setUrls] = useState<Record<string, string>>({});
   const urlsRef = useRef<Record<string, string>>({});
   const pending = useRef(new Set<string>());
   const queue = useRef<string[]>([]);
-  const running = useRef(false);
+  const running = useRef(0);
+  const showEditsRef = useRef(showEdits);
 
-  const pump = useCallback(async () => {
-    if (running.current) return;
-    running.current = true;
-    while (queue.current.length > 0) {
-      const path = queue.current.shift()!;
-      if (urlsRef.current[path] || isVideoPath(path)) continue;
-      try {
-        const metadata: any = await invoke(Invokes.LoadMetadata, { path });
-        const adjustments =
-          metadata?.adjustments && typeof metadata.adjustments === 'object' ? metadata.adjustments : {};
-        const bytes: Uint8Array = await invoke(Invokes.GeneratePreviewForPath, {
-          path: path.split('?vc=')[0],
-          jsAdjustments: adjustments,
-        });
-        const url = URL.createObjectURL(new Blob([bytes as BlobPart], { type: 'image/png' }));
-        urlsRef.current = { ...urlsRef.current, [path]: url };
-        setUrls(urlsRef.current);
-      } catch {
-        // The library thumbnail stays on screen.
-      } finally {
-        pending.current.delete(path);
+  // Changing what is shown starts again.
+  useEffect(() => {
+    if (showEditsRef.current === showEdits) return;
+    showEditsRef.current = showEdits;
+    Object.values(urlsRef.current).forEach((u) => URL.revokeObjectURL(u));
+    urlsRef.current = {};
+    setUrls({});
+  }, [showEdits]);
+
+  const load = useCallback(async (path: string) => {
+    const withEdits = showEditsRef.current;
+    try {
+      let adjustments: unknown = {};
+      if (withEdits) {
+        const metadata = await invoke<{ adjustments?: unknown } | null>(Invokes.LoadMetadata, { path });
+        if (metadata?.adjustments && typeof metadata.adjustments === 'object') adjustments = metadata.adjustments;
       }
+      const bytes: Uint8Array = await invoke(Invokes.GenerateCullPreview, {
+        path,
+        showEdits: withEdits,
+        jsAdjustments: adjustments,
+      });
+      if (withEdits !== showEditsRef.current) return;
+      const url = URL.createObjectURL(new Blob([bytes as BlobPart], { type: 'image/jpeg' }));
+      urlsRef.current = { ...urlsRef.current, [path]: url };
+      setUrls(urlsRef.current);
+    } catch {
+      // The library thumbnail stays on screen.
     }
-    running.current = false;
   }, []);
 
+  const pump = useCallback(() => {
+    while (running.current < PARALLEL && queue.current.length > 0) {
+      const path = queue.current.shift()!;
+      if (urlsRef.current[path] || isVideoPath(path)) {
+        pending.current.delete(path);
+        continue;
+      }
+      running.current += 1;
+      void load(path).finally(() => {
+        running.current -= 1;
+        pending.current.delete(path);
+        pump();
+      });
+    }
+  }, [load]);
+
   useEffect(() => {
-    // The current photo first, then the next two and the previous one.
-    const wanted = [index, index + 1, index + 2, index - 1]
+    const around = [index, index + 1, index + 2, index + 3, index + 4, index + 5, index + 6, index - 1, index - 2]
       .filter((i) => i >= 0 && i < paths.length)
-      .map((i) => paths[i])
-      .filter((p) => !urlsRef.current[p] && !pending.current.has(p));
+      .map((i) => paths[i]);
+    // Only the photos around this one: moving on drops what was queued for
+    // photos already passed.
+    queue.current.filter((p) => !around.includes(p)).forEach((p) => pending.current.delete(p));
+    const stillWanted = queue.current.filter((p) => around.includes(p));
+    const wanted = around.filter((p) => !urlsRef.current[p] && !pending.current.has(p));
     wanted.forEach((p) => pending.current.add(p));
-    queue.current = [...wanted, ...queue.current.filter((p) => !wanted.includes(p))];
-    void pump();
+    queue.current = [...wanted, ...stillWanted];
+    pump();
 
     // Keep a small window of previews; let the rest go.
-    const keep = new Set(paths.slice(Math.max(0, index - 3), index + 6));
+    const keep = new Set(paths.slice(Math.max(0, index - 3), index + 8));
     const next: Record<string, string> = {};
     for (const [p, url] of Object.entries(urlsRef.current)) {
       if (keep.has(p)) next[p] = url;
@@ -122,7 +166,7 @@ function usePreviews(paths: string[], index: number) {
       urlsRef.current = next;
       setUrls(next);
     }
-  }, [paths, index, pump]);
+  }, [paths, index, pump, showEdits]);
 
   useEffect(
     () => () => {
@@ -153,42 +197,38 @@ const MAX_ZOOM_FROM_FIT = 40;
 function useFullSize(path: string | undefined, wanted: boolean, zoomed: boolean) {
   const [full, setFull] = useState<{ path: string; url: string; width: number; height: number } | null>(null);
   useEffect(() => {
-    if (!path || !wanted || isVideoPath(path) || full?.path === path) return;
+    if (!path || !wanted || !zoomed || isVideoPath(path) || full?.path === path) return;
     let cancelled = false;
     let url: string | null = null;
-    // Straight away when zoomed; otherwise after a moment on the photo, so
-    // paging quickly through a cull does not render every frame at full
-    // size (and slow the previews down).
-    const timer = window.setTimeout(
-      async () => {
-        try {
-          const metadata = await invoke<{ adjustments?: unknown } | null>(Invokes.LoadMetadata, { path });
-          const adjustments =
-            metadata?.adjustments && typeof metadata.adjustments === 'object' ? metadata.adjustments : {};
-          const bytes: Uint8Array = await invoke(Invokes.GeneratePreviewForPath, {
-            path: path.split('?vc=')[0],
-            jsAdjustments: adjustments,
-            maxDimension: 0,
-          });
-          if (cancelled) return;
-          url = URL.createObjectURL(new Blob([bytes as BlobPart], { type: 'image/png' }));
-          const img = new Image();
-          img.src = url;
-          await img.decode();
-          if (cancelled) {
-            URL.revokeObjectURL(url);
-            return;
-          }
-          setFull((old) => {
-            if (old) URL.revokeObjectURL(old.url);
-            return { path, url: url!, width: img.naturalWidth, height: img.naturalHeight };
-          });
-        } catch {
-          // The 1920-pixel preview stays.
+    // Only when zoomed: rendering every photo rested on at full size held
+    // up the previews of the next ones.
+    const timer = window.setTimeout(async () => {
+      try {
+        const metadata = await invoke<{ adjustments?: unknown } | null>(Invokes.LoadMetadata, { path });
+        const adjustments =
+          metadata?.adjustments && typeof metadata.adjustments === 'object' ? metadata.adjustments : {};
+        const bytes: Uint8Array = await invoke(Invokes.GeneratePreviewForPath, {
+          path: path.split('?vc=')[0],
+          jsAdjustments: adjustments,
+          maxDimension: 0,
+        });
+        if (cancelled) return;
+        url = URL.createObjectURL(new Blob([bytes as BlobPart], { type: 'image/png' }));
+        const img = new Image();
+        img.src = url;
+        await img.decode();
+        if (cancelled) {
+          URL.revokeObjectURL(url);
+          return;
         }
-      },
-      zoomed ? 0 : 1200,
-    );
+        setFull((old) => {
+          if (old) URL.revokeObjectURL(old.url);
+          return { path, url: url!, width: img.naturalWidth, height: img.naturalHeight };
+        });
+      } catch {
+        // The 1920-pixel preview stays.
+      }
+    }, 0);
     return () => {
       cancelled = true;
       window.clearTimeout(timer);
@@ -422,6 +462,24 @@ export default function CullView({ onEdit }: { onEdit: (path: string) => void })
   const [compare, setCompare] = useState(false);
   const [focusRight, setFocusRight] = useState(false);
   const [zoom, setZoom] = useState<Zoom>(FIT);
+  // The camera's previews by default (fast); developed with edits on ask.
+  const [showEdits, setShowEdits] = useState(() => {
+    try {
+      return localStorage.getItem('darkroom.cullShowEdits') === '1';
+    } catch {
+      return false;
+    }
+  });
+  const toggleShowEdits = useCallback(() => {
+    setShowEdits((v) => {
+      try {
+        localStorage.setItem('darkroom.cullShowEdits', v ? '0' : '1');
+      } catch {
+        // Not remembered; harmless.
+      }
+      return !v;
+    });
+  }, []);
 
   useEffect(() => {
     if (!open) return;
@@ -433,7 +491,7 @@ export default function CullView({ onEdit }: { onEdit: (path: string) => void })
   }, [open, paths, startPath]);
 
   const byPath = useMemo(() => new Map(imageList.map((f) => [f.path, f])), [imageList]);
-  const previews = usePreviews(open ? paths : [], index);
+  const previews = usePreviews(open ? paths : [], index, showEdits);
   const target = Math.min(paths.length - 1, index + (compare && focusRight ? 1 : 0));
   const targetPath = paths[target];
   // Full size for the photos on screen, once there is a moment to look.
@@ -611,6 +669,22 @@ export default function CullView({ onEdit }: { onEdit: (path: string) => void })
           {index + 1} / {paths.length}
         </span>
         <div className="flex-1" />
+        <button
+          type="button"
+          onClick={toggleShowEdits}
+          aria-pressed={showEdits}
+          className={clsx(
+            'flex items-center gap-1.5 rounded-md px-2 py-1 text-xs',
+            showEdits ? 'bg-card-active' : 'text-text-secondary hover:bg-surface',
+          )}
+          data-tooltip={t('cull.showEditsTip', {
+            defaultValue:
+              'Off: the camera’s own preview, instant. On: each photo developed with its edits, slower. Zooming in always shows the developed photo.',
+          })}
+        >
+          <SlidersHorizontal size={13} />
+          {t('cull.showEdits', { defaultValue: 'Show edits' })}
+        </button>
         <button
           type="button"
           onClick={() => setAutoAdvance((v) => !v)}

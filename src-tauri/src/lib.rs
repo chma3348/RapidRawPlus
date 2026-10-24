@@ -20,6 +20,7 @@ pub mod cloud_files;
 pub mod color_engine;
 pub mod comfy_engine;
 pub mod convert;
+pub mod cull_preview;
 mod culling;
 mod denoising;
 pub mod engine_models;
@@ -2004,6 +2005,7 @@ pub fn run() {
             file_management::read_exif_for_paths,
             file_management::list_images_in_dir,
             file_management::cloud_folder_summary,
+            cull_preview::generate_cull_preview,
             file_management::list_images_recursive,
             file_management::get_folder_tree,
             file_management::get_folder_children,
