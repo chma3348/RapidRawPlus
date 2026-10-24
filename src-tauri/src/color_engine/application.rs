@@ -2253,8 +2253,19 @@ pub fn preview_bytes(
     edits: &Value,
     dimension: u32,
 ) -> Result<Vec<u8>, String> {
-    let frame = render_for_output(context, state, path, edits, Some(dimension))
-        .map_err(|e| e.to_string())?;
+    preview_bytes_sized(context, state, path, edits, Some(dimension))
+}
+
+/// `preview_bytes` at any size: `None` is the whole picture.
+pub fn preview_bytes_sized(
+    context: &GpuContext,
+    state: &AppState,
+    path: &str,
+    edits: &Value,
+    dimension: Option<u32>,
+) -> Result<Vec<u8>, String> {
+    let frame =
+        render_for_output(context, state, path, edits, dimension).map_err(|e| e.to_string())?;
     // Every caller shows it on screen (before/after, the crop view, preset
     // and LUT previews): the on-screen encoding, quick to make.
     let mut bytes = Vec::new();

@@ -1239,15 +1239,28 @@ async fn save_collage(base64_data: String, first_path_str: String) -> Result<Str
 fn generate_preview_for_path(
     path: String,
     js_adjustments: Value,
+    max_dimension: Option<u32>,
     state: tauri::State<AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<Response, String> {
     let context = get_or_init_gpu_context(&state, &app_handle)?;
     let render_adjustments_cow = render_adjustments_for_empty(&js_adjustments);
     let render_adjustments = render_adjustments_cow.as_ref();
-
-    color_engine::application::preview_bytes(&context, &state, &path, render_adjustments, 1920)
-        .map(Response::new)
+    // 1920 by default; Cull asks for the full picture (0) to check focus
+    // at 100%.
+    let dimension = match max_dimension {
+        None => Some(1920),
+        Some(0) => None,
+        Some(d) => Some(d),
+    };
+    color_engine::application::preview_bytes_sized(
+        &context,
+        &state,
+        &path,
+        render_adjustments,
+        dimension,
+    )
+    .map(Response::new)
 }
 
 fn setup_logging(app_handle: &tauri::AppHandle) {
