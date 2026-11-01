@@ -1,4 +1,5 @@
-//! Experimental calibrated Bayer development, independent of the legacy path.
+//! Experimental calibrated development of Bayer and Fujifilm X-Trans
+//! sensors, independent of the legacy path.
 use super::{
     config::*,
     input::{DecodedFrame, InputProvenance},
@@ -147,25 +148,60 @@ fn calibration(matrix: &[f32], wb: &[f32; 4]) -> Result<DMat3> {
     Ok(result)
 }
 
+/// Sensor levels repeating over the mosaic from its top-left corner, row
+/// by row (DNG's BlackLevelRepeatDim): one level, 2x2 for a Bayer
+/// sensor's sites, or 6x6 for an X-Trans one's.
+#[derive(Clone, Debug, PartialEq)]
+struct SiteLevels {
+    levels: Vec<f32>,
+    width: usize,
+    height: usize,
+}
+
+impl SiteLevels {
+    fn uniform(level: f32) -> Self {
+        Self {
+            levels: vec![level],
+            width: 1,
+            height: 1,
+        }
+    }
+    fn at(&self, row: usize, col: usize) -> f32 {
+        self.levels[(row % self.height) * self.width + col % self.width]
+    }
+}
+
 fn normalize_sensor(
     values: &mut [f32],
     width: usize,
-    black: [f32; 4],
-    white: [f32; 4],
+    black: &SiteLevels,
+    white: &SiteLevels,
 ) -> Result<()> {
     ensure!(width > 0, "Empty RAW width");
-    for i in 0..4 {
+    for levels in [black, white] {
         ensure!(
-            black[i].is_finite() && white[i].is_finite() && white[i] > black[i],
+            levels.width > 0
+                && levels.height > 0
+                && levels.levels.len() == levels.width * levels.height
+                && levels.levels.iter().all(|v| v.is_finite()),
             "Invalid sensor black/white levels"
         );
     }
+    for row in 0..black.height.max(white.height) {
+        for col in 0..black.width.max(white.width) {
+            ensure!(
+                white.at(row, col) > black.at(row, col),
+                "Invalid sensor black/white levels"
+            );
+        }
+    }
     for (i, value) in values.iter_mut().enumerate() {
         ensure!(value.is_finite(), "Non-finite sensor sample");
-        let site = ((i / width) % 2) * 2 + (i % width) % 2;
+        let (row, col) = (i / width, i % width);
+        let (black, white) = (black.at(row, col), white.at(row, col));
         // Sensor black floor only. No upper clamp, highlight desaturation, or
         // RGB gamut clipping. Above-white samples remain available downstream.
-        *value = (*value - black[site]).max(0.0) / (white[site] - black[site]);
+        *value = (*value - black).max(0.0) / (white - black);
         ensure!(value.is_finite(), "Sensor normalization overflow");
     }
     Ok(())
@@ -181,28 +217,29 @@ fn develop(
     let cfa = match &raw.photometric {
         RawPhotometricInterpretation::Cfa(config) => config,
         _ => anyhow::bail!(
-            "V3 RAW currently supports Bayer mosaics, not LinearRaw or monochrome files"
+            "V3 RAW currently supports Bayer and X-Trans mosaics, not LinearRaw or monochrome files"
         ),
     };
+    let bayer = cfa.cfa.width == 2 && cfa.cfa.height == 2;
+    // Fujifilm's X-Trans: a 6x6 pattern, demosaiced by the dependency.
+    let xtrans = cfa.cfa.width == 6 && cfa.cfa.height == 6;
     ensure!(
-        raw.cpp == 1 && cfa.cfa.is_rgb() && cfa.cfa.width == 2 && cfa.cfa.height == 2,
-        "V3 RAW currently requires a 2x2 RGB Bayer mosaic"
+        raw.cpp == 1 && cfa.cfa.is_rgb() && (bayer || xtrans),
+        "V3 RAW currently requires an RGB Bayer (2x2) or X-Trans (6x6) mosaic"
     );
     ensure!(
         raw.width >= 16
             && raw.height >= 16
-            && raw.width.is_multiple_of(2)
-            && raw.height.is_multiple_of(2),
+            && (xtrans || (raw.width.is_multiple_of(2) && raw.height.is_multiple_of(2))),
         "Unsupported RAW dimensions"
     );
+    // One black level, or one per site of the sensor's pattern.
+    let blacks = &raw.blacklevel;
     ensure!(
-        raw.blacklevel.cpp == 1
-            && ((raw.blacklevel.width == 1
-                && raw.blacklevel.height == 1
-                && raw.blacklevel.levels.len() == 1)
-                || (raw.blacklevel.width == 2
-                    && raw.blacklevel.height == 2
-                    && raw.blacklevel.levels.len() == 4)),
+        blacks.cpp == 1
+            && blacks.levels.len() == blacks.width * blacks.height
+            && ((blacks.width == 1 && blacks.height == 1)
+                || (blacks.width == cfa.cfa.width && blacks.height == cfa.cfa.height)),
         "Unsupported RAW black-level layout"
     );
     ensure!(
@@ -213,8 +250,12 @@ fn develop(
         "No D65 camera calibration; v3 will not select an arbitrary fallback illuminant",
     )?;
     let transform = calibration(matrix, &raw.wb_coeffs)?;
-    let black = raw.blacklevel.as_bayer_array();
-    let white = raw.whitelevel.as_bayer_array();
+    let black = SiteLevels {
+        levels: blacks.levels.iter().map(|v| v.as_f32()).collect(),
+        width: blacks.width,
+        height: blacks.height,
+    };
+    let white = SiteLevels::uniform(raw.whitelevel.0[0] as f32);
     let rcd_cfa = match &raw.photometric {
         RawPhotometricInterpretation::Cfa(config) if !fast && super::rcd::supports(&config.cfa) => {
             Some(config.cfa.clone())
@@ -225,7 +266,7 @@ fn develop(
         "camera_make": raw.clean_make, "camera_model": raw.clean_model,
         "xyz_to_camera_d65": matrix, "white_balance_rgb": &raw.wb_coeffs[..3],
         "camera_to_linear_srgb": transform.to_cols_array(), "matrix_layout": "column_major",
-        "black_levels": black, "white_levels": white,
+        "black_levels": &black.levels, "white_levels": &white.levels,
         "demosaic": if fast {"speed"} else if rcd_cfa.is_some() {"rcd"} else {"quality"},
         "sensor_floor": "zero_after_black_subtraction", "upper_clamp": false,
         "clipped_highlights": "neutral_where_green_clips_v1",
@@ -240,7 +281,7 @@ fn develop(
                 .context("RAW size overflow")?,
         "RAW sample count mismatch"
     );
-    normalize_sensor(&mut samples, raw.width, black, white)?;
+    normalize_sensor(&mut samples, raw.width, &black, &white)?;
     raw.data = RawImageData::Float(samples);
     check_cancel()?;
     let mut developer = RawDevelop::default();
@@ -259,8 +300,8 @@ fn develop(
         DemosaicAlgorithm::Quality
     };
     // A 2x2 RGB Bayer sensor is demosaiced with RCD (rcd.rs) at full quality;
-    // anything else (X-Trans, four colours) and the fast thumbnail path keep
-    // the dependency's own.
+    // X-Trans and the fast thumbnail path keep the dependency's own (for
+    // X-Trans, its interpolation, or its quicker superpixel when fast).
     let camera = if let Some(cfa) = rcd_cfa {
         develop_rcd(&raw, &cfa)
     } else {
@@ -341,7 +382,7 @@ fn develop(
         source_hash: String::new(), transform_decision: "camera_calibration_to_linear_srgb_scene".into(),
         decoder_revision: "v3-bayer-input-1-rawler-424cc109", interpretation: "calibrated_scene_linear_srgb".into(),
         profile_hash: None, calibration: Some(record),
-        warnings: vec!["Experimental Bayer calibration; clipped highlights are neutralised rather than reconstructed; no dual-illuminant interpolation yet.".into()],
+        warnings: vec!["Experimental sensor calibration; clipped highlights are neutralised rather than reconstructed; no dual-illuminant interpolation yet.".into()],
     }})
 }
 
@@ -421,15 +462,79 @@ mod tests {
     #[test]
     fn sensor_normalization_has_no_upper_ceiling() {
         let mut v = [50., 200., 600., 2200.];
+        let sites = |levels: [f32; 4]| SiteLevels {
+            levels: levels.to_vec(),
+            width: 2,
+            height: 2,
+        };
         normalize_sensor(
             &mut v,
             2,
-            [100., 100., 100., 200.],
-            [1100., 1100., 1100., 1200.],
+            &sites([100., 100., 100., 200.]),
+            &sites([1100., 1100., 1100., 1200.]),
         )
         .unwrap();
         assert_eq!(v, [0., 0.1, 0.5, 2.]);
-        assert!(normalize_sensor(&mut v, 2, [100.; 4], [100.; 4]).is_err());
+        let flat = SiteLevels::uniform(100.);
+        assert!(normalize_sensor(&mut v, 2, &flat, &flat).is_err());
+    }
+    /// A Fujifilm X-Trans mosaic develops: the sensor's 6x6 pattern, a black
+    /// level for each of its 36 sites, flat grey light.
+    #[test]
+    fn xtrans_mosaics_develop() {
+        use rawler::{
+            cfa::{CFA, PlaneColor},
+            decoders::Camera,
+            rawimage::{BlackLevel, CFAConfig, WhiteLevel},
+        };
+        // The X-T3's layout, as rawler reads it from a RAF.
+        let pattern = "GGRGGBGGBGGRBRGRBGGGBGGRGGRGGBRBGBRG";
+        let camera = Camera {
+            cfa: CFA::new(pattern),
+            plane_color: PlaneColor::new("RGB"),
+            ..Camera::default()
+        };
+        let cfa = CFAConfig::new_from_camera(&camera);
+        let (w, h) = (66, 42);
+        // Each site's black differs a little; the light above it is the same.
+        let blacks: Vec<u32> = (0..36).map(|i| 1000 + i).collect();
+        let data = (0..w * h)
+            .map(|i| (1000 + ((i / w) % 6) * 6 + (i % w) % 6) as f32 + 2000.0)
+            .collect();
+        let mut raw = RawImage::new_with_data(
+            camera,
+            RawImageData::Float(data),
+            w,
+            h,
+            1,
+            [1.0, 1.0, 1.0, f32::NAN],
+            RawPhotometricInterpretation::Cfa(cfa),
+            Some(BlackLevel::new(&blacks, 6, 6, 1)),
+            Some(WhiteLevel::new(vec![16383])),
+            false,
+        );
+        raw.color_matrix.insert(
+            Illuminant::D65,
+            vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+        );
+        let expected = 2000.0 / (16383.0 - 1000.0);
+        for fast in [false, true] {
+            let frame = develop(raw.clone(), Orientation::Normal, fast, || Ok(())).unwrap();
+            let (fw, fh) = frame.pixels.dimensions();
+            assert_eq!((fw, fh), (w as u32, h as u32));
+            // Away from the edges every pixel is the same neutral grey.
+            for y in fh / 4..fh * 3 / 4 {
+                for x in fw / 4..fw * 3 / 4 {
+                    let p = frame.pixels.get_pixel(x, y);
+                    for c in 0..3 {
+                        assert!(
+                            (p[c] - expected).abs() < 0.01 * expected,
+                            "fast {fast} at {x},{y}: {p:?}, expected {expected}"
+                        );
+                    }
+                }
+            }
+        }
     }
     #[test]
     fn calibration_preserves_signed_hdr_and_scales_linearly() {

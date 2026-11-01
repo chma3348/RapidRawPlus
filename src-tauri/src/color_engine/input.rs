@@ -215,6 +215,10 @@ fn finish_profiled(
     bytes: &[u8],
 ) -> Result<DecodedFrame> {
     let mut warnings = vec![];
+    // The profile the pixels are read through; for an Adobe RGB photo
+    // without one, the standard Adobe RGB profile, carried on so patches
+    // and smart previews read the file the same way.
+    let mut icc = icc;
     let (profile, interpretation) = if let Some(ref data) = icc {
         (
             ColorProfile::new_from_slice(data)
@@ -231,22 +235,26 @@ fn finish_profiled(
                 "PNG declares gamma/chromaticities without an ICC or sRGB profile; cannot assume sRGB"
             );
         }
-        // EXIF Adobe RGB/uncalibrated cannot be safely treated as untagged sRGB.
-        if let Ok(exif) = exif::Reader::new().read_from_container(&mut Cursor::new(bytes))
-            && let Some(value) = exif
-                .get_field(exif::Tag::ColorSpace, exif::In::PRIMARY)
-                .and_then(|f| f.value.get_uint(0))
-        {
-            ensure!(
-                value == 1,
-                "EXIF declares a non-sRGB or uncalibrated color space without an ICC profile"
-            );
+        match exif_color_space(bytes) {
+            ExifColorSpace::AdobeRgb => {
+                warnings.push("No embedded ICC profile: EXIF marks the photo Adobe RGB (1998), so it is read as Adobe RGB.".into());
+                let data = ColorProfile::new_adobe_rgb().encode()?;
+                let profile = ColorProfile::new_from_slice(&data)?;
+                icc = Some(data);
+                (profile, "exif_adobe_rgb")
+            }
+            space => {
+                warnings.push(if space == ExifColorSpace::Unknown {
+                    "No embedded ICC profile and EXIF says only \"uncalibrated\": read as sRGB, as other apps do.".into()
+                } else {
+                    "No embedded ICC profile: using the documented sRGB fallback for standard PNG/JPEG photos.".into()
+                });
+                (
+                    ColorProfile::new_from_slice(&ColorProfile::new_srgb().encode()?)?,
+                    "srgb_fallback",
+                )
+            }
         }
-        warnings.push("No embedded ICC profile: using the documented sRGB fallback for standard PNG/JPEG photos.".into());
-        (
-            ColorProfile::new_from_slice(&ColorProfile::new_srgb().encode()?)?,
-            "srgb_fallback",
-        )
     };
     ensure!(
         profile.color_space == DataColorSpace::Rgb,
@@ -281,6 +289,42 @@ fn finish_profiled(
         rendered_origin: false,
         input_domain: None,
     })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExifColorSpace {
+    Srgb,
+    AdobeRgb,
+    /// "Uncalibrated" with nothing saying which space.
+    Unknown,
+}
+
+/// The colour space a photo without an ICC profile declares in EXIF.
+/// Cameras shooting Adobe RGB write ColorSpace "uncalibrated" (65535) and
+/// say Adobe RGB through the DCF interoperability index "R03" (the DCF
+/// option file rule); "R98" is sRGB. A few write ColorSpace 2 for Adobe
+/// RGB. No EXIF, or no ColorSpace, is sRGB.
+fn exif_color_space(bytes: &[u8]) -> ExifColorSpace {
+    let Ok(exif) = exif::Reader::new().read_from_container(&mut Cursor::new(bytes)) else {
+        return ExifColorSpace::Srgb;
+    };
+    let space = exif
+        .get_field(exif::Tag::ColorSpace, exif::In::PRIMARY)
+        .and_then(|f| f.value.get_uint(0));
+    let interop = exif
+        .get_field(exif::Tag::InteroperabilityIndex, exif::In::PRIMARY)
+        .and_then(|f| match &f.value {
+            exif::Value::Ascii(v) => v
+                .first()
+                .map(|s| String::from_utf8_lossy(s).trim().to_string()),
+            _ => None,
+        });
+    match (space, interop.as_deref()) {
+        (None | Some(1), _) => ExifColorSpace::Srgb,
+        (Some(2), _) | (_, Some("R03")) => ExifColorSpace::AdobeRgb,
+        (_, Some("R98")) => ExifColorSpace::Srgb,
+        _ => ExifColorSpace::Unknown,
+    }
 }
 
 /// The ICC profile of a classic (not Big) TIFF, read from its first IFD:
@@ -598,6 +642,64 @@ mod tests {
         assert_eq!(frame.pixels.dimensions(), (1, 2));
         assert!(frame.pixels.get_pixel(0, 0)[0] > 0.99);
         assert_eq!(frame.pixels.get_pixel(0, 1)[3], 128.0 / 255.0);
+    }
+
+    /// A pure red PNG carrying EXIF ColorSpace "uncalibrated" and, when
+    /// given, a DCF interoperability index, as cameras shooting Adobe RGB do.
+    fn uncalibrated_red(interop: Option<&[u8; 4]>) -> Vec<u8> {
+        let le16 = |v: u16| v.to_le_bytes();
+        let le32 = |v: u32| v.to_le_bytes();
+        let mut exif = b"II\x2a\0".to_vec();
+        exif.extend(le32(8));
+        // IFD0: a pointer to the Exif IFD at 26.
+        exif.extend(le16(1));
+        exif.extend([le16(0x8769), le16(4)].concat());
+        exif.extend([le32(1), le32(26), le32(0)].concat());
+        // Exif IFD: ColorSpace 65535, and the interoperability IFD at 56.
+        let entries = if interop.is_some() { 2 } else { 1 };
+        exif.extend(le16(entries));
+        exif.extend([le16(0xA001), le16(3)].concat());
+        exif.extend([le32(1), le32(0xFFFF)].concat());
+        if let Some(index) = interop {
+            exif.extend([le16(0xA005), le16(4)].concat());
+            exif.extend([le32(1), le32(56)].concat());
+            exif.extend(le32(0));
+            exif.extend(le16(1));
+            exif.extend([le16(0x0001), le16(2)].concat());
+            exif.extend(le32(4));
+            exif.extend(index);
+        }
+        exif.extend(le32(0));
+        let mut bytes = Vec::new();
+        let mut encoder = image::codecs::png::PngEncoder::new(&mut bytes);
+        encoder.set_exif_metadata(exif).unwrap();
+        encoder
+            .write_image(&[255, 0, 0], 1, 1, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        bytes
+    }
+
+    #[test]
+    fn exif_adobe_rgb_is_read_as_adobe_rgb() {
+        let frame = decode_profiled_photo(&uncalibrated_red(Some(b"R03\0"))).unwrap();
+        let red = frame.pixels.get_pixel(0, 0).0;
+        // Adobe RGB's red has sRGB's hue but more light (Y 0.297 against
+        // 0.213), so read as Adobe RGB it is 1.4 in linear sRGB.
+        assert!(
+            (red[0] - 1.398).abs() < 0.01 && red[1].abs() < 1e-3,
+            "{red:?}"
+        );
+        assert_eq!(frame.provenance.interpretation, "exif_adobe_rgb");
+        assert!(frame.source_profile.is_some());
+        // R98 is sRGB, and "uncalibrated" alone is read as sRGB, not refused.
+        for bytes in [uncalibrated_red(Some(b"R98\0")), uncalibrated_red(None)] {
+            let frame = decode_profiled_photo(&bytes).unwrap();
+            let red = frame.pixels.get_pixel(0, 0).0;
+            assert!(
+                (red[0] - 1.0).abs() < 1e-3 && red[1].abs() < 1e-3,
+                "{red:?}"
+            );
+        }
     }
 
     #[test]
