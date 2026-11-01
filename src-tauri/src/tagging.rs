@@ -17,7 +17,6 @@ use walkdir::WalkDir;
 use crate::file_management::{self, parse_virtual_path};
 use crate::formats::is_supported_image_file;
 use crate::hierarchy::TAG_HIERARCHY;
-use crate::image_processing::ImageMetadata;
 use crate::{AppState, candidates::TAG_CANDIDATES};
 
 pub const COLOR_TAG_PREFIX: &str = "color:";
@@ -332,7 +331,7 @@ pub async fn start_background_indexing(
                     let path_str = path.to_string_lossy().to_string();
                     let (_, sidecar_path) = parse_virtual_path(&path_str);
 
-                    let mut metadata = crate::exif_processing::load_sidecar(&sidecar_path);
+                    let metadata = crate::exif_processing::load_sidecar(&sidecar_path);
 
                     let should_generate_tags = match &metadata.tags {
                         None => true,
@@ -357,22 +356,27 @@ pub async fn start_background_indexing(
                                 ) {
                                     println!("Found AI tags for {}: {:?}", path_str, ai_tags);
 
-                                    let mut existing_tags: HashSet<String> =
-                                        metadata.tags.unwrap_or_default().into_iter().collect();
-
-                                    for tag in ai_tags {
-                                        existing_tags.insert(tag);
-                                    }
-
-                                    let mut final_tags: Vec<String> =
-                                        existing_tags.into_iter().collect();
-                                    final_tags.sort_unstable();
-
-                                    metadata.tags = Some(final_tags);
-
-                                    if let Ok(json_string) = serde_json::to_string_pretty(&metadata)
-                                    {
-                                        let _ = fs::write(sidecar_path, json_string);
+                                    // Merged into the sidecar as it is now, under its
+                                    // lock: tagging takes a while, and the user may have
+                                    // rated or edited the photo meanwhile.
+                                    if let Err(e) = crate::exif_processing::modify_sidecar(
+                                        &sidecar_path,
+                                        |metadata| {
+                                            let mut existing_tags: HashSet<String> = metadata
+                                                .tags
+                                                .take()
+                                                .unwrap_or_default()
+                                                .into_iter()
+                                                .collect();
+                                            existing_tags.extend(ai_tags);
+                                            let mut final_tags: Vec<String> =
+                                                existing_tags.into_iter().collect();
+                                            final_tags.sort_unstable();
+                                            metadata.tags = Some(final_tags);
+                                            true
+                                        },
+                                    ) {
+                                        log::warn!("Could not save AI tags for {path_str}: {e}");
                                     }
                                 }
                             }
@@ -429,26 +433,21 @@ fn modify_tags_for_path(
 ) -> Result<(), String> {
     let (_, sidecar_path) = parse_virtual_path(path_str);
 
-    let mut metadata = crate::exif_processing::load_sidecar(&sidecar_path);
+    crate::exif_processing::modify_sidecar(&sidecar_path, |metadata| {
+        let mut tags = metadata.tags.take().unwrap_or_default();
+        modify_fn(&mut tags);
 
-    let mut tags = metadata.tags.unwrap_or_default();
-    modify_fn(&mut tags);
+        tags.sort_unstable();
+        tags.dedup();
 
-    tags.sort_unstable();
-    tags.dedup();
+        metadata.tags = (!tags.is_empty()).then_some(tags);
 
-    if tags.is_empty() {
-        metadata.tags = None;
-    } else {
-        metadata.tags = Some(tags);
-    }
-
-    if let Some(create_if_missing) = xmp {
-        crate::xmp::push(path_str, &mut metadata, create_if_missing);
-    }
-
-    let json_string = serde_json::to_string_pretty(&metadata).map_err(|e| e.to_string())?;
-    fs::write(sidecar_path, json_string).map_err(|e| e.to_string())
+        if let Some(create_if_missing) = xmp {
+            crate::xmp::push(path_str, metadata, create_if_missing);
+        }
+        true
+    })
+    .map(|_| ())
 }
 
 #[tauri::command]
@@ -491,73 +490,47 @@ pub fn remove_tag_for_paths(
 
 #[tauri::command]
 pub fn clear_ai_tags(root_path: String) -> Result<usize, String> {
-    if !Path::new(&root_path).exists() {
-        return Err(format!("Root path does not exist: {}", root_path));
-    }
-
-    let mut updated_count = 0;
-    let walker = WalkDir::new(root_path).into_iter();
-
-    for entry in walker.filter_map(|e| e.ok()) {
-        let path = entry.path();
-        if path.is_file()
-            && path.extension().and_then(|s| s.to_str()) == Some("dri")
-            && let Ok(content) = fs::read_to_string(path)
-            && let Ok(mut metadata) = serde_json::from_str::<ImageMetadata>(&content)
-            && let Some(tags) = &mut metadata.tags
-        {
-            let original_len = tags.len();
-            // Keep color tags and user tags, remove others (AI tags)
-            tags.retain(|tag| {
-                tag.starts_with(COLOR_TAG_PREFIX) || tag.starts_with(USER_TAG_PREFIX)
-            });
-
-            if tags.len() < original_len {
-                if tags.is_empty() {
-                    metadata.tags = None;
-                }
-                if let Ok(json_string) = serde_json::to_string_pretty(&metadata)
-                    && fs::write(path, json_string).is_ok()
-                {
-                    updated_count += 1;
-                }
-            }
-        }
-    }
-    Ok(updated_count)
+    // Keep color tags and user tags, remove others (AI tags)
+    clear_tags(&root_path, |tag| {
+        tag.starts_with(COLOR_TAG_PREFIX) || tag.starts_with(USER_TAG_PREFIX)
+    })
 }
 
 #[tauri::command]
 pub fn clear_all_tags(root_path: String) -> Result<usize, String> {
-    if !Path::new(&root_path).exists() {
+    // Keep only color tags, remove AI and user tags
+    clear_tags(&root_path, |tag| tag.starts_with(COLOR_TAG_PREFIX))
+}
+
+/// Drops the tags `keep` turns down from every sidecar under `root_path`,
+/// each under its lock. Returns how many sidecars changed.
+fn clear_tags(root_path: &str, keep: impl Fn(&str) -> bool) -> Result<usize, String> {
+    if !Path::new(root_path).exists() {
         return Err(format!("Root path does not exist: {}", root_path));
     }
 
     let mut updated_count = 0;
-    let walker = WalkDir::new(root_path).into_iter();
-
-    for entry in walker.filter_map(|e| e.ok()) {
+    for entry in WalkDir::new(root_path).into_iter().filter_map(|e| e.ok()) {
         let path = entry.path();
-        if path.is_file()
-            && path.extension().and_then(|s| s.to_str()) == Some("dri")
-            && let Ok(content) = fs::read_to_string(path)
-            && let Ok(mut metadata) = serde_json::from_str::<ImageMetadata>(&content)
-            && let Some(tags) = &mut metadata.tags
-        {
-            let original_len = tags.len();
-            // Keep only color tags, remove AI and user tags
-            tags.retain(|tag| tag.starts_with(COLOR_TAG_PREFIX));
-
-            if tags.len() < original_len {
+        if !path.is_file() || path.extension().and_then(|s| s.to_str()) != Some("dri") {
+            continue;
+        }
+        let mut changed = false;
+        let result = crate::exif_processing::modify_sidecar(path, |metadata| {
+            if let Some(tags) = &mut metadata.tags {
+                let original_len = tags.len();
+                tags.retain(|tag| keep(tag));
+                changed = tags.len() < original_len;
                 if tags.is_empty() {
                     metadata.tags = None;
                 }
-                if let Ok(json_string) = serde_json::to_string_pretty(&metadata)
-                    && fs::write(path, json_string).is_ok()
-                {
-                    updated_count += 1;
-                }
             }
+            changed
+        });
+        match result {
+            Ok(_) if changed => updated_count += 1,
+            Ok(_) => {}
+            Err(e) => log::warn!("Could not clear tags in {}: {e}", path.display()),
         }
     }
     Ok(updated_count)

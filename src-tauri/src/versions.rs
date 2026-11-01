@@ -59,22 +59,19 @@ pub fn free_version_path(source: &Path, kind: &str, ext: &str) -> PathBuf {
 pub fn record_merge(output: &Path, sources: &[PathBuf], kind: &str) {
     let write = |path: &Path, from: Option<String>, kind: &str| {
         let sidecar = crate::exif_processing::get_primary_sidecar_path(path);
-        let mut metadata = crate::exif_processing::load_sidecar(&sidecar);
-        if from.is_some()
-            && metadata.derived_from.is_some()
-            && metadata.derived_kind.as_deref() != Some(BRACKET_KIND)
-        {
-            return;
-        }
-        metadata.derived_from = from;
-        metadata.derived_kind = Some(kind.to_string());
-        match serde_json::to_string_pretty(&metadata) {
-            Ok(json) => {
-                if let Err(e) = std::fs::write(&sidecar, json) {
-                    log::warn!("could not record the merge for {path:?}: {e}");
-                }
+        let result = crate::exif_processing::modify_sidecar(&sidecar, |metadata| {
+            if from.is_some()
+                && metadata.derived_from.is_some()
+                && metadata.derived_kind.as_deref() != Some(BRACKET_KIND)
+            {
+                return false;
             }
-            Err(e) => log::warn!("could not record the merge for {path:?}: {e}"),
+            metadata.derived_from = from;
+            metadata.derived_kind = Some(kind.to_string());
+            true
+        });
+        if let Err(e) = result {
+            log::warn!("could not record the merge for {path:?}: {e}");
         }
     };
     write(output, None, kind);
@@ -92,16 +89,13 @@ pub const BRACKET_KIND: &str = "Bracket";
 /// writes the sidecar, so it is the last word.
 pub fn record_version(output: &Path, source: &Path, kind: &str) {
     let sidecar = crate::exif_processing::get_primary_sidecar_path(output);
-    let mut metadata = crate::exif_processing::load_sidecar(&sidecar);
-    metadata.derived_from = source.file_name().map(|n| n.to_string_lossy().into_owned());
-    metadata.derived_kind = Some(kind.to_string());
-    match serde_json::to_string_pretty(&metadata) {
-        Ok(json) => {
-            if let Err(e) = std::fs::write(&sidecar, json) {
-                log::warn!("could not record the original of {output:?}: {e}");
-            }
-        }
-        Err(e) => log::warn!("could not record the original of {output:?}: {e}"),
+    let result = crate::exif_processing::modify_sidecar(&sidecar, |metadata| {
+        metadata.derived_from = source.file_name().map(|n| n.to_string_lossy().into_owned());
+        metadata.derived_kind = Some(kind.to_string());
+        true
+    });
+    if let Err(e) = result {
+        log::warn!("could not record the original of {output:?}: {e}");
     }
 }
 
