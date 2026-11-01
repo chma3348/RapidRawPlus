@@ -365,10 +365,43 @@ fn process_preview_job(
     Ok(response)
 }
 
+/// Let go of the editor's caches that can be rebuilt, and say about how
+/// many bytes that was. Under a warning: everything kept for photos other
+/// than the open one, and the open one's full-size stages. When critical:
+/// everything rebuildable of the open photo too (its decoded pictures, the
+/// pictures the AI tools read), which the next render or tool makes again.
+/// Before, a warning freed only derived stages while five decoded photos
+/// stayed, so the pressure never eased and this ran every ten seconds.
+fn release_memory(state: &AppState, critical: bool) -> usize {
+    let open = state.original_image.lock().unwrap().clone();
+    let open_path = open.as_ref().map(|l| l.path.as_str());
+    let mut freed = state.v3.trim(open_path, critical);
+    if let Ok(mut cache) = state.decoded_image_cache.lock() {
+        let keep = open_path
+            .filter(|_| !critical)
+            .map(|p| parse_virtual_path(p).0.to_string_lossy().to_string());
+        freed += cache.keep_only(keep.as_deref());
+    }
+    if critical {
+        // The open photo's own decode is shared with the cache just emptied:
+        // counted here, where it is actually let go.
+        freed += open.as_ref().map_or(0, |l| l.release_pixels());
+        if let Some((_, image)) = state.full_warped_cache.lock().unwrap().take() {
+            freed += image.as_bytes().len();
+        }
+        if let Some((_, image, _)) = state.full_transformed_cache.lock().unwrap().take() {
+            freed += image.as_bytes().len();
+        }
+        let mut geometry = state.geometry_cache.lock().unwrap();
+        freed += geometry.values().map(|i| i.as_bytes().len()).sum::<usize>();
+        geometry.clear();
+    }
+    freed
+}
+
 /// macOS asks apps to give memory back before it starts closing them. While
 /// it reports memory pressure, let go of the editor's caches, which are all
-/// rebuilt on demand: the derived stages under a warning, the decoded photo
-/// too when critical.
+/// rebuilt on demand (`release_memory`).
 fn start_memory_watch(app_handle: tauri::AppHandle) {
     #[cfg(target_os = "macos")]
     std::thread::spawn(move || {
@@ -385,11 +418,17 @@ fn start_memory_watch(app_handle: tauri::AppHandle) {
             if since_trim >= 5 {
                 since_trim = 0;
                 let critical = level >= 4;
-                app_handle.state::<AppState>().v3.trim(critical);
-                log::warn!(
-                    "Memory pressure ({}): released the editor's caches",
-                    if critical { "critical" } else { "warning" }
-                );
+                let freed = release_memory(&app_handle.state::<AppState>(), critical);
+                // Said only when something went: pressure from other apps
+                // can last, and repeating that nothing was left to free is
+                // noise in the log.
+                if freed > 0 {
+                    log::warn!(
+                        "Memory pressure ({}): released about {} MB of the editor's caches",
+                        if critical { "critical" } else { "warning" },
+                        freed >> 20
+                    );
+                }
             }
         }
     });
@@ -463,6 +502,22 @@ fn start_preview_worker(app_handle: tauri::AppHandle) {
 
             let state = app_handle.state::<AppState>();
             let responder = job.responder;
+            // Asked about a photo that is not the one loaded: the editor has
+            // moved on, or this one is still opening (the editor waits for
+            // that). Nothing to render; dropping the reply tells the editor
+            // the request was superseded, rather than logging a failure.
+            if let Some(wanted) = &job.path {
+                let loaded = state
+                    .original_image
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|l| l.path.clone());
+                if loaded.as_deref() != Some(wanted.as_str()) {
+                    log::debug!("Preview for {wanted} dropped: it is not the photo loaded");
+                    continue;
+                }
+            }
             match process_preview_job(
                 &app_handle,
                 state,
@@ -491,7 +546,9 @@ fn release_zoom_caches(state: tauri::State<AppState>) {
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn apply_adjustments(
+    path: Option<String>,
     js_adjustments: serde_json::Value,
     is_interactive: bool,
     target_resolution: Option<u32>,
@@ -506,6 +563,7 @@ async fn apply_adjustments(
         let tx_guard = state.preview_worker_tx.lock().unwrap();
         if let Some(worker_tx) = &*tx_guard {
             let job = PreviewJob {
+                path,
                 adjustments: js_adjustments,
                 is_interactive,
                 target_resolution,
@@ -799,15 +857,16 @@ async fn preview_geometry_transform(
 pub fn get_full_image_for_processing(
     state: &tauri::State<AppState>,
 ) -> Result<(DynamicImage, bool), String> {
-    let original_image_lock = state.original_image.lock().unwrap();
-    let loaded_image = original_image_lock
-        .as_ref()
+    let loaded_image = state
+        .original_image
+        .lock()
+        .unwrap()
+        .clone()
         .ok_or("No original image loaded")?;
     // A RAW's patches are composited by v3 onto its own development, so they
     // must be made from that, not from the previous engine's decode.
     if loaded_image.is_raw {
         let path = loaded_image.path.clone();
-        drop(original_image_lock);
         let image = color_engine::application::raw_patch_base(state, &path)
             .map_err(|e| format!("Could not develop the RAW for this tool: {e:#}"))?;
         return Ok((image, true));
@@ -816,7 +875,6 @@ pub fn get_full_image_for_processing(
     // downloaded now.
     if loaded_image.from_preview {
         let path = loaded_image.path.clone();
-        drop(original_image_lock);
         let (source, _) = file_management::parse_virtual_path(&path);
         let bytes = std::fs::read(&source).map_err(|e| e.to_string())?;
         let image = image_loader::load_base_image_from_bytes(
@@ -829,15 +887,12 @@ pub fn get_full_image_for_processing(
         .map_err(|e| e.to_string())?;
         let mut lock = state.original_image.lock().unwrap();
         if let Some(loaded) = lock.as_mut().filter(|l| l.path == path) {
-            loaded.image = Arc::new(image.clone());
+            loaded.set_pixels(Arc::new(image.clone()));
             loaded.from_preview = false;
         }
         return Ok((image, false));
     }
-    Ok((
-        loaded_image.image.clone().as_ref().clone(),
-        loaded_image.is_raw,
-    ))
+    Ok((loaded_image.pixels()?.as_ref().clone(), loaded_image.is_raw))
 }
 
 #[tauri::command]

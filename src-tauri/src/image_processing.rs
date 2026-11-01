@@ -3742,14 +3742,13 @@ pub fn auto_results_to_json(results: &AutoAdjustmentResults) -> serde_json::Valu
 pub fn calculate_auto_adjustments(
     state: tauri::State<AppState>,
 ) -> Result<serde_json::Value, String> {
-    let original_image = state
+    let loaded = state
         .original_image
         .lock()
         .unwrap()
-        .as_ref()
-        .ok_or("No image loaded for auto adjustments")?
-        .image
-        .clone();
+        .clone()
+        .ok_or("No image loaded for auto adjustments")?;
+    let original_image = loaded.pixels()?;
 
     let results = perform_auto_analysis(&original_image);
 

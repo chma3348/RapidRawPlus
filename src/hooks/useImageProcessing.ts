@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import debounce from 'lodash.debounce';
-import { useEditorStore } from '../store/useEditorStore';
+import { adjustmentsUnsaved, rememberSavedAdjustments, useEditorStore } from '../store/useEditorStore';
 import { useUIStore } from '../store/useUIStore';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { useLibraryStore } from '../store/useLibraryStore';
@@ -28,6 +28,16 @@ function aroundView([x, y, w, h]: number[], margin: number): [number, number, nu
   const rx = Math.max(0, x - w * margin);
   const ry = Math.max(0, y - h * margin);
   return [rx, ry, Math.min(1 - rx, w * (1 + 2 * margin)), Math.min(1 - ry, h * (1 + 2 * margin))];
+}
+
+/** Hand `adjustments` to the save unless `path`'s sidecar already holds
+ * them: a render settling after merely looking at a photo must not rewrite
+ * its sidecar and thumbnail. Says whether it did. */
+function saveIfChanged(path: string, adjustments: Adjustments): boolean {
+  if (!adjustmentsUnsaved(path, adjustments)) return false;
+  rememberSavedAdjustments(path, adjustments);
+  debouncedSave(path, adjustments);
+  return true;
 }
 
 /** While a slider moves: the whole picture no larger than this, and zoomed
@@ -63,6 +73,13 @@ export function useImageProcessing(
   const viewSettledAt = useEditorStore((state) => state.viewSettledAt);
   const transformedOriginalUrl = useEditorStore((state) => state.transformedOriginalUrl);
   const setEditor = useEditorStore((state) => state.setEditor);
+  // Ready to render: the photo is shown and the backend has opened it. A
+  // remembered photo is shown before the backend has (it may still be
+  // decoding it), and a render asked for then failed.
+  const backendReady = useEditorStore(
+    (state) => state.loadedPath !== null && state.loadedPath === state.selectedImage?.path,
+  );
+  const isReady = !!selectedImage?.isReady && backendReady;
 
   const activeRightPanel = useUIStore((state) => state.activeRightPanel);
   const appSettings = useSettingsStore((state) => state.appSettings);
@@ -91,6 +108,8 @@ export function useImageProcessing(
   const tileAdjustmentsRef = useRef<Adjustments | null>(null);
   const activeWaveformChannelRef = useRef(activeWaveformChannel);
   activeWaveformChannelRef.current = activeWaveformChannel;
+  // The shown photo's latest adjustments, saved (if changed) on leaving it.
+  const pendingSaveRef = useRef<{ path: string; adjustments: Adjustments } | null>(null);
 
   const selectedImagePathRef = useRef<string | null>(null);
   useEffect(() => {
@@ -227,6 +246,7 @@ export function useImageProcessing(
 
       try {
         const buffer: ArrayBuffer = await invoke(Invokes.ApplyAdjustments, {
+          path: currentPath,
           jsAdjustments: payload,
           isInteractive: dragging,
           targetResolution: targetRes || null,
@@ -296,7 +316,8 @@ export function useImageProcessing(
             const blob = new Blob([imageBuffer], { type: payload.processVersion === 3 ? 'image/png' : 'image/jpeg' });
             const url = URL.createObjectURL(blob);
             await decoded(url);
-            if (jobId < latestRenderedJobIdRef.current) {
+            // Another photo may have opened while this frame decoded.
+            if (currentPath !== selectedImagePathRef.current || jobId < latestRenderedJobIdRef.current) {
               URL.revokeObjectURL(url);
               return;
             }
@@ -398,7 +419,7 @@ export function useImageProcessing(
 
   const applyAdjustments = useCallback(
     (currentAdjustments: Adjustments, dragging: boolean = false, targetRes?: number) => {
-      if (!selectedImage?.isReady || selectedImage.isVideo) return;
+      if (!selectedImage || !isReady || selectedImage.isVideo) return;
 
       if (dragging) {
         pendingApplyRef.current = { adjustments: currentAdjustments, targetRes };
@@ -408,17 +429,17 @@ export function useImageProcessing(
         executeApplyAdjustments(currentAdjustments, false, targetRes);
       }
     },
-    [selectedImage?.isReady, selectedImage?.isVideo, flushPipeline, executeApplyAdjustments],
+    [isReady, selectedImage?.isVideo, flushPipeline, executeApplyAdjustments],
   );
 
   const generateUncroppedPreview = useCallback(
     (currentAdjustments: Adjustments) => {
-      if (!selectedImage?.isReady || selectedImage.isVideo) return;
+      if (!selectedImage || !isReady || selectedImage.isVideo) return;
       invoke(Invokes.GenerateUncroppedPreview, { jsAdjustments: currentAdjustments }).catch((err) =>
         console.error('Failed to generate uncropped preview:', err),
       );
     },
-    [selectedImage?.isReady, selectedImage?.isVideo],
+    [isReady, selectedImage?.isVideo],
   );
 
   // The resolution to render at: by default for the view as zoomed (a zoom
@@ -497,7 +518,7 @@ export function useImageProcessing(
   // short pan needs nothing new, at the size it is shown.
   const requestZoomTile = useCallback(
     async (currentAdjustments: Adjustments) => {
-      if (!selectedImage?.isReady || selectedImage.isVideo || !isZoomedIn()) {
+      if (!selectedImage || !isReady || selectedImage.isVideo || !isZoomedIn()) {
         clearZoomTile();
         return;
       }
@@ -511,7 +532,7 @@ export function useImageProcessing(
       await executeApplyAdjustments(currentAdjustments, false, calculateTargetRes(), aroundView(visible, 0.15));
     },
     [
-      selectedImage?.isReady,
+      isReady,
       selectedImage?.isVideo,
       isZoomedIn,
       calculateROI,
@@ -558,7 +579,7 @@ export function useImageProcessing(
   // key by reference is enough.
   const lastUncroppedRef = useRef<{ path: string; adjustments: Adjustments } | null>(null);
   useEffect(() => {
-    if (activeRightPanel !== Panel.Crop || !selectedImage?.isReady || selectedImage.isVideo) {
+    if (activeRightPanel !== Panel.Crop || !selectedImage || !isReady || selectedImage.isVideo) {
       lastUncroppedRef.current = null;
       return;
     }
@@ -571,10 +592,10 @@ export function useImageProcessing(
       );
     lastUncroppedRef.current = { path: selectedImage.path, adjustments };
     if (changed) generateUncroppedPreview(adjustments);
-  }, [adjustments, activeRightPanel, selectedImage?.isReady, selectedImage?.path, generateUncroppedPreview]);
+  }, [adjustments, activeRightPanel, isReady, selectedImage?.path, generateUncroppedPreview]);
 
   useEffect(() => {
-    if (selectedImage?.isReady && !selectedImage.isVideo && displaySize.width > 0 && !isSliderDragging) {
+    if (selectedImage && isReady && !selectedImage.isVideo && displaySize.width > 0 && !isSliderDragging) {
       let baseRes = calculateTargetRes(true);
       if (originalSize.width > 0 && originalSize.height > 0) {
         const maxRes = Math.max(originalSize.width, originalSize.height);
@@ -594,7 +615,7 @@ export function useImageProcessing(
     displaySize.width,
     displaySize.height,
     calculateTargetRes,
-    selectedImage?.isReady,
+    isReady,
     isSliderDragging,
     requestHiFiZoom,
     originalSize,
@@ -607,7 +628,7 @@ export function useImageProcessing(
   useEffect(() => {
     if (lastOutputColorSpace.current === outputColorSpace) return;
     lastOutputColorSpace.current = outputColorSpace;
-    if (!selectedImage?.isReady || selectedImage.isVideo) return;
+    if (!selectedImage || !isReady || selectedImage.isVideo) return;
     currentOriginalResRef.current = 0;
     setEditor({ transformedOriginalUrl: null });
     const targetRes = calculateTargetRes(true);
@@ -617,8 +638,24 @@ export function useImageProcessing(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [outputColorSpace]);
 
+  // Leaving a photo saves its last edit, which the render below may not
+  // have handed to the save yet (it waits for the picture to settle, and a
+  // switch within that cancels it).
   useEffect(() => {
-    if (!selectedImage?.isReady || selectedImage.isVideo) return;
+    return () => {
+      const pending = pendingSaveRef.current;
+      pendingSaveRef.current = null;
+      if (pending && saveIfChanged(pending.path, pending.adjustments)) debouncedSave.flush();
+    };
+  }, [selectedImage?.path]);
+
+  useEffect(() => {
+    // The editor's adjustments are this photo's once it is shown (before
+    // that they may still be the last photo's).
+    if (selectedImage?.isReady && !selectedImage.isVideo && !previewOverride) {
+      pendingSaveRef.current = { path: selectedImage.path, adjustments };
+    }
+    if (!selectedImage || !isReady || selectedImage.isVideo) return;
 
     if (dragIdleTimer.current) clearTimeout(dragIdleTimer.current);
 
@@ -626,7 +663,7 @@ export function useImageProcessing(
     const renderAdjustments = previewOverride ?? adjustments;
 
     if (isSliderDragging) {
-      if (appSettings?.enableLivePreviews !== false && selectedImage?.isReady && !selectedImage.isVideo) {
+      if (appSettings?.enableLivePreviews !== false && isReady && !selectedImage.isVideo) {
         const visible = isZoomedIn() ? calculateROI() : null;
         if (visible) {
           // Zoomed in: just the view, at a fraction of its size (sharper than
@@ -665,7 +702,7 @@ export function useImageProcessing(
 
         if (previewOverride) return;
 
-        debouncedSave(selectedImage.path, adjustments);
+        saveIfChanged(selectedImage.path, adjustments);
 
         const otherPaths = multiSelectedPaths.filter((p) => p !== selectedImage.path);
         if (otherPaths.length > 0) {
@@ -705,7 +742,7 @@ export function useImageProcessing(
     adjustments,
     previewOverride,
     selectedImage?.path,
-    selectedImage?.isReady,
+    isReady,
     isSliderDragging,
     multiSelectedPaths,
     appSettings?.enableLivePreviews,
@@ -723,7 +760,7 @@ export function useImageProcessing(
   // Panning or zooming came to rest: zoomed out, drop the tile; zoomed in,
   // fetch one unless the one shown already covers the view at full detail.
   useEffect(() => {
-    if (!viewSettledAt || !selectedImage?.isReady || selectedImage.isVideo || isSliderDragging) return;
+    if (!viewSettledAt || !selectedImage || !isReady || selectedImage.isVideo || isSliderDragging) return;
     if (!isZoomedIn()) {
       if (useEditorStore.getState().zoomTile) clearZoomTile();
       return;
@@ -743,7 +780,7 @@ export function useImageProcessing(
   }, [viewSettledAt]);
 
   useEffect(() => {
-    if (showOriginal && selectedImage?.isReady && displaySize.width > 0 && !isSliderDragging) {
+    if (showOriginal && isReady && displaySize.width > 0 && !isSliderDragging) {
       let targetRes = calculateTargetRes();
       if (targetRes > currentOriginalResRef.current) {
         requestHiFiOriginalZoom(adjustments, targetRes);
@@ -758,7 +795,7 @@ export function useImageProcessing(
     displaySize.width,
     displaySize.height,
     calculateTargetRes,
-    selectedImage?.isReady,
+    isReady,
     isSliderDragging,
     requestHiFiOriginalZoom,
     originalSize,
@@ -767,7 +804,7 @@ export function useImageProcessing(
   useEffect(() => {
     let isEffectActive = true;
     const generate = async () => {
-      if (showOriginal && selectedImage?.path && !transformedOriginalUrl) {
+      if (showOriginal && isReady && selectedImage?.path && !transformedOriginalUrl) {
         try {
           const targetRes = calculateTargetRes();
           const base64Data: string = await invoke('generate_original_transformed_preview', {
@@ -790,7 +827,7 @@ export function useImageProcessing(
     return () => {
       isEffectActive = false;
     };
-  }, [showOriginal, selectedImage?.path, adjustments, transformedOriginalUrl, calculateTargetRes, setEditor]);
+  }, [showOriginal, isReady, selectedImage?.path, adjustments, transformedOriginalUrl, calculateTargetRes, setEditor]);
 
   return {
     applyAdjustments,

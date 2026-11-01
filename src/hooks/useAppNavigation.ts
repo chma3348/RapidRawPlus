@@ -4,13 +4,14 @@ import { open } from '@tauri-apps/plugin-dialog';
 import { homeDir } from '@tauri-apps/api/path';
 import { toast } from 'react-toastify';
 import { useLibraryStore } from '../store/useLibraryStore';
-import { useEditorStore } from '../store/useEditorStore';
+import { adjustmentsUnsaved, rememberSavedAdjustments, useEditorStore } from '../store/useEditorStore';
 import { useUIStore } from '../store/useUIStore';
 import { useProcessStore } from '../store/useProcessStore';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { Invokes, LibraryViewMode, ImageFile } from '../components/ui/AppProperties';
 import { isVideoPath } from '../utils/media';
 import { INITIAL_ADJUSTMENTS, normalizeLoadedAdjustments } from '../utils/adjustments';
+import { currentColorEngine } from '../utils/currentColorEngine';
 import { globalImageCache } from '../utils/ImageLRUCache';
 import { debouncedSave, debouncedSetHistory } from './useEditorActions';
 import { offerAdobeImport } from '../components/modals/AdobeImportModal';
@@ -30,6 +31,9 @@ export interface AppNavigationProps {
     prevAdjustmentsRef: React.RefObject<any>;
   };
 }
+
+// Counts photo selections, so a selection can tell it has been overtaken.
+let latestSelection = 0;
 
 export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationProps) {
   const {
@@ -77,8 +81,12 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
 
     const lastActivePath = selectedImage?.path ?? null;
 
+    // A selection still opening must not bring the editor back.
+    latestSelection += 1;
+
     setEditor({
       hasRenderedFirstFrame: false,
+      loadedPath: null,
       selectedImage: null,
       finalPreviewUrl: null,
       uncroppedAdjustedPreviewUrl: null,
@@ -109,11 +117,17 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
 
   const handleImageSelect = useCallback(
     async (path: string) => {
-      const { selectedImage, isSliderDragging, resetHistory, setEditor } = useEditorStore.getState();
+      const { selectedImage, resetHistory, setEditor } = useEditorStore.getState();
       const { setLibrary } = useLibraryStore.getState();
       const { setUI } = useUIStore.getState();
 
       if (selectedImage?.path === path) return;
+
+      // This selection is the latest from here on: one made before it that
+      // resumes after an await below (arrowing quickly through photos) must
+      // not take the editor back.
+      const request = ++latestSelection;
+      const superseded = () => request !== latestSelection;
 
       debouncedSave.flush();
       debouncedSetHistory.cancel();
@@ -159,6 +173,7 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
       const isCachedInBackend = isFrontendCached
         ? await invoke<boolean>('is_image_cached', { path }).catch(() => false)
         : false;
+      if (superseded()) return;
 
       const hasDifferentResolution =
         cached &&
@@ -211,34 +226,51 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
         isBackendReadyRef.current = false;
         currentResRef.current = Infinity;
 
+        // The picture shown is remembered, but the backend opens the photo
+        // again: renders wait until it has (loadedPath), and it forgets the
+        // AI patches it was sent, so they are sent again in full.
+        useEditorStore.getState().patchesSentToBackend.clear();
+        setEditor({ loadedPath: null });
+
         invoke(Invokes.LoadImage, { path })
           .then((_result: any) => {
-            if (selectedImagePathRef.current !== path) return;
+            if (superseded() || selectedImagePathRef.current !== path) return;
             isBackendReadyRef.current = true;
             currentResRef.current = 0;
-            setEditor({ originalSize: { width: _result.width, height: _result.height } });
+            setEditor({ originalSize: { width: _result.width, height: _result.height }, loadedPath: path });
           })
           .catch((err: any) => {
-            if (String(err).includes('cancelled')) return;
+            if (String(err).includes('cancelled') || superseded()) return;
             console.error('Background load_image failed on cache hit:', err);
             isBackendReadyRef.current = true;
             currentResRef.current = 0;
+            // Let renders try, so the editor shows why it cannot.
+            setEditor({ loadedPath: path });
           });
 
         invoke(Invokes.LoadMetadata, { path })
           .then((metadata: any) => {
-            if (selectedImagePathRef.current !== path) return;
+            if (superseded() || selectedImagePathRef.current !== path) return;
             let freshAdjustments: any;
             if (metadata.adjustments && !metadata.adjustments.is_null) {
               freshAdjustments = normalizeLoadedAdjustments(metadata.adjustments);
             } else {
               freshAdjustments = { ...INITIAL_ADJUSTMENTS };
             }
-            if (!isSliderDragging && JSON.stringify(cached.adjustments) !== JSON.stringify(freshAdjustments)) {
+            // Read now, not before the await: the user may have started
+            // editing meanwhile. Edits the sidecar does not hold yet are
+            // newer than it, and are kept; the sidecar replaces only edits
+            // it already held (it changed elsewhere since: a paste to a
+            // selection, another app).
+            const { adjustments: current, isSliderDragging } = useEditorStore.getState();
+            if (isSliderDragging || adjustmentsUnsaved(path, current)) return;
+            if (JSON.stringify(current) !== JSON.stringify(currentColorEngine(freshAdjustments))) {
               setEditor({ adjustments: freshAdjustments });
               resetHistory(freshAdjustments);
-              prevAdjustmentsRef.current = { path, adjustments: freshAdjustments };
-              globalImageCache.set(path, { ...cached, adjustments: freshAdjustments });
+              const loaded = useEditorStore.getState().adjustments;
+              rememberSavedAdjustments(path, loaded);
+              prevAdjustmentsRef.current = { path, adjustments: loaded };
+              globalImageCache.set(path, { ...cached, adjustments: loaded });
             }
           })
           .catch((err) => console.error('Failed background metadata sync on cache hit:', err));
@@ -249,6 +281,7 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
       isBackendReadyRef.current = true;
 
       setEditor({
+        loadedPath: null,
         selectedImage: {
           exif: null,
           height: 0,

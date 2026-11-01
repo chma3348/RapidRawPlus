@@ -1,7 +1,7 @@
 import { useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'react-toastify';
-import { useEditorStore } from '../store/useEditorStore';
+import { rememberSavedAdjustments, useEditorStore } from '../store/useEditorStore';
 import { useLibraryStore } from '../store/useLibraryStore';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { Invokes } from '../components/ui/AppProperties';
@@ -48,6 +48,9 @@ export function useImageLoader(cachedEditStateRef: React.RefObject<any>) {
 
           setEditor({ adjustments: initialAdjusts });
           resetHistory(initialAdjusts);
+          // What the sidecar holds, as the editor now holds it: viewing the
+          // photo does not save it.
+          rememberSavedAdjustments(selectedImage.path, useEditorStore.getState().adjustments);
         } catch (err) {
           console.error('Failed to load metadata early:', err);
         }
@@ -59,7 +62,7 @@ export function useImageLoader(cachedEditStateRef: React.RefObject<any>) {
           if (!isEffectActive) return;
 
           const { width, height } = loadImageResult;
-          setEditor({ originalSize: { width, height } });
+          setEditor({ originalSize: { width, height }, loadedPath: selectedImage.path });
 
           if (appSettings?.editorPreviewResolution) {
             const maxSize = appSettings.editorPreviewResolution;
