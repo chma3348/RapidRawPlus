@@ -133,10 +133,6 @@ export function adjustmentsUnsaved(path: string, adjustments: Adjustments): bool
   return JSON.stringify(saved) !== JSON.stringify(adjustments);
 }
 
-export function hasSavedAdjustments(path: string): boolean {
-  return savedAdjustments.has(path);
-}
-
 export const useEditorStore = create<EditorState>((set) => ({
   selectedImage: null,
   adjustments: INITIAL_ADJUSTMENTS,
