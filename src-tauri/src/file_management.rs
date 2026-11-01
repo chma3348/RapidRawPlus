@@ -321,47 +321,97 @@ pub async fn update_exif_fields(
         .unwrap_or(true)
         .then(|| settings.create_xmp_if_missing.unwrap_or(false));
     tauri::async_runtime::spawn_blocking(move || {
-        paths.par_iter().for_each(|path| {
-            let original_path = Path::new(&path);
-            let primary_path = crate::exif_processing::get_primary_sidecar_path(original_path);
-            let temp_metadata = crate::exif_processing::load_sidecar(&primary_path);
+        let failures: Vec<String> = paths
+            .par_iter()
+            .filter_map(|path| {
+                let original_path = Path::new(&path);
+                let primary_path = crate::exif_processing::get_primary_sidecar_path(original_path);
+                crate::exif_processing::modify_sidecar(&primary_path, |metadata| {
+                    let mut exif_data = metadata.exif.take().unwrap_or_else(|| {
+                        if let Some(existing) =
+                            crate::exif_processing::read_exif_sidecar(original_path)
+                        {
+                            existing
+                        } else if let Ok(mmap) = read_file_mapped(original_path) {
+                            crate::exif_processing::read_exif_data_from_bytes(path, &mmap)
+                        } else if let Ok(bytes) = fs::read(original_path) {
+                            crate::exif_processing::read_exif_data_from_bytes(path, &bytes)
+                        } else {
+                            HashMap::new()
+                        }
+                    });
 
-            let mut exif_data = temp_metadata.exif.unwrap_or_else(|| {
-                if let Some(existing) = crate::exif_processing::read_exif_sidecar(original_path) {
-                    existing
-                } else if let Ok(mmap) = read_file_mapped(original_path) {
-                    crate::exif_processing::read_exif_data_from_bytes(path, &mmap)
-                } else if let Ok(bytes) = fs::read(original_path) {
-                    crate::exif_processing::read_exif_data_from_bytes(path, &bytes)
-                } else {
-                    HashMap::new()
-                }
-            });
+                    for (k, v) in &updates {
+                        let trimmed = v.trim();
+                        if trimmed.is_empty() {
+                            exif_data.remove(k);
+                        } else {
+                            exif_data.insert(k.clone(), trimmed.to_string());
+                        }
+                    }
 
-            for (k, v) in &updates {
-                let trimmed = v.trim();
-                if trimmed.is_empty() {
-                    exif_data.remove(k);
-                } else {
-                    exif_data.insert(k.clone(), trimmed.to_string());
-                }
-            }
-
-            let mut final_metadata = crate::exif_processing::load_sidecar(&primary_path);
-
-            final_metadata.exif = Some(exif_data);
-            // Caption, author and copyright are shared through XMP.
-            if let Some(create_if_missing) = xmp {
-                crate::xmp::push(path, &mut final_metadata, create_if_missing);
-            }
-            if let Ok(json) = serde_json::to_string_pretty(&final_metadata) {
-                let _ = std::fs::write(&primary_path, json);
-            }
-        });
-        Ok(())
+                    metadata.exif = Some(exif_data);
+                    // Caption, author and copyright are shared through XMP.
+                    if let Some(create_if_missing) = xmp {
+                        crate::xmp::push(path, metadata, create_if_missing);
+                    }
+                    true
+                })
+                .err()
+            })
+            .collect();
+        sidecar_failures(failures)
     })
     .await
     .map_err(|e| format!("Task failed: {}", e))?
+}
+
+/// A batch's result: fine, or the sidecars that could not be updated
+/// (left exactly as they were).
+fn sidecar_failures(failures: Vec<String>) -> Result<(), String> {
+    match failures.as_slice() {
+        [] => Ok(()),
+        [only] => Err(only.clone()),
+        [first, ..] => Err(format!(
+            "{} photos were not changed. {first}",
+            failures.len()
+        )),
+    }
+}
+
+/// A photo's sidecar for a listing, with another program's XMP changes
+/// taken in (and saved) when `pull_xmp`. One that cannot be read shows as
+/// unedited and is left alone on disk.
+fn listed_sidecar(path_str: &str, sidecar_path: &Path, pull_xmp: bool) -> ImageMetadata {
+    if !pull_xmp {
+        return crate::exif_processing::load_sidecar(sidecar_path);
+    }
+    crate::exif_processing::modify_sidecar(sidecar_path, |metadata| {
+        crate::xmp::pull(path_str, metadata)
+    })
+    .unwrap_or_else(|e| {
+        log::warn!("{e}");
+        ImageMetadata::default()
+    })
+}
+
+/// A sidecar file's name split into the photo it belongs to and, for a
+/// virtual copy (`IMG.CR3.a1b2c3.dri`), the copy's id. `None` when the
+/// name is not a sidecar's.
+fn split_sidecar_name(file_name: &str) -> Option<(&str, Option<&str>)> {
+    let base = file_name.strip_suffix(".dri")?;
+    if base.is_empty() {
+        return None;
+    }
+    // A copy id is six hex digits after a dot, with a photo name before.
+    if let Some((photo, id)) = base.rsplit_once('.')
+        && !photo.is_empty()
+        && id.len() == 6
+        && id.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
+    {
+        return Some((photo, Some(id)));
+    }
+    Some((base, None))
 }
 
 // Off the main thread: reading a folder kept by a cloud service can wait on
@@ -387,24 +437,14 @@ pub fn list_images_in_dir(
             .unwrap_or_else(|os| os.to_string_lossy().into_owned());
 
         if file_name.ends_with(".dri") {
-            let base = &file_name[..file_name.len() - 7];
-
-            let (source_filename, copy_id) =
-                if base.len() >= 7 && base.as_bytes()[base.len() - 7] == b'.' {
-                    let id = &base[base.len() - 6..];
-                    if id.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')) {
-                        (&base[..base.len() - 7], Some(id.to_string()))
-                    } else {
-                        (base, None)
-                    }
-                } else {
-                    (base, None)
-                };
-
-            sidecars_by_filename
-                .entry(source_filename.to_string())
-                .or_default()
-                .push(copy_id);
+            // The photo itself is always listed (`None`), with or without a
+            // sidecar of its own; each copy's sidecar adds one entry.
+            if let Some((source_filename, Some(copy_id))) = split_sidecar_name(&file_name) {
+                sidecars_by_filename
+                    .entry(source_filename.to_string())
+                    .or_insert_with(|| vec![None])
+                    .push(Some(copy_id.to_string()));
+            }
         } else if is_supported_media_file(&file_name) {
             images.push((file_name, entry_path));
         }
@@ -446,15 +486,11 @@ pub fn list_images_in_dir(
                 let sidecar_path = path_buf.with_file_name(sidecar_filename);
 
                 let (is_edited, tags, rating, derived_from, derived_kind, flag) = {
-                    let mut metadata = crate::exif_processing::load_sidecar(&sidecar_path);
-
-                    if enable_xmp_sync
-                        && !is_virtual_copy
-                        && crate::xmp::pull(&path_str, &mut metadata)
-                        && let Ok(json) = serde_json::to_string_pretty(&metadata)
-                    {
-                        let _ = fs::write(&sidecar_path, json);
-                    }
+                    let metadata = listed_sidecar(
+                        &path_str,
+                        &sidecar_path,
+                        enable_xmp_sync && !is_virtual_copy,
+                    );
 
                     let is_raw = crate::formats::is_raw_file(&path_str);
                     let tm_override =
@@ -535,24 +571,15 @@ pub fn list_images_recursive(
         }
 
         let file_name = entry_path.file_name().unwrap_or_default().to_string_lossy();
-        if let Some(base) = file_name.strip_suffix(".dri") {
-            let (source_filename, copy_id) =
-                if base.len() >= 7 && base.as_bytes()[base.len() - 7] == b'.' {
-                    let id = &base[base.len() - 6..];
-                    if id.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')) {
-                        (&base[..base.len() - 7], Some(id.to_string()))
-                    } else {
-                        (base, None)
-                    }
-                } else {
-                    (base, None)
-                };
-
-            if let Some(parent) = entry_path.parent() {
+        if file_name.ends_with(".dri") {
+            // As in list_images_in_dir: the photo itself, then its copies.
+            if let Some((source_filename, Some(copy_id))) = split_sidecar_name(&file_name)
+                && let Some(parent) = entry_path.parent()
+            {
                 sidecars_by_path
                     .entry(parent.join(source_filename))
-                    .or_default()
-                    .push(copy_id);
+                    .or_insert_with(|| vec![None])
+                    .push(Some(copy_id.to_string()));
             }
         } else if is_supported_media_file(entry_path.to_string_lossy().as_ref()) {
             images.push(entry_path.to_path_buf());
@@ -600,15 +627,11 @@ pub fn list_images_recursive(
                 let sidecar_path = path_buf.with_file_name(sidecar_filename);
 
                 let (is_edited, tags, rating, derived_from, derived_kind, flag) = {
-                    let mut metadata = crate::exif_processing::load_sidecar(&sidecar_path);
-
-                    if enable_xmp_sync
-                        && !is_virtual_copy
-                        && crate::xmp::pull(&path_str, &mut metadata)
-                        && let Ok(json) = serde_json::to_string_pretty(&metadata)
-                    {
-                        let _ = fs::write(&sidecar_path, json);
-                    }
+                    let metadata = listed_sidecar(
+                        &path_str,
+                        &sidecar_path,
+                        enable_xmp_sync && !is_virtual_copy,
+                    );
 
                     let is_raw = crate::formats::is_raw_file(&path_str);
                     let tm_override =
@@ -879,14 +902,7 @@ pub fn get_album_images(
             let is_virtual_copy = virtual_path.contains("?vc=");
 
             let (is_edited, tags, rating, derived_from, derived_kind, flag) = {
-                let mut metadata = crate::exif_processing::load_sidecar(&sidecar_path);
-
-                if enable_xmp_sync
-                    && crate::xmp::pull(&virtual_path, &mut metadata)
-                    && let Ok(json) = serde_json::to_string_pretty(&metadata)
-                {
-                    let _ = fs::write(&sidecar_path, json);
-                }
+                let metadata = listed_sidecar(&virtual_path, &sidecar_path, enable_xmp_sync);
 
                 let is_raw = crate::formats::is_raw_file(&source_path);
                 let tm_override =
@@ -1866,8 +1882,9 @@ pub fn duplicate_file(
 }
 
 /// The files that belong to `image` and travel with it: its app sidecar,
-/// its virtual copies' sidecars, the legacy `.rrexif`, and its XMP when it
-/// owns one (a JPEG never takes its RAW twin's `IMG.xmp`).
+/// its virtual copies' sidecars, the legacy `.rrexif`, a cloud photo's
+/// smart preview (`.dripreview`), and its XMP when it owns one (a JPEG
+/// never takes its RAW twin's `IMG.xmp`, see `xmp::sidecar_for`).
 pub fn companion_files(image: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     let (Some(parent), Some(name)) = (image.parent(), image.file_name()) else {
@@ -1875,13 +1892,21 @@ pub fn companion_files(image: &Path) -> Vec<PathBuf> {
     };
     let name = name.to_string_lossy().into_owned();
     let primary = format!("{name}.dri");
-    let copies_prefix = format!("{name}.");
+    let legacy_exif = format!("{name}.rrexif");
+    let smart_preview = format!("{name}.dripreview");
     if let Ok(entries) = fs::read_dir(parent) {
         for entry in entries.filter_map(Result::ok) {
             let entry_name = entry.file_name().to_string_lossy().into_owned();
+            // A copy's sidecar is exactly `{name}.{id}.dri`, so another
+            // photo named `{name}.png` never has its sidecar taken.
+            let is_copy = matches!(
+                split_sidecar_name(&entry_name),
+                Some((photo, Some(_))) if photo == name
+            );
             let is_sidecar = entry_name == primary
-                || (entry_name.starts_with(&copies_prefix) && entry_name.ends_with(".dri"))
-                || entry_name == format!("{name}.rrexif");
+                || is_copy
+                || entry_name == legacy_exif
+                || entry_name == smart_preview;
             if is_sidecar && entry.path().is_file() {
                 found.push(entry.path());
             }
@@ -1994,12 +2019,15 @@ fn relink_versions(old: &Path, new: &Path) {
         if path.extension().is_none_or(|e| e != "dri") {
             continue;
         }
-        let mut meta = crate::exif_processing::load_sidecar(&path);
-        if meta.derived_from.as_deref() == Some(&*old_name) {
-            meta.derived_from = Some(new_name.to_string());
-            if let Ok(json) = serde_json::to_string_pretty(&meta) {
-                let _ = fs::write(&path, json);
+        let relinked = crate::exif_processing::modify_sidecar(&path, |meta| {
+            if meta.derived_from.as_deref() != Some(&*old_name) {
+                return false;
             }
+            meta.derived_from = Some(new_name.to_string());
+            true
+        });
+        if let Err(e) = relinked {
+            log::warn!("{e}");
         }
     }
 }
@@ -2076,69 +2104,124 @@ pub fn move_files(
         .map(|p| parse_virtual_path(p).0)
         .collect();
 
-    let mut all_files_to_trash = Vec::new();
-    let mut renames = HashMap::new();
-    let mut actions = Vec::new();
-
-    for source_image_path in unique_source_images {
+    // Everything is planned and checked before anything moves.
+    let mut moves = Vec::new();
+    let mut photo_moves = Vec::new();
+    for source_image_path in &unique_source_images {
         let source_parent = source_image_path
             .parent()
             .ok_or("Could not get parent directory")?;
         if source_parent == dest_path {
             return Err("Cannot move files into the same folder they are already in.".to_string());
         }
-
-        let files_to_move = find_all_associated_files(&source_image_path)?;
-        let dest_image_path = dest_path.join(source_image_path.file_name().unwrap());
-        let targets: Vec<PathBuf> = files_to_move
-            .iter()
-            .map(|f| companion_target(f, &source_image_path, &dest_image_path))
-            .collect();
-
-        if let Some(clash) = targets.iter().find(|t| t.exists()) {
-            return Err(format!(
-                "File already exists at destination: {}",
-                clash.display()
-            ));
+        let file_name = source_image_path
+            .file_name()
+            .ok_or("Could not get file name")?;
+        let dest_image_path = dest_path.join(file_name);
+        for file in find_all_associated_files(source_image_path)? {
+            let target = companion_target(&file, source_image_path, &dest_image_path);
+            moves.push((file, target));
         }
-
-        for (from, to) in files_to_move.iter().zip(&targets) {
-            if crate::journal::move_or_copy(from, to)? {
-                all_files_to_trash.push(from.clone());
-            }
-            actions.push(crate::journal::Action::Moved {
-                from: from.clone(),
-                to: to.clone(),
-            });
-        }
-
-        renames.insert(
-            source_image_path.to_string_lossy().into_owned(),
-            dest_image_path.to_string_lossy().into_owned(),
-        );
+        photo_moves.push((source_image_path.clone(), dest_image_path));
     }
+    check_move_targets(&moves)?;
+
+    let label = format!(
+        "Move {} to {}",
+        photos(photo_moves.len()),
+        folder_name(dest_path)
+    );
+    let done = crate::journal::move_all(&moves)
+        .map_err(|(error, stranded)| record_partial(&label, &stranded, &app_handle, error))?;
 
     // Originals copied across volumes go to the Trash once everything has
     // arrived. Undo brings the moved files back, so these are not journalled.
-    if !all_files_to_trash.is_empty() {
-        crate::journal::trash_all(&all_files_to_trash)?;
-    }
+    let copied: Vec<PathBuf> = done
+        .iter()
+        .filter(|d| d.copied)
+        .map(|d| d.from.clone())
+        .collect();
+    let (_, trash_problem) = crate::journal::trash_each(&copied);
 
     crate::journal::record(
-        format!(
-            "Move {} to {}",
-            photos(renames.len()),
-            folder_name(dest_path)
-        ),
-        actions,
+        label,
+        done.iter().map(crate::journal::Done::action).collect(),
     );
 
+    let renames: HashMap<String, String> = photo_moves
+        .iter()
+        .map(|(from, to)| {
+            (
+                from.to_string_lossy().into_owned(),
+                to.to_string_lossy().into_owned(),
+            )
+        })
+        .collect();
     sync_album_path_changes(&app_handle, Some(&renames), None, None);
 
+    match trash_problem {
+        None => Ok(()),
+        Some(problem) => Err(format!(
+            "The photos were copied to {}, but the originals stayed. {problem}",
+            folder_name(dest_path)
+        )),
+    }
+}
+
+/// Check a batch of moves or renames before any happens: no file may land
+/// on one already there, or two on the same name (compared ignoring case,
+/// as the Mac's drives do), so nothing is ever overwritten.
+fn check_move_targets(moves: &[(PathBuf, PathBuf)]) -> Result<(), String> {
+    let mut wanted = HashSet::new();
+    for (from, to) in moves {
+        if to != from && to.exists() {
+            return Err(format!("A file named {} already exists.", to.display()));
+        }
+        if !wanted.insert(to.to_string_lossy().to_lowercase()) {
+            return Err(format!("Two files would both be named {}.", to.display()));
+        }
+    }
     Ok(())
 }
 
-#[tauri::command]
+/// A batch move or rename failed part-way, and `stranded` could not be put
+/// back: record them so Undo can, and point albums at the photos among
+/// them. Returns the message to show.
+fn record_partial(
+    label: &str,
+    stranded: &[crate::journal::Done],
+    app_handle: &AppHandle,
+    error: String,
+) -> String {
+    if stranded.is_empty() {
+        return format!("{error}. Nothing was changed.");
+    }
+    crate::journal::record(
+        format!("{label} (incomplete)"),
+        stranded.iter().map(crate::journal::Done::action).collect(),
+    );
+    let renames: HashMap<String, String> = stranded
+        .iter()
+        .filter(|d| !d.copied && is_supported_media_file(&d.to))
+        .map(|d| {
+            (
+                d.from.to_string_lossy().into_owned(),
+                d.to.to_string_lossy().into_owned(),
+            )
+        })
+        .collect();
+    if !renames.is_empty() {
+        sync_album_path_changes(app_handle, Some(&renames), None, None);
+    }
+    format!(
+        "{error}. {} file(s) could not be put back; Undo can try again.",
+        stranded.len()
+    )
+}
+
+// Off the main thread: the save renders an interpretation snapshot, and the
+// window must not wait for it.
+#[tauri::command(async)]
 pub fn save_metadata_and_update_thumbnail(
     path: String,
     adjustments: Value,
@@ -2147,7 +2230,9 @@ pub fn save_metadata_and_update_thumbnail(
 ) -> Result<(), String> {
     let (_, sidecar_path) = parse_virtual_path(&path);
 
-    let mut metadata = crate::exif_processing::load_sidecar(&sidecar_path);
+    // Refuse before the slow work below if the sidecar is unreadable: the
+    // save would otherwise replace everything else in it with defaults.
+    let metadata = crate::exif_processing::try_load_sidecar(&sidecar_path)?;
 
     let mut final_adjustments = crate::color_engine::migration::normalize(&adjustments)
         .map(|edits| edits.into_owned())
@@ -2177,18 +2262,20 @@ pub fn save_metadata_and_update_thumbnail(
             }
         };
     }
-    metadata.adjustments = final_adjustments;
+    let xmp_sync = load_settings(app_handle.clone())
+        .ok()
+        .filter(|settings| settings.enable_xmp_sync.unwrap_or(true))
+        .map(|settings| settings.create_xmp_if_missing.unwrap_or(false));
 
-    // XMP first: writing it records its time in the sidecar saved below.
-    if let Ok(settings) = load_settings(app_handle.clone())
-        && settings.enable_xmp_sync.unwrap_or(true)
-    {
-        let create_if_missing = settings.create_xmp_if_missing.unwrap_or(false);
-        crate::xmp::push(&path, &mut metadata, create_if_missing);
-    }
-
-    let json_string = serde_json::to_string_pretty(&metadata).map_err(|e| e.to_string())?;
-    std::fs::write(&sidecar_path, json_string).map_err(|e| e.to_string())?;
+    // Only the edits are replaced: a rating or label saved meanwhile stays.
+    crate::exif_processing::modify_sidecar(&sidecar_path, |metadata| {
+        metadata.adjustments = final_adjustments;
+        // XMP first: writing it records its time in the sidecar saved here.
+        if let Some(create_if_missing) = xmp_sync {
+            crate::xmp::push(&path, metadata, create_if_missing);
+        }
+        true
+    })?;
 
     let gpu_context = gpu_processing::get_or_init_gpu_context(&state, &app_handle).ok();
     let app_handle_clone = app_handle.clone();
@@ -2288,39 +2375,39 @@ pub async fn apply_adjustments_to_paths(
         paths.par_iter().for_each(|path| {
             let (_, sidecar_path) = parse_virtual_path(path);
 
-            let mut existing_metadata = crate::exif_processing::load_sidecar(&sidecar_path);
+            let pasted = crate::exif_processing::modify_sidecar(&sidecar_path, |existing| {
+                let mut new_adjustments = std::mem::take(&mut existing.adjustments);
+                if new_adjustments.is_null() {
+                    new_adjustments = serde_json::json!({});
+                }
 
-            let mut new_adjustments = existing_metadata.adjustments;
-            if new_adjustments.is_null() {
-                new_adjustments = serde_json::json!({});
-            }
-
-            if let (Some(new_map), Some(pasted_map)) =
-                (new_adjustments.as_object_mut(), adjustments.as_object())
-            {
-                for (k, v) in pasted_map {
-                    if k == "v3" {
-                        merge_pasted_v3(new_map.entry("v3").or_insert(Value::Null), v);
-                    } else {
-                        new_map.insert(k.clone(), v.clone());
+                if let (Some(new_map), Some(pasted_map)) =
+                    (new_adjustments.as_object_mut(), adjustments.as_object())
+                {
+                    for (k, v) in pasted_map {
+                        if k == "v3" {
+                            merge_pasted_v3(new_map.entry("v3").or_insert(Value::Null), v);
+                        } else {
+                            new_map.insert(k.clone(), v.clone());
+                        }
                     }
                 }
-            }
 
-            resolve_lens_params_in_adjustments(
-                &mut new_adjustments,
-                &existing_metadata.exif,
-                lens_db.as_deref(),
-            );
+                resolve_lens_params_in_adjustments(
+                    &mut new_adjustments,
+                    &existing.exif,
+                    lens_db.as_deref(),
+                );
 
-            existing_metadata.adjustments = new_adjustments;
+                existing.adjustments = new_adjustments;
 
-            if enable_xmp_sync {
-                crate::xmp::push(path, &mut existing_metadata, create_xmp_if_missing);
-            }
-
-            if let Ok(json_string) = serde_json::to_string_pretty(&existing_metadata) {
-                let _ = std::fs::write(&sidecar_path, json_string);
+                if enable_xmp_sync {
+                    crate::xmp::push(path, existing, create_xmp_if_missing);
+                }
+                true
+            });
+            if let Err(e) = pasted {
+                log::warn!("Not pasting onto {path}: {e}");
             }
         });
 
@@ -2381,16 +2468,15 @@ pub async fn reset_adjustments_for_paths(
         paths.par_iter().for_each(|path| {
             let (_, sidecar_path) = parse_virtual_path(path);
 
-            let mut existing_metadata = crate::exif_processing::load_sidecar(&sidecar_path);
-
-            existing_metadata.adjustments = serde_json::json!({});
-
-            if enable_xmp_sync {
-                crate::xmp::push(path, &mut existing_metadata, create_xmp_if_missing);
-            }
-
-            if let Ok(json_string) = serde_json::to_string_pretty(&existing_metadata) {
-                let _ = std::fs::write(&sidecar_path, json_string);
+            let reset = crate::exif_processing::modify_sidecar(&sidecar_path, |existing| {
+                existing.adjustments = serde_json::json!({});
+                if enable_xmp_sync {
+                    crate::xmp::push(path, existing, create_xmp_if_missing);
+                }
+                true
+            });
+            if let Err(e) = reset {
+                log::warn!("Not resetting {path}: {e}");
             }
         });
 
@@ -2485,42 +2571,39 @@ pub async fn apply_auto_adjustments_to_paths(
                 let auto_results = perform_auto_analysis(&image);
                 let auto_adjustments_json = auto_results_to_json(&auto_results);
 
-                let mut existing_metadata = crate::exif_processing::load_sidecar(&sidecar_path);
+                crate::exif_processing::modify_sidecar(&sidecar_path, |existing_metadata| {
+                    if existing_metadata.adjustments.is_null() {
+                        existing_metadata.adjustments = serde_json::json!({});
+                    }
 
-                if existing_metadata.adjustments.is_null() {
-                    existing_metadata.adjustments = serde_json::json!({});
-                }
-
-                if let (Some(existing_map), Some(auto_map)) = (
-                    existing_metadata.adjustments.as_object_mut(),
-                    auto_adjustments_json.as_object(),
-                ) {
-                    for (k, v) in auto_map {
-                        if k == "sectionVisibility" {
-                            if let Some(existing_vis_val) = existing_map.get_mut(k) {
-                                if let (Some(existing_vis), Some(auto_vis)) =
-                                    (existing_vis_val.as_object_mut(), v.as_object())
-                                {
-                                    for (vis_k, vis_v) in auto_vis {
-                                        existing_vis.insert(vis_k.clone(), vis_v.clone());
+                    if let (Some(existing_map), Some(auto_map)) = (
+                        existing_metadata.adjustments.as_object_mut(),
+                        auto_adjustments_json.as_object(),
+                    ) {
+                        for (k, v) in auto_map {
+                            if k == "sectionVisibility" {
+                                if let Some(existing_vis_val) = existing_map.get_mut(k) {
+                                    if let (Some(existing_vis), Some(auto_vis)) =
+                                        (existing_vis_val.as_object_mut(), v.as_object())
+                                    {
+                                        for (vis_k, vis_v) in auto_vis {
+                                            existing_vis.insert(vis_k.clone(), vis_v.clone());
+                                        }
                                     }
+                                } else {
+                                    existing_map.insert(k.clone(), v.clone());
                                 }
                             } else {
                                 existing_map.insert(k.clone(), v.clone());
                             }
-                        } else {
-                            existing_map.insert(k.clone(), v.clone());
                         }
                     }
-                }
 
-                if enable_xmp_sync {
-                    crate::xmp::push(path, &mut existing_metadata, create_xmp_if_missing);
-                }
-
-                if let Ok(json_string) = serde_json::to_string_pretty(&existing_metadata) {
-                    let _ = std::fs::write(&sidecar_path, json_string);
-                }
+                    if enable_xmp_sync {
+                        crate::xmp::push(path, existing_metadata, create_xmp_if_missing);
+                    }
+                    true
+                })?;
                 Ok(image)
             })()
             .map_err(|e| eprintln!("Failed to apply auto adjustments to {}: {}", path, e))
@@ -2559,43 +2642,41 @@ pub fn set_color_label_for_paths(
     let enable_xmp_sync = settings.enable_xmp_sync.unwrap_or(true);
     let create_xmp_if_missing = settings.create_xmp_if_missing.unwrap_or(false);
 
-    paths.par_iter().for_each(|path| {
-        let (_, sidecar_path) = parse_virtual_path(path);
+    let failures: Vec<String> = paths
+        .par_iter()
+        .filter_map(|path| {
+            let (_, sidecar_path) = parse_virtual_path(path);
+            crate::exif_processing::modify_sidecar(&sidecar_path, |metadata| {
+                let mut tags = metadata.tags.take().unwrap_or_default();
+                tags.retain(|tag| !tag.starts_with(COLOR_TAG_PREFIX));
 
-        let mut metadata = crate::exif_processing::load_sidecar(&sidecar_path);
+                if let Some(c) = &color
+                    && !c.is_empty()
+                {
+                    tags.push(format!("{}{}", COLOR_TAG_PREFIX, c));
+                }
 
-        let mut tags = metadata.tags.unwrap_or_default();
-        tags.retain(|tag| !tag.starts_with(COLOR_TAG_PREFIX));
+                if !tags.is_empty() {
+                    metadata.tags = Some(tags);
+                }
 
-        if let Some(c) = &color
-            && !c.is_empty()
-        {
-            tags.push(format!("{}{}", COLOR_TAG_PREFIX, c));
-        }
+                if !path.contains("?vc=") {
+                    crate::finder_tags::set_color_label(
+                        Path::new(path),
+                        color.as_deref().filter(|c| !c.is_empty()),
+                    );
+                }
 
-        if tags.is_empty() {
-            metadata.tags = None;
-        } else {
-            metadata.tags = Some(tags);
-        }
+                if enable_xmp_sync {
+                    crate::xmp::push(path, metadata, create_xmp_if_missing);
+                }
+                true
+            })
+            .err()
+        })
+        .collect();
 
-        if !path.contains("?vc=") {
-            crate::finder_tags::set_color_label(
-                Path::new(path),
-                color.as_deref().filter(|c| !c.is_empty()),
-            );
-        }
-
-        if enable_xmp_sync {
-            crate::xmp::push(path, &mut metadata, create_xmp_if_missing);
-        }
-
-        if let Ok(json_string) = serde_json::to_string_pretty(&metadata) {
-            let _ = std::fs::write(&sidecar_path, json_string);
-        }
-    });
-
-    Ok(())
+    sidecar_failures(failures)
 }
 
 #[tauri::command]
@@ -2608,23 +2689,22 @@ pub fn set_rating_for_paths(
     let enable_xmp_sync = settings.enable_xmp_sync.unwrap_or(true);
     let create_xmp_if_missing = settings.create_xmp_if_missing.unwrap_or(false);
 
-    paths.par_iter().for_each(|path| {
-        let (_, sidecar_path) = parse_virtual_path(path);
+    let failures: Vec<String> = paths
+        .par_iter()
+        .filter_map(|path| {
+            let (_, sidecar_path) = parse_virtual_path(path);
+            crate::exif_processing::modify_sidecar(&sidecar_path, |metadata| {
+                metadata.rating = rating;
+                if enable_xmp_sync {
+                    crate::xmp::push(path, metadata, create_xmp_if_missing);
+                }
+                true
+            })
+            .err()
+        })
+        .collect();
 
-        let mut metadata = crate::exif_processing::load_sidecar(&sidecar_path);
-
-        metadata.rating = rating;
-
-        if enable_xmp_sync {
-            crate::xmp::push(path, &mut metadata, create_xmp_if_missing);
-        }
-
-        if let Ok(json_string) = serde_json::to_string_pretty(&metadata) {
-            let _ = std::fs::write(&sidecar_path, json_string);
-        }
-    });
-
-    Ok(())
+    sidecar_failures(failures)
 }
 
 /// Flag photos while culling: "pick", "reject", or none to clear.
@@ -2639,21 +2719,22 @@ pub fn set_flag_for_paths(
     let enable_xmp_sync = settings.enable_xmp_sync.unwrap_or(true);
     let create_xmp_if_missing = settings.create_xmp_if_missing.unwrap_or(false);
 
-    paths.par_iter().for_each(|path| {
-        let (_, sidecar_path) = parse_virtual_path(path);
-        let mut metadata = crate::exif_processing::load_sidecar(&sidecar_path);
-        metadata.flag = flag.clone();
+    let failures: Vec<String> = paths
+        .par_iter()
+        .filter_map(|path| {
+            let (_, sidecar_path) = parse_virtual_path(path);
+            crate::exif_processing::modify_sidecar(&sidecar_path, |metadata| {
+                metadata.flag = flag.clone();
+                if enable_xmp_sync {
+                    crate::xmp::push(path, metadata, create_xmp_if_missing);
+                }
+                true
+            })
+            .err()
+        })
+        .collect();
 
-        if enable_xmp_sync {
-            crate::xmp::push(path, &mut metadata, create_xmp_if_missing);
-        }
-
-        if let Ok(json_string) = serde_json::to_string_pretty(&metadata) {
-            let _ = std::fs::write(&sidecar_path, json_string);
-        }
-    });
-
-    Ok(())
+    sidecar_failures(failures)
 }
 
 #[tauri::command]
@@ -2662,16 +2743,8 @@ pub fn load_metadata(path: String, app_handle: AppHandle) -> Result<ImageMetadat
     let enable_xmp_sync = settings.enable_xmp_sync.unwrap_or(true);
 
     let (_, sidecar_path) = parse_virtual_path(&path);
-    let mut metadata = crate::exif_processing::load_sidecar(&sidecar_path);
-
-    if enable_xmp_sync
-        && crate::xmp::pull(&path, &mut metadata)
-        && let Ok(json) = serde_json::to_string_pretty(&metadata)
-    {
-        let _ = fs::write(&sidecar_path, json);
-    }
-
-    Ok(metadata)
+    // An unreadable sidecar opens as unedited; saving over it is refused.
+    Ok(listed_sidecar(&path, &sidecar_path, enable_xmp_sync))
 }
 
 fn get_presets_path(app_handle: &AppHandle) -> Result<std::path::PathBuf, String> {
@@ -3002,6 +3075,40 @@ pub fn show_in_finder(path: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Send `files` to the Trash as one undoable step, and drop from albums
+/// the photos in `deletions` that went. Anything the Trash refused stays
+/// where it is (nothing is deleted outright), and the error says so.
+fn trash_as_one_step(
+    label: String,
+    files: HashSet<PathBuf>,
+    deletions: HashSet<String>,
+    app_handle: &AppHandle,
+) -> Result<(), String> {
+    let files: Vec<PathBuf> = files.into_iter().collect();
+    let (actions, problem) = crate::journal::trash_each(&files);
+    crate::journal::record(label, actions);
+
+    let gone: HashSet<String> = deletions
+        .into_iter()
+        .filter(|p| {
+            let (source, sidecar) = parse_virtual_path(p);
+            if p.contains("?vc=") {
+                !sidecar.exists()
+            } else {
+                !source.exists()
+            }
+        })
+        .collect();
+    if !gone.is_empty() {
+        sync_album_path_changes(app_handle, None, Some(&gone), None);
+    }
+
+    match problem {
+        None => Ok(()),
+        Some(problem) => Err(problem),
+    }
+}
+
 #[tauri::command]
 pub fn delete_files_from_disk(paths: Vec<String>, app_handle: AppHandle) -> Result<(), String> {
     let mut files_to_trash = HashSet::new();
@@ -3016,23 +3123,8 @@ pub fn delete_files_from_disk(paths: Vec<String>, app_handle: AppHandle) -> Resu
             if sidecar_path.exists() {
                 files_to_trash.insert(sidecar_path);
             }
-        } else {
-            if source_path.exists() {
-                match find_all_associated_files(&source_path) {
-                    Ok(associated_files) => {
-                        for file in associated_files {
-                            files_to_trash.insert(file);
-                        }
-                    }
-                    Err(e) => {
-                        log::warn!(
-                            "Could not find associated files for {}: {}",
-                            source_path.display(),
-                            e
-                        );
-                    }
-                }
-            }
+        } else if source_path.exists() {
+            files_to_trash.extend(find_all_associated_files(&source_path)?);
         }
     }
 
@@ -3040,18 +3132,32 @@ pub fn delete_files_from_disk(paths: Vec<String>, app_handle: AppHandle) -> Resu
         return Ok(());
     }
 
-    let final_paths_to_delete: Vec<PathBuf> = files_to_trash.into_iter().collect();
-    let actions = crate::journal::trash_all(&final_paths_to_delete)?;
-    crate::journal::record(
+    trash_as_one_step(
         format!("Delete {} and associated files", photos(deletions.len())),
-        actions,
-    );
-
-    sync_album_path_changes(&app_handle, None, Some(&deletions), None);
-
-    Ok(())
+        files_to_trash,
+        deletions,
+        &app_handle,
+    )
 }
 
+/// The photos in `folder_files` named exactly `stems` (the name without
+/// its last extension: `Party 2024.01.05 001` for
+/// `Party 2024.01.05 001.jpg`, never every `Party 2024.*`).
+fn same_name_photos(folder_files: &[PathBuf], stems: &HashSet<String>) -> Vec<PathBuf> {
+    folder_files
+        .iter()
+        .filter(|f| is_supported_media_file(f))
+        .filter(|f| {
+            f.file_stem()
+                .is_some_and(|s| stems.contains(&*s.to_string_lossy()))
+        })
+        .cloned()
+        .collect()
+}
+
+/// Delete photos together with the other photos of exactly the same name
+/// (a RAW's JPEG twin, a Live Photo's video), each with everything that
+/// travels with it: sidecars, XMP it owns, smart previews.
 #[tauri::command]
 pub fn delete_files_with_associated(
     paths: Vec<String>,
@@ -3061,49 +3167,40 @@ pub fn delete_files_with_associated(
         return Ok(());
     }
 
-    let mut stems_to_delete = HashSet::new();
-    let mut parent_dirs = HashSet::new();
+    let mut files_to_trash = HashSet::new();
     let mut deletions = HashSet::new();
+    let mut stems_by_folder: HashMap<PathBuf, HashSet<String>> = HashMap::new();
 
     for path_str in &paths {
         deletions.insert(path_str.clone());
-        let (source_path, _) = parse_virtual_path(path_str);
-        if let Some(file_name) = source_path.file_name().and_then(|s| s.to_str())
-            && let Some(stem) = file_name.split('.').next()
-        {
-            stems_to_delete.insert(stem.to_string());
-        }
-        if let Some(parent) = source_path.parent() {
-            parent_dirs.insert(parent.to_path_buf());
-        }
-    }
-
-    if stems_to_delete.is_empty() {
-        return Ok(());
-    }
-
-    let mut files_to_trash = HashSet::new();
-
-    for parent_dir in parent_dirs {
-        if let Ok(entries) = fs::read_dir(parent_dir) {
-            for entry in entries.filter_map(Result::ok) {
-                let entry_path = entry.path();
-                if !entry_path.is_file() {
-                    continue;
-                }
-
-                let entry_filename = entry.file_name();
-                let entry_filename_str = entry_filename.to_string_lossy();
-
-                if let Some(base_stem) = entry_filename_str.split('.').next()
-                    && stems_to_delete.contains(base_stem)
-                    && (is_supported_image_file(entry_filename_str.as_ref())
-                        || entry_filename_str.ends_with(".dri")
-                        || entry_filename_str.ends_with(".rrexif"))
-                {
-                    files_to_trash.insert(entry_path);
-                }
+        let (source_path, sidecar_path) = parse_virtual_path(path_str);
+        if path_str.contains("?vc=") {
+            // A virtual copy has no file of its own but its sidecar.
+            if sidecar_path.exists() {
+                files_to_trash.insert(sidecar_path);
             }
+            continue;
+        }
+        if let (Some(parent), Some(stem)) = (source_path.parent(), source_path.file_stem()) {
+            stems_by_folder
+                .entry(parent.to_path_buf())
+                .or_default()
+                .insert(stem.to_string_lossy().into_owned());
+        }
+    }
+
+    let mut photo_count = 0;
+    for (folder, stems) in stems_by_folder {
+        let folder_files: Vec<PathBuf> = fs::read_dir(&folder)
+            .map_err(|e| format!("Could not read {}: {e}", folder.display()))?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.is_file())
+            .collect();
+        for photo in same_name_photos(&folder_files, &stems) {
+            files_to_trash.extend(find_all_associated_files(&photo)?);
+            deletions.insert(photo.to_string_lossy().into_owned());
+            photo_count += 1;
         }
     }
 
@@ -3111,32 +3208,12 @@ pub fn delete_files_with_associated(
         return Ok(());
     }
 
-    let final_paths_to_delete: Vec<PathBuf> = files_to_trash.into_iter().collect();
-    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
-    if let Err(trash_error) = trash::delete_all(&final_paths_to_delete) {
-        log::warn!(
-            "Failed to move files to trash: {}. Falling back to permanent delete.",
-            trash_error
-        );
-        for path in final_paths_to_delete {
-            if path.is_file() {
-                fs::remove_file(&path)
-                    .map_err(|e| format!("Failed to delete file {}: {}", path.display(), e))?;
-            }
-        }
-    }
-
-    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-    for path in final_paths_to_delete {
-        if path.is_file() {
-            fs::remove_file(&path)
-                .map_err(|e| format!("Failed to delete file {}: {}", path.display(), e))?;
-        }
-    }
-
-    sync_album_path_changes(&app_handle, None, Some(&deletions), None);
-
-    Ok(())
+    trash_as_one_step(
+        format!("Delete {} with files of the same name", photos(photo_count)),
+        files_to_trash,
+        deletions,
+        &app_handle,
+    )
 }
 
 pub fn get_thumb_cache_dir(app_handle: &AppHandle) -> Result<PathBuf, String> {
@@ -3345,38 +3422,12 @@ pub async fn import_files(
                 }
 
                 if settings.delete_after_import {
-                    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
-                    {
-                        if let Err(trash_error) = trash::delete(&source_path) {
-                            log::warn!(
-                                "Failed to trash source file {}: {}. Deleting permanently.",
-                                source_path.display(),
-                                trash_error
-                            );
-                            fs::remove_file(&source_path).map_err(|e| e.to_string())?;
-                        }
-                        for companion in companions.iter().filter(|c| c.exists()) {
-                            if let Err(trash_error) = trash::delete(companion) {
-                                log::warn!(
-                                    "Failed to trash source sidecar {}: {}. Deleting permanently.",
-                                    companion.display(),
-                                    trash_error
-                                );
-                                fs::remove_file(companion).map_err(|e| e.to_string())?;
-                            }
-                        }
-                    }
-
-                    #[cfg(not(any(
-                        target_os = "windows",
-                        target_os = "macos",
-                        target_os = "linux"
-                    )))]
-                    {
-                        fs::remove_file(&source_path).map_err(|e| e.to_string())?;
-                        for companion in companions.iter().filter(|c| c.exists()) {
-                            fs::remove_file(companion).map_err(|e| e.to_string())?;
-                        }
+                    // To the Trash only: where there is none, the originals
+                    // stay (the import itself has succeeded).
+                    let mut originals = vec![source_path.clone()];
+                    originals.extend(companions.iter().filter(|c| c.exists()).cloned());
+                    if let (_, Some(problem)) = crate::journal::trash_each(&originals) {
+                        log::warn!("Imported, but kept the original: {problem}");
                     }
                 }
 
@@ -3464,14 +3515,15 @@ pub fn rename_files(
         return Ok(Vec::new());
     }
 
-    let mut operations: HashMap<PathBuf, PathBuf> = HashMap::new();
-    let mut final_new_paths = Vec::with_capacity(paths.len());
-    let mut renames = HashMap::new();
-
+    // Each photo once (a virtual copy renames its photo), in the order given.
+    let mut photo_renames: Vec<(PathBuf, PathBuf)> = Vec::with_capacity(paths.len());
     for (i, path_str) in paths.iter().enumerate() {
         let (original_path, _) = parse_virtual_path(path_str);
         if !original_path.exists() {
             return Err(format!("File not found: {}", path_str));
+        }
+        if photo_renames.iter().any(|(o, _)| *o == original_path) {
+            continue;
         }
 
         let parent = original_path
@@ -3493,66 +3545,58 @@ pub fn rename_files(
         );
         let new_filename = format!("{}.{}", new_stem, extension);
         let new_path = parent.join(new_filename);
-
-        if new_path.exists() && new_path != original_path {
-            return Err(format!(
-                "A file with the name {} already exists.",
-                new_path.display()
-            ));
-        }
-
-        operations.insert(original_path, new_path);
+        photo_renames.push((original_path, new_path));
     }
 
-    // Everything that travels with each photo follows its new name.
-    let image_renames: Vec<(PathBuf, PathBuf)> = operations
-        .iter()
-        .map(|(o, n)| (o.clone(), n.clone()))
-        .collect();
-    let mut sidecar_operations: HashMap<PathBuf, PathBuf> = HashMap::new();
-    for (original_path, new_path) in &operations {
+    // Everything that travels with each photo follows its new name, and
+    // the whole batch is checked first: no new name may already be taken
+    // (another photo's sidecar included) or be given twice.
+    let mut moves = Vec::new();
+    for (original_path, new_path) in &photo_renames {
+        if new_path == original_path {
+            continue;
+        }
+        moves.push((original_path.clone(), new_path.clone()));
         for companion in companion_files(original_path) {
             let target = companion_target(&companion, original_path, new_path);
             if target != companion {
-                sidecar_operations.insert(companion, target);
+                moves.push((companion, target));
             }
         }
     }
-    operations.extend(sidecar_operations);
+    check_move_targets(&moves)?;
 
-    let mut actions = Vec::new();
-    for (old_path, new_path) in operations {
-        fs::rename(&old_path, &new_path).map_err(|e| {
-            format!(
-                "Failed to rename {} to {}: {}",
-                old_path.display(),
-                new_path.display(),
-                e
-            )
-        })?;
+    let label = format!("Rename {}", photos(photo_renames.len()));
+    let done = crate::journal::move_all(&moves)
+        .map_err(|(error, stranded)| record_partial(&label, &stranded, &app_handle, error))?;
 
-        let old_str = old_path.to_string_lossy().into_owned();
-        let new_str = new_path.to_string_lossy().into_owned();
-        actions.push(crate::journal::Action::Moved {
-            from: old_path.clone(),
-            to: new_path.clone(),
-        });
-
-        renames.insert(old_str, new_str.clone());
-
-        if is_supported_image_file(&new_path) {
-            final_new_paths.push(new_str);
+    for (old, new) in &photo_renames {
+        if old != new {
+            relink_versions(old, new);
         }
     }
+    crate::journal::record(
+        label,
+        done.iter().map(crate::journal::Done::action).collect(),
+    );
 
-    for (old, new) in &image_renames {
-        relink_versions(old, new);
-    }
-    crate::journal::record(format!("Rename {}", photos(image_renames.len())), actions);
-
+    let renames: HashMap<String, String> = done
+        .iter()
+        .map(|d| {
+            (
+                d.from.to_string_lossy().into_owned(),
+                d.to.to_string_lossy().into_owned(),
+            )
+        })
+        .collect();
     sync_album_path_changes(&app_handle, Some(&renames), None, None);
 
-    Ok(final_new_paths)
+    Ok(photo_renames
+        .into_iter()
+        .map(|(_, new)| new)
+        .filter(|new| is_supported_image_file(new))
+        .map(|new| new.to_string_lossy().into_owned())
+        .collect())
 }
 
 #[tauri::command]
@@ -3571,10 +3615,7 @@ pub fn create_virtual_copy(
         fs::copy(&source_sidecar_path, &new_sidecar_path)
             .map_err(|e| format!("Failed to copy sidecar file: {}", e))?;
     } else {
-        let default_metadata = ImageMetadata::default();
-        let json_string =
-            serde_json::to_string_pretty(&default_metadata).map_err(|e| e.to_string())?;
-        fs::write(&new_sidecar_path, json_string).map_err(|e| e.to_string())?;
+        crate::exif_processing::write_sidecar(&new_sidecar_path, &ImageMetadata::default())?;
     }
     crate::journal::record(
         "Create virtual copy",
@@ -3858,5 +3899,104 @@ mod paste_tests {
         let mut fresh = Value::Null;
         merge_pasted_v3(&mut fresh, &serde_json::json!({"temperature": 25}));
         assert_eq!(fresh, serde_json::json!({"temperature": 25}));
+    }
+}
+
+#[cfg(test)]
+mod library_safety_tests {
+    use super::*;
+
+    fn touch(p: &Path) {
+        fs::write(p, b"x").unwrap();
+    }
+
+    /// Sidecar names after the `.dri` suffix replaced the 7-letter
+    /// `.rrdata`: copies are found again, and short names never panic.
+    #[test]
+    fn sidecar_names_split_into_photo_and_copy() {
+        assert_eq!(split_sidecar_name("IMG.CR3.dri"), Some(("IMG.CR3", None)));
+        assert_eq!(
+            split_sidecar_name("IMG.CR3.a1b2c3.dri"),
+            Some(("IMG.CR3", Some("a1b2c3")))
+        );
+        assert_eq!(split_sidecar_name("a.dri"), Some(("a", None)));
+        assert_eq!(split_sidecar_name(".dri"), None);
+        assert_eq!(split_sidecar_name("dri"), None);
+        assert_eq!(split_sidecar_name("IMG.jpg"), None);
+        // Not six hex digits: part of the photo's own name.
+        assert_eq!(
+            split_sidecar_name("IMG.v2.jpg.dri"),
+            Some(("IMG.v2.jpg", None))
+        );
+        assert_eq!(split_sidecar_name("é.dri"), Some(("é", None)));
+    }
+
+    /// Only exactly the same name goes: `Party 2024.01.05 001.jpg` takes
+    /// its RAW twin, never every `Party 2024.*` photo.
+    #[test]
+    fn same_name_means_the_whole_name_without_its_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = |n: &str| dir.path().join(n);
+        let files: Vec<PathBuf> = [
+            "Party 2024.01.05 001.jpg",
+            "Party 2024.01.05 001.ARW",
+            "Party 2024.01.05 002.jpg",
+            "Party 2024.jpg",
+            "Party 2024.01.05 001.jpg.dri",
+        ]
+        .iter()
+        .map(|n| p(n))
+        .collect();
+        let stems: HashSet<String> = ["Party 2024.01.05 001".to_string()].into();
+        let mut found = same_name_photos(&files, &stems);
+        found.sort();
+        assert_eq!(
+            found,
+            [p("Party 2024.01.05 001.ARW"), p("Party 2024.01.05 001.jpg")]
+        );
+    }
+
+    /// A cloud photo's smart preview travels with it; a photo whose name
+    /// starts with another's never has its sidecar taken.
+    #[test]
+    fn companions_include_the_smart_preview_and_nothing_of_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = |n: &str| dir.path().join(n);
+        for n in [
+            "IMG.jpg",
+            "IMG.jpg.dri",
+            "IMG.jpg.a1b2c3.dri",
+            "IMG.jpg.dripreview",
+            "IMG.jpg.png",
+            "IMG.jpg.png.dri",
+        ] {
+            touch(&p(n));
+        }
+        let mut found = companion_files(&p("IMG.jpg"));
+        found.sort();
+        assert_eq!(
+            found,
+            [
+                p("IMG.jpg.a1b2c3.dri"),
+                p("IMG.jpg.dri"),
+                p("IMG.jpg.dripreview")
+            ]
+        );
+    }
+
+    /// A batch is refused before anything moves when a new name is taken
+    /// (another photo's sidecar included) or given twice.
+    #[test]
+    fn batch_targets_are_checked_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = |n: &str| dir.path().join(n);
+        touch(&p("A.ARW"));
+        touch(&p("B.ARW"));
+        touch(&p("NEW.xmp"));
+
+        assert!(check_move_targets(&[(p("A.ARW"), p("C.ARW"))]).is_ok());
+        assert!(check_move_targets(&[(p("A.ARW"), p("B.ARW"))]).is_err());
+        assert!(check_move_targets(&[(p("A.xmp"), p("NEW.xmp"))]).is_err());
+        assert!(check_move_targets(&[(p("A.ARW"), p("C.ARW")), (p("B.ARW"), p("c.arw"))]).is_err());
     }
 }

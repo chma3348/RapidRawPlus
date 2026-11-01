@@ -6,7 +6,7 @@
 //! files go back, created files go to the Trash, trashed files come back
 //! out of it. Deleting goes through the Trash, and on macOS through
 //! Finder's own call, which says where each file landed so it can be put
-//! back exactly.
+//! back exactly. Where there is no Trash, nothing is deleted.
 //!
 //! The journal lasts for the session, like an editor's undo history.
 
@@ -132,6 +132,73 @@ pub fn move_or_copy(from: &Path, to: &Path) -> Result<bool, String> {
     }
 }
 
+/// A file moved by `move_all`, and whether it arrived as a copy (from
+/// another volume), so the original is still there to remove.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Done {
+    pub from: PathBuf,
+    pub to: PathBuf,
+    pub copied: bool,
+}
+
+impl Done {
+    /// The journal entry for it: a copy whose original is still in place
+    /// is undone by trashing the copy.
+    pub fn action(&self) -> Action {
+        if self.copied && self.from.exists() {
+            Action::Created {
+                path: self.to.clone(),
+            }
+        } else {
+            Action::Moved {
+                from: self.from.clone(),
+                to: self.to.clone(),
+            }
+        }
+    }
+}
+
+/// Move each `(from, to)` in turn (see `move_or_copy`). If one fails, the
+/// ones already moved are put back, so a photo is never left in one place
+/// and its sidecars in another. The error comes with anything that could
+/// not be put back, for the caller to record.
+pub fn move_all(moves: &[(PathBuf, PathBuf)]) -> Result<Vec<Done>, (String, Vec<Done>)> {
+    let mut done = Vec::with_capacity(moves.len());
+    for (from, to) in moves {
+        match move_or_copy(from, to) {
+            Ok(copied) => done.push(Done {
+                from: from.clone(),
+                to: to.clone(),
+                copied,
+            }),
+            Err(e) => return Err((e, put_back_moves(done))),
+        }
+    }
+    Ok(done)
+}
+
+/// Undo `done`, newest first. Returns what could not be undone.
+fn put_back_moves(done: Vec<Done>) -> Vec<Done> {
+    let mut stranded = Vec::new();
+    for d in done.into_iter().rev() {
+        let undone = if d.copied {
+            // The original never left; only the copy just made goes.
+            std::fs::remove_file(&d.to)
+        } else {
+            std::fs::rename(&d.to, &d.from)
+        };
+        if let Err(e) = undone {
+            log::warn!(
+                "Could not put {} back as {}: {e}",
+                d.to.display(),
+                d.from.display()
+            );
+            stranded.push(d);
+        }
+    }
+    stranded
+}
+
 /// Send `path` to the Trash. Returns where it is in the Trash when the
 /// system says (macOS), so it can be put back.
 pub fn trash(path: &Path) -> Result<Option<PathBuf>, String> {
@@ -153,10 +220,13 @@ pub fn trash(path: &Path) -> Result<Option<PathBuf>, String> {
     }
 }
 
-/// Trash every path, falling back to deleting outright where a volume
-/// has no Trash (some network shares) — such deletions cannot be undone.
-pub fn trash_all(paths: &[PathBuf]) -> Result<Vec<Action>, String> {
+/// Trash every path it can. Nothing is ever deleted outright: where a
+/// volume has no Trash (some network shares) the file stays, and the error
+/// says so. Returns what went to the Trash (to record, so it can be put
+/// back) and, if anything stayed, why.
+pub fn trash_each(paths: &[PathBuf]) -> (Vec<Action>, Option<String>) {
     let mut actions = Vec::with_capacity(paths.len());
+    let mut kept = Vec::new();
     for path in paths {
         match trash(path) {
             Ok(at) => actions.push(Action::Trashed {
@@ -164,24 +234,33 @@ pub fn trash_all(paths: &[PathBuf]) -> Result<Vec<Action>, String> {
                 at,
             }),
             Err(e) => {
-                log::warn!(
-                    "Could not move {} to the Trash ({e}); deleting it permanently.",
-                    path.display()
-                );
-                if path.is_dir() {
-                    std::fs::remove_dir_all(path)
-                } else {
-                    std::fs::remove_file(path)
-                }
-                .map_err(|e| format!("Failed to delete {}: {e}", path.display()))?;
-                actions.push(Action::Trashed {
-                    from: path.clone(),
-                    at: None,
-                });
+                log::warn!("Could not move {} to the Trash: {e}", path.display());
+                kept.push((path, e));
             }
         }
     }
-    Ok(actions)
+    let problem = match kept.as_slice() {
+        [] => None,
+        [(path, e)] => Some(format!(
+            "Could not move {} to the Trash ({e}), so it was kept.",
+            path.display()
+        )),
+        [(path, e), ..] => Some(format!(
+            "Could not move {} items to the Trash, so they were kept. {}: {e}",
+            kept.len(),
+            path.display()
+        )),
+    };
+    (actions, problem)
+}
+
+/// Trash every path (see `trash_each`), as an error if any could not be.
+/// Anything trashed before the failure stays in the Trash.
+pub fn trash_all(paths: &[PathBuf]) -> Result<Vec<Action>, String> {
+    match trash_each(paths) {
+        (actions, None) => Ok(actions),
+        (_, Some(problem)) => Err(problem),
+    }
 }
 
 /// Undo the newest operation.
@@ -387,6 +466,39 @@ mod tests {
         assert!(!p("new").exists());
 
         assert!(record_nothing_is_ignored());
+    }
+
+    /// A batch that fails part-way puts back what it had moved, so a photo
+    /// and its sidecars are never split.
+    #[test]
+    fn a_failed_batch_move_is_put_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = |n: &str| dir.path().join(n);
+        fs::write(p("a.ARW"), b"a").unwrap();
+        fs::write(p("a.ARW.dri"), b"{}").unwrap();
+        fs::create_dir(p("sub")).unwrap();
+
+        let moves = vec![
+            (p("a.ARW"), p("sub/a.ARW")),
+            (p("a.ARW.dri"), p("sub/a.ARW.dri")),
+            // Fails: there is nothing to move.
+            (p("gone.xmp"), p("sub/gone.xmp")),
+        ];
+        let (_, stranded) = move_all(&moves).unwrap_err();
+        assert!(stranded.is_empty());
+        assert!(p("a.ARW").exists() && p("a.ARW.dri").exists());
+        assert!(!p("sub/a.ARW").exists() && !p("sub/a.ARW.dri").exists());
+
+        let done = move_all(&moves[..2]).unwrap();
+        assert_eq!(done.len(), 2);
+        assert!(p("sub/a.ARW").exists() && !p("a.ARW").exists());
+        assert_eq!(
+            done[0].action(),
+            Action::Moved {
+                from: p("a.ARW"),
+                to: p("sub/a.ARW")
+            }
+        );
     }
 
     fn record_nothing_is_ignored() -> bool {

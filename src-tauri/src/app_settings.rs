@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -638,15 +639,53 @@ pub fn get_settings_path(app_handle: &AppHandle) -> Result<PathBuf, String> {
     Ok(settings_dir.join("settings.json"))
 }
 
+/// Held while the settings file is read and written back, so the many
+/// threads that load settings (and the window saving them) never write
+/// over each other's changes.
+static SETTINGS_FILE: Mutex<()> = Mutex::new(());
+
+/// The settings file's text, parsed. A file that cannot be understood
+/// (`None`) is copied aside once as `settings.json.bad-<time>`, so
+/// whatever it held can be recovered, and is never overwritten here.
+fn parse_settings_file(path: &Path, content: &str) -> Option<AppSettings> {
+    static BACKED_UP: Mutex<Option<String>> = Mutex::new(None);
+    match serde_json::from_str(content) {
+        Ok(settings) => Some(settings),
+        Err(e) => {
+            let mut backed_up = BACKED_UP.lock().unwrap_or_else(|e| e.into_inner());
+            if backed_up.as_deref() != Some(content) {
+                let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+                let backup = path.with_file_name(format!("settings.json.bad-{stamp}"));
+                match fs::copy(path, &backup) {
+                    Ok(_) => log::error!(
+                        "Settings file could not be read ({e}); kept a copy at {}",
+                        backup.display()
+                    ),
+                    Err(copy_err) => log::error!(
+                        "Settings file could not be read ({e}), nor copied aside: {copy_err}"
+                    ),
+                }
+                *backed_up = Some(content.to_string());
+            }
+            None
+        }
+    }
+}
+
 #[tauri::command]
 pub fn load_settings(app_handle: AppHandle) -> Result<AppSettings, String> {
     let path = get_settings_path(&app_handle)?;
+    let _file = SETTINGS_FILE.lock().unwrap_or_else(|e| e.into_inner());
 
-    let mut settings: AppSettings = if path.exists() {
-        let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-        serde_json::from_str(&content).unwrap_or_default()
-    } else {
-        AppSettings::default()
+    // Defaults stand in for a file that cannot be understood, but are not
+    // written over it: only a save the person makes replaces it.
+    let (mut settings, may_write): (AppSettings, bool) = match fs::read_to_string(&path) {
+        Ok(content) => match parse_settings_file(&path, &content) {
+            Some(settings) => (settings, true),
+            None => (AppSettings::default(), false),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (AppSettings::default(), true),
+        Err(e) => return Err(e.to_string()),
     };
 
     let all_current_keys = all_available_adjustments();
@@ -698,8 +737,13 @@ pub fn load_settings(app_handle: AppHandle) -> Result<AppSettings, String> {
         }
     }
 
-    if settings_modified && let Ok(json_string) = serde_json::to_string_pretty(&settings) {
-        let _ = fs::write(&path, json_string);
+    if settings_modified
+        && may_write
+        && let Ok(json_string) = serde_json::to_string_pretty(&settings)
+        && let Err(e) =
+            crate::exif_processing::write_atomically(&path, json_string.as_bytes(), true)
+    {
+        log::warn!("Could not save upgraded settings: {e}");
     }
 
     crate::smart_preview::set_modes(&settings);
@@ -719,7 +763,11 @@ pub fn set_output_color_space(space: String, app_handle: AppHandle) {
 pub fn save_settings(settings: AppSettings, app_handle: AppHandle) -> Result<(), String> {
     let path = get_settings_path(&app_handle)?;
     let json_string = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
-    fs::write(path, json_string).map_err(|e| e.to_string())?;
+    {
+        let _file = SETTINGS_FILE.lock().unwrap_or_else(|e| e.into_inner());
+        crate::exif_processing::write_atomically(&path, json_string.as_bytes(), true)
+            .map_err(|e| e.to_string())?;
+    }
     crate::smart_preview::set_modes(&settings);
     crate::cloud_builder::wake();
 
@@ -734,4 +782,37 @@ pub fn save_settings(settings: AppSettings, app_handle: AppHandle) -> Result<(),
         .unwrap()
         .set_capacity(cache_size);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A settings file that cannot be understood is copied aside once and
+    /// left in place, not replaced.
+    #[test]
+    fn unreadable_settings_are_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let bad = r#"{"rootFolders": ["/Users/me/Pict"#;
+        fs::write(&path, bad).unwrap();
+
+        assert!(parse_settings_file(&path, bad).is_none());
+        assert!(parse_settings_file(&path, bad).is_none());
+        let backups: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("settings.json.bad-")
+            })
+            .collect();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(fs::read_to_string(backups[0].path()).unwrap(), bad);
+        assert_eq!(fs::read_to_string(&path).unwrap(), bad);
+
+        let good = serde_json::to_string(&AppSettings::default()).unwrap();
+        assert!(parse_settings_file(&path, &good).is_some());
+    }
 }

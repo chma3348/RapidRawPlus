@@ -37,18 +37,99 @@ pub fn truncate_large_exif(value: &str) -> String {
     value.to_string()
 }
 
-pub fn load_sidecar(sidecar_path: &Path) -> ImageMetadata {
-    if !sidecar_path.exists() {
-        return ImageMetadata::default();
+/// Write `bytes` to `path` so a reader only ever sees the old file or the
+/// whole new one: written beside it under a name of its own, then renamed
+/// over it. Two writers at once each rename a complete file, so neither
+/// leaves the other's half-written. `durable` also flushes it to the disk
+/// first, for files written rarely (on macOS that flush is a full sync,
+/// too slow for a batch of sidecars).
+pub fn write_atomically(path: &Path, bytes: &[u8], durable: bool) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let tmp = path.with_file_name(format!(
+        ".{name}.{}-{}.tmp",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let result = (|| {
+        let mut file = fs::File::create(&tmp)?;
+        file.write_all(bytes)?;
+        if durable {
+            file.sync_all()?;
+        }
+        drop(file);
+        fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
     }
+    result
+}
 
-    let Ok(content) = fs::read_to_string(sidecar_path) else {
-        return ImageMetadata::default();
+/// One lock per sidecar, held from reading it to writing it back, so two
+/// changes at once (a rating while a paste is saving) both land instead of
+/// the later write dropping the earlier one.
+fn sidecar_mutex(path: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
+    use std::sync::{Arc, LazyLock, Mutex};
+    static LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> =
+        LazyLock::new(Default::default);
+    let mut locks = LOCKS.lock().unwrap_or_else(|e| e.into_inner());
+    if locks.len() > 4096 {
+        // Forget the locks nobody holds, so the table stays small.
+        locks.retain(|_, lock| Arc::strong_count(lock) > 1);
+    }
+    locks.entry(path.to_path_buf()).or_default().clone()
+}
+
+thread_local! {
+    /// Sidecars this thread holds the lock for, so a nested update of the
+    /// same sidecar (EXIF migrated while it is being edited) does not wait
+    /// on itself.
+    static HELD: std::cell::RefCell<std::collections::HashSet<PathBuf>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+/// Run `f` holding `path`'s sidecar lock.
+pub fn with_sidecar_lock<R>(path: &Path, f: impl FnOnce() -> R) -> R {
+    if HELD.with(|held| held.borrow().contains(path)) {
+        return f();
+    }
+    let lock = sidecar_mutex(path);
+    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+    HELD.with(|held| held.borrow_mut().insert(path.to_path_buf()));
+    // Released even if `f` panics, so the thread can take it again later.
+    struct Release<'a>(&'a Path);
+    impl Drop for Release<'_> {
+        fn drop(&mut self) {
+            HELD.with(|held| held.borrow_mut().remove(self.0));
+        }
+    }
+    let _release = Release(path);
+    f()
+}
+
+/// Read a sidecar as it is on disk. Missing (or empty: nothing in it to
+/// lose) is a new photo's defaults; anything else that cannot be read or
+/// understood is an error, so it is never replaced by defaults. Returns
+/// whether over-long EXIF values were trimmed on the way.
+fn read_sidecar(sidecar_path: &Path) -> Result<(ImageMetadata, bool), String> {
+    let content = match fs::read_to_string(sidecar_path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((ImageMetadata::default(), false));
+        }
+        Err(e) => return Err(format!("Could not read {}: {e}", sidecar_path.display())),
     };
+    if content.trim().is_empty() {
+        return Ok((ImageMetadata::default(), false));
+    }
+    let mut meta = serde_json::from_str::<ImageMetadata>(&content)
+        .map_err(|e| format!("Could not understand {}: {e}", sidecar_path.display()))?;
 
-    let mut meta = serde_json::from_str::<ImageMetadata>(&content).unwrap_or_default();
     let mut healed = false;
-
     if let Some(ref mut exif_map) = meta.exif {
         for val in exif_map.values_mut() {
             if val.len() > 500 {
@@ -57,22 +138,81 @@ pub fn load_sidecar(sidecar_path: &Path) -> ImageMetadata {
             }
         }
     }
+    Ok((meta, healed))
+}
 
-    if healed && let Ok(json) = serde_json::to_string_pretty(&meta) {
-        let _ = fs::write(sidecar_path, json);
-        log::info!(
-            "Auto-healed bloated sidecar for: {}",
-            sidecar_path.display()
-        );
-    }
-
-    // Adopt development-era settings in memory. Disk persistence remains tied
-    // to an ordinary save; opening a library does not rewrite every sidecar.
+/// Adopt development-era settings in memory. Disk persistence remains tied
+/// to an ordinary save; opening a library does not rewrite every sidecar.
+fn migrate_in_memory(sidecar_path: &Path, meta: &mut ImageMetadata) {
     match crate::color_engine::migration::normalize(&meta.adjustments) {
         Ok(edits) => meta.adjustments = edits.into_owned(),
         Err(error) => log::warn!("Cannot migrate sidecar {}: {error}", sidecar_path.display()),
     }
-    meta
+}
+
+/// A photo's sidecar, or why it could not be read. A missing sidecar is
+/// the defaults.
+pub fn try_load_sidecar(sidecar_path: &Path) -> Result<ImageMetadata, String> {
+    let (mut meta, healed) = read_sidecar(sidecar_path)?;
+    if healed {
+        // Re-read under the lock so the trimmed copy never replaces a
+        // change written since.
+        let healed_on_disk = with_sidecar_lock(sidecar_path, || {
+            let (fresh, still_bloated) = read_sidecar(sidecar_path)?;
+            if still_bloated {
+                write_sidecar(sidecar_path, &fresh)?;
+            }
+            Ok::<_, String>(())
+        });
+        match healed_on_disk {
+            Ok(()) => log::info!(
+                "Auto-healed bloated sidecar for: {}",
+                sidecar_path.display()
+            ),
+            Err(e) => log::warn!("Could not heal {}: {e}", sidecar_path.display()),
+        }
+    }
+    migrate_in_memory(sidecar_path, &mut meta);
+    Ok(meta)
+}
+
+/// A photo's sidecar for reading only: one that cannot be read shows as
+/// the defaults. Anything that writes the sidecar back uses
+/// `modify_sidecar` instead, which refuses to replace an unreadable one.
+pub fn load_sidecar(sidecar_path: &Path) -> ImageMetadata {
+    try_load_sidecar(sidecar_path).unwrap_or_else(|e| {
+        log::warn!("{e}");
+        ImageMetadata::default()
+    })
+}
+
+/// Save a sidecar whole (see `write_atomically`).
+pub fn write_sidecar(sidecar_path: &Path, metadata: &ImageMetadata) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(metadata).map_err(|e| e.to_string())?;
+    write_atomically(sidecar_path, json.as_bytes(), false)
+        .map_err(|e| format!("Could not save {}: {e}", sidecar_path.display()))
+}
+
+/// Read, change and save a sidecar under its lock. `change` returns
+/// whether it changed anything; nothing is written when it did not (so a
+/// photo without a sidecar does not get one for nothing). A sidecar that
+/// exists but cannot be read is left exactly as it is, and the error says
+/// why. Returns the sidecar as it now is.
+pub fn modify_sidecar(
+    sidecar_path: &Path,
+    change: impl FnOnce(&mut ImageMetadata) -> bool,
+) -> Result<ImageMetadata, String> {
+    with_sidecar_lock(sidecar_path, || {
+        let (mut meta, healed) = read_sidecar(sidecar_path)?;
+        let as_read = healed.then(|| meta.clone());
+        migrate_in_memory(sidecar_path, &mut meta);
+        if change(&mut meta) {
+            write_sidecar(sidecar_path, &meta)?;
+        } else if let Some(trimmed) = as_read {
+            write_sidecar(sidecar_path, &trimmed)?;
+        }
+        Ok(meta)
+    })
 }
 
 fn to_ur64(val: &exif::Rational) -> uR64 {
@@ -152,15 +292,20 @@ pub fn read_raw_metadata(file_bytes: &[u8]) -> Option<RawMetadata> {
     decoder.raw_metadata(&raw_source, &Default::default()).ok()
 }
 
-pub fn read_exposure_time_secs(path: &str, file_bytes: &[u8]) -> Option<f32> {
-    if let Some(map) = read_exif_sidecar(Path::new(path))
-        && let Some(val_str) = map.get("ExposureTime").or(map.get("ShutterSpeedValue"))
-    {
+/// ShutterSpeedValue is in APEX units, log2(1/t), not seconds: 8 is 1/256 s.
+fn seconds_from_apex_shutter(value: f32) -> Option<f32> {
+    let secs = (-value).exp2();
+    (secs.is_finite() && secs > 0.0).then_some(secs)
+}
+
+/// The exposure time from a sidecar's EXIF: ExposureTime ("1/250 s") when
+/// recorded, else ShutterSpeedValue ("7.97 EV", or a bare APEX number).
+fn exposure_secs_from_sidecar(map: &HashMap<String, String>) -> Option<f32> {
+    if let Some(val_str) = map.get("ExposureTime") {
         let cleaned = val_str.replace(" s", "");
-        if cleaned.contains('/') {
-            let parts: Vec<&str> = cleaned.split('/').collect();
-            if parts.len() == 2
-                && let (Ok(num), Ok(den)) = (parts[0].parse::<f32>(), parts[1].parse::<f32>())
+        let cleaned = cleaned.trim();
+        if let Some((num, den)) = cleaned.split_once('/') {
+            if let (Ok(num), Ok(den)) = (num.trim().parse::<f32>(), den.trim().parse::<f32>())
                 && den != 0.0
             {
                 return Some(num / den);
@@ -168,6 +313,22 @@ pub fn read_exposure_time_secs(path: &str, file_bytes: &[u8]) -> Option<f32> {
         } else if let Ok(val) = cleaned.parse::<f32>() {
             return Some(val);
         }
+    }
+    let apex = map.get("ShutterSpeedValue")?;
+    let apex = apex
+        .trim()
+        .trim_end_matches("EV")
+        .trim()
+        .parse::<f32>()
+        .ok()?;
+    seconds_from_apex_shutter(apex)
+}
+
+pub fn read_exposure_time_secs(path: &str, file_bytes: &[u8]) -> Option<f32> {
+    if let Some(map) = read_exif_sidecar(Path::new(path))
+        && let Some(secs) = exposure_secs_from_sidecar(&map)
+    {
+        return Some(secs);
     }
 
     if is_raw_file(path)
@@ -183,7 +344,7 @@ pub fn read_exposure_time_secs(path: &str, file_bytes: &[u8]) -> Option<f32> {
             return if r.d == 0 {
                 None
             } else {
-                Some(r.n as f32 / r.d as f32)
+                seconds_from_apex_shutter(r.n as f32 / r.d as f32)
             };
         }
     }
@@ -205,19 +366,20 @@ pub fn read_exposure_time_secs(path: &str, file_bytes: &[u8]) -> Option<f32> {
             }
         } else if let Some(shutter_speed) =
             exif.get_field(exif::Tag::ShutterSpeedValue, In::PRIMARY)
-            && let Value::Rational(ref r) = shutter_speed.value
         {
-            if r.is_empty() {
-                return None;
-            }
-
-            let val = r.first()?;
-
-            return if val.denom == 0 {
-                None
-            } else {
-                Some(val.num as f32 / val.denom as f32)
+            // Signed by the standard; some writers use unsigned.
+            let apex = match shutter_speed.value {
+                Value::SRational(ref r) => r
+                    .first()
+                    .filter(|v| v.denom != 0)
+                    .map(|v| v.num as f32 / v.denom as f32),
+                Value::Rational(ref r) => r
+                    .first()
+                    .filter(|v| v.denom != 0)
+                    .map(|v| v.num as f32 / v.denom as f32),
+                _ => None,
             };
+            return apex.and_then(seconds_from_apex_shutter);
         }
     }
     None
@@ -672,6 +834,75 @@ pub fn get_creation_date_from_bytes(path_hint: &str, file_bytes: &[u8]) -> DateT
     Utc::now()
 }
 
+/// The location in a sidecar's EXIF, which holds it as display text:
+/// "37 deg 46 min 29.64 sec" (sometimes with its hemisphere after),
+/// "N", "15.2 meters above sea level" or "15.2", "above sea level" or "0".
+#[derive(Debug, Default, PartialEq)]
+struct SidecarGps {
+    latitude: Option<(Vec<uR64>, char)>,
+    longitude: Option<(Vec<uR64>, char)>,
+    /// Metres, and whether below sea level.
+    altitude: Option<(uR64, bool)>,
+}
+
+impl SidecarGps {
+    fn from_map(map: &HashMap<String, String>) -> Self {
+        let coordinate = |key: &str, hemispheres: [char; 2]| {
+            let text = map.get(key)?;
+            let dms = parse_dms(text)?;
+            // The reference field, else a hemisphere letter after the value.
+            let hemisphere = map
+                .get(&format!("{key}Ref"))
+                .and_then(|r| r.trim().trim_matches('"').chars().next())
+                .or_else(|| text.trim().chars().last())
+                .map(|c| c.to_ascii_uppercase())
+                .filter(|c| hemispheres.contains(c))?;
+            Some((dms, hemisphere))
+        };
+        let altitude = map.get("GPSAltitude").and_then(|text| {
+            let metres = first_number(text).filter(|m| *m >= 0.0)?;
+            let reference = map.get("GPSAltitudeRef").map(|r| r.trim().to_lowercase());
+            let below = match reference.as_deref() {
+                Some(r) => r == "1" || r.contains("below"),
+                None => text.to_lowercase().contains("below"),
+            };
+            Some((to_rational(metres)?, below))
+        });
+        SidecarGps {
+            latitude: coordinate("GPSLatitude", ['N', 'S']),
+            longitude: coordinate("GPSLongitude", ['E', 'W']),
+            altitude,
+        }
+    }
+}
+
+fn first_number(text: &str) -> Option<f64> {
+    text.split_whitespace().find_map(|t| t.parse::<f64>().ok())
+}
+
+fn to_rational(value: f64) -> Option<uR64> {
+    let scaled = (value * 10_000.0).round();
+    (value.is_finite() && (0.0..=u32::MAX as f64).contains(&scaled)).then_some(uR64 {
+        nominator: scaled as u32,
+        denominator: 10_000,
+    })
+}
+
+/// "37 deg 46 min 29.64 sec" (or plain degrees, "37.7749") as the three
+/// rationals EXIF stores.
+fn parse_dms(text: &str) -> Option<Vec<uR64>> {
+    let numbers: Vec<f64> = text
+        .split_whitespace()
+        .filter_map(|t| t.parse::<f64>().ok())
+        .collect();
+    if numbers.is_empty() || numbers.len() > 3 || numbers.iter().any(|n| *n < 0.0) {
+        return None;
+    }
+    (0..3)
+        .map(|i| to_rational(numbers.get(i).copied().unwrap_or(0.0)))
+        .collect()
+}
+
 pub fn write_image_with_metadata(
     image_bytes: &mut Vec<u8>,
     original_path_str: &str,
@@ -800,6 +1031,21 @@ pub fn write_image_with_metadata(
             && let Ok(iso) = val.replace('"', "").trim().parse::<u16>()
         {
             metadata.set_tag(ExifTag::ISO(vec![iso]));
+        }
+        if !strip_gps {
+            let gps = SidecarGps::from_map(&map);
+            if let Some((dms, hemisphere)) = gps.latitude {
+                metadata.set_tag(ExifTag::GPSLatitude(dms));
+                metadata.set_tag(ExifTag::GPSLatitudeRef(hemisphere.to_string()));
+            }
+            if let Some((dms, hemisphere)) = gps.longitude {
+                metadata.set_tag(ExifTag::GPSLongitude(dms));
+                metadata.set_tag(ExifTag::GPSLongitudeRef(hemisphere.to_string()));
+            }
+            if let Some((altitude, below_sea_level)) = gps.altitude {
+                metadata.set_tag(ExifTag::GPSAltitude(vec![altitude]));
+                metadata.set_tag(ExifTag::GPSAltitudeRef(vec![below_sea_level as u8]));
+            }
         }
     }
 
@@ -1099,10 +1345,23 @@ fn load_primary_metadata(image_path: &Path) -> ImageMetadata {
     load_sidecar(&primary)
 }
 
-fn save_primary_metadata(image_path: &Path, metadata: &ImageMetadata) -> std::io::Result<()> {
+/// Store `exif` in the photo's own sidecar, under its lock. With
+/// `only_if_missing`, EXIF already there (perhaps saved by another thread
+/// meanwhile) is kept.
+fn store_primary_exif(
+    image_path: &Path,
+    exif: HashMap<String, String>,
+    only_if_missing: bool,
+) -> Result<(), String> {
     let primary = get_primary_sidecar_path(image_path);
-    let json = serde_json::to_string_pretty(metadata).map_err(std::io::Error::other)?;
-    fs::write(&primary, json)
+    modify_sidecar(&primary, |metadata| {
+        if only_if_missing && metadata.exif.is_some() {
+            return false;
+        }
+        metadata.exif = Some(exif);
+        true
+    })
+    .map(|_| ())
 }
 
 pub fn read_exif_sidecar(image_path: &Path) -> Option<HashMap<String, String>> {
@@ -1116,9 +1375,7 @@ pub fn read_exif_sidecar(image_path: &Path) -> Option<HashMap<String, String>> {
         && let Ok(content) = fs::read_to_string(&legacy)
         && let Ok(map) = serde_json::from_str::<HashMap<String, String>>(&content)
     {
-        let mut migrated = load_primary_metadata(image_path);
-        migrated.exif = Some(map.clone());
-        if save_primary_metadata(image_path, &migrated).is_ok() {
+        if store_primary_exif(image_path, map.clone(), false).is_ok() {
             let _ = fs::remove_file(&legacy);
         }
         return Some(map);
@@ -1151,10 +1408,10 @@ pub fn read_exif_data(path: &str, file_bytes: &[u8]) -> HashMap<String, String> 
     }
 
     let exif_map = read_exif_data_from_bytes(path, file_bytes);
-    if !exif_map.is_empty() {
-        let mut metadata = load_primary_metadata(source_path);
-        metadata.exif = Some(exif_map.clone());
-        let _ = save_primary_metadata(source_path, &metadata);
+    if !exif_map.is_empty()
+        && let Err(e) = store_primary_exif(source_path, exif_map.clone(), true)
+    {
+        log::warn!("{e}");
     }
     exif_map
 }
@@ -1172,9 +1429,7 @@ pub fn persist_exif_if_missing(source_path: &Path, source_path_str: &str, file_b
         && let Ok(content) = fs::read_to_string(&legacy)
         && let Ok(map) = serde_json::from_str::<HashMap<String, String>>(&content)
     {
-        let mut metadata = load_primary_metadata(source_path);
-        metadata.exif = Some(map);
-        if save_primary_metadata(source_path, &metadata).is_ok() {
+        if store_primary_exif(source_path, map, false).is_ok() {
             let _ = fs::remove_file(&legacy);
         }
         return;
@@ -1185,11 +1440,8 @@ pub fn persist_exif_if_missing(source_path: &Path, source_path_str: &str, file_b
         return;
     }
 
-    let mut metadata = load_primary_metadata(source_path);
-
-    if metadata.exif.is_none() {
-        metadata.exif = Some(exif_map);
-        let _ = save_primary_metadata(source_path, &metadata);
+    if let Err(e) = store_primary_exif(source_path, exif_map, true) {
+        log::warn!("{e}");
     }
 }
 
@@ -1208,8 +1460,164 @@ pub fn write_exif_sidecar(source_path_str: &str, target_image_path: &Path) -> Re
         return Ok(());
     }
 
-    let mut metadata = load_primary_metadata(target_image_path);
-    metadata.exif = Some(exif_data);
-    save_primary_metadata(target_image_path, &metadata)
+    store_primary_exif(target_image_path, exif_data, false)
         .map_err(|e| format!("Failed to write sidecar: {}", e))
+}
+
+#[cfg(test)]
+mod sidecar_tests {
+    use super::*;
+
+    /// Missing is a new photo; unreadable is an error, and a change to it
+    /// is refused with the file left exactly as it was.
+    #[test]
+    fn an_unreadable_sidecar_is_never_replaced_by_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("new.jpg.dri");
+        assert_eq!(try_load_sidecar(&missing).unwrap().rating, 0);
+
+        let empty = dir.path().join("empty.jpg.dri");
+        fs::write(&empty, "").unwrap();
+        assert!(try_load_sidecar(&empty).is_ok());
+
+        let torn = dir.path().join("torn.jpg.dri");
+        let half = r#"{"version": 1, "rating": 5, "adjustm"#;
+        fs::write(&torn, half).unwrap();
+        assert!(try_load_sidecar(&torn).is_err());
+        let refused = modify_sidecar(&torn, |m| {
+            m.rating = 1;
+            true
+        });
+        assert!(refused.is_err());
+        assert_eq!(fs::read_to_string(&torn).unwrap(), half);
+    }
+
+    /// Changes made at once from many threads all land.
+    #[test]
+    fn concurrent_changes_all_land() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("IMG.jpg.dri");
+        std::thread::scope(|s| {
+            for i in 0..16 {
+                let path = &path;
+                s.spawn(move || {
+                    modify_sidecar(path, |m| {
+                        m.tags.get_or_insert_with(Vec::new).push(format!("t{i}"));
+                        true
+                    })
+                    .unwrap();
+                });
+            }
+        });
+        let tags = try_load_sidecar(&path).unwrap().tags.unwrap();
+        assert_eq!(tags.len(), 16);
+        // No temporary files are left beside it.
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    /// An unchanged sidecar is not written, so listing never creates one.
+    #[test]
+    fn no_change_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("IMG.jpg.dri");
+        modify_sidecar(&path, |_| false).unwrap();
+        assert!(!path.exists());
+    }
+
+    /// A nested change to the same sidecar on one thread does not wait on
+    /// itself.
+    #[test]
+    fn nested_changes_do_not_deadlock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("IMG.jpg.dri");
+        modify_sidecar(&path, |outer| {
+            modify_sidecar(&path, |inner| {
+                inner.rating = 2;
+                true
+            })
+            .unwrap();
+            outer.flag = Some("pick".into());
+            true
+        })
+        .unwrap();
+        assert_eq!(
+            try_load_sidecar(&path).unwrap().flag.as_deref(),
+            Some("pick")
+        );
+    }
+
+    /// ShutterSpeedValue is log2(1/t): 8 is 1/256 s, -1 is 2 s.
+    #[test]
+    fn shutter_speed_value_is_apex_not_seconds() {
+        let map = |pairs: &[(&str, &str)]| -> HashMap<String, String> {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        };
+        let close = |a: Option<f32>, b: f32| (a.unwrap() - b).abs() < 1e-6;
+        assert!(close(
+            exposure_secs_from_sidecar(&map(&[("ShutterSpeedValue", "8")])),
+            1.0 / 256.0
+        ));
+        assert!(close(
+            exposure_secs_from_sidecar(&map(&[("ShutterSpeedValue", "-1 EV")])),
+            2.0
+        ));
+        // ExposureTime, when there, is used as it is.
+        assert!(close(
+            exposure_secs_from_sidecar(&map(&[
+                ("ExposureTime", "1/250 s"),
+                ("ShutterSpeedValue", "3")
+            ])),
+            1.0 / 250.0
+        ));
+        assert_eq!(exposure_secs_from_sidecar(&map(&[])), None);
+    }
+
+    /// The location as both readers store it in a sidecar.
+    #[test]
+    fn sidecar_gps_reads_both_ways_it_is_stored() {
+        let map = |pairs: &[(&str, &str)]| -> HashMap<String, String> {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        };
+        let r = |n: u32| uR64 {
+            nominator: n,
+            denominator: 10_000,
+        };
+        // As the file's EXIF reads it (with units).
+        let from_file = SidecarGps::from_map(&map(&[
+            ("GPSLatitude", "17 deg 32 min 6.5 sec S"),
+            ("GPSLatitudeRef", "S"),
+            ("GPSLongitude", "149 deg 34 min 0 sec W"),
+            ("GPSLongitudeRef", "W"),
+            ("GPSAltitude", "12.5 meters below sea level"),
+            ("GPSAltitudeRef", "below sea level"),
+        ]));
+        assert_eq!(
+            from_file.latitude,
+            Some((vec![r(170_000), r(320_000), r(65_000)], 'S'))
+        );
+        assert_eq!(
+            from_file.longitude,
+            Some((vec![r(1_490_000), r(340_000), r(0)], 'W'))
+        );
+        assert_eq!(from_file.altitude, Some((r(125_000), true)));
+
+        // As a RAW's metadata reads it.
+        let from_raw = SidecarGps::from_map(&map(&[
+            ("GPSLatitude", "40 deg 45 min 0 sec"),
+            ("GPSLatitudeRef", "N"),
+            ("GPSAltitude", "10"),
+            ("GPSAltitudeRef", "0"),
+        ]));
+        assert_eq!(from_raw.latitude.unwrap().1, 'N');
+        assert_eq!(from_raw.longitude, None);
+        assert_eq!(from_raw.altitude, Some((r(100_000), false)));
+
+        assert_eq!(SidecarGps::from_map(&map(&[])), SidecarGps::default());
+    }
 }

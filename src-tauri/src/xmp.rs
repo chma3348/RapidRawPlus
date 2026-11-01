@@ -427,24 +427,69 @@ pub fn reconcile_hierarchy(existing: &[String], keywords: &[String]) -> Vec<Stri
 // Where the sidecar is
 // ---------------------------------------------------------------------------
 
-fn has_raw_sibling(image: &Path) -> bool {
+/// How strong a file's claim is to the `IMG.xmp` it shares a stem with:
+/// a RAW, then a still, then a video, then anything else.
+fn stem_xmp_rank(ext: &str) -> u8 {
+    use crate::formats::{NON_RAW_EXTENSIONS, RAW_EXTENSIONS, VIDEO_EXTENSIONS};
+    if RAW_EXTENSIONS
+        .iter()
+        .any(|(e, _)| e.eq_ignore_ascii_case(ext))
+    {
+        0
+    } else if NON_RAW_EXTENSIONS
+        .iter()
+        .any(|e| e.eq_ignore_ascii_case(ext))
+    {
+        1
+    } else if VIDEO_EXTENSIONS.iter().any(|e| e.eq_ignore_ascii_case(ext)) {
+        2
+    } else {
+        3
+    }
+}
+
+/// Whether `image` owns the XMP named after its stem (`IMG.xmp`), which
+/// its twins of the same name would otherwise share, a rating set on one
+/// then showing on the other. One file owns it: a RAW always (as before);
+/// otherwise the strongest claim (`stem_xmp_rank`: a HEIC over its Live
+/// Photo's video), and between two of a kind the extension first in the
+/// alphabet (`IMG.jpg` over `IMG.tif`). The others have none of their own.
+fn owns_stem_xmp(image: &Path) -> bool {
+    if crate::formats::is_raw_file(image) {
+        return true;
+    }
     let (Some(parent), Some(stem)) = (image.parent(), image.file_stem()) else {
-        return false;
+        return true;
     };
     let stem = stem.to_string_lossy();
-    crate::formats::RAW_EXTENSIONS.iter().any(|(ext, _)| {
-        parent.join(format!("{stem}.{ext}")).exists()
+    let own_ext = image
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let own = (stem_xmp_rank(&own_ext), own_ext.as_str());
+    let stronger = crate::formats::RAW_EXTENSIONS
+        .iter()
+        .map(|(e, _)| *e)
+        .chain(crate::formats::NON_RAW_EXTENSIONS.iter().copied())
+        .chain(crate::formats::VIDEO_EXTENSIONS.iter().copied())
+        .filter(|e| (stem_xmp_rank(e), *e) < own);
+    for ext in stronger {
+        if parent.join(format!("{stem}.{ext}")).exists()
             || parent
                 .join(format!("{stem}.{}", ext.to_ascii_uppercase()))
                 .exists()
-    })
+        {
+            return false;
+        }
+    }
+    true
 }
 
 /// The XMP sidecar for `image` (a real path, not a virtual copy's), and
 /// whether it exists. `None` when the photo should not have one of its
-/// own: a JPEG whose RAW twin owns `IMG.xmp`.
+/// own: a JPEG whose RAW twin owns `IMG.xmp`, or a Live Photo's video
+/// beside its HEIC (see `owns_stem_xmp`).
 pub fn sidecar_for(image: &Path) -> Option<(PathBuf, bool)> {
-    let is_raw = crate::formats::is_raw_file(image);
     let stem_xmp = image.with_extension("xmp");
     let stem_xmp_upper = image.with_extension("XMP");
     let name = image.file_name()?.to_string_lossy().into_owned();
@@ -453,7 +498,7 @@ pub fn sidecar_for(image: &Path) -> Option<(PathBuf, bool)> {
 
     for candidate in [&stem_xmp, &stem_xmp_upper] {
         if candidate.exists() {
-            if is_raw || !has_raw_sibling(image) {
+            if owns_stem_xmp(image) {
                 return Some((candidate.clone(), true));
             }
             break;
@@ -464,7 +509,7 @@ pub fn sidecar_for(image: &Path) -> Option<(PathBuf, bool)> {
             return Some((candidate.clone(), true));
         }
     }
-    if is_raw || !has_raw_sibling(image) {
+    if owns_stem_xmp(image) {
         Some((stem_xmp, false))
     } else {
         None
@@ -846,6 +891,29 @@ mod tests {
             reconcile_hierarchy(&existing, &kw(&["Paris", "Beach"])),
             kw(&["Places|Paris", "Beach"])
         );
+    }
+
+    /// Twins without a RAW share no `IMG.xmp`: a HEIC owns it over its
+    /// Live Photo's video, and of two stills the first extension by name.
+    #[test]
+    fn one_twin_owns_the_stem_xmp() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = |n: &str| dir.path().join(n);
+        for n in ["IMG.HEIC", "IMG.MOV", "IMG.xmp", "B.jpg", "B.tif", "B.xmp"] {
+            std::fs::write(p(n), b"x").unwrap();
+        }
+        assert_eq!(sidecar_for(&p("IMG.HEIC")), Some((p("IMG.xmp"), true)));
+        assert!(sidecar_for(&p("IMG.MOV")).is_none());
+        assert_eq!(sidecar_for(&p("B.jpg")), Some((p("B.xmp"), true)));
+        assert!(sidecar_for(&p("B.tif")).is_none());
+
+        // A video's own full-name XMP is still its own.
+        std::fs::write(p("IMG.MOV.xmp"), b"x").unwrap();
+        assert_eq!(sidecar_for(&p("IMG.MOV")), Some((p("IMG.MOV.xmp"), true)));
+
+        // On its own, a video owns the stem XMP as before.
+        std::fs::write(p("C.mp4"), b"x").unwrap();
+        assert_eq!(sidecar_for(&p("C.mp4")), Some((p("C.xmp"), false)));
     }
 
     #[test]

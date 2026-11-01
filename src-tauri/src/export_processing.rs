@@ -1,7 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Cursor;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -21,6 +21,73 @@ use crate::file_management::{generate_filename_from_template, parse_virtual_path
 use crate::image_processing::{GpuContext, get_or_init_gpu_context, render_adjustments_for_empty};
 
 use crate::hydrate_adjustments;
+
+#[cfg(test)]
+mod naming_tests {
+    use super::*;
+
+    /// Exporting `{original_filename}` JPEGs of IMG_1.ARW and IMG_1.JPG into
+    /// their own folder overwrites neither the original JPEG nor each other.
+    #[test]
+    fn exports_never_overwrite_a_source_or_each_other() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = |n: &str| dir.path().join(n);
+        for n in [
+            "IMG_1.ARW",
+            "IMG_1.JPG",
+            "IMG_2.ARW",
+            "IMG_2.jpg",
+            "IMG_2-2.jpg",
+        ] {
+            std::fs::write(p(n), b"x").unwrap();
+        }
+        let settings: ExportSettings = serde_json::from_value(serde_json::json!({
+            "jpegQuality": 90, "resize": null, "keepMetadata": false,
+            "stripGps": false, "filenameTemplate": "{original_filename}",
+            "watermark": null,
+        }))
+        .unwrap();
+        let items: Vec<_> = ["IMG_1.ARW", "IMG_1.JPG", "IMG_2.ARW"]
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (i, p(n).to_string_lossy().into_owned(), 1, None))
+            .collect();
+        let planned: Vec<PathBuf> =
+            plan_export_paths(items, dir.path(), false, &[], &settings, "jpg", 3)
+                .into_iter()
+                .map(|(_, path)| path.unwrap())
+                .collect();
+        // IMG_1.jpg is the original JPEG (by name, ignoring case); IMG_2.jpg
+        // and IMG_2-2.jpg were already there.
+        let names: Vec<String> = planned
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["IMG_1-2.jpg", "IMG_1-3.jpg", "IMG_2-3.jpg"]);
+        assert!(planned.iter().all(|p| !p.exists()));
+    }
+
+    /// A file chosen in the save dialog is used as chosen, unless it is the
+    /// photo being exported.
+    #[test]
+    fn a_chosen_file_is_kept_but_never_the_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("IMG_1.JPG");
+        let chosen = dir.path().join("Mine.jpg");
+        std::fs::write(&source, b"x").unwrap();
+        std::fs::write(&chosen, b"x").unwrap();
+        let settings: ExportSettings = serde_json::from_value(serde_json::json!({
+            "jpegQuality": 90, "resize": null, "keepMetadata": false,
+            "stripGps": false, "filenameTemplate": null, "watermark": null,
+        }))
+        .unwrap();
+        let item = || vec![(0, source.to_string_lossy().into_owned(), 1, None)];
+        let plan = plan_export_paths(item(), &chosen, true, &[], &settings, "jpg", 1);
+        assert_eq!(plan[0].1, Ok(chosen.clone()));
+        let plan = plan_export_paths(item(), &source, true, &[], &settings, "jpg", 1);
+        assert!(plan[0].1.is_err());
+    }
+}
 
 #[cfg(test)]
 mod format_tests {
@@ -593,6 +660,144 @@ pub(crate) fn encode_image_to_bytes(
     Ok(image_bytes)
 }
 
+/// Where one export would go before any clash is settled: the template's
+/// name, in the chosen folder (or the photo's own subfolder of it, when
+/// keeping folders).
+fn desired_export_path(
+    source_path: &Path,
+    new_filename: &str,
+    output_folder: &Path,
+    base_origin_folders: &[String],
+    preserve_folders: bool,
+) -> PathBuf {
+    if !preserve_folders {
+        return output_folder.join(new_filename);
+    }
+    let rel_dir = base_origin_folders
+        .iter()
+        .map(Path::new)
+        .find(|b| source_path.starts_with(b))
+        .and_then(|base| source_path.strip_prefix(base).ok())
+        .map(|rel| rel.parent().unwrap_or_else(|| Path::new("")));
+    match rel_dir {
+        Some(rel_dir)
+            if rel_dir.components().all(|component| {
+                matches!(
+                    component,
+                    std::path::Component::Normal(_) | std::path::Component::CurDir
+                )
+            }) =>
+        {
+            let full_dir = output_folder.join(rel_dir);
+            if let Err(e) = std::fs::create_dir_all(&full_dir) {
+                log::warn!("Failed to create export subdirectory: {}", e);
+            }
+            full_dir.join(new_filename)
+        }
+        _ => output_folder.join(new_filename),
+    }
+}
+
+/// `desired`, or the first of `name-2.jpg`, `name-3.jpg`… that is neither
+/// a file already there (a photo being exported included) nor taken by
+/// an earlier export in this batch. Names are compared ignoring case, as
+/// the Mac's drives do.
+fn unique_export_path(desired: PathBuf, taken: &mut HashSet<String>) -> PathBuf {
+    let is_free = |p: &Path, taken: &HashSet<String>| !p.exists() && !taken.contains(&path_key(p));
+    let mut candidate = desired.clone();
+    let stem = desired
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let ext = desired
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    let mut n = 2;
+    while !is_free(&candidate, taken) {
+        candidate = desired.with_file_name(format!("{stem}-{n}{ext}"));
+        n += 1;
+    }
+    taken.insert(path_key(&candidate));
+    candidate
+}
+
+fn path_key(path: &Path) -> String {
+    path.to_string_lossy().to_lowercase()
+}
+
+/// Each export's photo and where it will be written, in the order given.
+/// An export never overwrites a photo being exported, and otherwise never
+/// overwrites anything either, unless a single file's path was chosen in
+/// the save dialog (which has asked about replacing it).
+#[allow(clippy::too_many_arguments)]
+fn plan_export_paths(
+    items: Vec<(usize, String, usize, Option<u32>)>,
+    output_folder: &Path,
+    explicit_file: bool,
+    base_origin_folders: &[String],
+    export_settings: &ExportSettings,
+    output_format: &str,
+    total_paths: usize,
+) -> Vec<(String, Result<PathBuf, String>)> {
+    let sources: HashSet<String> = items
+        .iter()
+        .map(|(_, p, _, _)| path_key(&parse_virtual_path(p).0))
+        .collect();
+    // The photos themselves count as taken even where the drive tells
+    // `IMG.jpg` from `IMG.JPG`.
+    let mut taken = sources.clone();
+    let filename_template = export_settings
+        .filename_template
+        .as_deref()
+        .unwrap_or("{original_filename}_edited");
+
+    items
+        .into_iter()
+        .map(
+            |(global_index, image_path_str, appearance_count, explicit_vc)| {
+                if explicit_file {
+                    let target = output_folder.to_path_buf();
+                    let planned = if sources.contains(&path_key(&target)) {
+                        Err(format!(
+                            "{} is the photo being exported; choose another name.",
+                            target.display()
+                        ))
+                    } else {
+                        Ok(target)
+                    };
+                    return (image_path_str, planned);
+                }
+
+                let (source_path, _) = parse_virtual_path(&image_path_str);
+                let file_date = exif_processing::get_creation_date_from_path(&source_path);
+                let mut new_stem = generate_filename_from_template(
+                    filename_template,
+                    &source_path,
+                    global_index + 1,
+                    total_paths,
+                    &file_date,
+                );
+                if let Some(vc_id) = explicit_vc {
+                    new_stem = format!("{}_VC{:02}", new_stem, vc_id);
+                } else if appearance_count > 1 {
+                    new_stem = format!("{}_VC{:02}", new_stem, appearance_count - 1);
+                }
+                let new_filename = format!("{}.{}", new_stem, output_format);
+                let desired = desired_export_path(
+                    &source_path,
+                    &new_filename,
+                    output_folder,
+                    base_origin_folders,
+                    export_settings.preserve_folders,
+                );
+                (image_path_str, Ok(unique_export_path(desired, &mut taken)))
+            },
+        )
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn export_images(
@@ -675,17 +880,45 @@ pub async fn export_images(
             export_items.push((i, path_str, *count, explicit_vc));
         }
 
+        // Every file's name is settled before any is written, in the order
+        // given, so names are predictable and never land on one another.
+        let plan_settings = export_settings.clone();
+        let plan_output = output_folder_path.to_path_buf();
+        let output_format_for_plan = output_format.clone();
+        let planned = match tokio::task::spawn_blocking(move || {
+            plan_export_paths(
+                export_items,
+                &plan_output,
+                is_explicit_file_path && total_paths == 1,
+                &base_origin_folders,
+                &plan_settings,
+                &output_format_for_plan,
+                total_paths,
+            )
+        })
+        .await
+        {
+            Ok(planned) => planned,
+            Err(e) => {
+                let _ = app_handle.emit("export-error", format!("Export failed: {e}"));
+                *app_handle
+                    .state::<AppState>()
+                    .export_task_handle
+                    .lock()
+                    .unwrap() = None;
+                return;
+            }
+        };
+
         let semaphore = Arc::new(tokio::sync::Semaphore::new(num_threads));
         let mut join_handles = Vec::new();
 
-        for (global_index, image_path_str, appearance_count, explicit_vc) in export_items {
+        for (image_path_str, output_path) in planned {
             let permit = semaphore.clone().acquire_owned().await.unwrap();
 
             let app_handle_clone = app_handle.clone();
             let context_clone = Arc::clone(&context);
             let progress_counter_clone = Arc::clone(&progress_counter);
-            let output_folder_path = output_folder_path.to_path_buf();
-            let base_origin_folders = base_origin_folders.clone();
             let export_settings = export_settings.clone();
             let output_format = output_format.clone();
             let current_edit_path = current_edit_path.clone();
@@ -719,69 +952,11 @@ pub async fn export_images(
                 };
 
                 hydrate_adjustments(&state, &mut js_adjustments);
-                let original_path = std::path::Path::new(&source_path_str);
-                let file_date = exif_processing::get_creation_date_from_path(original_path);
-
-                let filename_template = export_settings
-                    .filename_template
-                    .as_deref()
-                    .unwrap_or("{original_filename}_edited");
-
-                let mut new_stem = generate_filename_from_template(
-                    filename_template,
-                    original_path,
-                    global_index + 1,
-                    total_paths,
-                    &file_date,
-                );
-
-                if let Some(vc_id) = explicit_vc {
-                    new_stem = format!("{}_VC{:02}", new_stem, vc_id);
-                } else if appearance_count > 1 {
-                    new_stem = format!("{}_VC{:02}", new_stem, appearance_count - 1);
-                }
-
-                let new_filename = format!("{}.{}", new_stem, output_format);
-                let output_path = if is_explicit_file_path && total_paths == 1 {
-                    output_folder_path
-                } else if export_settings.preserve_folders {
-                    let matched_base = base_origin_folders
-                        .iter()
-                        .map(std::path::Path::new)
-                        .find(|b| source_path.starts_with(b));
-                    if let Some(base_origin) = matched_base {
-                        if let Ok(rel_path) = source_path.strip_prefix(base_origin) {
-                            let rel_dir = rel_path
-                                .parent()
-                                .unwrap_or_else(|| std::path::Path::new(""));
-                            let rel_dir_is_safe = rel_dir.components().all(|component| {
-                                matches!(
-                                    component,
-                                    std::path::Component::Normal(_) | std::path::Component::CurDir
-                                )
-                            });
-                            if rel_dir_is_safe {
-                                let full_dir = output_folder_path.join(rel_dir);
-                                if let Err(e) = std::fs::create_dir_all(&full_dir) {
-                                    log::warn!("Failed to create export subdirectory: {}", e);
-                                }
-                                full_dir.join(&new_filename)
-                            } else {
-                                output_folder_path.join(&new_filename)
-                            }
-                        } else {
-                            output_folder_path.join(&new_filename)
-                        }
-                    } else {
-                        output_folder_path.join(&new_filename)
-                    }
-                } else {
-                    output_folder_path.join(&new_filename)
-                };
 
                 let extension = output_format.to_lowercase();
 
                 let result: Result<(), String> = (|| {
+                    let output_path = output_path?;
                     {
                         if extension == "cube" || export_settings.export_masks {
                             return Err("V3 currently exports the composited photo; separate mask-image and LUT exports are not supported.".into());

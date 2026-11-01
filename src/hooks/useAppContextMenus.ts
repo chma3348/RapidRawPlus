@@ -429,11 +429,22 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
         !finalSelection[0].includes('?vc=') &&
         imageList.some((image) => image.path.startsWith(`${finalSelection[0]}?vc=`));
 
+      // Other photos of exactly the same name (IMG_1.ARW beside IMG_1.JPG):
+      // the path without its last extension, as delete_files_with_associated
+      // matches it. A virtual copy's own photo does not count.
+      const withoutExtension = (p: string) => {
+        const lastDotIndex = p.lastIndexOf('.');
+        const lastSlashIndex = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
+        return lastDotIndex > lastSlashIndex ? p.substring(0, lastDotIndex) : null;
+      };
       const hasAssociatedFiles = finalSelection.some((selectedPath) => {
-        const lastDotIndex = selectedPath.lastIndexOf('.');
-        if (lastDotIndex === -1) return false;
-        const basePath = selectedPath.substring(0, lastDotIndex);
-        return imageList.some((image) => image.path.startsWith(basePath + '.') && image.path !== selectedPath);
+        if (selectedPath.includes('?vc=')) return false;
+        const basePath = withoutExtension(selectedPath);
+        if (basePath === null) return false;
+        return imageList.some(
+          (image) =>
+            !image.path.includes('?vc=') && image.path !== selectedPath && withoutExtension(image.path) === basePath,
+        );
       });
 
       let deleteSubmenu;
