@@ -87,6 +87,10 @@ interface EditorState {
   isAIConnectorConnected: boolean;
   hasRenderedFirstFrame: boolean;
   patchesSentToBackend: Set<string>;
+  /** The photo the backend has finished opening (its load_image resolved).
+   * Renders wait for it: the editor shows a remembered photo at once, while
+   * the backend may still be decoding it. */
+  loadedPath: string | null;
 
   // Clipboard
   copiedSectionAdjustments: any | null;
@@ -100,6 +104,33 @@ interface EditorState {
   redo: () => void;
   resetHistory: (initialState: Adjustments) => void;
   goToHistoryIndex: (index: number) => void;
+}
+
+// The adjustments each photo's sidecar is known to hold: as loaded, or as
+// last handed to the save. A render settling saves only when the editor's
+// differ, so looking at a photo never rewrites its sidecar (and thumbnail).
+// Kept for the most recent photos only; one forgotten is saved once more.
+const savedAdjustments = new Map<string, Adjustments>();
+const SAVED_ADJUSTMENTS_KEPT = 50;
+
+export function rememberSavedAdjustments(path: string, adjustments: Adjustments) {
+  savedAdjustments.delete(path);
+  savedAdjustments.set(path, adjustments);
+  if (savedAdjustments.size > SAVED_ADJUSTMENTS_KEPT) {
+    const oldest = savedAdjustments.keys().next().value;
+    if (oldest !== undefined) savedAdjustments.delete(oldest);
+  }
+}
+
+/** Whether `adjustments` differ from what `path`'s sidecar is known to hold
+ * (unknown counts as different). Same object first: edits replace what they
+ * change, so an untouched photo's adjustments are usually the very object
+ * loaded, and the JSON comparison is the fallback. */
+export function adjustmentsUnsaved(path: string, adjustments: Adjustments): boolean {
+  const saved = savedAdjustments.get(path);
+  if (saved === undefined) return true;
+  if (saved === adjustments) return false;
+  return JSON.stringify(saved) !== JSON.stringify(adjustments);
 }
 
 export const useEditorStore = create<EditorState>((set) => ({
@@ -160,6 +191,7 @@ export const useEditorStore = create<EditorState>((set) => ({
   isMaskControlHovered: false,
   hasRenderedFirstFrame: false,
   patchesSentToBackend: new Set<string>(),
+  loadedPath: null,
 
   setEditor: (updater) =>
     set((state) => {

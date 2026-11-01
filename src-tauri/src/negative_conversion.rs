@@ -204,7 +204,10 @@ pub async fn preview_negative_conversion(
                 let original_lock = state.original_image.lock().unwrap();
                 if let Some(loaded) = original_lock.as_ref() {
                     if loaded.path == source_path_str {
-                        loaded.image.clone().as_ref().clone()
+                        // A RAW's may be decoded now: not under the lock.
+                        let loaded = loaded.clone();
+                        drop(original_lock);
+                        loaded.pixels()?.as_ref().clone()
                     } else {
                         drop(original_lock);
                         let settings = load_settings(app_handle.clone()).unwrap_or_default();

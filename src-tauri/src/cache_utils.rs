@@ -214,6 +214,30 @@ impl DecodedImageCache {
             self.items.remove(0);
         }
         self.items.push((path, image, exif));
+        // A count alone let five large pictures (16-bit TIFFs, panoramas)
+        // pile up into gigabytes: keep to a budget too, unless one alone is
+        // larger.
+        let total = |items: &Vec<(String, Arc<DynamicImage>, HashMap<String, String>)>| {
+            items.iter().map(|i| i.1.as_bytes().len()).sum::<usize>()
+        };
+        while self.items.len() > 1 && total(&self.items) > Self::BUDGET {
+            self.items.remove(0);
+        }
+    }
+
+    const BUDGET: usize = 512 << 20;
+
+    /// Let go of every picture but `path`'s; about how many bytes that was.
+    pub fn keep_only(&mut self, path: Option<&str>) -> usize {
+        let mut freed = 0;
+        self.items.retain(|(p, image, _)| {
+            let keep = Some(p.as_str()) == path;
+            if !keep {
+                freed += image.as_bytes().len();
+            }
+            keep
+        });
+        freed
     }
 }
 

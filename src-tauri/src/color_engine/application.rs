@@ -11,21 +11,115 @@ use crate::{AppState, image_processing::GpuContext};
 use anyhow::{Context, Result, ensure};
 use image::{DynamicImage, GenericImageView};
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::{
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
     time::SystemTime,
 };
 
-pub struct SourceCache {
-    path: std::path::PathBuf,
+/// What a decoded source is: the photo's file and version, the input
+/// captures and RAW recovery it was developed with, and how fully.
+#[derive(Clone, PartialEq)]
+struct SourceKey {
+    path: PathBuf,
     length: u64,
     modified: SystemTime,
     input_digest: Option<String>,
     source_digest: String,
     recovery: super::raw::Recovery,
     quality: Quality,
+}
+
+pub struct SourceCache {
+    key: SourceKey,
     pub frame: Arc<DecodedFrame>,
+}
+
+/// What a decoded picture costs to keep.
+fn frame_bytes(frame: &DecodedFrame) -> usize {
+    frame.pixels.as_raw().len() * 4
+        + frame.unrecovered.as_ref().map_or(0, |u| {
+            u.pixels.len() * std::mem::size_of::<(u32, [f32; 3])>()
+        })
+}
+
+/// The decoded photos, most recently used last: the open one and, while they
+/// fit the budget, the ones just before it, so going back to a photo just
+/// seen does not decode it again. A 24-megapixel picture is about 384 MB.
+#[derive(Default)]
+pub struct Sources(Vec<SourceCache>);
+
+impl Sources {
+    const KEEP: usize = 3;
+    /// Never more than this between them unless the newest alone is larger.
+    const BUDGET: usize = 1 << 30;
+
+    /// The picture `key` names, now the most recently used.
+    fn find(&mut self, key: &SourceKey) -> Option<Arc<DecodedFrame>> {
+        let i = self.0.iter().position(|c| c.key == *key)?;
+        let entry = self.0.remove(i);
+        let frame = entry.frame.clone();
+        self.0.push(entry);
+        Some(frame)
+    }
+
+    /// The picture `key` names, leaving the order alone: a look from a side
+    /// job (saving the photo just left) must not push out the open one.
+    fn peek(&self, key: &SourceKey) -> Option<Arc<DecodedFrame>> {
+        self.0
+            .iter()
+            .find(|c| c.key == *key)
+            .map(|c| c.frame.clone())
+    }
+
+    fn put(&mut self, entry: SourceCache) {
+        self.0.retain(|c| c.key != entry.key);
+        self.0.push(entry);
+        let total = |v: &Vec<SourceCache>| v.iter().map(|c| frame_bytes(&c.frame)).sum::<usize>();
+        while self.0.len() > Self::KEEP || (self.0.len() > 1 && total(&self.0) > Self::BUDGET) {
+            self.0.remove(0);
+        }
+    }
+
+    /// Whether any picture of the photo at `path` is decoded.
+    fn holds(&self, path: &Path) -> bool {
+        self.0.iter().any(|c| c.key.path == path)
+    }
+
+    /// Let go of every picture but those of `open`; what that came to.
+    fn keep_only(&mut self, open: Option<&Path>) -> usize {
+        let mut freed = 0;
+        self.0.retain(|c| {
+            let keep = open.is_some_and(|p| c.key.path == p);
+            if !keep {
+                freed += frame_bytes(&c.frame);
+            }
+            keep
+        });
+        freed
+    }
+}
+
+/// What a decoded picture was found to be, kept after the picture itself is
+/// let go: the sidecar's interpretation snapshot records it on every save,
+/// and must not decode the photo again for that.
+#[derive(Clone)]
+struct Summary {
+    color: SourceColor,
+    provenance: super::input::InputProvenance,
+    width: u32,
+    height: u32,
+}
+
+impl Summary {
+    fn of(frame: &DecodedFrame) -> Self {
+        Self {
+            color: frame.color.clone(),
+            provenance: frame.provenance.clone(),
+            width: frame.pixels.width(),
+            height: frame.pixels.height(),
+        }
+    }
 }
 
 /// How much of the source to develop. Thumbnails never share a cache with
@@ -62,13 +156,15 @@ impl<T> Default for Slots<T> {
 
 impl<T: Weigh> Slots<T> {
     /// Keep only the smallest entry (the picture on screen), letting go of
-    /// a full-size one.
-    pub fn keep_smallest(&mut self) {
-        if let Some(smallest) = (0..self.0.len()).min_by_key(|&i| self.0[i].bytes()) {
-            let keep = self.0.swap_remove(smallest);
-            self.0.clear();
-            self.0.push(keep);
-        }
+    /// a full-size one; what that came to.
+    pub fn keep_smallest(&mut self) -> usize {
+        let Some(smallest) = (0..self.0.len()).min_by_key(|&i| self.0[i].bytes()) else {
+            return 0;
+        };
+        let keep = self.0.swap_remove(smallest);
+        let freed = self.clear();
+        self.0.push(keep);
+        freed
     }
 
     /// A zoomed-in editor moves between up to five sizes of the same picture:
@@ -94,8 +190,11 @@ impl<T: Weigh> Slots<T> {
         }
     }
 
-    pub fn clear(&mut self) {
+    /// Let go of every entry; what that came to.
+    pub fn clear(&mut self) -> usize {
+        let freed = self.0.iter().map(Weigh::bytes).sum();
         self.0.clear();
+        freed
     }
 }
 
@@ -179,7 +278,10 @@ impl Weigh for NeighbourhoodCache {
 
 #[derive(Default)]
 pub struct V3Caches {
-    pub source: Mutex<Option<SourceCache>>,
+    source: Mutex<Sources>,
+    /// Kept for more photos than `Sources` ever holds: a few hundred bytes
+    /// each.
+    summaries: Mutex<std::collections::VecDeque<(SourceKey, Summary)>>,
     pub prepared: Mutex<Slots<PreparedCache>>,
     pub detail: Mutex<Slots<DetailCache>>,
     pub neighbourhood: Mutex<Slots<NeighbourhoodCache>>,
@@ -187,14 +289,18 @@ pub struct V3Caches {
     pub masks: Mutex<std::collections::HashMap<u64, Arc<image::GrayImage>>>,
     /// The photograph's own colour noise (detail::photo_colour_noise),
     /// measured once so every render of it, preview, zoomed region or
-    /// export, reduces it alike.
-    pub noise: Mutex<Option<(Arc<DecodedFrame>, f32)>>,
+    /// export, reduces it alike. Held by a weak reference: remembering the
+    /// measurement must not keep a decoded picture of hundreds of megabytes
+    /// alive after everything else has let it go.
+    noise: Mutex<Option<(Weak<DecodedFrame>, f32)>>,
     /// Where the whole prepared picture's tones sit, for renders of part of
     /// it (the tone sliders adapt to the whole photo, not the part shown).
     tones: Mutex<Option<(std::sync::Weak<HalfImage>, super::plan::PhotoTones)>>,
 }
 
 impl V3Caches {
+    const SUMMARIES: usize = 64;
+
     /// Zoomed back out: the full-size stages behind the sharp region are no
     /// longer needed; the whole picture on screen keeps its own.
     pub fn release_full_size(&self) {
@@ -209,11 +315,79 @@ impl V3Caches {
         }
     }
 
-    /// Let go of what can be rebuilt, when the system is short of memory:
-    /// every derived stage, and under critical pressure the decoded photo
-    /// too (it is decoded again on the next render).
-    pub fn trim(&self, critical: bool) {
-        if critical && let Ok(mut c) = self.source.lock() {
+    /// The decoded picture used last: the open photo's.
+    pub fn newest_source(&self) -> Option<Arc<DecodedFrame>> {
+        self.source
+            .lock()
+            .ok()
+            .and_then(|c| c.0.last().map(|c| c.frame.clone()))
+    }
+
+    /// Whether a picture of the photo at `path` (a virtual copy's too) is
+    /// decoded, so opening it again will not decode it.
+    pub fn holds_source(&self, path: &str) -> bool {
+        let (path, _) = crate::file_management::parse_virtual_path(path);
+        self.source.lock().is_ok_and(|c| c.holds(&path))
+    }
+
+    /// Let go of what can be rebuilt, when the system is short of memory,
+    /// and say about how many bytes that was. Under a warning: every other
+    /// photo's decoded picture, the full-size stages behind a zoomed view
+    /// (the picture on screen keeps its own) and the masks' pictures.
+    /// Under critical pressure: everything, the open photo's decoded
+    /// picture too (decoded again on the next render).
+    pub fn trim(&self, open: Option<&str>, critical: bool) -> usize {
+        let open = open
+            .filter(|_| !critical)
+            .map(|p| crate::file_management::parse_virtual_path(p).0);
+        let mut freed = 0;
+        if let Ok(mut c) = self.source.lock() {
+            freed += c.keep_only(open.as_deref());
+        }
+        if critical && let Ok(mut c) = self.noise.lock() {
+            *c = None;
+        }
+        if let Ok(mut c) = self.prepared.lock() {
+            freed += if critical {
+                c.clear()
+            } else {
+                c.keep_smallest()
+            };
+        }
+        if let Ok(mut c) = self.detail.lock() {
+            freed += if critical {
+                c.clear()
+            } else {
+                c.keep_smallest()
+            };
+        }
+        if let Ok(mut c) = self.neighbourhood.lock() {
+            freed += if critical {
+                c.clear()
+            } else {
+                c.keep_smallest()
+            };
+        }
+        if let Ok(mut c) = self.sampling.lock()
+            && let Some((_, image)) = c.take()
+        {
+            freed += image.as_bytes().len();
+        }
+        if let Ok(mut c) = self.masks.lock() {
+            freed += c.values().map(|m| m.as_raw().len()).sum::<usize>();
+            c.clear();
+        }
+        freed
+    }
+
+    /// A different photo is being opened: forget everything made from the
+    /// last one's picture, but keep the decoded pictures themselves (within
+    /// their budget), so going back to it does not decode it again.
+    pub fn open(&self) {
+        if let Ok(mut c) = self.noise.lock() {
+            *c = None;
+        }
+        if let Ok(mut c) = self.tones.lock() {
             *c = None;
         }
         if let Ok(mut c) = self.prepared.lock() {
@@ -233,29 +407,38 @@ impl V3Caches {
         }
     }
 
-    /// Forget everything: a different photo is being opened.
+    /// Forget everything, decoded pictures included.
     pub fn clear(&self) {
-        if let Ok(mut c) = self.noise.lock() {
-            *c = None;
-        }
+        self.open();
         if let Ok(mut c) = self.source.lock() {
-            *c = None;
+            c.keep_only(None);
         }
-        if let Ok(mut c) = self.prepared.lock() {
+        if let Ok(mut c) = self.summaries.lock() {
             c.clear();
         }
-        if let Ok(mut c) = self.detail.lock() {
-            c.clear();
+    }
+
+    fn remember_summary(&self, key: &SourceKey, frame: &DecodedFrame) {
+        if let Ok(mut c) = self.summaries.lock() {
+            c.retain(|(k, _)| k != key);
+            c.push_back((key.clone(), Summary::of(frame)));
+            while c.len() > Self::SUMMARIES {
+                c.pop_front();
+            }
         }
-        if let Ok(mut c) = self.neighbourhood.lock() {
-            c.clear();
+    }
+
+    /// What the picture `key` names was found to be, without decoding it.
+    fn summary(&self, key: &SourceKey) -> Option<Summary> {
+        if let Some(frame) = self.source.lock().ok().and_then(|c| c.peek(key)) {
+            return Some(Summary::of(&frame));
         }
-        if let Ok(mut c) = self.sampling.lock() {
-            *c = None;
-        }
-        if let Ok(mut c) = self.masks.lock() {
-            c.clear();
-        }
+        self.summaries
+            .lock()
+            .ok()?
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, s)| s.clone())
     }
 }
 pub struct EngineCache {
@@ -363,58 +546,127 @@ pub fn raw_patch_base(state: &AppState, path: &str) -> Result<DynamicImage> {
     ))
 }
 
+/// What identifies a photo's decoded picture, and how it is to be read.
+struct Located {
+    key: SourceKey,
+    /// The photo's bytes, when hashing them had to read them.
+    bytes: Option<Vec<u8>>,
+    /// Developed from its smart preview: the photo is only in the cloud.
+    stands_in: bool,
+    input: Option<super::cube::CapturedInput>,
+}
+
+/// Where the picture of `path` is developed from, and what identifies it,
+/// without decoding anything. A photo only in the cloud is developed from
+/// its smart preview, which stands in for it at its own size: reading the
+/// photo would download it. The preview is identified by its file's version
+/// (only its header is read), so a render that finds its picture cached,
+/// and a range mask asking which picture it samples, never decode it.
+fn locate(path: &Path, pair: &super::identity::Resolved, quality: Quality) -> Result<Located> {
+    let meta = std::fs::metadata(path)?;
+    let stands_in = crate::smart_preview::may_stand_in(path)
+        && crate::cloud_files::is_cloud_only(path)
+        && crate::smart_preview::is_current(path);
+    let (source_digest, bytes) = if stands_in {
+        let preview = super::file_version::version(&crate::smart_preview::path_for(path))?;
+        (format!("preview:{preview:?}"), None)
+    } else {
+        super::file_version::digest(path, false)?
+    };
+    // Decode depends on the installed input transforms too, not just the
+    // photo's filename. Do not silently keep old pixels after replacing one.
+    let input = captured_input(pair)?;
+    Ok(Located {
+        key: SourceKey {
+            path: path.to_path_buf(),
+            length: meta.len(),
+            modified: meta.modified()?,
+            input_digest: input.as_ref().map(|c| c.digest()),
+            source_digest,
+            recovery: pair.recovery,
+            quality,
+        },
+        bytes,
+        stands_in,
+        input,
+    })
+}
+
+/// The RAW decoder panics on some malformed files instead of failing. Here
+/// that would take the render (or the whole photo's opening) down with it:
+/// make it an error the editor can show.
+fn decode_raw_guarded(
+    bytes: &[u8],
+    fast: bool,
+    cancel: &dyn Fn() -> Result<()>,
+) -> Result<DecodedFrame> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        super::raw::decode_raw(bytes, fast, cancel)
+    }))
+    .unwrap_or_else(|_| {
+        Err(anyhow::anyhow!(
+            "This RAW file could not be decoded: the decoder failed on it (the file may be damaged, or from a camera it does not support)"
+        ))
+    })
+}
+
 fn source_for(
     caches: &V3Caches,
     path: &str,
     pair: &super::identity::Resolved,
     quality: Quality,
 ) -> Result<Arc<DecodedFrame>> {
+    source_for_cancellable(caches, path, pair, quality, &|| Ok(()))
+}
+
+/// `source_for`, giving up between the decoder's stages once `cancel` says
+/// so (another photo was opened meanwhile).
+fn source_for_cancellable(
+    caches: &V3Caches,
+    path: &str,
+    pair: &super::identity::Resolved,
+    quality: Quality,
+    cancel: &dyn Fn() -> Result<()>,
+) -> Result<Arc<DecodedFrame>> {
     let (path, _) = crate::file_management::parse_virtual_path(path);
-    let meta = std::fs::metadata(&path)?;
-    let modified = meta.modified()?;
-    // A photo only in the cloud is developed from its smart preview, which
-    // stands in for it at its own size: reading the photo would download it.
     let wants_previews =
         crate::smart_preview::mode_for(&path) == crate::smart_preview::Mode::Previews;
-    let preview =
-        if crate::smart_preview::may_stand_in(&path) && crate::cloud_files::is_cloud_only(&path) {
-            crate::smart_preview::read_frame(&path).unwrap_or_else(|e| {
-                log::warn!(
-                    "[preview] could not read {}'s preview: {e:#}",
-                    path.display()
-                );
-                None
-            })
-        } else {
-            None
-        };
-    let (source_digest, bytes) = match &preview {
-        Some(frame) => (format!("preview:{}", frame.provenance.source_hash), None),
-        None => super::file_version::digest(&path, false)?,
-    };
-    // Decode depends on the installed input transforms too, not just the
-    // photo's filename. Do not silently keep old pixels after replacing one.
-    let input = captured_input(pair)?;
-    let input_digest = input.as_ref().map(|c| c.digest());
-    let hit = |c: &SourceCache| {
-        c.path == path
-            && c.length == meta.len()
-            && c.modified == modified
-            && c.input_digest == input_digest
-            && c.source_digest == source_digest
-            && c.recovery == pair.recovery
-            && c.quality == quality
-    };
+    let Located {
+        key,
+        bytes,
+        stands_in,
+        input,
+    } = locate(&path, pair, quality)?;
     // The lock is held only to look, never while decoding: a decode takes
     // hundreds of milliseconds and must not block another render.
-    if let Some(frame) = caches
-        .source
-        .lock()
-        .ok()
-        .and_then(|c| c.as_ref().filter(|c| hit(c)).map(|c| c.frame.clone()))
-    {
+    if let Some(frame) = caches.source.lock().ok().and_then(|mut c| c.find(&key)) {
         return Ok(frame);
     }
+    let preview = if stands_in {
+        crate::smart_preview::read_frame(&path).unwrap_or_else(|e| {
+            log::warn!(
+                "[preview] could not read {}'s preview: {e:#}",
+                path.display()
+            );
+            None
+        })
+    } else {
+        None
+    };
+    // The preview could not be read after all: the photo itself, then.
+    let (key, bytes) = if stands_in && preview.is_none() {
+        let (source_digest, bytes) = super::file_version::digest(&path, false)?;
+        (
+            SourceKey {
+                source_digest,
+                ..key
+            },
+            bytes,
+        )
+    } else {
+        (key, bytes)
+    };
+    cancel()?;
     let is_raw = crate::formats::is_raw_file(&path);
     let mut frame = match preview {
         Some(frame) => frame,
@@ -424,7 +676,7 @@ fn source_for(
                 None => std::fs::read(&path)?,
             };
             let frame = if is_raw {
-                super::raw::decode_raw(&bytes, quality == Quality::Thumbnail, || Ok(()))?
+                decode_raw_guarded(&bytes, quality == Quality::Thumbnail, cancel)?
             } else {
                 super::input::decode_profiled_photo(&bytes)?
             };
@@ -512,19 +764,31 @@ fn source_for(
         ));
     }
     let frame = Arc::new(frame);
+    if quality == Quality::Full {
+        caches.remember_summary(&key, &frame);
+    }
     if let Ok(mut cache) = caches.source.lock() {
-        *cache = Some(SourceCache {
-            path,
-            length: meta.len(),
-            modified,
-            input_digest,
-            source_digest,
-            recovery: pair.recovery,
-            quality,
+        cache.put(SourceCache {
+            key,
             frame: frame.clone(),
         });
     }
     Ok(frame)
+}
+
+/// Develop `path` for the editor before its first render asks, exactly as
+/// that render will (the same saved edits, so the same captures and RAW
+/// recovery): opening a photo then decodes it once, and the render finds it
+/// ready. `cancel` is checked between the decoder's stages.
+pub fn open_source(
+    state: &AppState,
+    path: &str,
+    edits: &Value,
+    cancel: &dyn Fn() -> Result<()>,
+) -> Result<Arc<DecodedFrame>> {
+    let normalized = super::migration::normalize(edits)?;
+    let pair = super::identity::resolve(state, normalized.as_ref())?;
+    source_for_cancellable(&state.v3, path, &pair, Quality::Full, cancel)
 }
 
 /// The shared settings of the previous engine that v3 reads as controls.
@@ -880,15 +1144,17 @@ fn spatial(
 
 /// The photograph's colour noise, measured once on the decoded source.
 fn photo_noise(caches: &V3Caches, source: &Arc<DecodedFrame>) -> f32 {
+    // The weak reference keeps its allocation, so no later picture can come
+    // to sit at the same address: comparing addresses is exact.
     if let Ok(cache) = caches.noise.lock()
         && let Some((frame, noise)) = cache.as_ref()
-        && Arc::ptr_eq(frame, source)
+        && std::ptr::eq(frame.as_ptr(), Arc::as_ptr(source))
     {
         return *noise;
     }
     let noise = super::detail::photo_colour_noise(&source.pixels);
     if let Ok(mut cache) = caches.noise.lock() {
-        *cache = Some((source.clone(), noise));
+        *cache = Some((Arc::downgrade(source), noise));
     }
     noise
 }
@@ -1370,15 +1636,16 @@ fn sampling_image(
     transform.hash(&mut hasher);
     patches.hash(&mut hasher);
     let (real_path, _) = crate::file_management::parse_virtual_path(path);
-    let meta = std::fs::metadata(&real_path)?;
-    meta.len().hash(&mut hasher);
-    meta.modified()?.hash(&mut hasher);
-    super::file_version::digest(&real_path, false)?
-        .0
-        .hash(&mut hasher);
     let neutral = ungraded(edits);
     neutral.to_string().hash(&mut hasher);
     let pair = super::identity::resolve(state, edits)?;
+    // The picture sampled is the one the render develops, identified the
+    // same way: for a photo only in the cloud, its smart preview. Hashing
+    // the photo itself would download it (and fail offline).
+    let source = locate(&real_path, &pair, quality)?.key;
+    source.length.hash(&mut hasher);
+    source.modified.hash(&mut hasher);
+    source.source_digest.hash(&mut hasher);
     for transform in [pair.input, pair.input_p3, pair.output] {
         transform
             .map(|p| super::cube::CubeLut::load(&p).map(|c| c.digest.clone()))
@@ -2069,6 +2336,26 @@ pub(crate) fn input_snapshot(state: &AppState, path: &str, edits: &Value) -> Res
     interpretation_report(state, path, edits, false)
 }
 
+/// What the picture of `path` was found to be when it was last decoded,
+/// for saving. Saving runs on the app's main thread and often for the photo
+/// just left: it must neither decode that photo again (seconds, for a RAW)
+/// nor put its picture in place of the open one's. Only a photo never
+/// decoded in this session is decoded, aside from the editor's caches.
+fn remembered_summary(
+    state: &AppState,
+    path: &str,
+    pair: &super::identity::Resolved,
+) -> Result<Summary> {
+    let (real_path, _) = crate::file_management::parse_virtual_path(path);
+    let key = locate(&real_path, pair, Quality::Full)?.key;
+    if let Some(summary) = state.v3.summary(&key) {
+        return Ok(summary);
+    }
+    let frame = source_for(&V3Caches::default(), path, pair, Quality::Full)?;
+    state.v3.remember_summary(&key, &frame);
+    Ok(Summary::of(&frame))
+}
+
 fn interpretation_report(
     state: &AppState,
     path: &str,
@@ -2083,7 +2370,11 @@ fn interpretation_report(
         super::file_version::digest(&real_path, true)?;
     }
     let pair = super::identity::resolve(state, edits)?;
-    let frame = source_for(&state.v3, path, &pair, Quality::Full)?;
+    let frame = if fresh {
+        Summary::of(source_for(&state.v3, path, &pair, Quality::Full)?.as_ref())
+    } else {
+        remembered_summary(state, path, &pair)?
+    };
     let digest = |p: &Option<PathBuf>| -> Result<Option<String>> {
         p.as_ref()
             .map(|p| Ok(super::file_version::digest(p, fresh)?.0))
@@ -2094,7 +2385,7 @@ fn interpretation_report(
         "effective_input_policy": super::identity::INPUT_POLICY,
         "saved_input_policy": edits["v3Pipeline"]["input_policy"],
         "input_policy_mismatch": edits["v3Pipeline"]["input_policy"].as_str().is_some_and(|p| p != super::identity::INPUT_POLICY),
-        "width": frame.pixels.width(), "height": frame.pixels.height(),
+        "width": frame.width, "height": frame.height,
         "input_transform_hash": digest(&pair.input)?,
         "input_transform_p3_hash": digest(&pair.input_p3)?,
         "output_transform_hash": digest(&pair.output)?,
@@ -2475,6 +2766,78 @@ mod audit_tests {
         *state.v3_asset_dir.lock().unwrap() = Some(dir.path().join("assets"));
         let identity = super::super::identity::pin(&state, &serde_json::json!({})).unwrap();
         assert!(identity.input_transform_p3.is_some());
+    }
+
+    fn grey_photo(dir: &std::path::Path, name: &str, value: u8) -> String {
+        let photo = dir.join(name);
+        image::ImageBuffer::from_pixel(8, 8, image::Rgba([value, value, value, 255]))
+            .save(&photo)
+            .unwrap();
+        photo.to_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn decoded_photos_are_kept_by_recency_and_let_go_under_pressure() {
+        let dir = tempfile::tempdir().unwrap();
+        let photos: Vec<String> = (0..4)
+            .map(|i| grey_photo(dir.path(), &format!("p{i}.png"), 40 + i as u8 * 30))
+            .collect();
+        let state = AppState::default();
+        let first = source(&state, &photos[0]).unwrap();
+        for photo in &photos[1..] {
+            source(&state, photo).unwrap();
+        }
+        // Three kept: the oldest went.
+        assert!(!state.v3.holds_source(&photos[0]));
+        assert!(photos[1..].iter().all(|p| state.v3.holds_source(p)));
+        // Going back to one kept is the same picture, not a new decode.
+        let again = source(&state, &photos[2]).unwrap();
+        assert!(Arc::ptr_eq(&again, &source(&state, &photos[2]).unwrap()));
+        assert!(!Arc::ptr_eq(&first, &again));
+        // A warning lets go of every photo but the open one; critical, of it too.
+        assert!(state.v3.trim(Some(&photos[3]), false) > 0);
+        assert!(state.v3.holds_source(&photos[3]));
+        assert!(!state.v3.holds_source(&photos[1]) && !state.v3.holds_source(&photos[2]));
+        state.v3.trim(Some(&photos[3]), true);
+        assert!(!state.v3.holds_source(&photos[3]));
+    }
+
+    #[test]
+    fn saving_the_photo_left_neither_decodes_it_nor_displaces_the_open_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let left = grey_photo(dir.path(), "left.png", 60);
+        let open = grey_photo(dir.path(), "open.png", 120);
+        let state = AppState::default();
+        let edits = serde_json::json!({});
+        let audit = input_report(&state, &left, &edits).unwrap();
+        let open_frame = source(&state, &open).unwrap();
+        // Memory pressure let go of the photo left; its save still records
+        // what it is, from what was found when it was decoded.
+        state.v3.trim(Some(&open), false);
+        assert!(!state.v3.holds_source(&left));
+        let snapshot = input_snapshot(&state, &left, &edits).unwrap();
+        assert_eq!(snapshot, audit);
+        assert!(!state.v3.holds_source(&left), "saving decoded it again");
+        assert!(Arc::ptr_eq(&open_frame, &source(&state, &open).unwrap()));
+    }
+
+    #[test]
+    fn remembering_the_noise_does_not_keep_the_picture() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo = grey_photo(dir.path(), "noise.png", 90);
+        let caches = V3Caches::default();
+        let frame = Arc::new(
+            super::super::input::decode_profiled_photo(&std::fs::read(photo).unwrap()).unwrap(),
+        );
+        let noise = photo_noise(&caches, &frame);
+        assert_eq!(Arc::strong_count(&frame), 1);
+        assert_eq!(photo_noise(&caches, &frame), noise);
+    }
+
+    #[test]
+    fn a_raw_the_decoder_cannot_read_is_an_error() {
+        let garbage = vec![0x49u8, 0x49, 0x2a, 0x00, 0xff, 0xff, 0xff, 0xff, 1, 2, 3];
+        assert!(decode_raw_guarded(&garbage, false, &|| Ok(())).is_err());
     }
 
     #[test]

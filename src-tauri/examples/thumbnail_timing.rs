@@ -26,13 +26,7 @@ fn main() -> Result<()> {
     let edits = json!({"processVersion": 3, "toneMapper": "resolve", "v3": {}});
     // The editor has a photo open.
     render_file(&context, &state, &args[0], &edits, Some(1600))?;
-    let held = state
-        .v3
-        .source
-        .lock()
-        .unwrap()
-        .as_ref()
-        .map(|c| Arc::as_ptr(&c.frame));
+    let held = state.v3.newest_source().map(|f| Arc::as_ptr(&f));
     for path in &args[1..] {
         let start = std::time::Instant::now();
         let thumb = render_thumbnail(&context, &state, path, &json!({}), 720)?;
@@ -47,13 +41,7 @@ fn main() -> Result<()> {
             start.elapsed().as_secs_f64() * 1000.
         );
     }
-    let still = state
-        .v3
-        .source
-        .lock()
-        .unwrap()
-        .as_ref()
-        .map(|c| Arc::as_ptr(&c.frame));
+    let still = state.v3.newest_source().map(|f| Arc::as_ptr(&f));
     anyhow::ensure!(held == still, "thumbnails evicted the editor's source");
     let start = std::time::Instant::now();
     render_file(

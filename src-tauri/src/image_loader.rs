@@ -25,6 +25,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 use std::time::Instant;
+use tauri::Manager;
 
 #[derive(serde::Serialize)]
 pub struct LoadImageResult {
@@ -597,12 +598,69 @@ pub fn composite_patches_on_image(
 pub fn is_image_cached(path: String, state: tauri::State<'_, AppState>) -> bool {
     let (source_path, _) = parse_virtual_path(&path);
     let source_path_str = source_path.to_string_lossy().to_string();
+    // A RAW is kept only as v3 develops it (see load_image).
+    if is_raw_file(&source_path_str) {
+        return state.v3.holds_source(&path);
+    }
     state
         .decoded_image_cache
         .lock()
         .unwrap()
         .get(&source_path_str)
         .is_some()
+}
+
+/// A photo's bytes: mapped where possible, read otherwise.
+enum PhotoBytes {
+    Mapped(memmap2::Mmap),
+    Read(Vec<u8>),
+}
+
+impl std::ops::Deref for PhotoBytes {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match self {
+            PhotoBytes::Mapped(m) => m,
+            PhotoBytes::Read(v) => v,
+        }
+    }
+}
+
+fn read_photo(path: &str) -> Result<PhotoBytes, String> {
+    match read_file_mapped(Path::new(path)) {
+        Ok(mmap) => Ok(PhotoBytes::Mapped(mmap)),
+        Err(e) => {
+            log::warn!(
+                "Failed to memory-map file '{}': {}. Falling back to standard read.",
+                path,
+                e
+            );
+            fs::read(path)
+                .map(PhotoBytes::Read)
+                .map_err(|io_err| format!("Fallback read failed for {}: {}", path, io_err))
+        }
+    }
+}
+
+/// The previous engine's picture of `path` (see `LoadedImage::pixels`):
+/// decoded from the file, or for a photo opened from its smart preview,
+/// made from that, as opening it did.
+pub fn legacy_pixels(
+    path: &str,
+    from_preview: bool,
+    settings: &AppSettings,
+) -> Result<DynamicImage, String> {
+    let (source, _) = parse_virtual_path(path);
+    let source_str = source.to_string_lossy().to_string();
+    if from_preview {
+        return crate::smart_preview::read_frame(&source)
+            .map_err(|e| format!("{e:#}"))?
+            .map(|frame| crate::smart_preview::pristine(&frame, is_raw_file(&source_str)))
+            .ok_or_else(|| "This photo's preview is missing.".to_string());
+    }
+    let bytes = read_photo(&source_str)?;
+    load_base_image_from_bytes(&bytes, &source_str, false, settings, None)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -617,7 +675,9 @@ pub async fn load_image(
 
     {
         *state.original_image.lock().unwrap() = None;
-        state.v3.clear();
+        // The photo before keeps its decoded picture (within the cache's
+        // budget): going back to it then does not decode it again.
+        state.v3.open();
         *state.full_warped_cache.lock().unwrap() = None;
         *state.full_transformed_cache.lock().unwrap() = None;
 
@@ -641,8 +701,10 @@ pub async fn load_image(
     let metadata: ImageMetadata = crate::exif_processing::load_sidecar(&sidecar_path);
 
     let settings = load_settings(app_handle.clone()).unwrap_or_default();
+    let loaded_settings = settings.clone();
 
     let path_clone = source_path_str.clone();
+    let is_raw = is_raw_file(&source_path_str);
 
     // The photo opened before is given back to the cloud if opening it (or
     // a tool) downloaded it.
@@ -652,7 +714,9 @@ pub async fn load_image(
     let stand_in = crate::cloud_files::is_cloud_only(&source_path)
         && crate::smart_preview::may_stand_in(&source_path)
         && crate::smart_preview::is_current(&source_path);
-    let cached_data = if stand_in {
+    // A RAW is never kept here: the editor renders it from v3's own
+    // development, which keeps its own decoded pictures.
+    let cached_data = if stand_in || is_raw {
         None
     } else {
         state
@@ -662,77 +726,95 @@ pub async fn load_image(
             .get(&source_path_str)
     };
 
-    let (pristine_arc, exif_data) = if stand_in {
+    let (pixels, (orig_width, orig_height), exif_data) = if is_raw {
+        // Developed once, as v3 renders it, and left in its cache for the
+        // first render. The previous engine's decode of a RAW is made only
+        // if a tool asks for it (LoadedImage::pixels).
+        let app = app_handle.clone();
+        let photo = source_path.clone();
+        let virtual_path = path.clone();
+        let edits = metadata.adjustments.clone();
+        let preview_exif = metadata.exif.clone();
+        tokio::task::spawn_blocking(move || {
+            let cancelled = || generation_tracker.load(Ordering::SeqCst) != my_generation;
+            if cancelled() {
+                return Err("Load cancelled".to_string());
+            }
+            let exif = if stand_in {
+                preview_exif
+                    .or_else(|| crate::smart_preview::exif(&photo))
+                    .unwrap_or_default()
+            } else {
+                let bytes = read_photo(&path_clone)?;
+                crate::exif_processing::persist_exif_if_missing(&photo, &path_clone, &bytes);
+                exif_processing::read_exif_data(&path_clone, &bytes)
+            };
+            let state = app.state::<AppState>();
+            let developed = crate::color_engine::application::open_source(
+                &state,
+                &virtual_path,
+                &edits,
+                &|| {
+                    anyhow::ensure!(!cancelled(), "Load cancelled");
+                    Ok(())
+                },
+            );
+            match developed {
+                Ok(frame) => Ok((None, frame.pixels.dimensions(), exif)),
+                Err(_) if cancelled() => Err("Load cancelled".to_string()),
+                // v3 could not develop it (a pinned transform gone, say):
+                // open it as before, so the editor can say why it cannot
+                // render it rather than refusing to open it.
+                Err(e) => {
+                    log::warn!("Opening {path_clone} without v3's development: {e:#}");
+                    let image = legacy_pixels(&virtual_path, stand_in, &settings)?;
+                    let dimensions = image.dimensions();
+                    Ok((Some(Arc::new(image)), dimensions, exif))
+                }
+            }
+        })
+        .await
+        .map_err(|e| e.to_string())??
+    } else if stand_in {
         let photo = source_path.clone();
         let exif = metadata
             .exif
             .clone()
             .or_else(|| crate::smart_preview::exif(&photo))
             .unwrap_or_default();
-        let raw = is_raw_file(&source_path_str);
         let image = tokio::task::spawn_blocking(move || {
             crate::smart_preview::read_frame(&photo)
                 .map_err(|e| format!("{e:#}"))?
-                .map(|frame| crate::smart_preview::pristine(&frame, raw))
+                .map(|frame| crate::smart_preview::pristine(&frame, false))
                 .ok_or_else(|| "This photo's preview is missing.".to_string())
         })
         .await
         .map_err(|e| e.to_string())??;
         log::info!("[preview] opened {source_path_str} from its smart preview");
-        (Arc::new(image), exif)
+        let dimensions = image.dimensions();
+        (Some(Arc::new(image)), dimensions, exif)
     } else if let Some((cached_img, cached_exif)) = cached_data {
-        (cached_img, cached_exif)
+        let dimensions = cached_img.dimensions();
+        (Some(cached_img), dimensions, cached_exif)
     } else {
         let (pristine_img, exif_data_loaded) = tokio::task::spawn_blocking(move || {
             if generation_tracker.load(Ordering::SeqCst) != my_generation {
                 return Err("Load cancelled".to_string());
             }
-
-            let result: Result<(DynamicImage, HashMap<String, String>), String> =
-                (|| match read_file_mapped(Path::new(&path_clone)) {
-                    Ok(mmap) => {
-                        if generation_tracker.load(Ordering::SeqCst) != my_generation {
-                            return Err("Load cancelled".to_string());
-                        }
-
-                        let img = load_base_image_from_bytes(
-                            &mmap,
-                            &path_clone,
-                            false,
-                            &settings,
-                            cancel_token.clone(),
-                        )
-                        .map_err(|e| e.to_string())?;
-                        let exif = exif_processing::read_exif_data(&path_clone, &mmap);
-                        Ok((img, exif))
-                    }
-                    Err(e) => {
-                        log::warn!(
-                            "Failed to memory-map file '{}': {}. Falling back to standard read.",
-                            path_clone,
-                            e
-                        );
-                        let bytes = fs::read(&path_clone).map_err(|io_err| {
-                            format!("Fallback read failed for {}: {}", path_clone, io_err)
-                        })?;
-
-                        if generation_tracker.load(Ordering::SeqCst) != my_generation {
-                            return Err("Load cancelled".to_string());
-                        }
-
-                        let img = load_base_image_from_bytes(
-                            &bytes,
-                            &path_clone,
-                            false,
-                            &settings,
-                            cancel_token.clone(),
-                        )
-                        .map_err(|e| e.to_string())?;
-                        let exif = exif_processing::read_exif_data(&path_clone, &bytes);
-                        Ok((img, exif))
-                    }
-                })();
-            result
+            let bytes = read_photo(&path_clone)?;
+            if generation_tracker.load(Ordering::SeqCst) != my_generation {
+                return Err("Load cancelled".to_string());
+            }
+            let img = load_base_image_from_bytes(
+                &bytes,
+                &path_clone,
+                false,
+                &settings,
+                cancel_token.clone(),
+            )
+            .map_err(|e| e.to_string())?;
+            let exif = exif_processing::read_exif_data(&path_clone, &bytes);
+            Ok((img, exif))
         })
         .await
         .map_err(|e| e.to_string())??;
@@ -745,27 +827,29 @@ pub async fn load_image(
             exif_data_loaded.clone(),
         );
 
-        (arc_img, exif_data_loaded)
+        let dimensions = arc_img.dimensions();
+        (Some(arc_img), dimensions, exif_data_loaded)
     };
-
-    if state.load_image_generation.load(Ordering::SeqCst) != my_generation {
-        return Err("Load cancelled".to_string());
+    if stand_in && is_raw {
+        log::info!("[preview] opened {source_path_str} from its smart preview");
     }
 
-    let is_raw = is_raw_file(&source_path_str);
-
-    if state.load_image_generation.load(Ordering::SeqCst) != my_generation {
-        return Err("Load cancelled".to_string());
+    // Checked and stored under one lock: a newer load_image clears this
+    // under the same lock only after counting itself, so it either cancels
+    // this one here or clears what this one stored.
+    {
+        let mut loaded = state.original_image.lock().unwrap();
+        if state.load_image_generation.load(Ordering::SeqCst) != my_generation {
+            return Err("Load cancelled".to_string());
+        }
+        *loaded = Some(LoadedImage::new(
+            path,
+            pixels,
+            loaded_settings,
+            is_raw,
+            stand_in,
+        ));
     }
-
-    let (orig_width, orig_height) = pristine_arc.dimensions();
-
-    *state.original_image.lock().unwrap() = Some(LoadedImage {
-        path,
-        image: pristine_arc,
-        is_raw,
-        from_preview: stand_in,
-    });
 
     Ok(LoadImageResult {
         width: orig_width,

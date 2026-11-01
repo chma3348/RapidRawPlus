@@ -12,6 +12,7 @@ use tokio::task::JoinHandle;
 use wgpu::{Texture, TextureView};
 
 use crate::ai_processing::AiState;
+use crate::app_settings::AppSettings;
 use crate::cache_utils::DecodedImageCache;
 #[cfg(any(test, feature = "legacy-reference"))]
 use crate::gpu_processing::GpuProcessor;
@@ -33,10 +34,67 @@ pub struct WindowState {
 #[derive(Clone)]
 pub struct LoadedImage {
     pub path: String,
-    pub image: Arc<DynamicImage>,
+    /// The previous engine's decode of the photo, which only some tools read
+    /// (patches and masks of a rendered photo, negative conversion, the
+    /// previous automatic adjustment). A RAW's is made only when one asks
+    /// (`pixels`): the editor renders from v3's own development, and
+    /// decoding every RAW twice cost seconds and hundreds of megabytes per
+    /// photo opened. Shared by every copy of this value.
+    pixels: Arc<Mutex<Option<Arc<DynamicImage>>>>,
+    /// The settings the photo was opened with, which that decode follows.
+    settings: Arc<AppSettings>,
     pub is_raw: bool,
     /// Made from the photo's smart preview: the photo is in the cloud.
     pub from_preview: bool,
+}
+
+impl LoadedImage {
+    pub fn new(
+        path: String,
+        pixels: Option<Arc<DynamicImage>>,
+        settings: AppSettings,
+        is_raw: bool,
+        from_preview: bool,
+    ) -> Self {
+        Self {
+            path,
+            pixels: Arc::new(Mutex::new(pixels)),
+            settings: Arc::new(settings),
+            is_raw,
+            from_preview,
+        }
+    }
+
+    /// The previous engine's picture of the photo, decoded now if it has
+    /// not been (or was let go under memory pressure). That can take
+    /// seconds: call it without holding `AppState::original_image`.
+    pub fn pixels(&self) -> Result<Arc<DynamicImage>, String> {
+        let mut slot = self.pixels.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(image) = slot.as_ref() {
+            return Ok(image.clone());
+        }
+        let image = Arc::new(crate::image_loader::legacy_pixels(
+            &self.path,
+            self.from_preview,
+            &self.settings,
+        )?);
+        *slot = Some(image.clone());
+        Ok(image)
+    }
+
+    pub fn set_pixels(&self, image: Arc<DynamicImage>) {
+        *self.pixels.lock().unwrap_or_else(|e| e.into_inner()) = Some(image);
+    }
+
+    /// Let go of the picture, which `pixels` makes again from the file (or
+    /// the smart preview) when next asked; about how many bytes that was.
+    pub fn release_pixels(&self) -> usize {
+        self.pixels
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+            .map_or(0, |image| image.as_bytes().len())
+    }
 }
 
 #[cfg(any(test, feature = "legacy-reference"))]
@@ -56,6 +114,10 @@ pub struct GpuProcessorState {
 }
 
 pub struct PreviewJob {
+    /// The photo the editor asked about. The worker drops a job for a photo
+    /// that is no longer the one loaded (the editor has moved on), instead
+    /// of rendering the wrong photo or failing.
+    pub path: Option<String>,
     pub adjustments: serde_json::Value,
     pub is_interactive: bool,
     pub target_resolution: Option<u32>,
