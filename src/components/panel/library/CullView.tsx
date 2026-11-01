@@ -514,7 +514,13 @@ function CullPhoto({
   );
 }
 
-export default function CullView({ onEdit }: { onEdit: (path: string) => void }) {
+export default function CullView({
+  onEdit,
+  requestThumbnails,
+}: {
+  onEdit: (path: string) => void;
+  requestThumbnails: (paths: string[]) => void;
+}) {
   const { t } = useTranslation();
   const { open, paths, startPath, closeCull, finishCull } = useCullStore();
   const imageList = useLibraryStore((s) => s.imageList);
@@ -695,6 +701,18 @@ export default function CullView({ onEdit }: { onEdit: (path: string) => void })
     zoomBy,
   ]);
 
+  const strip = paths.slice(Math.max(0, index - 8), index + 9);
+  // The strip's own thumbnails: the library grid only makes the ones it has
+  // shown, so photos it never scrolled to stayed blank here. Asked for again
+  // when the queue drops some, as the grid does.
+  const thumbnailsDropped = useProcessStore((s) => s.thumbnailsDropped);
+  const stripKey = strip.join('\n');
+  useEffect(() => {
+    if (!open) return;
+    const missing = stripKey.split('\n').filter((p) => p && !useProcessStore.getState().thumbnails[p]);
+    if (missing.length > 0) requestThumbnails(missing);
+  }, [open, stripKey, thumbnailsDropped, requestThumbnails]);
+
   if (!open || paths.length === 0) return null;
 
   const photo = (i: number, focused: boolean, full: ReturnType<typeof useFullSize>, onFocus?: () => void) => {
@@ -724,7 +742,6 @@ export default function CullView({ onEdit }: { onEdit: (path: string) => void })
   const targetRating = targetPath ? imageRatings[targetPath] || 0 : 0;
 
   const name = (paths[target] || '').split(/[\\/]/).pop()?.replace('?vc=', ' · copy ');
-  const strip = paths.slice(Math.max(0, index - 8), index + 9);
 
   return (
     <div className="fixed inset-0 z-[60] flex flex-col bg-bg-primary text-text-primary">
@@ -806,9 +823,9 @@ export default function CullView({ onEdit }: { onEdit: (path: string) => void })
                   i === index ? 'ring-2 ring-accent' : 'opacity-70 hover:opacity-100',
                 )}
               >
-                {thumbnails[p] && (
+                {(thumbnails[p] || previews[p]) && (
                   <img
-                    src={thumbnails[p]}
+                    src={thumbnails[p] || previews[p]}
                     alt=""
                     draggable={false}
                     className={clsx('h-full w-full object-cover', f?.flag === 'reject' && 'opacity-35')}

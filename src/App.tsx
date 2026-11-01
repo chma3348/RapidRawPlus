@@ -897,7 +897,7 @@ function App() {
           handleRenameAlbumItem={handleRenameAlbumItem}
         />
         <FileDragGhost />
-        <CullView onEdit={handleImageSelect} />
+        <CullView onEdit={handleImageSelect} requestThumbnails={requestThumbnails} />
         <ShortcutSheet />
         <RejectsPrompt />
         <AdobeImportModal />
