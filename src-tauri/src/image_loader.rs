@@ -374,6 +374,13 @@ fn decode_via_system_codec(bytes: &[u8], extension: &str) -> Result<DynamicImage
         .context("Failed to decode the converted image")
 }
 
+/// A non-RAW photo upright, in the file's own code values: its colour
+/// profile is deliberately not applied. The previous engine's tools make
+/// heals and fills from these values, and the colour engine reads those
+/// patches back through the photo's profile (patches.rs), so converting
+/// here would shift every patch on a wide-gamut file. Anything that needs
+/// true colours decodes with `color_engine::input::decode_profiled_photo`
+/// instead, as merges and panoramas do.
 pub fn load_image_with_orientation(
     bytes: &[u8],
     cancel_token: Option<(Arc<AtomicUsize>, usize)>,

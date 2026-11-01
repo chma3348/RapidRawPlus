@@ -40,7 +40,9 @@ pub struct HdrResult {
 pub enum Merged {
     /// Linear light from RAW frames, in the reference frame's units: a DNG.
     Raw(crate::hdr_dng::DngCamera),
-    /// A finished picture, sRGB-encoded 0..1: a JPEG XL or a TIFF.
+    /// A finished picture in Display P3 (which holds every sRGB colour and
+    /// the wider ones of P3 photos), encoded with sRGB's curve, 0..1: a
+    /// JPEG XL or a TIFF.
     Rendered,
 }
 
@@ -82,7 +84,13 @@ pub fn finish(
         crate::hdr_dng::Compression::Lossless
     };
     let pixel_count = pixels.width() as u64 * pixels.height() as u64;
-    let compact_rendered = compact && pixel_count <= COMPACT_MAX_PIXELS;
+    // Wide-gamut finished pictures are saved lossless too: the JPEG XL
+    // encoder loses colours outside sRGB even when told the picture is P3
+    // (measured: P3's pure red came back a dull pink).
+    let compact_rendered = compact
+        && pixel_count <= COMPACT_MAX_PIXELS
+        && matches!(merged, Merged::Rendered)
+        && fits_srgb(pixels);
     let extension = match merged {
         Merged::Raw(_) => "dng",
         Merged::Rendered if compact_rendered => "jxl",
@@ -130,18 +138,57 @@ pub fn finish(
     Ok((result, url))
 }
 
-/// A finished-picture merge (sRGB-encoded 0..1): JPEG XL at 16 bits when
-/// compact, otherwise a 16-bit TIFF, deflate-compressed with the
-/// horizontal predictor (an uncompressed float TIFF made a 144-megapixel
-/// panorama 1.65 GB).
+/// Does every colour of a finished-picture merge (Display P3-encoded) fit
+/// in sRGB? A hair of tolerance for the round trip through the two spaces.
+fn fits_srgb(encoded: &Rgb32FImage) -> bool {
+    let p3_to_srgb = p3_to_srgb();
+    encoded.as_raw().par_chunks(3).all(|p| {
+        mul(&p3_to_srgb, [decode(p[0]), decode(p[1]), decode(p[2])])
+            .iter()
+            .all(|v| (-1e-4..=1.0 + 1e-4).contains(v))
+    })
+}
+
+/// A finished-picture merge (Display P3, sRGB's curve, 0..1): JPEG XL at
+/// 16 bits when compact, otherwise a 16-bit TIFF, deflate-compressed with
+/// the horizontal predictor (an uncompressed float TIFF made a
+/// 144-megapixel panorama 1.65 GB). Stored as sRGB when every colour fits
+/// in it, which more programs read correctly; otherwise as Display P3,
+/// with its profile, so the wider colours of P3 photos are not clipped —
+/// which only a TIFF holds (see `finish`).
 pub fn write_rendered(path: &Path, encoded: &Rgb32FImage, compact: bool) -> Result<()> {
+    use crate::color_engine::config::OutputSpace;
     let (w, h) = encoded.dimensions();
+    let p3_to_srgb = p3_to_srgb();
+    let to_srgb = |p: &[f32]| {
+        let linear = mul(&p3_to_srgb, [decode(p[0]), decode(p[1]), decode(p[2])]);
+        linear.map(|v| encode(v.clamp(0.0, 1.0)))
+    };
+    let fits_srgb = fits_srgb(encoded);
+    ensure!(
+        fits_srgb || !compact,
+        "A merge with colours outside sRGB must be saved lossless"
+    );
+    let space = if fits_srgb {
+        OutputSpace::Srgb
+    } else {
+        OutputSpace::DisplayP3
+    };
+    let quantize = |v: f32| (v.clamp(0.0, 1.0) * 65535.0).round() as u16;
     let data: Vec<u16> = encoded
         .as_raw()
-        .par_iter()
-        .map(|v| (v.clamp(0.0, 1.0) * 65535.0).round() as u16)
+        .par_chunks(3)
+        .flat_map_iter(|p| {
+            let p = if fits_srgb {
+                to_srgb(p)
+            } else {
+                [p[0], p[1], p[2]]
+            };
+            p.map(quantize)
+        })
         .collect();
     if compact {
+        // sRGB, which a JPEG XL is taken to be unless it says otherwise.
         let bytes: Vec<u8> = data.iter().flat_map(|v| v.to_ne_bytes()).collect();
         let jxl = jxl_encoder::LossyConfig::new(RENDERED_DISTANCE)
             .with_effort(RENDERED_EFFORT)
@@ -150,28 +197,81 @@ pub fn write_rendered(path: &Path, encoded: &Rgb32FImage, compact: bool) -> Resu
         std::fs::write(path, jxl)?;
         return Ok(());
     }
+    let icc = space.icc_profile()?;
     let file = std::io::BufWriter::new(std::fs::File::create(path)?);
-    tiff::encoder::TiffEncoder::new(file)?
+    let mut tiff = tiff::encoder::TiffEncoder::new(file)?
         .with_compression(tiff::encoder::Compression::Deflate(
             tiff::encoder::DeflateLevel::Balanced,
         ))
-        .with_predictor(tiff::tags::Predictor::Horizontal)
-        .write_image::<tiff::encoder::colortype::RGB16>(w, h, &data)
-        .context("Writing the merged TIFF")?;
+        .with_predictor(tiff::tags::Predictor::Horizontal);
+    let mut image = tiff.new_image::<tiff::encoder::colortype::RGB16>(w, h)?;
+    image
+        .encoder()
+        .write_tag(tiff::tags::Tag::IccProfile, icc.as_slice())?;
+    image.write_data(&data).context("Writing the merged TIFF")?;
     Ok(())
 }
 
-/// Linear display light to sRGB-encoded values, for a finished-picture
-/// merge.
-pub fn encode_srgb(img: &mut Rgb32FImage) {
-    img.par_iter_mut().for_each(|v| {
-        let x = v.clamp(0.0, 1.0);
-        *v = if x <= 0.0031308 {
-            x * 12.92
-        } else {
-            1.055 * x.powf(1.0 / 2.4) - 0.055
-        };
+/// Linear sRGB primaries to linear Display P3 (both D65), as the colour
+/// engine's captured-input stage converts them.
+const SRGB_TO_P3: [[f32; 3]; 3] = [
+    [0.822_462_1, 0.177_538, 0.0],
+    [0.033_194_1, 0.966_805_9, 0.0],
+    [0.017_082_7, 0.072_397_4, 0.910_519_9],
+];
+
+fn p3_to_srgb() -> [[f32; 3]; 3] {
+    let m = glam::Mat3::from_cols_array_2d(&SRGB_TO_P3)
+        .transpose()
+        .inverse();
+    m.transpose().to_cols_array_2d()
+}
+
+fn mul(m: &[[f32; 3]; 3], p: [f32; 3]) -> [f32; 3] {
+    m.map(|row| row[0] * p[0] + row[1] * p[1] + row[2] * p[2])
+}
+
+fn encode(x: f32) -> f32 {
+    if x <= 0.0031308 {
+        x * 12.92
+    } else {
+        1.055 * x.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+fn decode(x: f32) -> f32 {
+    if x <= 0.04045 {
+        x / 12.92
+    } else {
+        ((x + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// Linear light in sRGB primaries — where a colour sRGB cannot hold has a
+/// channel below zero or above one — to linear Display P3, the space
+/// finished-picture merges are made in, so those colours survive the
+/// folding and clamping that follow.
+pub fn to_display_p3(img: &mut Rgb32FImage) {
+    img.par_chunks_mut(3).for_each(|p| {
+        let q = mul(&SRGB_TO_P3, [p[0], p[1], p[2]]);
+        p.copy_from_slice(&q);
     });
+}
+
+/// sRGB-encoded values (0..1) to Display P3-encoded ones: the same colours,
+/// for a panorama frame the previous engine decoded.
+pub fn srgb_encoded_to_display_p3(img: &mut Rgb32FImage) {
+    img.par_iter_mut()
+        .for_each(|v| *v = decode(v.clamp(0.0, 1.0)));
+    to_display_p3(img);
+    encode_srgb(img);
+}
+
+/// Linear display light to values encoded with sRGB's curve (which Display
+/// P3 shares), clamped to 0..1, for a finished-picture merge.
+pub fn encode_srgb(img: &mut Rgb32FImage) {
+    img.par_iter_mut()
+        .for_each(|v| *v = encode(v.clamp(0.0, 1.0)));
 }
 
 impl Drop for HdrResult {
@@ -286,6 +386,64 @@ pub fn save(result: &HdrResult) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use image::Rgb;
+
+    /// A finished-picture merge of P3 frames keeps the colours sRGB cannot
+    /// hold, in a P3 TIFF (never a JPEG XL, which would lose them); one of
+    /// sRGB colours is still stored as sRGB, in either form. Read back as
+    /// the editor reads it.
+    #[test]
+    fn rendered_merges_keep_wide_gamut_colours() {
+        let dir = std::env::temp_dir().join("darkroom-rendered-merge-test");
+        let _ = std::fs::create_dir_all(&dir);
+        // Linear sRGB coordinates of Display P3's pure red, and a grey.
+        let wide = |x: u32| {
+            if x < 32 {
+                Rgb([1.2249, -0.0421, -0.0196])
+            } else {
+                Rgb([0.2, 0.2, 0.2])
+            }
+        };
+        for (name, source) in [
+            ("wide", Rgb32FImage::from_fn(64, 64, |x, _| wide(x))),
+            (
+                "srgb",
+                Rgb32FImage::from_pixel(64, 64, Rgb([0.8, 0.1, 0.05])),
+            ),
+        ] {
+            let mut merged = source.clone();
+            to_display_p3(&mut merged);
+            fold_highlights(&mut merged);
+            encode_srgb(&mut merged);
+            assert_eq!(fits_srgb(&merged), name == "srgb");
+            for compact in [false, true] {
+                let path = dir.join(format!("{name}-{compact}.out"));
+                if name == "wide" && compact {
+                    assert!(write_rendered(&path, &merged, compact).is_err());
+                    continue;
+                }
+                write_rendered(&path, &merged, compact).unwrap();
+                let bytes = std::fs::read(&path).unwrap();
+                let frame = crate::color_engine::input::decode_profiled_photo(&bytes).unwrap();
+                let got = frame.pixels.get_pixel(12, 32).0;
+                let want = source.get_pixel(12, 32).0;
+                // JPEG XL is lossy; a lost profile moves red by 0.2 or more.
+                for c in 0..3 {
+                    assert!(
+                        (got[c] - want[c]).abs() < 0.03,
+                        "{name}, compact {compact}: {got:?} vs {want:?}"
+                    );
+                }
+                if !compact {
+                    let p3 = moxcms::ColorProfile::new_display_p3().encode().unwrap();
+                    assert_eq!(
+                        frame.source_profile.as_deref() == Some(p3.as_slice()),
+                        name == "wide",
+                        "{name}: stored in the wrong space"
+                    );
+                }
+            }
+        }
+    }
 
     /// Folding keeps everything up to the knee, puts the brightest light at
     /// white, and never reverses an order of brightness.

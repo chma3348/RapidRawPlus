@@ -1150,6 +1150,7 @@ async fn merge_hdr(
     let merged_kind = match camera {
         Some(camera) => crate::hdr_output::Merged::Raw(camera),
         None => {
+            crate::hdr_output::to_display_p3(&mut merged);
             crate::hdr_output::fold_highlights(&mut merged);
             crate::hdr_output::encode_srgb(&mut merged);
             crate::hdr_output::Merged::Rendered
