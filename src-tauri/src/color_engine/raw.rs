@@ -60,7 +60,8 @@ pub fn decode_raw(
         .orientation
         .map(Orientation::from_u16)
         .unwrap_or(raw.orientation);
-    let mut frame = develop(raw, orientation, fast, check_cancel)?;
+    let dng = decoder.format_hint() == rawler::decoders::FormatHint::DNG;
+    let mut frame = develop(raw, orientation, dng, fast, check_cancel)?;
     frame.provenance.source_hash = blake3::hash(bytes).to_hex().to_string();
     Ok(frame)
 }
@@ -148,14 +149,17 @@ fn calibration(matrix: &[f32], wb: &[f32; 4]) -> Result<DMat3> {
     Ok(result)
 }
 
-/// Sensor levels repeating over the mosaic from its top-left corner, row
-/// by row (DNG's BlackLevelRepeatDim): one level, 2x2 for a Bayer
-/// sensor's sites, or 6x6 for an X-Trans one's.
+/// Sensor levels repeating over the mosaic, row by row (DNG's
+/// BlackLevelRepeatDim): one level, 2x2 for a Bayer sensor's sites, or 6x6
+/// for an X-Trans one's. The pattern starts at `origin` (row, column) of
+/// the mosaic: its top-left corner for most RAWs, but for a DNG the corner
+/// of its ActiveArea, which the DNG specification measures BlackLevel from.
 #[derive(Clone, Debug, PartialEq)]
 struct SiteLevels {
     levels: Vec<f32>,
     width: usize,
     height: usize,
+    origin: (usize, usize),
 }
 
 impl SiteLevels {
@@ -164,10 +168,15 @@ impl SiteLevels {
             levels: vec![level],
             width: 1,
             height: 1,
+            origin: (0, 0),
         }
     }
     fn at(&self, row: usize, col: usize) -> f32 {
-        self.levels[(row % self.height) * self.width + col % self.width]
+        // Rows and columns before the origin wrap round to the pattern's end.
+        let (h, w) = (self.height, self.width);
+        let row = (row % h + h - self.origin.0 % h) % h;
+        let col = (col % w + w - self.origin.1 % w) % w;
+        self.levels[row * w + col]
     }
 }
 
@@ -207,9 +216,12 @@ fn normalize_sensor(
     Ok(())
 }
 
+/// `dng`: the RAW is a DNG, whose per-site black levels start at its
+/// ActiveArea rather than the mosaic's corner.
 fn develop(
     mut raw: RawImage,
     orientation: Orientation,
+    dng: bool,
     fast: bool,
     check_cancel: impl Fn() -> Result<()>,
 ) -> Result<DecodedFrame> {
@@ -250,10 +262,17 @@ fn develop(
         "No D65 camera calibration; v3 will not select an arbitrary fallback illuminant",
     )?;
     let transform = calibration(matrix, &raw.wb_coeffs)?;
+    // rawler moves a DNG's CFA pattern from the ActiveArea corner to the
+    // mosaic's, but leaves its black levels where the file put them.
+    let origin = match raw.active_area {
+        Some(area) if dng => (area.p.y, area.p.x),
+        _ => (0, 0),
+    };
     let black = SiteLevels {
         levels: blacks.levels.iter().map(|v| v.as_f32()).collect(),
         width: blacks.width,
         height: blacks.height,
+        origin,
     };
     let white = SiteLevels::uniform(raw.whitelevel.0[0] as f32);
     let rcd_cfa = match &raw.photometric {
@@ -391,7 +410,7 @@ mod tests {
     use super::*;
     #[test]
     fn recovery_is_explicit_and_original_pixels_are_retained() {
-        let mut frame = develop(fixture(), Orientation::Normal, false, || Ok(())).unwrap();
+        let mut frame = develop(fixture(), Orientation::Normal, false, false, || Ok(())).unwrap();
         let historical = frame.pixels.clone();
         let mut original = historical.clone();
         frame.unrecovered.as_ref().unwrap().restore(&mut original);
@@ -409,15 +428,16 @@ mod tests {
             Recovery::from_edits(&serde_json::json!({})).unwrap(),
             Recovery::NeutralGreenV1
         );
-        let again = develop(fixture(), Orientation::Normal, false, || Ok(())).unwrap();
+        let again = develop(fixture(), Orientation::Normal, false, false, || Ok(())).unwrap();
         assert_eq!(again.pixels, historical);
     }
     #[test]
     fn unrecovered_pixels_follow_the_orientation() {
         // Restoring the originals on a rotated frame must equal rotating the
         // frame restored upright.
-        let mut upright = develop(fixture(), Orientation::Normal, false, || Ok(())).unwrap();
-        let mut rotated = develop(fixture(), Orientation::Rotate90, false, || Ok(())).unwrap();
+        let mut upright = develop(fixture(), Orientation::Normal, false, false, || Ok(())).unwrap();
+        let mut rotated =
+            develop(fixture(), Orientation::Rotate90, false, false, || Ok(())).unwrap();
         Recovery::Off.apply(&mut upright);
         Recovery::Off.apply(&mut rotated);
         let expected = crate::image_processing::apply_orientation(
@@ -466,6 +486,7 @@ mod tests {
             levels: levels.to_vec(),
             width: 2,
             height: 2,
+            origin: (0, 0),
         };
         normalize_sensor(
             &mut v,
@@ -477,6 +498,50 @@ mod tests {
         assert_eq!(v, [0., 0.1, 0.5, 2.]);
         let flat = SiteLevels::uniform(100.);
         assert!(normalize_sensor(&mut v, 2, &flat, &flat).is_err());
+    }
+    /// A DNG's black pattern starts at its ActiveArea corner: with the
+    /// active area one row down and three columns in, the mosaic's (1, 3)
+    /// takes the pattern's first level, and the mosaic's corner the one
+    /// diagonally opposite it.
+    #[test]
+    fn black_levels_start_at_their_origin() {
+        let levels = SiteLevels {
+            levels: vec![10., 20., 30., 40.],
+            width: 2,
+            height: 2,
+            origin: (1, 3),
+        };
+        assert_eq!(levels.at(1, 3), 10.);
+        assert_eq!(levels.at(1, 4), 20.);
+        assert_eq!(levels.at(2, 3), 30.);
+        assert_eq!(levels.at(2, 4), 40.);
+        assert_eq!(levels.at(0, 0), 40.);
+        assert_eq!(levels.at(0, 1), 30.);
+        // A 6x6 pattern, where wrapping forwards and backwards differ.
+        let xtrans = SiteLevels {
+            levels: (0..36).map(|i| i as f32).collect(),
+            width: 6,
+            height: 6,
+            origin: (1, 3),
+        };
+        for (row, col) in [(0, 0), (1, 3), (5, 2), (7, 9), (12, 1)] {
+            // Measured from the origin, wrapping round the pattern.
+            let (r, c) = ((row + 6 - 1) % 6, (col + 6 - 3) % 6);
+            assert_eq!(xtrans.at(row, col), (r * 6 + c) as f32, "({row}, {col})");
+        }
+        // Whole frames: the black each sample loses follows the origin.
+        let mut v = [110., 120., 130., 140., 150., 160., 170., 180.];
+        let white = SiteLevels::uniform(1010.);
+        normalize_sensor(&mut v, 4, &levels, &white).unwrap();
+        // Row 0 is the pattern's second row, column 0 its second column.
+        let blacks = [40., 30., 40., 30., 20., 10., 20., 10.];
+        for ((got, raw), black) in v
+            .iter()
+            .zip([110., 120., 130., 140., 150., 160., 170., 180.])
+            .zip(blacks)
+        {
+            assert!((got - (raw - black) / (1010. - black)).abs() < 1e-6);
+        }
     }
     /// A Fujifilm X-Trans mosaic develops: the sensor's 6x6 pattern, a black
     /// level for each of its 36 sites, flat grey light.
@@ -519,7 +584,7 @@ mod tests {
         );
         let expected = 2000.0 / (16383.0 - 1000.0);
         for fast in [false, true] {
-            let frame = develop(raw.clone(), Orientation::Normal, fast, || Ok(())).unwrap();
+            let frame = develop(raw.clone(), Orientation::Normal, false, fast, || Ok(())).unwrap();
             let (fw, fh) = frame.pixels.dimensions();
             assert_eq!((fw, fh), (w as u32, h as u32));
             // Away from the edges every pixel is the same neutral grey.
@@ -554,8 +619,8 @@ mod tests {
     }
     #[test]
     fn real_demosaicers_keep_flat_field_headroom() {
-        let full = develop(fixture(), Orientation::Normal, false, || Ok(())).unwrap();
-        let fast = develop(fixture(), Orientation::Normal, true, || Ok(())).unwrap();
+        let full = develop(fixture(), Orientation::Normal, false, false, || Ok(())).unwrap();
+        let fast = develop(fixture(), Orientation::Normal, false, true, || Ok(())).unwrap();
         let a = full
             .pixels
             .get_pixel(full.pixels.width() / 2, full.pixels.height() / 2);
@@ -646,7 +711,7 @@ mod tests {
         assert_eq!(off.pixels, expected_off);
         assert_ne!(off.pixels, on.pixels);
         assert_eq!(restored.pixels, on.pixels);
-        let expected = develop(fixture(), Orientation::Normal, false, || Ok(())).unwrap();
+        let expected = develop(fixture(), Orientation::Normal, false, false, || Ok(())).unwrap();
         assert_eq!(frame.pixels.dimensions(), expected.pixels.dimensions());
         for (a, b) in frame.pixels.as_raw().iter().zip(expected.pixels.as_raw()) {
             assert!((a - b).abs() < 1e-5, "{a} {b}");
@@ -656,14 +721,18 @@ mod tests {
     fn invalid_metadata_and_cancellation_fail_closed() {
         let mut raw = fixture();
         raw.color_matrix.clear();
-        assert!(develop(raw, Orientation::Normal, false, || Ok(())).is_err());
+        assert!(develop(raw, Orientation::Normal, false, false, || Ok(())).is_err());
         let mut raw = fixture();
         raw.photometric = RawPhotometricInterpretation::LinearRaw;
-        assert!(develop(raw, Orientation::Normal, false, || Ok(())).is_err());
+        assert!(develop(raw, Orientation::Normal, false, false, || Ok(())).is_err());
         assert!(
-            develop(fixture(), Orientation::Normal, false, || anyhow::bail!(
-                "cancelled"
-            ))
+            develop(
+                fixture(),
+                Orientation::Normal,
+                false,
+                false,
+                || anyhow::bail!("cancelled")
+            )
             .is_err()
         );
     }
