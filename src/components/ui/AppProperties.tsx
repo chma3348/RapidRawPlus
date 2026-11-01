@@ -83,6 +83,7 @@ export enum Invokes {
   ListImagesInDir = 'list_images_in_dir',
   CloudFolderSummary = 'cloud_folder_summary',
   GenerateCullPreview = 'generate_cull_preview',
+  GenerateCullFull = 'generate_cull_full',
   ListImagesRecursive = 'list_images_recursive',
   ListEngineLoras = 'list_engine_loras',
   ListRegisteredModels = 'list_registered_models',

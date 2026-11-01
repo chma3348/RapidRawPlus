@@ -37,6 +37,7 @@ import {
 } from 'lucide-react';
 
 import CollapsibleSection from '../../ui/CollapsibleSection';
+import { useHealSelection } from '../../../store/useHealSelection';
 import ReplacementBlendControls from './ReplacementBlendControls';
 import Switch from '../../ui/Switch';
 import Slider from '../../ui/Slider';
@@ -1831,6 +1832,44 @@ function SubMaskRow({
   );
 }
 
+/**
+ * Refresh source and Delete for the spot selected on the photo, with
+ * Lightroom's keys (/ and Delete) shown on the buttons.
+ */
+function HealSpotActions() {
+  const { t } = useTranslation();
+  const selected = useHealSelection((s) => s.selected);
+  const request = useHealSelection((s) => s.request);
+  if (!selected) {
+    return null;
+  }
+  return (
+    <div className="mt-2 flex gap-2">
+      <button
+        type="button"
+        onClick={() => request('refresh')}
+        className="flex flex-1 items-center justify-center gap-1.5 rounded-md bg-surface px-2 py-1.5 text-xs text-text-primary hover:bg-card-active"
+        data-tooltip={t('editor.ai.settings.refreshSourceHint', {
+          defaultValue: 'Borrow from somewhere else, chosen automatically',
+        })}
+      >
+        <RotateCcw size={13} />
+        {t('editor.ai.settings.refreshSource', { defaultValue: 'Refresh source' })}
+        <kbd className="font-sans opacity-60">/</kbd>
+      </button>
+      <button
+        type="button"
+        onClick={() => request('delete')}
+        className="flex items-center justify-center gap-1.5 rounded-md bg-surface px-2 py-1.5 text-xs text-text-primary hover:bg-card-active"
+      >
+        <Trash2 size={13} />
+        {t('editor.ai.settings.deleteSpot', { defaultValue: 'Delete' })}
+        <kbd className="font-sans opacity-60">⌫</kbd>
+      </button>
+    </div>
+  );
+}
+
 function SettingsPanel({
   container,
   activeSubMask,
@@ -1905,6 +1944,8 @@ function SettingsPanel({
               // re-run the blend even though nothing else changed.
               line.cloneOffset?.x,
               line.cloneOffset?.y,
+              // Refresh source turns the current one down: heal again.
+              line.rejectedSources?.length,
             ]),
           ),
         ])
@@ -2158,6 +2199,7 @@ function SettingsPanel({
           <Text variant={TextVariants.small} className="block text-text-secondary">
             {t('editor.ai.settings.cloneHint')}
           </Text>
+          <HealSpotActions />
         </div>
       )}
 

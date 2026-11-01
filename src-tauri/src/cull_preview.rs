@@ -9,7 +9,10 @@
 //!   "Show edits" on:** developed through the colour engine (a cloud photo
 //!   from its smart preview, so nothing downloads), as a JPEG.
 //!
-//! Zooming in still develops the photo at full size, for focus.
+//! Zooming in develops the photo at full size, for focus
+//! (`generate_cull_full`): a JPEG off the main thread, which Cull asks for
+//! as soon as a photo has been looked at for a moment, so it is usually
+//! ready by the time you zoom.
 
 use std::io::Cursor;
 
@@ -117,6 +120,44 @@ pub fn generate_cull_preview(
     let mut out = Vec::new();
     frame
         .write_display_jpeg(&mut out, QUALITY)
+        .map_err(|e| e.to_string())?;
+    Ok(Response::new(out))
+}
+
+/// Quality of a full-size picture: focus is judged on it, so higher than
+/// the screen preview's. 6 MB for 33 megapixels, where the PNG it replaced
+/// was 55 MB to send and decode.
+const FULL_QUALITY: u8 = 92;
+
+/// The photo developed at full size, for checking focus at 100%: with its
+/// edits when Show edits is on, as it opens unedited otherwise.
+#[tauri::command(async)]
+pub fn generate_cull_full(
+    path: String,
+    show_edits: bool,
+    js_adjustments: serde_json::Value,
+    app_handle: tauri::AppHandle,
+) -> Result<Response, String> {
+    let real = path.split("?vc=").next().unwrap_or(&path).to_string();
+    let state = app_handle.state::<AppState>();
+    let context = crate::image_processing::get_or_init_gpu_context(&state, &app_handle)?;
+    let unedited = serde_json::json!({});
+    let edits = crate::image_processing::render_adjustments_for_empty(if show_edits {
+        &js_adjustments
+    } else {
+        &unedited
+    });
+    let frame = crate::color_engine::application::render_for_output(
+        &context,
+        &state,
+        &real,
+        edits.as_ref(),
+        None,
+    )
+    .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    frame
+        .write_display_jpeg(&mut out, FULL_QUALITY)
         .map_err(|e| e.to_string())?;
     Ok(Response::new(out))
 }

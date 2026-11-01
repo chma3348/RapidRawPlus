@@ -194,53 +194,112 @@ const FIT: Zoom = { scale: 1, cx: 0.5, cy: 0.5 };
 const MAX_ZOOM_FROM_FIT = 40;
 
 /** The photo itself, full size, for focus at 100% (the previews are 1920 px). */
-function useFullSize(path: string | undefined, wanted: boolean, zoomed: boolean) {
-  const [full, setFull] = useState<{ path: string; url: string; width: number; height: number } | null>(null);
+interface FullPicture {
+  url: string;
+  width: number;
+  height: number;
+}
+
+/**
+ * Full-size pictures for checking focus, shared by both sides of Compare.
+ * One develops at a time (they share the GPU; two at once only finish
+ * later), the zoomed photo first; the last few are kept, so stepping back
+ * and forth does not develop them again.
+ */
+const fullPictures = {
+  done: new Map<string, FullPicture>(),
+  developing: null as string | null,
+  /** What each mounted photo wants, by its hook's id. */
+  wants: new Map<number, { key: string; path: string; showEdits: boolean; urgent: boolean }>(),
+  listeners: new Set<() => void>(),
+};
+const FULL_KEPT = 4;
+/** How long a photo is looked at before it is developed at full size. */
+const FULL_DWELL_MS = 350;
+
+const fullKey = (path: string, showEdits: boolean) => `${showEdits ? 'edited' : 'plain'}|${path}`;
+
+function notifyFull() {
+  fullPictures.listeners.forEach((listener) => listener());
+}
+
+async function developNextFull() {
+  if (fullPictures.developing) return;
+  const wants = [...fullPictures.wants.values()]
+    .filter((w) => !fullPictures.done.has(w.key))
+    .sort((a, b) => Number(b.urgent) - Number(a.urgent));
+  const next = wants[0];
+  if (!next) return;
+  fullPictures.developing = next.key;
+  try {
+    let adjustments: unknown = {};
+    if (next.showEdits) {
+      const metadata = await invoke<{ adjustments?: unknown } | null>(Invokes.LoadMetadata, { path: next.path });
+      if (metadata?.adjustments && typeof metadata.adjustments === 'object') adjustments = metadata.adjustments;
+    }
+    const bytes: Uint8Array = await invoke(Invokes.GenerateCullFull, {
+      path: next.path.split('?vc=')[0],
+      showEdits: next.showEdits,
+      jsAdjustments: adjustments,
+    });
+    const url = URL.createObjectURL(new Blob([bytes as BlobPart], { type: 'image/jpeg' }));
+    const img = new Image();
+    img.src = url;
+    // Decoded before it is shown, so the swap from the preview is instant.
+    await img.decode();
+    fullPictures.done.set(next.key, { url, width: img.naturalWidth, height: img.naturalHeight });
+    // Forget the oldest beyond the few kept, never one still wanted.
+    const wanted = new Set([...fullPictures.wants.values()].map((w) => w.key));
+    for (const key of fullPictures.done.keys()) {
+      if (fullPictures.done.size <= FULL_KEPT) break;
+      if (wanted.has(key)) continue;
+      URL.revokeObjectURL(fullPictures.done.get(key)!.url);
+      fullPictures.done.delete(key);
+    }
+  } catch {
+    // The 1920-pixel preview stays.
+  } finally {
+    fullPictures.developing = null;
+    notifyFull();
+    void developNextFull();
+  }
+}
+
+let fullHookIds = 0;
+
+/**
+ * The photo at full size: developed straight away when zoomed in, and once
+ * it has been looked at for a moment otherwise, so it is usually ready by
+ * the time you zoom.
+ */
+function useFullSize(path: string | undefined, wanted: boolean, zoomed: boolean, showEdits: boolean) {
+  const [id] = useState(() => ++fullHookIds);
+  const [, rerender] = useState(0);
+  const key = path ? fullKey(path, showEdits) : null;
   useEffect(() => {
-    if (!path || !wanted || !zoomed || isVideoPath(path) || full?.path === path) return;
-    let cancelled = false;
-    let url: string | null = null;
-    // Only when zoomed: rendering every photo rested on at full size held
-    // up the previews of the next ones.
-    const timer = window.setTimeout(async () => {
-      try {
-        const metadata = await invoke<{ adjustments?: unknown } | null>(Invokes.LoadMetadata, { path });
-        const adjustments =
-          metadata?.adjustments && typeof metadata.adjustments === 'object' ? metadata.adjustments : {};
-        const bytes: Uint8Array = await invoke(Invokes.GeneratePreviewForPath, {
-          path: path.split('?vc=')[0],
-          jsAdjustments: adjustments,
-          maxDimension: 0,
-        });
-        if (cancelled) return;
-        url = URL.createObjectURL(new Blob([bytes as BlobPart], { type: 'image/png' }));
-        const img = new Image();
-        img.src = url;
-        await img.decode();
-        if (cancelled) {
-          URL.revokeObjectURL(url);
-          return;
-        }
-        setFull((old) => {
-          if (old) URL.revokeObjectURL(old.url);
-          return { path, url: url!, width: img.naturalWidth, height: img.naturalHeight };
-        });
-      } catch {
-        // The 1920-pixel preview stays.
-      }
-    }, 0);
+    const listener = () => rerender((n) => n + 1);
+    fullPictures.listeners.add(listener);
     return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
+      fullPictures.listeners.delete(listener);
+      fullPictures.wants.delete(id);
     };
-  }, [path, wanted, zoomed, full?.path]);
-  useEffect(
-    () => () => {
-      if (full) URL.revokeObjectURL(full.url);
-    },
-    [full],
-  );
-  return full?.path === path ? full : null;
+  }, [id]);
+  useEffect(() => {
+    fullPictures.wants.delete(id);
+    if (!path || !key || !wanted || isVideoPath(path)) return;
+    const want = () => {
+      fullPictures.wants.set(id, { key, path, showEdits, urgent: zoomed });
+      void developNextFull();
+    };
+    if (zoomed) {
+      want();
+      return;
+    }
+    // Passing through on the way to another photo develops nothing.
+    const timer = window.setTimeout(want, FULL_DWELL_MS);
+    return () => window.clearTimeout(timer);
+  }, [id, key, path, wanted, zoomed, showEdits]);
+  return key ? (fullPictures.done.get(key) ?? null) : null;
 }
 
 /**
@@ -403,7 +462,10 @@ function CullPhoto({
     }
   });
 
-  const shown = full?.url ?? src;
+  // The full size only once zoomed: it is developed by the app, the preview
+  // is the camera's own JPEG, and swapping them while just looking would
+  // shift the colours under you.
+  const shown = full && zoom.scale > 1.01 ? full.url : src;
   return (
     <div
       ref={box}
@@ -496,8 +558,8 @@ export default function CullView({ onEdit }: { onEdit: (path: string) => void })
   const targetPath = paths[target];
   // Full size for the photos on screen, once there is a moment to look.
   const zoomed = zoom.scale > 1.01;
-  const fullLeft = useFullSize(open ? paths[index] : undefined, open, zoomed);
-  const fullRight = useFullSize(open && compare ? paths[index + 1] : undefined, open && compare, zoomed);
+  const fullLeft = useFullSize(open ? paths[index] : undefined, open, zoomed, showEdits);
+  const fullRight = useFullSize(open && compare ? paths[index + 1] : undefined, open && compare, zoomed, showEdits);
 
   const go = useCallback((to: number) => setIndex(Math.max(0, Math.min(paths.length - 1, to))), [paths.length]);
   const advance = useCallback(() => {

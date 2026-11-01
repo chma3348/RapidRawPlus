@@ -2006,6 +2006,7 @@ pub fn run() {
             file_management::list_images_in_dir,
             file_management::cloud_folder_summary,
             cull_preview::generate_cull_preview,
+            cull_preview::generate_cull_full,
             file_management::list_images_recursive,
             file_management::get_folder_tree,
             file_management::get_folder_children,

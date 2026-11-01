@@ -13,6 +13,7 @@ import {
 } from '../utils/adjustments';
 import { v4 as uuidv4 } from 'uuid';
 import { SubMask } from '../components/panel/right/Masks';
+import { healLines, type Offset } from '../store/useHealSelection';
 import { Invokes } from '../components/ui/AppProperties';
 import { useAuth } from '@clerk/react';
 import type { ReplacementBlendOptions } from '../components/panel/right/ReplacementBlendControls';
@@ -337,6 +338,31 @@ export function useAiMasking() {
         // A "null" body means every spot was deleted: patchData becomes
         // null and the repair comes off the photo with its markers.
         const patchData = JSON.parse(patchJson);
+        // The source each stroke was healed from, in stroke order, so the
+        // canvas draws where it really borrowed from. Not part of the patch.
+        const sources: Array<Offset | null> = patchData?.healSources || [];
+        if (patchData) delete patchData.healSources;
+        // Units in the order the backend split them: a stroke each, or a
+        // whole sub-mask that has no strokes.
+        const units: Array<{ subMaskId: string; lineIndex: number } | null> = [];
+        for (const sm of container.subMasks || []) {
+          const lines = healLines(sm.parameters);
+          if (lines && lines.length > 0) {
+            lines.forEach((_, lineIndex) => units.push({ subMaskId: sm.id, lineIndex }));
+          } else {
+            units.push(null);
+          }
+        }
+        // Refresh source found nothing else that fits: say so, rather than
+        // seeming to ignore the key.
+        const sameAgain = units.some((unit, i) => {
+          const sm = unit && container.subMasks.find((m) => m.id === unit.subMaskId);
+          const line = unit && sm ? healLines(sm.parameters)?.[unit.lineIndex] : undefined;
+          const turnedDown = line?.rejectedSources?.[line.rejectedSources.length - 1];
+          const got = sources[i];
+          return !line?.cloneOffset && turnedDown && got && Math.hypot(got.x - turnedDown.x, got.y - turnedDown.y) < 2;
+        });
+        if (sameAgain) toast.info('No other good source nearby');
         // The preview strips patchData for any patch the backend has
         // already cached, and hydrate_adjustments then fills the gap from
         // that cache. Without this the next redraw rebuilt the PREVIOUS
@@ -344,9 +370,27 @@ export function useAiMasking() {
         patchesSentToBackend.delete(patchId);
         setAdjustments((prev: Adjustments) => ({
           ...prev,
-          aiPatches: prev.aiPatches.map((p: AiPatch) =>
-            p.id === patchId ? { ...p, patchData, isLoading: false, name: isHeal ? 'Heal' : 'Clone' } : p,
-          ),
+          aiPatches: prev.aiPatches.map((p: AiPatch) => {
+            if (p.id !== patchId) return p;
+            const subMasks = p.subMasks.map((sm: SubMask) => {
+              const lines = healLines(sm.parameters);
+              if (!lines) return sm;
+              return {
+                ...sm,
+                parameters: {
+                  ...sm.parameters,
+                  lines: lines.map((line, lineIndex) => {
+                    const at = units.findIndex((u) => u?.subMaskId === sm.id && u.lineIndex === lineIndex);
+                    const source = at >= 0 ? sources[at] : null;
+                    // Only strokes left to choose their own; one dragged by
+                    // hand keeps its cloneOffset.
+                    return source && !line.cloneOffset ? { ...line, autoOffset: source } : line;
+                  }),
+                },
+              } as SubMask;
+            });
+            return { ...p, subMasks, patchData, isLoading: false, name: isHeal ? 'Heal' : 'Clone' };
+          }),
         }));
         // Heal is meant to be worked at: keep the brush pointed at the same
         // sub-mask so more strokes can be added and the source re-dragged,

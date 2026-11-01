@@ -4318,6 +4318,33 @@ pub(crate) fn display_to_image_point(
 
 /// Same mapping for a DIRECTION (the clone offset): no translation, only
 /// the rotation and mirroring parts apply.
+/// The inverse of `display_to_image_vector`: an image-space offset as the
+/// canvas draws it.
+pub(crate) fn image_to_display_vector(
+    ix: f64,
+    iy: f64,
+    orientation_steps: u32,
+    flip_horizontal: bool,
+    flip_vertical: bool,
+    rotation_deg: f64,
+) -> (f64, f64) {
+    let (mut vx, mut vy) = match orientation_steps % 4 {
+        1 => (-iy, ix),
+        2 => (-ix, -iy),
+        3 => (iy, -ix),
+        _ => (ix, iy),
+    };
+    if flip_horizontal {
+        vx = -vx;
+    }
+    if flip_vertical {
+        vy = -vy;
+    }
+    let angle = rotation_deg.to_radians();
+    let (cos_a, sin_a) = (angle.cos(), angle.sin());
+    (vx * cos_a - vy * sin_a, vx * sin_a + vy * cos_a)
+}
+
 pub(crate) fn display_to_image_vector(
     dx: f64,
     dy: f64,
@@ -4407,6 +4434,16 @@ fn mask_bounds(mask: &GrayImage) -> Option<(u32, u32, u32, u32)> {
     any.then_some((x0, y0, x1, y1))
 }
 
+/// The best source, with none turned down.
+#[cfg(test)]
+pub(crate) fn auto_clone_offset(
+    image: &RgbaImage,
+    mask: &GrayImage,
+    bounds: (u32, u32, u32, u32),
+) -> (i32, i32) {
+    auto_clone_offset_avoiding(image, mask, bounds, &[])
+}
+
 /// Chooses where a heal spot should sample from, so the user never has to.
 ///
 /// A heal needs a source — it repairs by borrowing texture from elsewhere —
@@ -4416,10 +4453,15 @@ fn mask_bounds(mask: &GrayImage) -> Option<(u32, u32, u32, u32)> {
 /// gradient-domain blend disappears, and rejects any candidate that would
 /// sample the hole being repaired. Nearer sources win ties, since texture
 /// and lighting drift across a frame.
-pub(crate) fn auto_clone_offset(
+///
+/// Sources already turned down (Refresh source) are kept clear of: no
+/// candidate near one of `avoid` is taken. When nothing else fits, the best
+/// source is given again.
+pub(crate) fn auto_clone_offset_avoiding(
     image: &RgbaImage,
     mask: &GrayImage,
     bounds: (u32, u32, u32, u32),
+    avoid: &[(i32, i32)],
 ) -> (i32, i32) {
     let (w, h) = image.dimensions();
     let (bx0, by0, bx1, by1) = bounds;
@@ -4499,13 +4541,26 @@ pub(crate) fn auto_clone_offset(
 
     let min_shift = (size * 3) / 4;
     let max_shift = size * 3;
+    // A turned-down source rules out the candidates that would look the same.
+    let clear = (size * 2 / 3).max(12);
+    let allowed = |dx: i32, dy: i32| {
+        avoid
+            .iter()
+            .all(|(ax, ay)| (dx - ax).pow(2) + (dy - ay).pow(2) >= clear * clear)
+    };
+    if !avoid.is_empty() {
+        let fresh = auto_clone_offset_avoiding(image, mask, bounds, &[]);
+        if allowed(fresh.0, fresh.1) {
+            return fresh;
+        }
+    }
     let mut best: Option<(f32, i32, i32)> = None;
     let coarse = (size / 6).max(8);
     let mut dy = -max_shift;
     while dy <= max_shift {
         let mut dx = -max_shift;
         while dx <= max_shift {
-            let far_enough = dx * dx + dy * dy >= min_shift * min_shift;
+            let far_enough = dx * dx + dy * dy >= min_shift * min_shift && allowed(dx, dy);
             match far_enough.then(|| score(dx, dy)).flatten() {
                 Some(sc) if best.is_none_or(|(b, _, _)| sc < b) => best = Some((sc, dx, dy)),
                 _ => {}
@@ -4515,7 +4570,12 @@ pub(crate) fn auto_clone_offset(
         dy += coarse;
     }
     let Some((_, cx, cy)) = best else {
-        return (0, -size.max(40));
+        // Nothing but the turned-down sources fits: give the best again.
+        return if avoid.is_empty() {
+            (0, -size.max(40))
+        } else {
+            auto_clone_offset_avoiding(image, mask, bounds, &[])
+        };
     };
 
     // Refine around the winner so the answer is not stuck on the coarse grid.
@@ -4525,7 +4585,7 @@ pub(crate) fn auto_clone_offset(
     while dy <= cy + coarse {
         let mut dx = cx - coarse;
         while dx <= cx + coarse {
-            let far_enough = dx * dx + dy * dy >= min_shift * min_shift;
+            let far_enough = dx * dx + dy * dy >= min_shift * min_shift && allowed(dx, dy);
             match far_enough.then(|| score(dx, dy)).flatten() {
                 Some(sc) if sc < refined.0 => refined = (sc, dx, dy),
                 _ => {}
@@ -4654,6 +4714,37 @@ pub async fn apply_clone_patch(
                 (sm, off)
             })
             .collect();
+    // Display space to image space and back, for the sources the canvas
+    // shows: the ones turned down (Refresh source) and the ones chosen.
+    let to_image = |x: f64, y: f64| {
+        let (x, y) = if needs_mapping {
+            display_to_image_vector(x, y, steps, flip_h, flip_v, rotation)
+        } else {
+            (x, y)
+        };
+        (x.round() as i32, y.round() as i32)
+    };
+    let to_display = |(x, y): (i32, i32)| {
+        let (x, y) = if needs_mapping {
+            image_to_display_vector(x as f64, y as f64, steps, flip_h, flip_v, rotation)
+        } else {
+            (x as f64, y as f64)
+        };
+        serde_json::json!({ "x": x.round(), "y": y.round() })
+    };
+    let rejected = |unit: &crate::mask_generation::SubMask| -> Vec<(i32, i32)> {
+        unit.parameters["lines"][0]["rejectedSources"]
+            .as_array()
+            .map(|all| {
+                all.iter()
+                    .filter_map(|o| Some(to_image(o.get("x")?.as_f64()?, o.get("y")?.as_f64()?)))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    // Where each stroke ended up sampling, in stroke order, so the canvas
+    // draws the source that was used rather than a guess.
+    let mut chosen_sources: Vec<serde_json::Value> = Vec::with_capacity(units.len());
 
     let full_def = build_def(sub_masks.clone());
     let warped = resolve_warped_image_for_masks(
@@ -4693,7 +4784,9 @@ pub async fn apply_clone_patch(
     let mut auto_sourced = 0usize;
     let (mut ms_masks, mut ms_heal) = (0u128, 0u128);
     for (unit, unit_offset) in units {
+        chosen_sources.push(serde_json::Value::Null);
         let t_mask = std::time::Instant::now();
+        let avoid = rejected(&unit);
         let unit_def = build_def(vec![unit]);
         let Some(bitmap) =
             generate_mask_bitmap(&unit_def, img_w, img_h, 1.0, (0.0, 0.0), warped.as_deref())
@@ -4717,9 +4810,10 @@ pub async fn apply_clone_patch(
             Some(off) => off,
             None => {
                 auto_sourced += 1;
-                auto_clone_offset(&encoded_full, &spot_mask, spot_bounds)
+                auto_clone_offset_avoiding(&encoded_full, &spot_mask, spot_bounds, &avoid)
             }
         };
+        *chosen_sources.last_mut().unwrap() = to_display((ox, oy));
         ms_masks += t_mask.elapsed().as_millis();
         let t_heal = std::time::Instant::now();
         working = if heal {
@@ -4752,7 +4846,10 @@ pub async fn apply_clone_patch(
         return Ok("null".to_string());
     }
     let t_encode = std::time::Instant::now();
-    let patch_json = encode_patch_result(&working, is_linear, &union_mask)?;
+    let mut patch = encode_patch_result_value(&working, is_linear, &union_mask)?;
+    // Taken off by the caller, which writes them onto the strokes.
+    patch["healSources"] = serde_json::Value::Array(chosen_sources);
+    let patch_json = patch.to_string();
     log::info!(
         "[clone] {healed_spots} spot(s) ({auto_sourced} auto-sourced), {masked_px} px total \
          (heal={heal}) | source {ms_source}ms, masks {ms_masks}ms, blend {ms_heal}ms, \
@@ -7394,8 +7491,26 @@ mod clone_stamp_tests {
 
 #[cfg(test)]
 mod auto_source_tests {
-    use super::{auto_clone_offset, mask_bounds};
+    use super::{auto_clone_offset, auto_clone_offset_avoiding, mask_bounds};
     use image::{GrayImage, Luma, Rgba, RgbaImage};
+
+    /// Refresh source: a turned-down source is not offered again while
+    /// another fits, and every turned-down one is kept clear of.
+    #[test]
+    fn refresh_offers_a_different_source() {
+        let img = periodic_scene(60);
+        let m = spot(280, 180, 340, 240);
+        let b = mask_bounds(&m).unwrap();
+        let first = auto_clone_offset(&img, &m, b);
+        let second = auto_clone_offset_avoiding(&img, &m, b, &[first]);
+        let third = auto_clone_offset_avoiding(&img, &m, b, &[first, second]);
+        let far = |a: (i32, i32), c: (i32, i32)| (a.0 - c.0).pow(2) + (a.1 - c.1).pow(2) >= 40 * 40;
+        assert!(far(first, second), "{first:?} then {second:?}");
+        assert!(
+            far(first, third) && far(second, third),
+            "{first:?} {second:?} {third:?}"
+        );
+    }
 
     /// Horizontally periodic scene: a source one period away is a perfect
     /// match, so a working picker should land near a multiple of it.
@@ -7665,7 +7780,25 @@ mod heal_unit_tests {
 
 #[cfg(test)]
 mod display_space_tests {
-    use super::{display_to_image_point, display_to_image_vector};
+    use super::{display_to_image_point, display_to_image_vector, image_to_display_vector};
+
+    /// The canvas shows a chosen source through the inverse mapping: it
+    /// must land back on the offset the stroke would send.
+    #[test]
+    fn source_offsets_round_trip_through_display_space() {
+        for steps in 0..4 {
+            for (fh, fv) in [(false, false), (true, false), (false, true), (true, true)] {
+                for rot in [0.0, 3.5, -12.0] {
+                    let (ix, iy) = display_to_image_vector(37.0, -120.0, steps, fh, fv, rot);
+                    let (dx, dy) = image_to_display_vector(ix, iy, steps, fh, fv, rot);
+                    assert!(
+                        (dx - 37.0).abs() < 1e-9 && (dy + 120.0).abs() < 1e-9,
+                        "steps {steps} flips {fh}/{fv} rot {rot}: {dx},{dy}"
+                    );
+                }
+            }
+        }
+    }
 
     const W: f64 = 7008.0;
     const H: f64 = 4672.0;
