@@ -62,6 +62,7 @@ pub async fn generate_ai_foreground_mask(
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<AiForegroundMaskParameters, String> {
+    ensure_photo_loaded(&state, &path, "selection")?;
     let (registry, model) = resolve_and_prepare(
         &app_handle,
         &state.model_registry,
@@ -229,6 +230,7 @@ async fn compute_auto_subject(
     state: &tauri::State<'_, AppState>,
     app_handle: &tauri::AppHandle,
 ) -> Result<(Option<crate::scene_masks::AutoSubject>, (u32, u32)), String> {
+    ensure_photo_loaded(state, path, "selection")?;
     // BiRefNet is the primary path; the saliency + SAM path below remains
     // as the fallback when it cannot be installed (offline first run).
     match resolve_and_prepare(
@@ -431,6 +433,7 @@ pub async fn generate_ai_depth_mask(
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<AiDepthMaskParameters, String> {
+    ensure_photo_loaded(&state, &path, "selection")?;
     let (registry, model) = resolve_and_prepare(
         &app_handle,
         &state.model_registry,
@@ -533,6 +536,7 @@ pub async fn generate_ai_subject_mask(
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<AiSubjectMaskParameters, String> {
+    ensure_photo_loaded(&state, &path, "selection")?;
     let (registry, model) = resolve_and_prepare(
         &app_handle,
         &state.model_registry,
@@ -746,6 +750,7 @@ pub async fn generate_ai_paint_mask(
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<AiSubjectMaskParameters, String> {
+    ensure_photo_loaded(&state, &path, "selection")?;
     let (registry, model) = resolve_and_prepare(
         &app_handle,
         &state.model_registry,
@@ -927,6 +932,7 @@ pub async fn precompute_ai_subject_mask(
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
+    ensure_photo_loaded(&state, &path, "selection")?;
     let (registry, model) = resolve_and_prepare(
         &app_handle,
         &state.model_registry,
@@ -4658,7 +4664,10 @@ pub async fn apply_clone_patch(
 
     let t_total = std::time::Instant::now();
     let t_source = std::time::Instant::now();
+    ensure_photo_loaded(&state, &path, "repair")?;
     let (base_image, _) = get_full_image_for_processing(&state)?;
+    // Checked again: a photo opened during that read may have supplied it.
+    ensure_photo_loaded(&state, &path, "repair")?;
     let source_image = composite_patches_on_image(&base_image, &source_adjustments)
         .map_err(|e| format!("Failed to prepare source image: {}", e))?;
     let ms_source = t_source.elapsed().as_millis();
@@ -4865,7 +4874,6 @@ pub async fn apply_clone_patch(
         t_encode.elapsed().as_millis(),
         t_total.elapsed().as_millis()
     );
-    let _ = path;
     let _ = app_handle;
     Ok(patch_json)
 }
@@ -4880,6 +4888,7 @@ pub async fn invoke_generative_replace_with_mask_def(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
+    ensure_photo_loaded(&state, &path, "fill")?;
     let settings = load_settings(app_handle.clone()).unwrap_or_default();
     let semantic_replace =
         patch_definition.generate_mode || !patch_definition.prompt.trim().is_empty();
@@ -4940,6 +4949,8 @@ pub async fn invoke_generative_replace_with_mask_def(
     }
 
     let (base_image, _) = get_full_image_for_processing(&state)?;
+    // Checked again: a photo opened during that read may have supplied it.
+    ensure_photo_loaded(&state, &path, "fill")?;
     let source_image = composite_patches_on_image(&base_image, &source_image_adjustments)
         .map_err(|e| format!("Failed to prepare source image: {}", e))?;
 
@@ -6016,7 +6027,7 @@ pub async fn invoke_spot_enhance_with_mask_def(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
-    let _ = path;
+    ensure_photo_loaded(&state, &path, "enhance")?;
     log::info!(
         "[spot] enhance requested: task={} strength={:?} texture={:?} grain={:?} patch={}",
         task,
@@ -6043,10 +6054,21 @@ pub async fn invoke_spot_enhance_with_mask_def(
     }
 
     let (base_image, _) = get_full_image_for_processing(&state)?;
+    // Checked again: a photo opened during that read may have supplied it.
+    ensure_photo_loaded(&state, &path, "enhance")?;
     let source_image = composite_patches_on_image(&base_image, &source_image_adjustments)
         .map_err(|e| format!("Failed to prepare source image: {}", e))?;
 
     let (img_w, img_h) = source_image.dimensions();
+    // The same mapping as the fill and clone paths: detector masks are
+    // already in original space, brush strokes are in display space. Left
+    // unmapped, Enhance on a rotated or flipped photo worked on the mirror
+    // image of what was painted.
+    let mut sub_masks = patch_definition.sub_masks.clone();
+    neutralize_display_orientation(&mut sub_masks);
+    if map_strokes_to_image_space(&mut sub_masks, img_w, img_h, &current_adjustments) {
+        log::info!("[spot] mapped brush strokes from display space");
+    }
     let mask_def_for_generation = MaskDefinition {
         id: patch_definition.id.clone(),
         name: patch_definition.name.clone(),
@@ -6056,7 +6078,7 @@ pub async fn invoke_spot_enhance_with_mask_def(
         grow: 0.0,
         feather: 0.0,
         adjustments: serde_json::Value::Null,
-        sub_masks: patch_definition.sub_masks.clone(),
+        sub_masks,
     };
 
     let warped_image = resolve_warped_image_for_masks(
@@ -7019,6 +7041,31 @@ pub(crate) fn map_strokes_to_image_space(
     true
 }
 
+/// The AI tools read the photo the editor has loaded, not the file named by
+/// `path`. They differ while another photo is opening, or once the user has
+/// moved on after starting a run, and the loaded pixels would then be edited
+/// into (or their embeddings cached for) the wrong photo.
+fn ensure_photo_loaded(state: &AppState, path: &str, what: &str) -> Result<(), String> {
+    let loaded = state
+        .original_image
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|i| i.path.clone());
+    check_loaded_path(loaded.as_deref(), path, what)
+}
+
+fn check_loaded_path(loaded: Option<&str>, path: &str, what: &str) -> Result<(), String> {
+    if loaded == Some(path) {
+        Ok(())
+    } else {
+        Err(format!(
+            "The photo changed before the {what} started, so nothing was changed. \
+             Try again once the photo has opened."
+        ))
+    }
+}
+
 pub(crate) fn neutralize_display_orientation(sub_masks: &mut [crate::mask_generation::SubMask]) {
     for sm in sub_masks {
         if matches!(
@@ -7037,6 +7084,14 @@ pub(crate) fn neutralize_display_orientation(sub_masks: &mut [crate::mask_genera
                 | "ai-subject"
                 | "ai-foreground"
                 | "ai-sky"
+                // Made the same way: Detect objects (generate_ai_paint_mask)
+                // un-transforms the strokes and embeds the warped image, and
+                // Quick Erase is a generate_ai_subject_mask result. Left
+                // out, their fills landed mirrored on a flipped photo. (Until
+                // its result lands, ai-paint draws its strokes like a brush,
+                // and those are mapped by map_strokes_to_image_space.)
+                | "ai-paint"
+                | "quick-eraser"
         ) && let Some(params) = sm.parameters.as_object_mut()
         {
             params.insert("rotation".into(), serde_json::json!(0.0));
@@ -7307,7 +7362,13 @@ mod neutralize_orientation_tests {
     /// flipped photo landed on the far side of the frame.
     #[test]
     fn detector_masks_are_neutralized() {
-        for kind in ["ai-subject", "ai-foreground", "ai-sky"] {
+        for kind in [
+            "ai-subject",
+            "ai-foreground",
+            "ai-sky",
+            "ai-paint",
+            "quick-eraser",
+        ] {
             let mut masks = [sub(kind)];
             neutralize_display_orientation(&mut masks);
             assert!(is_neutral(&masks[0]), "{kind} kept its orientation");
@@ -7334,6 +7395,23 @@ mod neutralize_orientation_tests {
             !is_neutral(&masks[0]),
             "a brush mask must keep its orientation"
         );
+    }
+}
+
+#[cfg(test)]
+mod loaded_photo_tests {
+    use super::check_loaded_path;
+
+    /// A run started for one photo must not read another's pixels: the
+    /// editor may still be opening the next photo, or none may be open.
+    #[test]
+    fn runs_only_on_the_photo_they_were_started_for() {
+        assert!(check_loaded_path(Some("/a/one.jpg"), "/a/one.jpg", "fill").is_ok());
+        let err = check_loaded_path(Some("/a/two.jpg"), "/a/one.jpg", "fill").unwrap_err();
+        assert!(err.contains("photo changed before the fill"), "{err}");
+        assert!(check_loaded_path(None, "/a/one.jpg", "fill").is_err());
+        // A virtual copy is a different photo from its original.
+        assert!(check_loaded_path(Some("/a/one.jpg?vc=1"), "/a/one.jpg", "fill").is_err());
     }
 }
 
