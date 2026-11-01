@@ -212,15 +212,22 @@ fn resize(img: &Rgba32FImage, w: u32, h: u32) -> Rgba32FImage {
 /// it must. Everything else rendering at the time still uses previews.
 static NEED_ORIGINAL: std::sync::Mutex<Vec<(PathBuf, usize)>> = std::sync::Mutex::new(Vec::new());
 
-/// Held while `photo` must be read from its original. If the photo was only
-/// in the cloud, it is given back once nothing needs it (unless it is the
-/// photo open in the editor, which is given back when another is opened).
+/// Held while `photo` must be read from its original. If this app brought
+/// the photo down (it was only in the cloud, now or when an earlier use
+/// read it), it is given back once nothing needs it (unless it is the photo
+/// open in the editor, which is given back when another is opened).
 pub struct OriginalNeeded {
     photo: PathBuf,
-    was_cloud_only: bool,
+    ours: bool,
 }
 
 pub fn need_original(photo: &Path) -> OriginalNeeded {
+    let ours = if crate::cloud_files::is_cloud_only(photo) {
+        crate::cloud_files::brought_down(photo);
+        true
+    } else {
+        crate::cloud_files::is_ours(photo)
+    };
     let mut list = NEED_ORIGINAL.lock().unwrap_or_else(|e| e.into_inner());
     match list.iter_mut().find(|(p, _)| p == photo) {
         Some(entry) => entry.1 += 1,
@@ -228,7 +235,7 @@ pub fn need_original(photo: &Path) -> OriginalNeeded {
     }
     OriginalNeeded {
         photo: photo.to_path_buf(),
-        was_cloud_only: crate::cloud_files::is_cloud_only(photo),
+        ours,
     }
 }
 
@@ -248,19 +255,25 @@ impl Drop for OriginalNeeded {
                 None => false,
             }
         };
-        if last && self.was_cloud_only && !crate::cloud_files::is_open(&self.photo) {
+        // The open photo is kept (giving back waits for it to be left).
+        if last && (self.ours || crate::cloud_files::is_ours(&self.photo)) {
             crate::cloud_files::give_back_later(self.photo.clone());
         }
     }
 }
 
+/// Whether something is reading `photo`'s original right now (an export, a
+/// patch-making tool): it must not be given back to the cloud meanwhile.
+pub fn original_in_use(photo: &Path) -> bool {
+    NEED_ORIGINAL
+        .lock()
+        .map(|l| l.iter().any(|(p, _)| p == photo))
+        .unwrap_or(false)
+}
+
 /// Whether `photo` may be shown from its preview now.
 pub fn may_stand_in(photo: &Path) -> bool {
-    mode_for(photo) == Mode::Previews
-        && !NEED_ORIGINAL
-            .lock()
-            .map(|l| l.iter().any(|(p, _)| p == photo))
-            .unwrap_or(false)
+    mode_for(photo) == Mode::Previews && !original_in_use(photo)
 }
 
 /// Where `photo`'s preview lives.
@@ -367,8 +380,51 @@ pub fn write(
 }
 
 /// Encode and write a prepared preview (slow: run it off the render path).
+/// Asked again while one for the same photo is being written, or once the
+/// photo has a current preview, it does nothing: two renders of a photo
+/// each ask for one, a second or so apart.
 pub fn write_pending(p: Pending, exif: Option<HashMap<String, String>>) -> Result<()> {
+    let Some(_writing) = Writing::claim(&p.photo) else {
+        return Ok(());
+    };
+    if is_current(&p.photo) {
+        return Ok(());
+    }
     write_pending_with(p, exif, DISTANCE)
+}
+
+/// Photos whose previews are being written now.
+static WRITING: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+/// Held while a photo's preview is written; None when one already is.
+struct Writing(PathBuf);
+
+impl Writing {
+    fn claim(photo: &Path) -> Option<Writing> {
+        let mut writing = WRITING.lock().unwrap_or_else(|e| e.into_inner());
+        if writing.iter().any(|p| p == photo) {
+            return None;
+        }
+        writing.push(photo.to_path_buf());
+        Some(Writing(photo.to_path_buf()))
+    }
+}
+
+impl Drop for Writing {
+    fn drop(&mut self) {
+        let mut writing = WRITING.lock().unwrap_or_else(|e| e.into_inner());
+        writing.retain(|p| *p != self.0);
+    }
+}
+
+/// A temporary name beside `target` that no other write shares, even one
+/// by another copy of the app on this Mac or one in the same moment here.
+fn part_path(target: &Path) -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut part = target.as_os_str().to_os_string();
+    part.push(format!(".{}-{n}.part", std::process::id()));
+    PathBuf::from(part)
 }
 
 #[cfg(test)]
@@ -431,10 +487,11 @@ fn write_pending_with(
     // Written whole, then moved into place: a half-written preview must
     // never be synced or read.
     let target = path_for(photo);
-    let mut part = target.clone().into_os_string();
-    part.push(".part");
-    fs::write(&part, &out)?;
-    fs::rename(&part, &target)?;
+    let part = part_path(&target);
+    if let Err(e) = fs::write(&part, &out).and_then(|()| fs::rename(&part, &target)) {
+        let _ = fs::remove_file(&part);
+        return Err(e.into());
+    }
     log::info!(
         "[preview] wrote {} ({pw}x{ph}, {} KB)",
         target.display(),
@@ -677,5 +734,51 @@ mod tests {
         fs::write(&photo, b"a different photo").unwrap();
         assert!(!is_current(&photo));
         assert!(read_frame(&photo).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_preview_is_written_once_at_a_time() {
+        let photo = Path::new("/nowhere/writing-once.ARW");
+        let first = Writing::claim(photo).expect("nothing writing yet");
+        assert!(Writing::claim(photo).is_none());
+        // Another photo's write is not held up.
+        assert!(Writing::claim(Path::new("/nowhere/other.ARW")).is_some());
+        drop(first);
+        assert!(Writing::claim(photo).is_some());
+    }
+
+    #[test]
+    fn concurrent_writes_never_share_a_temporary_file() {
+        let target = Path::new("/nowhere/a.ARW.dripreview");
+        let (a, b) = (part_path(target), part_path(target));
+        assert_ne!(a, b);
+        assert!(
+            a.to_string_lossy()
+                .starts_with("/nowhere/a.ARW.dripreview.")
+        );
+        assert!(a.to_string_lossy().ends_with(".part"));
+    }
+
+    #[test]
+    fn asking_twice_for_a_preview_writes_it_once() {
+        let dir = std::env::temp_dir().join("darkroom-smart-preview-twice");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let photo = dir.join("photo.JPG");
+        fs::write(&photo, b"stand-in").unwrap();
+        let original = frame(400, 300);
+        let (a, b) = (prepare(&photo, &original), prepare(&photo, &original));
+        let threads = [a, b].map(|p| std::thread::spawn(move || write_pending(p, None)));
+        for t in threads {
+            t.join().unwrap().unwrap();
+        }
+        assert!(is_current(&photo));
+        // Nothing half-written left beside it.
+        let names: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names.len(), 2, "{names:?}");
     }
 }

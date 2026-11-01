@@ -190,7 +190,9 @@ pub fn cloud_folder_summary(path: String) -> Result<CloudFolderSummary, String> 
     for entry in fs::read_dir(&path).map_err(|e| e.to_string())?.flatten() {
         let file = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
-        if !is_supported_media_file(&name) || !crate::cloud_files::is_cloud_only(&file) {
+        // Photographs only: videos get no preview or thumbnail built, so
+        // they are neither waited for nor downloaded by any choice.
+        if !is_supported_image_file(&name) || !crate::cloud_files::is_cloud_only(&file) {
             continue;
         }
         summary.photos += 1;
