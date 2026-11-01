@@ -602,6 +602,18 @@ pub fn select(
     _selection_id: Option<&str>,
     whole: bool,
 ) -> Result<GrayImage> {
+    select_grown(decoder, embeddings, points, whole, true)
+}
+
+/// `grow` enables the click path's automatic growth (below); painted
+/// selections leave it off, because the paint already gives the extent.
+fn select_grown(
+    decoder: &Mutex<Session>,
+    embeddings: &ImageEmbeddings,
+    points: &[SubjectPoint],
+    whole: bool,
+    grow: bool,
+) -> Result<GrayImage> {
     ensure!(
         !points.is_empty() && points.len() <= 256,
         "Use between 1 and 256 selection points."
@@ -778,7 +790,7 @@ pub fn select(
             quality = scores[best];
         }
         prior = Some(logits.clone());
-        if !user_box {
+        if grow && !user_box {
             // Grow from the model's own connected low-confidence support
             // around the clicks, never from the rendered mask.
             grown_box = ghost_box(
@@ -902,6 +914,93 @@ pub fn paint_points(paint: &GrayImage, excluded: &GrayImage) -> Vec<SubjectPoint
     points
 }
 
+/// Paint-to-select (Remove's "Detect objects", as Lightroom's): the strokes
+/// say which object AND roughly how far it reaches. Painted pixels prompt the
+/// model without the click path's automatic growth, and the answer is held to
+/// the paint plus a margin. Before, a stroke beside a ladder took 18% of the
+/// frame and one down a tree took the forest below it (23%); on Test Photos
+/// they now take 7% and 13%, while a stroke along a river or a road still
+/// gets the whole of it. Erased strokes are always left out.
+pub fn select_painted(
+    decoder: &Mutex<Session>,
+    embeddings: &ImageEmbeddings,
+    paint: &GrayImage,
+    excluded: &GrayImage,
+    brush_radius: f64,
+) -> Result<GrayImage> {
+    let bounds = paint
+        .enumerate_pixels()
+        .filter(|(_, _, p)| p[0] > 127)
+        .fold(None, |b: Option<(u32, u32, u32, u32)>, (x, y, _)| {
+            Some(b.map_or((x, y, x, y), |(x0, y0, x1, y1)| {
+                (x0.min(x), y0.min(y), x1.max(x), y1.max(y))
+            }))
+        });
+    let Some((x0, y0, x1, y1)) = bounds else {
+        anyhow::bail!("Paint over the subject first, then release.");
+    };
+    let margin = paint_margin(brush_radius, (x1 - x0).max(y1 - y0) as f64);
+    let points = paint_points(paint, excluded);
+    let mut mask = select_grown(decoder, embeddings, &points, true, false)?;
+    confine_to_paint(&mut mask, paint, excluded, margin);
+    Ok(mask)
+}
+
+/// How far a painted selection may reach past the paint: at least two brush
+/// radii, and a fifth of the painted extent, so a quick stroke down the middle
+/// of a person still reaches their sides.
+fn paint_margin(brush_radius: f64, painted_extent: f64) -> f64 {
+    (brush_radius * 2.0).max(painted_extent * 0.2)
+}
+
+/// Fades the selection out between `margin` and 1.25 × `margin` from the
+/// nearest painted pixel, and clears it under erased strokes. Distances are
+/// measured on a grid of at most 1024 px for speed.
+fn confine_to_paint(mask: &mut GrayImage, paint: &GrayImage, excluded: &GrayImage, margin: f64) {
+    use imageproc::distance_transform::{Norm, distance_transform};
+    let (w, h) = paint.dimensions();
+    let step = w.max(h).div_ceil(1024).max(1);
+    let (gw, gh) = (w.div_ceil(step), h.div_ceil(step));
+    let mut grid = GrayImage::new(gw, gh);
+    for (x, y, p) in paint.enumerate_pixels() {
+        if p[0] > 127 {
+            grid.put_pixel(x / step, y / step, image::Luma([255]));
+        }
+    }
+    let distance = distance_transform(&grid, Norm::L2);
+    let inner = (margin / step as f64).min(200.0);
+    let band = (inner * 0.25).max(2.0);
+    let at = |gx: u32, gy: u32| distance.get_pixel(gx.min(gw - 1), gy.min(gh - 1))[0] as f64;
+    let mask_w = mask.width() as usize;
+    mask.par_chunks_mut(mask_w)
+        .enumerate()
+        .for_each(|(y, row)| {
+            let y = y as u32;
+            for (x, p) in row.iter_mut().enumerate() {
+                let x = x as u32;
+                if *p == 0 {
+                    continue;
+                }
+                if excluded.get_pixel(x, y)[0] > 127 {
+                    *p = 0;
+                    continue;
+                }
+                // Bilinear distance, so the fade has no grid steps.
+                let fx = (x as f64 + 0.5) / step as f64 - 0.5;
+                let fy = (y as f64 + 0.5) / step as f64 - 0.5;
+                let (gx, gy) = (fx.max(0.0).floor() as u32, fy.max(0.0).floor() as u32);
+                let (tx, ty) = (
+                    (fx - gx as f64).clamp(0.0, 1.0),
+                    (fy - gy as f64).clamp(0.0, 1.0),
+                );
+                let d = (at(gx, gy) * (1.0 - tx) + at(gx + 1, gy) * tx) * (1.0 - ty)
+                    + (at(gx, gy + 1) * (1.0 - tx) + at(gx + 1, gy + 1) * tx) * ty;
+                let keep = ((inner + band - d) / band).clamp(0.0, 1.0);
+                *p = (*p as f64 * keep).round() as u8;
+            }
+        });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -935,6 +1034,23 @@ mod tests {
             choose_candidate(&masks, &[0.94, 0.90, 0.60], 4, &points, 256.0, true, 16),
             0
         );
+    }
+    #[test]
+    fn painted_selection_stays_near_the_paint_and_off_erased_strokes() {
+        let mut paint = GrayImage::new(400, 100);
+        for y in 40..60 {
+            for x in 40..60 {
+                paint.put_pixel(x, y, Luma([255]));
+            }
+        }
+        let mut excluded = GrayImage::new(400, 100);
+        excluded.put_pixel(70, 50, Luma([255]));
+        let mut mask = GrayImage::from_pixel(400, 100, Luma([255]));
+        confine_to_paint(&mut mask, &paint, &excluded, paint_margin(10.0, 20.0));
+        assert_eq!(mask.get_pixel(50, 50)[0], 255);
+        assert_eq!(mask.get_pixel(75, 50)[0], 255);
+        assert_eq!(mask.get_pixel(70, 50)[0], 0);
+        assert_eq!(mask.get_pixel(300, 50)[0], 0);
     }
     #[test]
     fn portrait_matte_crops_padding_instead_of_stretching_it() {

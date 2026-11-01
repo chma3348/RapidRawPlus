@@ -732,7 +732,7 @@ pub async fn generate_ai_subject_mask(
 
 /// Paint-to-select: the user's rough brush strokes (display space) are
 /// un-transformed to image space, rasterized, and handed to SAM as a
-/// positive and negative multi-point prompt.
+/// positive and negative multi-point prompt held to the painted area.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn generate_ai_paint_mask(
@@ -833,9 +833,13 @@ pub async fn generate_ai_paint_mask(
     let empty = Vec::new();
     let lines_arr = lines.as_array().unwrap_or(&empty);
     let mut stamped = 0u32;
+    let mut paint_radius = 0.0f64;
     for line in lines_arr {
         let erase = line["tool"].as_str() == Some("eraser");
         let radius = (line["brushSize"].as_f64().unwrap_or(50.0) / 2.0).max(4.0);
+        if !erase {
+            paint_radius = paint_radius.max(radius);
+        }
         let pts: Vec<(f64, f64)> = line["points"]
             .as_array()
             .map(|a| {
@@ -893,10 +897,14 @@ pub async fn generate_ai_paint_mask(
         return Err("Paint over the subject first, then release.".to_string());
     }
 
-    let points = crate::subject_selection::paint_points(&paint, &excluded);
-    let mask_bitmap =
-        crate::subject_selection::select(&decoder_session, &embeddings, &points, None, true)
-            .map_err(|e| e.to_string())?;
+    let mask_bitmap = crate::subject_selection::select_painted(
+        &decoder_session,
+        &embeddings,
+        &paint,
+        &excluded,
+        paint_radius,
+    )
+    .map_err(|e| e.to_string())?;
     let base64_data = encode_to_base64_png(&mask_bitmap)?;
 
     Ok(AiSubjectMaskParameters {

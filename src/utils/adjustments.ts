@@ -686,6 +686,16 @@ const deepCloneParametric = (pCurve: any): ParametricCurve => ({
   blue: { ...DEFAULT_PARAMETRIC_CURVE_SETTINGS, ...(pCurve?.blue || {}) },
 });
 
+/**
+ * A patch's "generating" mark belongs to the run in progress, never to the
+ * saved edit: saved or restored, it would show a spinner with no run behind
+ * it and grey out Generate for good.
+ */
+export const settleAiPatches = <T extends Adjustments>(adjustments: T): T =>
+  adjustments?.aiPatches?.some((p: AiPatch) => p.isLoading)
+    ? { ...adjustments, aiPatches: adjustments.aiPatches.map((p: AiPatch) => ({ ...p, isLoading: false })) }
+    : adjustments;
+
 export const normalizeLoadedAdjustments = (loadedAdjustments: Adjustments): any => {
   if (!loadedAdjustments) {
     return INITIAL_ADJUSTMENTS;
@@ -740,6 +750,7 @@ export const normalizeLoadedAdjustments = (loadedAdjustments: Adjustments): any 
   const normalizedAiPatches = (loadedAdjustments.aiPatches || []).map((patch: any) => ({
     visible: true,
     ...patch,
+    isLoading: false,
     subMasks: normalizeSubMasks(patch.subMasks),
   }));
 

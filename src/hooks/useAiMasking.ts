@@ -10,7 +10,10 @@ import {
   MaskContainer,
   Coord,
   INITIAL_MASK_CONTAINER,
+  normalizeLoadedAdjustments,
 } from '../utils/adjustments';
+import { syncFillAdjustmentMasks } from '../utils/fillAdjustmentMasks';
+import { globalImageCache } from '../utils/ImageLRUCache';
 import { v4 as uuidv4 } from 'uuid';
 import { SubMask } from '../components/panel/right/Masks';
 import { healLines, type Offset } from '../store/useHealSelection';
@@ -20,6 +23,29 @@ import type { ReplacementBlendOptions } from '../components/panel/right/Replacem
 import { subjectPrompts } from '../utils/subjectSelection';
 
 const pendingSelections = new Set<string>();
+
+/**
+ * A fill can take minutes. If the user has moved to another photo by the time
+ * it finishes, the result goes into the photo it was made for, on disk,
+ * instead of being dropped. Returns false if that photo no longer has the patch.
+ */
+const saveToPhoto = async (path: string, patchId: string, update: (p: AiPatch) => AiPatch) => {
+  const metadata = await invoke<{ adjustments?: (Adjustments & { is_null?: boolean }) | null } | null>(
+    Invokes.LoadMetadata,
+    { path },
+  );
+  if (!metadata?.adjustments || metadata.adjustments.is_null) return false;
+  const saved: Adjustments = normalizeLoadedAdjustments(metadata.adjustments);
+  if (!saved.aiPatches?.some((p: AiPatch) => p.id === patchId)) return false;
+  const next = syncFillAdjustmentMasks({
+    ...saved,
+    aiPatches: saved.aiPatches.map((p: AiPatch) => (p.id === patchId ? update(p) : p)),
+  });
+  await invoke(Invokes.SaveMetadataAndUpdateThumbnail, { path, adjustments: next });
+  // The editor's cached copy of that photo predates the result.
+  globalImageCache.delete(path);
+  return true;
+};
 
 const getTransformAdjustments = (adj: Adjustments) => ({
   transformDistortion: adj.transformDistortion,
@@ -137,6 +163,28 @@ export function useAiMasking() {
         });
 
         const newPatchData = JSON.parse(newPatchDataJson);
+        const finished = (p: AiPatch): AiPatch => ({
+          ...p,
+          patchData: newPatchData,
+          isLoading: false,
+          reconstructSinglePath,
+          needsPromptReason: undefined,
+          name: useFastInpaint ? 'Inpaint' : prompt && prompt.trim() ? prompt.trim() : p.name,
+        });
+
+        if (useEditorStore.getState().selectedImage?.path !== selectedImage.path) {
+          const name = selectedImage.path.split(/[\\/]/).pop();
+          if (newPatchData?.needsPrompt) {
+            toast.info(
+              `${name}: there was too little around the selection to rebuild from. Describe what should be there.`,
+            );
+          } else if (await saveToPhoto(selectedImage.path, patchId, finished)) {
+            toast.success(`Remove finished on ${name}.`);
+          } else {
+            toast.info(`Remove finished on ${name}, but that selection had been deleted.`);
+          }
+          return;
+        }
 
         // A promptless repair with nothing to rebuild from comes back asking
         // for direction rather than spending minutes producing a wash. The
@@ -160,18 +208,7 @@ export function useAiMasking() {
 
         setAdjustments((prev: Adjustments) => ({
           ...prev,
-          aiPatches: prev.aiPatches.map((p: AiPatch) =>
-            p.id === patchId
-              ? {
-                  ...p,
-                  patchData: newPatchData,
-                  isLoading: false,
-                  reconstructSinglePath,
-                  needsPromptReason: undefined,
-                  name: useFastInpaint ? 'Inpaint' : prompt && prompt.trim() ? prompt.trim() : p.name,
-                }
-              : p,
-          ),
+          aiPatches: prev.aiPatches.map((p: AiPatch) => (p.id === patchId ? finished(p) : p)),
         }));
         // Keep the container selected: deselecting grayed the whole
         // generative section into a pointer-events-none dead zone, so the

@@ -13,6 +13,7 @@ import {
   PasteMode,
   LensAdjustment,
   normalizeLoadedAdjustments,
+  settleAiPatches,
   v3ForPaste,
   mergePastedV3,
 } from '../utils/adjustments';
@@ -26,10 +27,12 @@ export const debouncedSetHistory = debounce((newAdj: Adjustments) => {
 }, 500);
 
 export const debouncedSave = debounce((path: string, adjustmentsToSave: Adjustments) => {
-  invoke(Invokes.SaveMetadataAndUpdateThumbnail, { path, adjustments: adjustmentsToSave }).catch((err) => {
-    console.error('Auto-save failed:', err);
-    toast.error(`Failed to save changes: ${err}`);
-  });
+  invoke(Invokes.SaveMetadataAndUpdateThumbnail, { path, adjustments: settleAiPatches(adjustmentsToSave) }).catch(
+    (err) => {
+      console.error('Auto-save failed:', err);
+      toast.error(`Failed to save changes: ${err}`);
+    },
+  );
 }, 300);
 
 export function useEditorActions() {

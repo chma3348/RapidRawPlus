@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { currentColorEngine } from '../utils/currentColorEngine';
-import { Adjustments, INITIAL_ADJUSTMENTS, MaskContainer, AiPatch } from '../utils/adjustments';
+import { Adjustments, INITIAL_ADJUSTMENTS, MaskContainer, AiPatch, settleAiPatches } from '../utils/adjustments';
 import { SelectedImage, WaveformData, BrushSettings } from '../components/ui/AppProperties';
 import { ChannelConfig } from '../components/adjustments/Curves';
 import { ImageDimensions } from '../hooks/useImageRenderSize';
@@ -183,7 +183,9 @@ export const useEditorStore = create<EditorState>((set) => ({
     set((state) => {
       if (state.historyIndex > 0) {
         const newIndex = state.historyIndex - 1;
-        return { historyIndex: newIndex, adjustments: currentColorEngine(state.history[newIndex]) };
+        // A step recorded mid-run must not bring back a spinner once it ended.
+        const restored = currentColorEngine(state.history[newIndex]);
+        return { historyIndex: newIndex, adjustments: state.isGeneratingAi ? restored : settleAiPatches(restored) };
       }
       return state;
     }),
@@ -192,7 +194,9 @@ export const useEditorStore = create<EditorState>((set) => ({
     set((state) => {
       if (state.historyIndex < state.history.length - 1) {
         const newIndex = state.historyIndex + 1;
-        return { historyIndex: newIndex, adjustments: currentColorEngine(state.history[newIndex]) };
+        // A step recorded mid-run must not bring back a spinner once it ended.
+        const restored = currentColorEngine(state.history[newIndex]);
+        return { historyIndex: newIndex, adjustments: state.isGeneratingAi ? restored : settleAiPatches(restored) };
       }
       return state;
     }),
