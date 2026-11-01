@@ -89,14 +89,30 @@ fn emit(app: &tauri::AppHandle) {
 }
 
 /// Whether `photo` (only in the cloud) still needs something built here.
+/// Only photographs: a folder's videos are listed with its photos, but there
+/// is nothing to make from one, and reading it would download it whole.
 fn needs_work(photo: &Path, thumbs: Option<&Path>) -> bool {
+    if !crate::formats::is_supported_image_file(photo) {
+        return false;
+    }
     match smart_preview::mode_for(photo) {
-        Mode::Previews => !smart_preview::is_current(photo),
+        Mode::Previews => preview_needed(photo),
         Mode::Thumbnails => thumbs.is_some_and(|t| {
             !crate::file_management::has_cached_thumbnail(&photo.to_string_lossy(), t)
         }),
         Mode::Nothing => false,
     }
+}
+
+/// Whether `photo` has no preview made from its current version. A preview
+/// itself only in the cloud (made on another Mac, not yet synced down here)
+/// is taken as current: checking it would download it.
+fn preview_needed(photo: &Path) -> bool {
+    let preview = smart_preview::path_for(photo);
+    if !preview.exists() {
+        return true;
+    }
+    !crate::cloud_files::is_dataless(&preview) && !smart_preview::is_current(photo)
 }
 
 /// Queue the cloud-only photos among `photos` (a folder just listed) that
@@ -198,7 +214,11 @@ fn build(app: &tauri::AppHandle, photo: &Path) -> Result<(), String> {
         return Ok(());
     }
     let path_str = photo.to_string_lossy().into_owned();
-    // Reading it downloads it.
+    // Reading it downloads it: it is to be given back, even if something
+    // else (the editor, an export) starts using it meanwhile.
+    if was_cloud_only {
+        crate::cloud_files::brought_down(photo);
+    }
     let bytes = std::fs::read(photo).map_err(|e| format!("could not download it: {e}"))?;
     let result = (|| {
         if smart_preview::mode_for(photo) == Mode::Previews {
@@ -235,37 +255,57 @@ fn build(app: &tauri::AppHandle, photo: &Path) -> Result<(), String> {
         }
         Ok(())
     })();
-    if was_cloud_only && let Err(e) = crate::cloud_files::free_local_copy(photo) {
-        log::warn!(
-            "[cloud] could not give {} back to the cloud: {e}",
-            photo.display()
-        );
+    if was_cloud_only {
+        wait_for_thumbnail_readers(app, photo);
+        // Not while it is open or exported: that use gives it back after.
+        crate::cloud_files::give_back_now(photo);
     }
     result
 }
 
+/// While the photo is here it is no longer only in the cloud, so the
+/// thumbnail workers may draw it from the original: giving it back during
+/// that would pull it out from under them. Waits for them, a while at most.
+fn wait_for_thumbnail_readers(app: &tauri::AppHandle, photo: &Path) {
+    let state = app.state::<crate::AppState>();
+    let path = photo.to_string_lossy();
+    for _ in 0..120 {
+        let reading = state
+            .thumbnail_manager
+            .processing_now
+            .lock()
+            .map(|now| {
+                now.iter()
+                    .any(|p| p.split("?vc=").next() == Some(path.as_ref()))
+            })
+            .unwrap_or(false);
+        if !reading {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+}
+
 /// Photos asked to be shown (their thumbnails requested: on screen in the
 /// grid or on Home) go to the front: those already waiting, and cloud-only
-/// ones not yet queued that have no preview (or, in the thumbnails mode, no
-/// thumbnail). Home lists folders without queueing them, so this is how
-/// what it shows gets built. Only file metadata is read here.
+/// ones not yet queued that have no current preview (or, in the thumbnails
+/// mode, no thumbnail). Home lists folders without queueing them, so this is
+/// how what it shows gets built. Never reads a cloud-only file: only file
+/// metadata, and the headers of previews already here.
 pub fn request(app: &tauri::AppHandle, photos: &[String]) {
     let thumbs = crate::file_management::get_thumb_cache_dir(app).ok();
-    let wanted: Vec<PathBuf> = photos
+    let mut wanted: Vec<PathBuf> = photos
         .iter()
         .filter(|p| !p.contains("?vc="))
         .map(PathBuf::from)
-        .filter(|p| crate::cloud_files::is_cloud_only(p))
-        .filter(|p| match smart_preview::mode_for(p) {
-            Mode::Previews => !smart_preview::path_for(p).exists(),
-            Mode::Thumbnails => thumbs.as_deref().is_some_and(|t| {
-                !crate::file_management::has_cached_thumbnail(&p.to_string_lossy(), t)
-            }),
-            Mode::Nothing => false,
-        })
+        .filter(|p| crate::cloud_files::is_cloud_only(p) && needs_work(p, thumbs.as_deref()))
         .collect();
-    let wanted_set: HashSet<&Path> = wanted.iter().map(PathBuf::as_path).collect();
     let mut q = QUEUE.0.lock().unwrap();
+    // One that has failed every try (a file nothing can decode) is not
+    // started again each time it scrolls into view; opening its folder
+    // again does try it once more.
+    wanted.retain(|p| q.failures.get(p).is_none_or(|&n| n < TRIES));
+    let wanted_set: HashSet<&Path> = wanted.iter().map(PathBuf::as_path).collect();
     let mut changed = false;
     let mut front: VecDeque<PathBuf> = VecDeque::new();
     q.items.retain(|p| {
@@ -318,4 +358,33 @@ pub fn set_cloud_previews_paused(paused: bool, app_handle: tauri::AppHandle) -> 
     QUEUE.1.notify_all();
     emit(&app_handle);
     progress()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn videos_are_never_built() {
+        let dir = std::env::temp_dir().join("darkroom-cloud-builder-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let video = dir.join("C0025.MP4");
+        std::fs::write(&video, b"not a photo").unwrap();
+        assert!(!needs_work(&video, None));
+        assert!(!needs_work(&dir.join("clip.mov"), None));
+    }
+
+    #[test]
+    fn a_stale_preview_is_built_again() {
+        let dir = std::env::temp_dir().join("darkroom-cloud-builder-stale");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let photo = dir.join("photo.JPG");
+        std::fs::write(&photo, b"a photo").unwrap();
+        assert!(preview_needed(&photo));
+        // A preview file there, but not made from this version (not a
+        // preview at all, here): the photo still needs one.
+        std::fs::write(smart_preview::path_for(&photo), b"an old preview").unwrap();
+        assert!(preview_needed(&photo));
+    }
 }

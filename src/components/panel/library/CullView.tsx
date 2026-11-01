@@ -208,6 +208,12 @@ interface FullPicture {
  */
 const fullPictures = {
   done: new Map<string, FullPicture>(),
+  /**
+   * Ones that could not be developed (a file nothing decodes): not tried
+   * again until the photo is left and come back to, or each try would start
+   * the next straight away, over and over.
+   */
+  failed: new Set<string>(),
   developing: null as string | null,
   /** What each mounted photo wants, by its hook's id. */
   wants: new Map<number, { key: string; path: string; showEdits: boolean; priority: number }>(),
@@ -223,10 +229,17 @@ function notifyFull() {
   fullPictures.listeners.forEach((listener) => listener());
 }
 
+/** A photo is no longer wanted by this hook: once none wants it, a failure is forgotten. */
+function stopWanting(id: number) {
+  const key = fullPictures.wants.get(id)?.key;
+  fullPictures.wants.delete(id);
+  if (key && ![...fullPictures.wants.values()].some((w) => w.key === key)) fullPictures.failed.delete(key);
+}
+
 async function developNextFull() {
   if (fullPictures.developing) return;
   const wants = [...fullPictures.wants.values()]
-    .filter((w) => !fullPictures.done.has(w.key))
+    .filter((w) => !fullPictures.done.has(w.key) && !fullPictures.failed.has(w.key))
     .sort((a, b) => b.priority - a.priority);
   const next = wants[0];
   if (!next) return;
@@ -257,7 +270,9 @@ async function developNextFull() {
       fullPictures.done.delete(key);
     }
   } catch {
-    // The 1920-pixel preview stays.
+    // The 1920-pixel preview stays. (Left meanwhile, it is tried afresh on
+    // coming back.)
+    if ([...fullPictures.wants.values()].some((w) => w.key === next.key)) fullPictures.failed.add(next.key);
   } finally {
     fullPictures.developing = null;
     notifyFull();
@@ -282,11 +297,11 @@ function useFullSize(path: string | undefined, wanted: boolean, zoomed: boolean,
     fullPictures.listeners.add(listener);
     return () => {
       fullPictures.listeners.delete(listener);
-      fullPictures.wants.delete(id);
+      stopWanting(id);
     };
   }, [id]);
   useEffect(() => {
-    fullPictures.wants.delete(id);
+    stopWanting(id);
     if (!path || !key || !wanted || isVideoPath(path)) return;
     const want = () => {
       fullPictures.wants.set(id, { key, path, showEdits, priority: zoomed && !ahead ? 2 : ahead ? 0 : 1 });

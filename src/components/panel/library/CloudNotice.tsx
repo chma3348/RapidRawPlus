@@ -8,6 +8,7 @@ import { useShallow } from 'zustand/react/shallow';
 import { useLibraryStore } from '../../../store/useLibraryStore';
 import { useSettingsStore } from '../../../store/useSettingsStore';
 import { AppSettings, cloudServiceName, ImageFile, Invokes } from '../../ui/AppProperties';
+import { isVideoPath } from '../../../utils/media';
 
 /**
  * Photos that are only in a cloud service (Nextcloud…), not on this Mac.
@@ -307,16 +308,19 @@ export default function CloudNotice({ photos, home = false }: { photos?: ImageFi
   }, []);
 
   const cloudPhotos = useMemo(() => imageList.filter((f) => f.cloud_only && !f.is_virtual_copy), [imageList]);
+  // Videos are in the cloud too, but nothing is made for them: only
+  // photographs are waited for, counted as ready, or offered a choice.
+  const cloudStills = useMemo(() => cloudPhotos.filter((f) => !isVideoPath(f.path)), [cloudPhotos]);
   const folder = !home && currentFolderPath && !currentFolderPath.startsWith('Album: ') ? currentFolderPath : null;
 
   // What this folder's cloud photos come to, for the choice.
   useEffect(() => {
     setSummary(null);
-    if (!folder || cloudPhotos.length === 0) return;
+    if (!folder || cloudStills.length === 0) return;
     invoke<FolderSummary>(Invokes.CloudFolderSummary, { path: folder })
       .then(setSummary)
       .catch(() => {});
-  }, [folder, cloudPhotos.length]);
+  }, [folder, cloudStills.length]);
 
   const building = progress.total > progress.done;
   if (cloudPhotos.length === 0 && !building) return null;
@@ -327,8 +331,8 @@ export default function CloudNotice({ photos, home = false }: { photos?: ImageFi
   const link = 'inline-flex items-center gap-1.5 hover:text-text-primary transition-colors';
 
   // This folder's previews: made before (listed) or since (events).
-  const waiting = cloudPhotos.filter((f) => !f.has_preview && !made.has(f.path)).length;
-  const ready = cloudPhotos.length - waiting;
+  const waiting = cloudStills.filter((f) => !f.has_preview && !made.has(f.path)).length;
+  const ready = cloudStills.length - waiting;
   const secondsLeft =
     progress.secondsPerPhoto && !progress.paused
       ? (folder ? waiting : progress.total - progress.done) * progress.secondsPerPhoto
@@ -380,12 +384,12 @@ export default function CloudNotice({ photos, home = false }: { photos?: ImageFi
       ? t('cloud.pausedFolder', {
           defaultValue: 'Previews paused, {{ready}} of {{total}} ready',
           ready,
-          total: cloudPhotos.length,
+          total: cloudStills.length,
         })
       : t('cloud.makingFolder', {
           defaultValue: 'Making previews for this folder: {{ready}} of {{total}}',
           ready,
-          total: cloudPhotos.length,
+          total: cloudStills.length,
         });
   } else if (folder) {
     status = building
@@ -400,7 +404,7 @@ export default function CloudNotice({ photos, home = false }: { photos?: ImageFi
       : t('cloud.previewsStatus', { defaultValue: 'Small previews' });
   }
 
-  const askNow = !chosen && !postponed && cloudPhotos.length > 0;
+  const askNow = !chosen && !postponed && cloudStills.length > 0;
 
   return (
     <>
@@ -435,7 +439,7 @@ export default function CloudNotice({ photos, home = false }: { photos?: ImageFi
       {(choosing || askNow) && (
         <CloudPhotosChoice
           folder={folder}
-          photoCount={cloudPhotos.length}
+          photoCount={cloudStills.length}
           summary={summary}
           firstTime={!chosen}
           service={service}
