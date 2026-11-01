@@ -292,7 +292,7 @@ fn finish_profiled(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ExifColorSpace {
+pub(crate) enum ExifColorSpace {
     Srgb,
     AdobeRgb,
     /// "Uncalibrated" with nothing saying which space.
@@ -304,7 +304,7 @@ enum ExifColorSpace {
 /// say Adobe RGB through the DCF interoperability index "R03" (the DCF
 /// option file rule); "R98" is sRGB. A few write ColorSpace 2 for Adobe
 /// RGB. No EXIF, or no ColorSpace, is sRGB.
-fn exif_color_space(bytes: &[u8]) -> ExifColorSpace {
+pub(crate) fn exif_color_space(bytes: &[u8]) -> ExifColorSpace {
     let Ok(exif) = exif::Reader::new().read_from_container(&mut Cursor::new(bytes)) else {
         return ExifColorSpace::Srgb;
     };
