@@ -885,8 +885,12 @@ export const useKeyboardShortcuts = ({
 
       if (isModalOpen) return;
 
+      // Keys typed into a field, a select or editable text are not
+      // shortcuts (a letter in a select jumps to an option, and H would
+      // pick Heal). The same test as the canvas's own keys.
+      const focused = document.activeElement as HTMLElement | null;
       const isInputFocused =
-        document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA';
+        !!focused && (focused.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(focused.tagName));
       if (isInputFocused) return;
 
       for (const builtin of builtinShortcuts) {

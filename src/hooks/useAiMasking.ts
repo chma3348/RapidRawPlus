@@ -1,6 +1,7 @@
 import { useRef, useCallback, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'react-toastify';
+import { create } from 'zustand';
 import { useEditorStore } from '../store/useEditorStore';
 import { useEditorActions } from './useEditorActions';
 import {
@@ -23,6 +24,65 @@ import type { ReplacementBlendOptions } from '../components/panel/right/Replacem
 import { subjectPrompts } from '../utils/subjectSelection';
 
 const pendingSelections = new Set<string>();
+
+/**
+ * Sub-masks whose AI selection is still being worked out: waiting out the
+ * paint debounce (`waiting`) or running (`running`, a count per sub-mask).
+ * Generate waits for these; a fill started earlier was made from the raw
+ * strokes, not the object they select.
+ */
+interface PendingAiSelections {
+  waiting: string | null;
+  running: Record<string, number>;
+}
+export const usePendingAiSelections = create<PendingAiSelections>(() => ({ waiting: null, running: {} }));
+
+export const isSelectionPending = (state: PendingAiSelections, subMaskIds: string[]) =>
+  subMaskIds.some((id) => state.waiting === id || (state.running[id] ?? 0) > 0);
+
+const startSelectionRun = (subMaskId: string) =>
+  usePendingAiSelections.setState((s) => ({
+    running: { ...s.running, [subMaskId]: (s.running[subMaskId] ?? 0) + 1 },
+  }));
+
+const endSelectionRun = (subMaskId: string) =>
+  usePendingAiSelections.setState((s) => {
+    const running = { ...s.running };
+    if ((running[subMaskId] ?? 0) <= 1) delete running[subMaskId];
+    else running[subMaskId] -= 1;
+    return { running };
+  });
+
+/**
+ * A cheap fingerprint of what a patch's sub-masks select. Mask bitmaps are
+ * megabytes of base64, so those are sampled rather than copied whole.
+ */
+export const selectionSignature = (subMasks: SubMask[] = []) =>
+  JSON.stringify(
+    subMasks.map((sm: SubMask) => {
+      // The request id changes when a run starts, not when the selection does.
+      const { maskDataBase64, lines, subjectRequestId: _request, ...rest } = sm.parameters || {};
+      const data = typeof maskDataBase64 === 'string' ? maskDataBase64 : '';
+      let hash = 2166136261;
+      const step = Math.max(1, Math.floor(data.length / 512));
+      for (let i = 0; i < data.length; i += step) hash = Math.imul(hash ^ data.charCodeAt(i), 16777619);
+      return [
+        sm.id, sm.type, sm.mode, sm.visible, sm.invert, sm.opacity, rest, data.length, hash,
+        Array.isArray(lines)
+          ? lines.map((l: { tool?: string; brushSize?: number; points?: unknown }) =>
+            [l.tool, l.brushSize, JSON.stringify(l.points)])
+          : null,
+      ];
+    }),
+  );
+
+/**
+ * The selection each fill was last run on, by patch id: when it differs from
+ * the patch's selection now, the fill is out of date and the panel says so.
+ * Kept for this session only; a reopened photo starts with nothing to compare.
+ */
+const fillSelections = new Map<string, string>();
+export const fillSelectionOf = (patchId: string) => fillSelections.get(patchId);
 
 /**
  * A fill can take minutes. If the user has moved to another photo by the time
@@ -80,10 +140,16 @@ export function useAiMasking() {
           ...c,
           subMasks: c.subMasks.map((sm: SubMask) => (sm.id === subMaskId ? { ...sm, ...updatedData } : sm)),
         })),
-        aiPatches: (prev.aiPatches || []).map((p: AiPatch) => ({
-          ...p,
-          subMasks: p.subMasks.map((sm: SubMask) => (sm.id === subMaskId ? { ...sm, ...updatedData } : sm)),
-        })),
+        aiPatches: (prev.aiPatches || []).map((p: AiPatch) =>
+          p.subMasks.some((sm: SubMask) => sm.id === subMaskId)
+            ? {
+                ...p,
+                subMasks: p.subMasks.map((sm: SubMask) => (sm.id === subMaskId ? { ...sm, ...updatedData } : sm)),
+                // "Too little around the selection" was about the old one.
+                needsPromptReason: undefined,
+              }
+            : p,
+        ),
       }));
     },
     [setAdjustments],
@@ -123,6 +189,13 @@ export function useAiMasking() {
         toast.error('The selection could not be found — try re-creating it.');
         return;
       }
+      // The panel disables Generate meanwhile; this catches Enter in the
+      // prompt and any other way in.
+      if (isSelectionPending(usePendingAiSelections.getState(), patch.subMasks.map((sm: SubMask) => sm.id))) {
+        console.error('[ai] generate blocked: selection still being made', patchId);
+        toast.info('Wait for the selection to finish, then generate.');
+        return;
+      }
 
       // Threaded explicitly rather than read back from the store: the panel
       // calls updateContainer immediately before this, and that state is not
@@ -154,6 +227,19 @@ export function useAiMasking() {
       ]).catch(() => null);
 
       try {
+        // The token wait can take seconds: if another photo was opened
+        // meanwhile, this one's selection and adjustments no longer match
+        // what the backend has loaded.
+        if (useEditorStore.getState().selectedImage?.path !== selectedImage.path) {
+          console.error('[ai] generate cancelled: the photo changed before the fill started');
+          toast.info('The photo changed before the fill started, so nothing was run.');
+          setAdjustments((prev: Adjustments) => ({
+            ...prev,
+            aiPatches: prev.aiPatches.map((p: AiPatch) => (p.id === patchId ? { ...p, isLoading: false } : p)),
+          }));
+          return;
+        }
+        const selection = selectionSignature(patch.subMasks);
         const newPatchDataJson: any = await invoke(Invokes.InvokeGenerativeReplaseWithMaskDef, {
           currentAdjustments: adjustments,
           patchDefinition: patchDefinition,
@@ -163,13 +249,17 @@ export function useAiMasking() {
         });
 
         const newPatchData = JSON.parse(newPatchDataJson);
+        fillSelections.set(patchId, selection);
         const finished = (p: AiPatch): AiPatch => ({
           ...p,
           patchData: newPatchData,
           isLoading: false,
           reconstructSinglePath,
           needsPromptReason: undefined,
+          prompt,
           name: useFastInpaint ? 'Inpaint' : prompt && prompt.trim() ? prompt.trim() : p.name,
+          // A fill made on an Enhance retouch makes it a Remove one.
+          patchType: p.patchType === 'enhance' ? undefined : p.patchType,
         });
 
         if (useEditorStore.getState().selectedImage?.path !== selectedImage.path) {
@@ -380,12 +470,17 @@ export function useAiMasking() {
         const sources: Array<Offset | null> = patchData?.healSources || [];
         if (patchData) delete patchData.healSources;
         // Units in the order the backend split them: a stroke each, or a
-        // whole sub-mask that has no strokes.
-        const units: Array<{ subMaskId: string; lineIndex: number } | null> = [];
+        // whole sub-mask that has no strokes. Each stroke is known by its
+        // points, not its index: a spot deleted while this ran shifts the
+        // indexes, and its source would have gone to the next spot.
+        const strokeKey = (subMaskId: string, line: { points?: Offset[] }) =>
+          `${subMaskId}:${JSON.stringify(line.points ?? [])}`;
+        const units: Array<{ subMaskId: string; lineIndex: number; key: string } | null> = [];
         for (const sm of container.subMasks || []) {
           const lines = healLines(sm.parameters);
           if (lines && lines.length > 0) {
-            lines.forEach((_, lineIndex) => units.push({ subMaskId: sm.id, lineIndex }));
+            lines.forEach((line, lineIndex) =>
+              units.push({ subMaskId: sm.id, lineIndex, key: strokeKey(sm.id, line) }));
           } else {
             units.push(null);
           }
@@ -409,6 +504,8 @@ export function useAiMasking() {
           ...prev,
           aiPatches: prev.aiPatches.map((p: AiPatch) => {
             if (p.id !== patchId) return p;
+            // Two identical strokes take their sources in order.
+            const claimed = new Set<number>();
             const subMasks = p.subMasks.map((sm: SubMask) => {
               const lines = healLines(sm.parameters);
               if (!lines) return sm;
@@ -416,8 +513,10 @@ export function useAiMasking() {
                 ...sm,
                 parameters: {
                   ...sm.parameters,
-                  lines: lines.map((line, lineIndex) => {
-                    const at = units.findIndex((u) => u?.subMaskId === sm.id && u.lineIndex === lineIndex);
+                  lines: lines.map((line) => {
+                    const key = strokeKey(sm.id, line);
+                    const at = units.findIndex((u, i) => u?.key === key && !claimed.has(i));
+                    if (at >= 0) claimed.add(at);
                     const source = at >= 0 ? sources[at] : null;
                     // Only strokes left to choose their own; one dragged by
                     // hand keeps its cloneOffset.
@@ -481,6 +580,8 @@ export function useAiMasking() {
                   patchData: newPatchData,
                   isLoading: false,
                   name: `Spot ${task}`,
+                  // What makes it an Enhance retouch; the name is the user's.
+                  patchType: 'enhance',
                 }
               : p,
           ),
@@ -588,6 +689,7 @@ export function useAiMasking() {
         });
 
         const newPatchData = JSON.parse(newPatchDataJson);
+        fillSelections.set(patchId, selectionSignature(patchDefinitionForBackend?.subMasks));
         patchesSentToBackend.delete(patchId);
 
         setAdjustments((prev: Partial<Adjustments>) => ({
@@ -712,6 +814,7 @@ export function useAiMasking() {
     updateSubMask(subMaskId, { parameters: { ...prior, subjectPoints: points, subjectGeometry: geometry,
       subjectRequestId: requestId } });
     pendingSelections.add(requestId);
+    startSelectionRun(subMaskId);
     setEditor({ isGeneratingAiMask: true });
 
     try {
@@ -742,22 +845,35 @@ export function useAiMasking() {
     } catch (error) {
       toast.error(`AI Mask Failed: ${error}`);
     } finally {
+      endSelectionRun(subMaskId);
       pendingSelections.delete(requestId);
       setEditor({ isGeneratingAiMask: pendingSelections.size > 0 });
     }
   };
 
   const paintDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => () => {
+  // The sub-mask this hook's debounce is waiting on, so only it is cleared.
+  const paintWaitingRef = useRef<string | null>(null);
+  const stopPaintWait = () => {
     if (paintDebounceRef.current) clearTimeout(paintDebounceRef.current);
-  }, []);
+    paintDebounceRef.current = null;
+    if (paintWaitingRef.current && usePendingAiSelections.getState().waiting === paintWaitingRef.current) {
+      usePendingAiSelections.setState({ waiting: null });
+    }
+    paintWaitingRef.current = null;
+  };
+  useEffect(() => () => stopPaintWait(), []);
 
   const handleGenerateAiPaintMask = (subMaskId: string, lines: any[]) => {
     // Debounced: painting several strokes in a row batches into ONE SAM
     // run 600ms after the last release, instead of pausing between each.
-    if (paintDebounceRef.current) clearTimeout(paintDebounceRef.current);
+    // The wait counts as pending, so Generate can't run on the bare strokes.
+    stopPaintWait();
     const path = useEditorStore.getState().selectedImage?.path;
+    paintWaitingRef.current = subMaskId;
+    usePendingAiSelections.setState({ waiting: subMaskId });
     paintDebounceRef.current = setTimeout(() => {
+      stopPaintWait();
       if (useEditorStore.getState().selectedImage?.path !== path) return;
       void runAiPaintGeneration(subMaskId, lines);
     }, 600);
@@ -777,6 +893,7 @@ export function useAiMasking() {
     const requestId = uuidv4();
     updateSubMask(subMaskId, { parameters: { ...subMask.parameters, subjectRequestId: requestId } });
     pendingSelections.add(requestId);
+    startSelectionRun(subMaskId);
     setEditor({ isGeneratingAiMask: true });
 
     try {
@@ -802,6 +919,7 @@ export function useAiMasking() {
     } catch (error) {
       toast.error(`AI Paint Failed: ${error}`);
     } finally {
+      endSelectionRun(subMaskId);
       pendingSelections.delete(requestId);
       setEditor({ isGeneratingAiMask: pendingSelections.size > 0 });
     }
@@ -853,6 +971,7 @@ export function useAiMasking() {
       adjustments.flipVertical, adjustments.orientationSteps]);
     updateSubMask(subMaskId, { parameters: { ...subMask.parameters, subjectRequestId: requestId } });
     pendingSelections.add(requestId);
+    startSelectionRun(subMaskId);
     setEditor({ isGeneratingAiMask: true });
     try {
       const result: any = await invoke(Invokes.GenerateAiAutoSubjectMask, {
@@ -882,6 +1001,7 @@ export function useAiMasking() {
     } catch (error) {
       toast.error(`AI Mask Failed: ${error}`);
     } finally {
+      endSelectionRun(subMaskId);
       pendingSelections.delete(requestId);
       setEditor({ isGeneratingAiMask: pendingSelections.size > 0 });
     }
@@ -890,6 +1010,7 @@ export function useAiMasking() {
   const handleGenerateAiForegroundMask = async (subMaskId: string) => {
     const { selectedImage, adjustments, patchesSentToBackend } = useEditorStore.getState();
     if (!selectedImage?.path) return;
+    startSelectionRun(subMaskId);
     setEditor({ isGeneratingAiMask: true });
 
     try {
@@ -929,6 +1050,7 @@ export function useAiMasking() {
     } catch (error) {
       toast.error(`AI Mask Failed: ${error}`);
     } finally {
+      endSelectionRun(subMaskId);
       setEditor({ isGeneratingAiMask: false });
     }
   };
