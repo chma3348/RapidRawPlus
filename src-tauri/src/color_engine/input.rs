@@ -60,8 +60,9 @@ impl Unrecovered {
                 Rotate180 => (width - 1 - x, height - 1 - y, width),
                 Rotate90 => (height - 1 - y, x, height),
                 Rotate270 => (y, width - 1 - x, height),
-                Transpose => (height - 1 - y, width - 1 - x, height),
-                Transverse => (y, x, height),
+                // EXIF 5 swaps x and y; EXIF 7 mirrors across the other diagonal.
+                Transpose => (y, x, height),
+                Transverse => (height - 1 - y, width - 1 - x, height),
             };
             *index = y * w + x;
         }
@@ -92,13 +93,21 @@ pub struct DecodedFrame {
 /// image. Out-of-sRGB colors retain negative/above-one values until output.
 /// The reference domain remains Display: a linear transfer is not scene data.
 pub fn decode_profiled_photo(bytes: &[u8]) -> Result<DecodedFrame> {
+    decode_profiled(bytes, true)
+}
+
+/// `own_orientation`: turn the pixels upright by the orientation this file
+/// itself declares. Off for the PNG macOS hands back for a HEIC, which
+/// copies the original's orientation into an eXIf chunk while leaving the
+/// pixels stored as they were; the original's is applied instead, once.
+fn decode_profiled(bytes: &[u8], own_orientation: bool) -> Result<DecodedFrame> {
     // HEIC, AVIF and Photoshop documents: macOS decodes them to PNG with the
     // source's ICC profile embedded, so they go through exactly the same
-    // interpretation as a PNG. The PNG has no orientation, so the original
-    // file's is applied afterwards.
+    // interpretation as a PNG. The PNG's pixels are not yet upright, so the
+    // original file's orientation is applied afterwards — and only that.
     if let Some(extension) = crate::image_loader::system_codec_format(bytes) {
         let png = crate::image_loader::system_codec_png(bytes, extension)?;
-        let mut frame = decode_profiled_photo(&png)?;
+        let mut frame = decode_profiled(&png, false)?;
         frame.provenance.source_hash = blake3::hash(bytes).to_hex().to_string();
         if let Some(orientation) = exif_orientation(bytes) {
             let mut image = DynamicImage::ImageRgba32F(frame.pixels);
@@ -159,7 +168,7 @@ pub fn decode_profiled_photo(bytes: &[u8]) -> Result<DecodedFrame> {
         && let Some(image) = crate::image_loader::decode_half_float_tiff(bytes)
     {
         let mut image = image;
-        if let Some(orientation) = exif_orientation(bytes) {
+        if own_orientation && let Some(orientation) = exif_orientation(bytes) {
             image.apply_orientation(orientation);
         }
         return finish_profiled(image, tiff_icc_profile(bytes), format, bytes);
@@ -202,7 +211,9 @@ pub fn decode_profiled_photo(bytes: &[u8]) -> Result<DecodedFrame> {
     }
     let orientation = decoder.orientation()?;
     let mut image = DynamicImage::from_decoder(decoder)?;
-    image.apply_orientation(orientation);
+    if own_orientation {
+        image.apply_orientation(orientation);
+    }
     finish_profiled(image, icc, format, bytes)
 }
 
@@ -536,12 +547,16 @@ mod tests {
             )
             .into_rgba32f();
             let mapped = sparse.clone().oriented(width, height, orientation);
-            for (index, rgb) in mapped.pixels {
+            for ((index, rgb), (stored, _)) in mapped.pixels.into_iter().zip(&sparse.pixels) {
+                let (ux, uy) = (index % expected.width(), index / expected.width());
+                assert_eq!(&expected.get_pixel(ux, uy).0[..3], &rgb);
+                // And where the EXIF definition of the orientation puts it.
+                let (x, y) = (stored % width, stored / width);
+                let exif = orientation.to_u16().max(1);
                 assert_eq!(
-                    &expected
-                        .get_pixel(index % expected.width(), index / expected.width())
-                        .0[..3],
-                    &rgb
+                    (ux, uy),
+                    crate::image_processing::exif_spec_position(exif, x, y, width, height),
+                    "{orientation:?}"
                 );
             }
         }
@@ -769,6 +784,65 @@ mod tests {
                 );
             }
             assert_eq!(frame.pixels.dimensions(), (16, 8), "{format} changed size");
+        }
+    }
+
+    /// A rotated HEIC, made by macOS from a JPEG tagged Orientation 6, turns
+    /// upright once — not twice through the copy of the tag `sips` leaves
+    /// in its PNG. Skipped where `sips` is unavailable.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn rotated_heic_is_turned_upright_once() {
+        let dir = std::env::temp_dir().join("darkroom_index_heic_orientation");
+        let _ = std::fs::create_dir_all(&dir);
+        // Stored 64×32: the left half red, the right half blue. Orientation
+        // 6 puts the stored left edge along the top.
+        let stored = image::RgbImage::from_fn(64, 32, |x, _| {
+            if x < 32 {
+                image::Rgb([255, 0, 0])
+            } else {
+                image::Rgb([0, 0, 255])
+            }
+        });
+        let exif = b"II\x2a\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0\x06\0\0\0\0\0\0\0";
+        let mut jpeg = Vec::new();
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 95);
+        encoder.set_exif_metadata(exif.to_vec()).unwrap();
+        encoder
+            .write_image(stored.as_raw(), 64, 32, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        let source = dir.join("rot6.jpg");
+        let heic = dir.join("rot6.heic");
+        std::fs::write(&source, &jpeg).unwrap();
+        let converted = std::process::Command::new("sips")
+            .args(["-s", "format", "heic"])
+            .arg(&source)
+            .arg("--out")
+            .arg(&heic)
+            .output()
+            .is_ok_and(|o| o.status.success());
+        if !converted {
+            return;
+        }
+        let bytes = std::fs::read(&heic).unwrap();
+        // Only meaningful if the HEIC kept its orientation and stored pixels.
+        if exif_orientation(&bytes) != Some(image::metadata::Orientation::Rotate90) {
+            return;
+        }
+        let frame = decode_profiled_photo(&bytes).unwrap();
+        let legacy = crate::image_loader::load_image_with_orientation(&bytes, None)
+            .unwrap()
+            .into_rgb32f();
+        let v3 = DynamicImage::ImageRgba32F(frame.pixels).into_rgb32f();
+        for (name, image) in [("v3", v3), ("legacy", legacy)] {
+            assert_eq!(image.dimensions(), (32, 64), "{name}: wrong orientation");
+            let top = image.get_pixel(16, 8).0;
+            let bottom = image.get_pixel(16, 56).0;
+            assert!(top[0] > top[2], "{name}: red should be at the top: {top:?}");
+            assert!(
+                bottom[2] > bottom[0],
+                "{name}: blue at the bottom: {bottom:?}"
+            );
         }
     }
 

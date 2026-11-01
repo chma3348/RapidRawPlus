@@ -1196,16 +1196,44 @@ pub fn apply_linear_to_srgb(mut image: DynamicImage) -> DynamicImage {
     image
 }
 
+/// Turn stored pixels upright. rawler's Transpose is EXIF 5 (stored (x, y)
+/// shows at (y, x)) and Transverse is EXIF 7 (the other diagonal) — the same
+/// mapping the image crate's own apply_orientation uses.
 pub fn apply_orientation(image: DynamicImage, orientation: Orientation) -> DynamicImage {
     match orientation {
         Orientation::Normal | Orientation::Unknown => image,
         Orientation::HorizontalFlip => image.fliph(),
         Orientation::Rotate180 => image.rotate180(),
         Orientation::VerticalFlip => image.flipv(),
-        Orientation::Transpose => image.rotate90().flipv(),
+        Orientation::Transpose => image.rotate90().fliph(),
         Orientation::Rotate90 => image.rotate90(),
-        Orientation::Transverse => image.rotate90().fliph(),
+        Orientation::Transverse => image.rotate90().flipv(),
         Orientation::Rotate270 => image.rotate270(),
+    }
+}
+
+/// Where the stored pixel (x, y) of a width × height image shows once it is
+/// upright, written straight from the EXIF definitions of each value (which
+/// side of the picture the stored 0th row and 0th column are).
+#[cfg(test)]
+pub(crate) fn exif_spec_position(exif: u16, x: u32, y: u32, width: u32, height: u32) -> (u32, u32) {
+    let (w, h) = (width - 1, height - 1);
+    match exif {
+        // 2: row 0 at the top, column 0 on the right.
+        2 => (w - x, y),
+        // 3: row 0 at the bottom, column 0 on the right.
+        3 => (w - x, h - y),
+        // 4: row 0 at the bottom, column 0 on the left.
+        4 => (x, h - y),
+        // 5: row 0 down the left side, column 0 along the top.
+        5 => (y, x),
+        // 6: row 0 down the right side, column 0 along the top.
+        6 => (h - y, x),
+        // 7: row 0 down the right side, column 0 along the bottom.
+        7 => (h - y, w - x),
+        // 8: row 0 down the left side, column 0 along the bottom.
+        8 => (y, w - x),
+        _ => (x, y),
     }
 }
 
@@ -3889,5 +3917,35 @@ mod resample_tests {
         let sharp = contrast(&resample_f32_image(&stripes, 200, 200).to_rgba32f());
         let soft = contrast(&downscale_f32_image(&stripes, 200, 200).to_rgba32f());
         assert!(sharp > soft, "lanczos {sharp} vs box {soft}");
+    }
+}
+
+#[cfg(test)]
+mod orientation_tests {
+    use super::*;
+
+    #[test]
+    fn every_exif_orientation_lands_pixels_where_the_spec_says() {
+        let (width, height) = (5u32, 3u32);
+        let stored = image::Rgba32FImage::from_fn(width, height, |x, y| {
+            Rgba([x as f32, y as f32, 0.0, 1.0])
+        });
+        for exif in 1..=8u16 {
+            let upright = apply_orientation(
+                DynamicImage::ImageRgba32F(stored.clone()),
+                Orientation::from_u16(exif),
+            )
+            .into_rgba32f();
+            let expected = if exif >= 5 {
+                (height, width)
+            } else {
+                (width, height)
+            };
+            assert_eq!(upright.dimensions(), expected, "EXIF {exif}");
+            for (x, y, p) in stored.enumerate_pixels() {
+                let (ux, uy) = exif_spec_position(exif, x, y, width, height);
+                assert_eq!(upright.get_pixel(ux, uy), p, "EXIF {exif}: ({x}, {y})");
+            }
+        }
     }
 }

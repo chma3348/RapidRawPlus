@@ -185,18 +185,38 @@ fn stitch_images(image_paths: Vec<String>, app_handle: AppHandle) -> Result<Dyna
             let file_bytes = fs::read(filename)
                 .map_err(|e| format!("Failed to read image {}: {}", filename, e))?;
 
-            let mut dynamic_image = crate::image_loader::load_base_image_from_bytes(
-                &file_bytes,
-                filename,
-                false,
-                &settings,
-                None,
-            )
-            .map_err(|e| format!("Failed to load image {}: {}", filename, e))?;
-
-            if is_raw_file(filename) {
-                apply_cpu_default_raw_processing(&mut dynamic_image);
-            }
+            // Every frame is stitched in Display P3, the space the finished
+            // panorama is made in. Finished pictures are decoded by the
+            // colour engine, through their own profile, as HDR merges'
+            // frames are: the previous engine's decode reads every file as
+            // sRGB, which dulled P3 and Adobe RGB photos.
+            let profiled = (!is_raw_file(filename))
+                .then(|| crate::hdr_output::load_frame(filename, &file_bytes))
+                .and_then(|frame| {
+                    frame
+                        .inspect_err(|e| log::warn!("Panorama: '{filename}' read as sRGB ({e:#})"))
+                        .ok()
+                });
+            let dynamic_image = if let Some(mut linear) = profiled {
+                crate::hdr_output::to_display_p3(&mut linear);
+                crate::hdr_output::encode_srgb(&mut linear);
+                DynamicImage::ImageRgb32F(linear)
+            } else {
+                let mut dynamic_image = crate::image_loader::load_base_image_from_bytes(
+                    &file_bytes,
+                    filename,
+                    false,
+                    &settings,
+                    None,
+                )
+                .map_err(|e| format!("Failed to load image {}: {}", filename, e))?;
+                if is_raw_file(filename) {
+                    apply_cpu_default_raw_processing(&mut dynamic_image);
+                }
+                let mut encoded = dynamic_image.into_rgb32f();
+                crate::hdr_output::srgb_encoded_to_display_p3(&mut encoded);
+                DynamicImage::ImageRgb32F(encoded)
+            };
 
             let image_f32 = dynamic_image.to_rgb32f();
 
