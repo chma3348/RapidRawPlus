@@ -29,6 +29,10 @@ const ILLUMINANT_D65: u32 = 21;
 /// Rows per compressed strip: small enough to compress strips in parallel
 /// and to keep each one's buffer modest.
 const ROWS_PER_STRIP: u32 = 32;
+/// The largest DNG read here: Lightroom's own panorama limits (65,000
+/// pixels a side, 512 megapixels), with a little room on the side length.
+const MAX_SIDE: u64 = 65_535;
+const MAX_PIXELS: u64 = 512_000_000;
 
 /// XYZ (D65) to linear sRGB: the "camera" of a merged DNG is linear sRGB.
 const XYZ_TO_SRGB: [f64; 9] = [
@@ -601,17 +605,22 @@ pub fn is_float_linear_dng(bytes: &[u8]) -> bool {
 pub fn decode_float_dng(bytes: &[u8]) -> Result<DecodedFrame> {
     let (reader, ifd, root) = float_linear_dng(bytes).context("Not a floating-point linear DNG")?;
     let get = |k: u16| ifd.get(&k).or_else(|| root.get(&k));
-    let width = get(256).and_then(|v| v.int(0)).context("No width")? as usize;
-    let height = get(257).and_then(|v| v.int(0)).context("No height")? as usize;
+    let width = get(256).and_then(|v| v.int(0)).context("No width")?;
+    let height = get(257).and_then(|v| v.int(0)).context("No height")?;
+    // The header's size is trusted for one allocation of the whole frame,
+    // so a damaged or hostile file must not ask for more than a real merge
+    // could be.
+    ensure!(
+        (1..=MAX_SIDE).contains(&width)
+            && (1..=MAX_SIDE).contains(&height)
+            && width * height <= MAX_PIXELS,
+        "Unsupported DNG size {width} x {height}"
+    );
+    let (width, height) = (width as usize, height as usize);
     let spp = get(277).and_then(|v| v.int(0)).unwrap_or(1) as usize;
     ensure!(
         spp == 3,
         "Floating-point DNGs with {spp} samples per pixel are not supported"
-    );
-    let bits = get(258).and_then(|v| v.int(0)).unwrap_or(32) as usize;
-    ensure!(
-        matches!(bits, 8 | 10 | 12 | 14 | 16 | 24 | 32),
-        "Unsupported sample depth {bits}"
     );
     let compression = get(259).and_then(|v| v.int(0)).unwrap_or(1);
     ensure!(
@@ -623,6 +632,17 @@ pub fn decode_float_dng(bytes: &[u8]) -> Result<DecodedFrame> {
     ensure!(
         float || jxl,
         "Integer samples are read here only from JPEG XL tiles"
+    );
+    let bits = get(258).and_then(|v| v.int(0)).unwrap_or(32) as usize;
+    // Floats are read here as half, 24-bit or single precision; integer
+    // depths only come out of JPEG XL, which decodes them itself.
+    ensure!(
+        if float {
+            matches!(bits, 16 | 24 | 32)
+        } else {
+            matches!(bits, 8 | 10 | 12 | 14 | 16 | 24 | 32)
+        },
+        "Unsupported sample depth {bits}"
     );
     // JPEG XL hands integer samples back as 0..1: back to the file's scale,
     // which its black and white levels are given in.
@@ -646,15 +666,29 @@ pub fn decode_float_dng(bytes: &[u8]) -> Result<DecodedFrame> {
     let bytes_per = bits / 8;
 
     // Strips or tiles: each a block of `bw` x `bh` pixels at (bx, by).
+    // Only as many blocks as cover the frame are read, so a long offset list
+    // cannot make the decode allocate past the image's own size.
     let blocks: Vec<(usize, usize, usize, usize, u64, u64)> = if let Some(offsets) = get(324) {
-        let tw = get(322).and_then(|v| v.int(0)).context("No tile width")? as usize;
-        let th = get(323).and_then(|v| v.int(0)).context("No tile length")? as usize;
+        let tw = get(322).and_then(|v| v.int(0)).context("No tile width")?;
+        let th = get(323).and_then(|v| v.int(0)).context("No tile length")?;
+        ensure!(
+            (1..=MAX_SIDE).contains(&tw) && (1..=MAX_SIDE).contains(&th),
+            "Unsupported DNG tile size {tw} x {th}"
+        );
+        let (tw, th) = (tw as usize, th as usize);
         let counts = get(325).context("No tile byte counts")?.ints();
-        let across = width.div_ceil(tw);
+        let (across, down) = (width.div_ceil(tw), height.div_ceil(th));
+        // Edge tiles are padded past the frame; no more than one tile's
+        // worth along each side.
+        ensure!(
+            ((across * tw) as u64) * ((down * th) as u64) <= 2 * MAX_PIXELS,
+            "Unsupported DNG tile size {tw} x {th}"
+        );
         offsets
             .ints()
             .into_iter()
             .zip(counts)
+            .take(across * down)
             .enumerate()
             .map(|(i, (o, c))| ((i % across) * tw, (i / across) * th, tw, th, o, c))
             .collect()
@@ -663,11 +697,13 @@ pub fn decode_float_dng(bytes: &[u8]) -> Result<DecodedFrame> {
         let counts = get(279).context("No strip byte counts")?.ints();
         let rows = get(278)
             .and_then(|v| v.int(0))
-            .map(|r| r as usize)
+            .map(|r| (r as usize).min(height))
             .unwrap_or(height);
+        ensure!(rows > 0, "DNG strips of no rows");
         offsets
             .into_iter()
             .zip(counts)
+            .take(height.div_ceil(rows))
             .enumerate()
             .map(|(i, (o, c))| {
                 (
@@ -686,8 +722,9 @@ pub fn decode_float_dng(bytes: &[u8]) -> Result<DecodedFrame> {
     let decoded: Vec<(usize, usize, usize, usize, Vec<f32>)> = blocks
         .par_iter()
         .map(|&(bx, by, bw, bh, offset, count)| -> Result<_> {
-            let raw = bytes
-                .get(offset as usize..(offset + count) as usize)
+            let raw = offset
+                .checked_add(count)
+                .and_then(|end| bytes.get(offset as usize..end as usize))
                 .context("DNG block outside the file")?;
             if jxl {
                 // One JPEG XL codestream per tile, decoded as linear light.
@@ -716,14 +753,19 @@ pub fn decode_float_dng(bytes: &[u8]) -> Result<DecodedFrame> {
                 }
                 return Ok((bx, by, bw, bh, values));
             }
+            let row_bytes = bw * spp * bytes_per;
             let mut data = if compression == 1 {
                 raw.to_vec()
             } else {
-                let mut out = Vec::with_capacity(bw * bh * spp * bytes_per);
-                flate2::read::ZlibDecoder::new(raw).read_to_end(&mut out)?;
+                // Inflate no further than the block holds: a small stream
+                // can otherwise expand without bound.
+                let expected = row_bytes * bh;
+                let mut out = Vec::with_capacity(expected);
+                flate2::read::ZlibDecoder::new(raw)
+                    .take(expected as u64)
+                    .read_to_end(&mut out)?;
                 out
             };
-            let row_bytes = bw * spp * bytes_per;
             ensure!(data.len() >= row_bytes * bh, "Short DNG block");
             let mut values = Vec::with_capacity(bw * bh * spp);
             for row in data.chunks_mut(row_bytes).take(bh) {
@@ -992,6 +1034,89 @@ mod tests {
             mean < 0.02 && p99 < 0.08,
             "compact differs: mean {mean}, p99 {p99} stops"
         );
+    }
+
+    /// Overwrite every value of `tag` (SHORT or LONG) in each directory of
+    /// a little-endian TIFF reachable from the root, sub-directories too.
+    fn patch_tag(bytes: &mut [u8], tag: u16, value: u32) {
+        let u16_at = |b: &[u8], at: usize| u16::from_le_bytes([b[at], b[at + 1]]);
+        let u32_at = |b: &[u8], at: usize| u32::from_le_bytes(b[at..at + 4].try_into().unwrap());
+        let mut pending = vec![u32_at(bytes, 4) as usize];
+        while let Some(ifd) = pending.pop() {
+            for i in 0..u16_at(bytes, ifd) as usize {
+                let entry = ifd + 2 + i * 12;
+                let (code, kind, count) = (
+                    u16_at(bytes, entry),
+                    u16_at(bytes, entry + 2),
+                    u32_at(bytes, entry + 4) as usize,
+                );
+                let size = if kind == 3 { 2 } else { 4 };
+                let at = if size * count <= 4 {
+                    entry + 8
+                } else {
+                    u32_at(bytes, entry + 8) as usize
+                };
+                if code == 330 {
+                    pending.extend((0..count).map(|k| u32_at(bytes, at + k * 4) as usize));
+                }
+                if code == tag {
+                    for k in 0..count {
+                        let at = at + k * size;
+                        if size == 2 {
+                            bytes[at..at + 2].copy_from_slice(&(value as u16).to_le_bytes());
+                        } else {
+                            bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn written(compression: Compression) -> Vec<u8> {
+        let linear = Rgb32FImage::from_pixel(40, 24, image::Rgb([0.2, 0.3, 0.4]));
+        let dir = std::env::temp_dir().join("darkroom-float-dng-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join(format!("malformed-{compression:?}.dng"));
+        let camera = DngCamera {
+            make: "Sony".into(),
+            model: "ILCE-7M3".into(),
+        };
+        write_float_dng(&path, &linear, &camera, compression, None).unwrap();
+        std::fs::read(&path).unwrap()
+    }
+
+    /// Damaged headers are refused with an error, never a panic or an
+    /// allocation the size of whatever the header claims.
+    #[test]
+    fn malformed_headers_are_refused() {
+        let lossless = written(Compression::Lossless);
+        assert!(decode_float_dng(&lossless).is_ok());
+        let compact = written(COMPACT);
+        assert!(decode_float_dng(&compact).is_ok());
+        let cases: [(&[u8], u16, u32, &str); 7] = [
+            (&compact, 322, 0, "zero tile width"),
+            (&compact, 323, 0, "zero tile length"),
+            (&compact, 322, 65_535 * 2, "oversized tile"),
+            (&lossless, 258, 8, "8-bit floats"),
+            (&lossless, 258, 12, "12-bit floats"),
+            (&lossless, 278, 0, "strips of no rows"),
+            (&lossless, 256, 4_000_000, "absurd width"),
+        ];
+        for (source, tag, value, what) in cases {
+            let mut bytes = source.to_vec();
+            patch_tag(&mut bytes, tag, value);
+            assert!(decode_float_dng(&bytes).is_err(), "{what} was accepted");
+        }
+        // Each side in range, the area not.
+        let mut bytes = lossless.clone();
+        patch_tag(&mut bytes, 256, 60_000);
+        patch_tag(&mut bytes, 257, 60_000);
+        assert!(decode_float_dng(&bytes).is_err(), "3.6 gigapixels accepted");
+        // A strip claiming to run past the end of the file.
+        let mut bytes = lossless.clone();
+        patch_tag(&mut bytes, 279, u32::MAX);
+        assert!(decode_float_dng(&bytes).is_err(), "strip past the file");
     }
 
     #[test]
