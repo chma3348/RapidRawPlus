@@ -78,7 +78,13 @@ import { useEditorStore } from '../../../store/useEditorStore';
 import { useProcessStore } from '../../../store/useProcessStore';
 import { useUIStore } from '../../../store/useUIStore';
 import { useEditorActions } from '../../../hooks/useEditorActions';
-import { useAiMasking } from '../../../hooks/useAiMasking';
+import {
+  fillSelectionOf,
+  isSelectionPending,
+  selectionSignature,
+  useAiMasking,
+  usePendingAiSelections,
+} from '../../../hooks/useAiMasking';
 import { useEditorRequests } from '../../../store/useEditorRequests';
 
 interface DragData {
@@ -139,12 +145,23 @@ const TOOL_START: Record<RetouchTool, string> = {
   enhance: 'Paint over an area, then choose how to enhance it.',
 };
 
-/** Which tool a retouch was made with; a sky replacement belongs to none. */
+/** The name Spot Enhance gave its results before retouches were typed. */
+const LEGACY_ENHANCE_NAME = /^Spot (deblur|restore|upscale)$/;
+
+/**
+ * Which tool a retouch was made with; a sky replacement belongs to none.
+ * Decided by its type, never by its name alone: a fill is renamed to its
+ * prompt, and "Spotted dog" made a Remove into an Enhance.
+ */
 const toolOf = (patch: AiPatch | undefined): RetouchTool | null => {
   if (!patch || patch.patchType === 'sky') return null;
   if (patch.patchType === 'heal') return 'heal';
   if (patch.patchType === 'clone') return 'clone';
-  if (patch.patchType === 'enhance' || String(patch.name || '').startsWith('Spot')) return 'enhance';
+  if (patch.patchType === 'enhance') return 'enhance';
+  // Older Enhance results carry only their name. A name taken from the
+  // prompt equals the prompt, so a prompt can't pass for one.
+  const name = String(patch.name || '');
+  if (!patch.patchType && LEGACY_ENHANCE_NAME.test(name) && name !== (patch.prompt || '').trim()) return 'enhance';
   return 'remove';
 };
 
@@ -2085,6 +2102,25 @@ function SettingsPanel({
   const displayContainer = container || PLACEHOLDER_PATCH;
   const isQuickErasePatch = displayContainer.subMasks?.some((sm: SubMask) => sm.type === Mask.QuickEraser);
   const isReconstructPatch = displayContainer.subMasks?.some((sm: SubMask) => sm.type === Mask.Clipped);
+  // Generate waits for the selection: while Detect objects waits out its
+  // pause after a stroke or is finding the object, and while painted strokes
+  // have no object yet (that run failed). A fill made then followed the bare
+  // strokes, not the object.
+  const subMaskIds: string[] = (container?.subMasks || []).map((sm: SubMask) => sm.id);
+  const selectionPending = usePendingAiSelections((s) => isSelectionPending(s, subMaskIds));
+  const paintWithoutObject = (container?.subMasks || []).some(
+    (sm: SubMask) =>
+      sm.type === Mask.AiPaint && (sm.parameters?.lines || []).length > 0 && !sm.parameters?.maskDataBase64,
+  );
+  const selectionNotReady = selectionPending || paintWithoutObject;
+  const selectionNotReadyReason = selectionPending
+    ? t('editor.ai.settings.selectionPending', { defaultValue: 'Finding the object you painted…' })
+    : t('editor.ai.settings.selectionMissing', {
+        defaultValue: 'No object was found for these strokes yet. Paint over the object again.',
+      });
+  // A fill is out of date once its selection has changed since it ran.
+  const madeFrom = container ? fillSelectionOf(container.id) : undefined;
+  const selectionChanged = !!container && madeFrom !== undefined && madeFrom !== selectionSignature(container.subMasks);
   const [prompt, setPrompt] = useState(displayContainer.prompt || '');
   const [useFastInpaint, setUseFastInpaint] = useState(!isGenerativeAvailable);
   const [generateMode, setGenerateMode] = useState(false);
@@ -2137,7 +2173,9 @@ function SettingsPanel({
         ),
       ])
     : '';
-  const healApplied = useRef<string>('');
+  // The arrangement last applied, per retouch: one value for the panel made
+  // switching between heal patches (or pressing H) re-run a heal for nothing.
+  const healApplied = useRef(new Map<string, string>());
   useEffect(() => {
     if (!container || !isRepair) return;
     const strokes = (container.subMasks || []).reduce(
@@ -2146,10 +2184,16 @@ function SettingsPanel({
     );
     // Nothing painted and nothing left over to clear.
     if (strokes === 0 && !container.patchData) return;
+    // A retouch first seen with its result already made (opened from a
+    // saved photo, or made before this panel showed it) is up to date.
+    // One with no strokes left still runs, to clear what they left behind.
+    if (!healApplied.current.has(container.id) && strokes > 0 && container.patchData && !container.isLoading) {
+      healApplied.current.set(container.id, healSignature);
+    }
     // Already applied exactly this arrangement of strokes and sources.
     // This is also what stops the retry below from looping: once a run
     // lands, the flip back to idle re-enters here and finds nothing to do.
-    if (healSignature === healApplied.current) return;
+    if (healSignature === healApplied.current.get(container.id)) return;
     // A change made while a heal was in flight must not be dropped — with
     // every stroke auto-applying, deleting a spot mid-run is easy to do.
     // isGeneratingAi is a dependency, so this re-enters when the run ends.
@@ -2159,17 +2203,18 @@ function SettingsPanel({
     // to set up first and no button to press.
     clearTimeout(healTimer.current);
     const applying = healSignature;
+    const containerId = container.id;
     healTimer.current = setTimeout(() => {
-      healApplied.current = applying;
-      onCloneStamp?.(container.id);
+      healApplied.current.set(containerId, applying);
+      onCloneStamp?.(containerId);
     }, 450);
     return () => clearTimeout(healTimer.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [healSignature, isGeneratingAi, container?.isLoading]);
+  }, [container?.id, healSignature, isGeneratingAi, container?.isLoading]);
 
   const spotRespotTimer = useRef<any>(null);
   useEffect(() => {
-    const isSpotPatch = container?.patchData && String(container?.name || '').startsWith('Spot');
+    const isSpotPatch = container?.patchData && toolOf(container) === 'enhance';
     if (!isSpotPatch || isGeneratingAi || container?.isLoading) return;
     clearTimeout(spotRespotTimer.current);
     spotRespotTimer.current = setTimeout(() => {
@@ -2274,6 +2319,11 @@ function SettingsPanel({
   const handleGenerateClick = () => {
     if (!container) {
       console.error('[ai] generate blocked: no active patch container');
+      return;
+    }
+    // Enter in the prompt field gets here without the button.
+    if (selectionNotReady) {
+      console.error('[ai] generate blocked: selection not ready', container.id);
       return;
     }
     updateContainer(container.id, {
@@ -2386,7 +2436,12 @@ function SettingsPanel({
           </Text>
           <Button
             className="w-full"
-            disabled={isGeneratingAi || displayContainer.isLoading || displayContainer.subMasks.length === 0}
+            disabled={
+              isGeneratingAi ||
+              displayContainer.isLoading ||
+              displayContainer.subMasks.length === 0 ||
+              selectionNotReady
+            }
             onClick={handleGenerateClick}
           >
             {isGeneratingAi || displayContainer.isLoading ? (
@@ -2408,8 +2463,21 @@ function SettingsPanel({
                       : t('editor.ai.settings.generateWithAiButton')}
             </span>
           </Button>
+          {selectionNotReady && !isGeneratingAi && !displayContainer.isLoading && (
+            <Text variant={TextVariants.small} className="block mt-2 text-text-secondary">
+              {selectionNotReadyReason}
+            </Text>
+          )}
+          {!selectionNotReady && selectionChanged && displayContainer.patchData && (
+            <Text variant={TextVariants.small} className="block mt-2 text-text-secondary">
+              {t('editor.ai.settings.selectionChanged', {
+                defaultValue: 'The selection has changed since this was made. Run it again to update it.',
+              })}
+            </Text>
+          )}
           {!generateMode &&
             !prompt.trim() &&
+            !selectionChanged &&
             displayContainer.needsPromptReason !== undefined &&
             !displayContainer.patchData && (
               <Text variant={TextVariants.small} className="block mt-2 text-text-secondary">
@@ -2481,7 +2549,12 @@ function SettingsPanel({
             <div className="mb-3">
               <Button
                 className="w-full bg-surface text-text-primary text-sm py-1.5"
-                disabled={isGeneratingAi || displayContainer.isLoading || displayContainer.subMasks.length === 0}
+                disabled={
+                  isGeneratingAi ||
+                  displayContainer.isLoading ||
+                  displayContainer.subMasks.length === 0 ||
+                  selectionNotReady
+                }
                 onClick={handleGenerateClick}
                 title="Generate one more attempt"
               >
@@ -2741,7 +2814,12 @@ function SettingsPanel({
               />
               <Button
                 className="w-full"
-                disabled={isGeneratingAi || displayContainer.isLoading || displayContainer.subMasks.length === 0}
+                disabled={
+                  isGeneratingAi ||
+                  displayContainer.isLoading ||
+                  displayContainer.subMasks.length === 0 ||
+                  selectionNotReady
+                }
                 onClick={() =>
                   container &&
                   onSpotEnhance(container.id, spotTask, spotStrength / 100, spotTexture / 100, spotGrain / 100)
@@ -2758,6 +2836,11 @@ function SettingsPanel({
                     : t('editor.ai.settings.spotEnhanceButton')}
                 </span>
               </Button>
+              {selectionNotReady && !isGeneratingAi && !displayContainer.isLoading && (
+                <Text variant={TextVariants.small} className="block text-text-secondary">
+                  {selectionNotReadyReason}
+                </Text>
+              )}
             </div>
           </CollapsibleSection>
         </>
