@@ -1332,7 +1332,7 @@ const ImageCanvas = memo(
     // back to the container's offset.
     const healSpots = useMemo(() => {
       const container: any = activeContainer;
-      if (!isAiEditing || !container || container.patchType !== 'heal') {
+      if (!isAiEditing || !container || (container.patchType !== 'heal' && container.patchType !== 'clone')) {
         return [] as Array<HealSpot>;
       }
       // Image space -> display space, matching how brush strokes are drawn.

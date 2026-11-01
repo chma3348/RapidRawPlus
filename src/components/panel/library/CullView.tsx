@@ -210,7 +210,7 @@ const fullPictures = {
   done: new Map<string, FullPicture>(),
   developing: null as string | null,
   /** What each mounted photo wants, by its hook's id. */
-  wants: new Map<number, { key: string; path: string; showEdits: boolean; urgent: boolean }>(),
+  wants: new Map<number, { key: string; path: string; showEdits: boolean; priority: number }>(),
   listeners: new Set<() => void>(),
 };
 const FULL_KEPT = 4;
@@ -227,7 +227,7 @@ async function developNextFull() {
   if (fullPictures.developing) return;
   const wants = [...fullPictures.wants.values()]
     .filter((w) => !fullPictures.done.has(w.key))
-    .sort((a, b) => Number(b.urgent) - Number(a.urgent));
+    .sort((a, b) => b.priority - a.priority);
   const next = wants[0];
   if (!next) return;
   fullPictures.developing = next.key;
@@ -270,9 +270,10 @@ let fullHookIds = 0;
 /**
  * The photo at full size: developed straight away when zoomed in, and once
  * it has been looked at for a moment otherwise, so it is usually ready by
- * the time you zoom.
+ * the time you zoom. `ahead` marks the next photo, developed after the
+ * one on screen, so it is ready when you get to it.
  */
-function useFullSize(path: string | undefined, wanted: boolean, zoomed: boolean, showEdits: boolean) {
+function useFullSize(path: string | undefined, wanted: boolean, zoomed: boolean, showEdits: boolean, ahead = false) {
   const [id] = useState(() => ++fullHookIds);
   const [, rerender] = useState(0);
   const key = path ? fullKey(path, showEdits) : null;
@@ -288,17 +289,17 @@ function useFullSize(path: string | undefined, wanted: boolean, zoomed: boolean,
     fullPictures.wants.delete(id);
     if (!path || !key || !wanted || isVideoPath(path)) return;
     const want = () => {
-      fullPictures.wants.set(id, { key, path, showEdits, urgent: zoomed });
+      fullPictures.wants.set(id, { key, path, showEdits, priority: zoomed && !ahead ? 2 : ahead ? 0 : 1 });
       void developNextFull();
     };
-    if (zoomed) {
+    if (zoomed && !ahead) {
       want();
       return;
     }
     // Passing through on the way to another photo develops nothing.
     const timer = window.setTimeout(want, FULL_DWELL_MS);
     return () => window.clearTimeout(timer);
-  }, [id, key, path, wanted, zoomed, showEdits]);
+  }, [id, key, path, wanted, zoomed, showEdits, ahead]);
   return key ? (fullPictures.done.get(key) ?? null) : null;
 }
 
@@ -560,6 +561,9 @@ export default function CullView({ onEdit }: { onEdit: (path: string) => void })
   const zoomed = zoom.scale > 1.01;
   const fullLeft = useFullSize(open ? paths[index] : undefined, open, zoomed, showEdits);
   const fullRight = useFullSize(open && compare ? paths[index + 1] : undefined, open && compare, zoomed, showEdits);
+  // The photo after the one(s) on screen, developed in the background once
+  // they are done, so zooming on it is instant too.
+  useFullSize(open ? paths[index + (compare ? 2 : 1)] : undefined, open, false, showEdits, true);
 
   const go = useCallback((to: number) => setIndex(Math.max(0, Math.min(paths.length - 1, to))), [paths.length]);
   const advance = useCallback(() => {

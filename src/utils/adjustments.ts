@@ -281,9 +281,10 @@ export interface AiPatch {
   needsPromptReason?: number;
   subMasks: Array<SubMask>;
   visible: boolean;
-  /** 'heal' patches clone from a source offset and stay editable; 'sky'
-   *  patches come from Sky Replace and remember how they were made. */
-  patchType?: 'heal' | 'sky';
+  /** 'heal' and 'clone' patches borrow from a source offset (blended, or
+   *  copied as is) and stay editable; 'enhance' ones are Spot Enhance's;
+   *  'sky' patches come from Sky Replace and remember how they were made. */
+  patchType?: 'heal' | 'clone' | 'enhance' | 'sky';
   sky?: { plate: string; options: Record<string, number | boolean> };
   /** Where the heal copies FROM, relative to the painted area, in source px. */
   cloneOffset?: { x: number; y: number };

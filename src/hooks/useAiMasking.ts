@@ -392,12 +392,9 @@ export function useAiMasking() {
             return { ...p, subMasks, patchData, isLoading: false, name: isHeal ? 'Heal' : 'Clone' };
           }),
         }));
-        // Heal is meant to be worked at: keep the brush pointed at the same
-        // sub-mask so more strokes can be added and the source re-dragged,
-        // each edit re-running the blend. Clone stays one-shot.
-        if (!isHeal) {
-          setEditor({ activeAiSubMaskId: null });
-        }
+        // Heal and Clone are meant to be worked at: the brush stays on the
+        // same sub-mask so more strokes can be added and sources re-dragged,
+        // each edit re-running the repair.
       } catch (err) {
         toast.error(`${isHeal ? 'Heal' : 'Clone'} failed: ${err}`);
         setAdjustments((prev: Adjustments) => ({

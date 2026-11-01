@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { v4 as uuidv4 } from 'uuid';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -34,6 +34,13 @@ import {
   FolderOpen,
   SquaresIntersect,
   Stamp,
+  Bandage,
+  Eraser,
+  Brush,
+  ChevronRight,
+  Shapes,
+  Sun,
+  type LucideIcon,
 } from 'lucide-react';
 
 import CollapsibleSection from '../../ui/CollapsibleSection';
@@ -91,6 +98,154 @@ const PLACEHOLDER_PATCH: AiPatch = {
   visible: true,
   patchData: null,
 };
+
+/**
+ * The retouching tools, as Lightroom's Remove panel lays them out: Remove
+ * fills a selection (generatively or with the fast fill), Heal and Clone
+ * borrow detail from elsewhere in the photo (blended, or copied as is),
+ * and Enhance sharpens, deblurs or restores an area.
+ */
+export type RetouchTool = 'remove' | 'heal' | 'clone' | 'enhance';
+
+const RETOUCH_TOOLS: Array<{ id: RetouchTool; icon: LucideIcon; label: string; hint: string }> = [
+  { id: 'remove', icon: Eraser, label: 'Remove', hint: 'Paint over something to fill it in' },
+  { id: 'heal', icon: Bandage, label: 'Heal', hint: 'Borrow detail from nearby, blended into its surroundings' },
+  { id: 'clone', icon: Stamp, label: 'Clone', hint: 'Copy detail from nearby exactly as it is' },
+  { id: 'enhance', icon: Sparkles, label: 'Enhance', hint: 'Sharpen, deblur or restore an area' },
+];
+
+const readFlag = (key: string, fallback: boolean) => {
+  try {
+    const stored = localStorage.getItem(key);
+    return stored === null ? fallback : stored === '1';
+  } catch {
+    return fallback;
+  }
+};
+const writeFlag = (key: string, value: boolean) => {
+  try {
+    localStorage.setItem(key, value ? '1' : '0');
+  } catch {
+    // Remembered for this session only.
+  }
+};
+
+/** What to do next with a tool picked and nothing painted yet. */
+const TOOL_START: Record<RetouchTool, string> = {
+  remove:
+    'Paint over what you want gone, then press the button that appears. With Detect objects on, paint roughly over an object to select it.',
+  heal: 'Paint over a blemish: it is repaired straight away from a matching area nearby. Each stroke is its own spot.',
+  clone: 'Paint over something to cover it with an exact copy from nearby. Each stroke is its own spot.',
+  enhance: 'Paint over an area, then choose how to enhance it.',
+};
+
+/** Which tool a retouch was made with; a sky replacement belongs to none. */
+const toolOf = (patch: AiPatch | undefined): RetouchTool | null => {
+  if (!patch || patch.patchType === 'sky') return null;
+  if (patch.patchType === 'heal') return 'heal';
+  if (patch.patchType === 'clone') return 'clone';
+  if (patch.patchType === 'enhance' || String(patch.name || '').startsWith('Spot')) return 'enhance';
+  return 'remove';
+};
+
+/**
+ * Other ways to choose what Remove or Enhance works on, beyond painting it:
+ * Lightroom's Distraction Removal rows, holding the selection tools.
+ */
+const SELECTION_GROUPS: Array<{ id: string; title: string; icon: LucideIcon; types: Mask[] }> = [
+  {
+    id: 'objects',
+    title: 'Objects and people',
+    icon: Shapes,
+    types: [Mask.QuickEraser, Mask.AiSubject, Mask.AiPaint, Mask.AiForeground],
+  },
+  { id: 'areas', title: 'Areas', icon: Brush, types: [Mask.Brush, Mask.Linear, Mask.Radial, Mask.Color] },
+  { id: 'highlights', title: 'Blown highlights', icon: Sun, types: [Mask.Clipped] },
+];
+
+function RetouchTools({
+  active,
+  disabled,
+  onPick,
+}: {
+  active: RetouchTool | null;
+  disabled: boolean;
+  onPick: (tool: RetouchTool) => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+      {RETOUCH_TOOLS.map((tool, i) => (
+        <div key={tool.id} className="flex items-center gap-2">
+          {/* Enhance is apart from the three that remove, as Lightroom
+              sets Red Eye apart. */}
+          {i === 3 && <div className="h-8 w-px bg-surface" />}
+          <button
+            type="button"
+            disabled={disabled}
+            onClick={() => onPick(tool.id)}
+            aria-pressed={active === tool.id}
+            className={`flex h-11 w-11 items-center justify-center rounded-lg transition-colors disabled:opacity-50 ${
+              active === tool.id
+                ? 'bg-card-active text-text-primary ring-1 ring-accent'
+                : 'text-text-secondary hover:bg-surface hover:text-text-primary'
+            }`}
+            data-tooltip={`${t(`editor.ai.tools.${tool.id}`, { defaultValue: tool.label })}: ${t(
+              `editor.ai.tools.${tool.id}Hint`,
+              { defaultValue: tool.hint },
+            )}`}
+          >
+            <tool.icon size={22} />
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** A row that opens to show more, like Lightroom's Distraction Removal rows. */
+function DisclosureRow({
+  icon: Icon,
+  title,
+  open,
+  onToggle,
+  action,
+  children,
+}: {
+  icon: LucideIcon;
+  title: string;
+  open: boolean;
+  onToggle: () => void;
+  action?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="rounded-lg bg-bg-tertiary" onClick={(e) => e.stopPropagation()}>
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={onToggle}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            onToggle();
+          }
+        }}
+        className="flex w-full cursor-pointer items-center gap-3 rounded-lg px-2 py-2 text-left hover:bg-surface"
+      >
+        <span className="flex h-7 w-7 items-center justify-center rounded-md bg-surface text-text-secondary">
+          <Icon size={16} />
+        </span>
+        <Text as="span" weight={TextWeights.medium} className="flex-1 truncate">
+          {title}
+        </Text>
+        {action}
+        <ChevronRight size={16} className={`text-text-secondary transition-transform ${open ? 'rotate-90' : ''}`} />
+      </div>
+      {open && children}
+    </div>
+  );
+}
 
 const SUB_MASK_CONFIG: any = {
   [Mask.Radial]: {
@@ -401,17 +556,26 @@ export default function AIPanel() {
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [tempName, setTempName] = useState('');
   const [pendingAction, setPendingAction] = useState<(() => void) | null>(null);
-  const [isSettingsPanelEverOpened, setIsSettingsPanelEverOpened] = useState(false);
+  // The tool picked last: it stays lit with nothing selected, as
+  // Lightroom's does, and says what the next new retouch is.
+  const [pickedTool, setPickedTool] = useState<RetouchTool>('remove');
+  // Remove with Detect objects: a rough stroke snaps to the object (AI Paint).
+  const [detectObjects, setDetectObjects] = useState(() => readFlag('darkroom.retouchDetectObjects', false));
+  const [openGroups, setOpenGroups] = useState<Set<string>>(new Set());
+  const [listOpen, setListOpen] = useState(() => readFlag('darkroom.retouchListOpen', true));
+  useEffect(() => writeFlag('darkroom.retouchDetectObjects', detectObjects), [detectObjects]);
+  useEffect(() => writeFlag('darkroom.retouchListOpen', listOpen), [listOpen]);
   const hasPerformedInitialSelection = useRef(false);
   const [analyzingSubMaskId, setAnalyzingSubMaskId] = useState<string | null>(null);
   const [copiedPatch, setCopiedPatch] = useState<AiPatch | null>(null);
   const [copiedSubMask, setCopiedSubMask] = useState<SubMask | null>(null);
 
   const [collapsibleState, setCollapsibleState] = useState({
-    generative: true,
-    // Open by default: collapsed, the region-enhance tool (the right
-    // instrument for washed-out areas) was effectively invisible.
-    spotEnhance: true,
+    // Replace with… (prompt, model, LoRAs) opens when asked for, as
+    // Lightroom's Remove has no prompt; Enhance opens itself for the
+    // Enhance tool.
+    generative: false,
+    spotEnhance: false,
     properties: true,
   });
 
@@ -449,12 +613,6 @@ export default function AIPanel() {
   }, [adjustments.aiPatches, activePatchContainerId, onSelectPatchContainer, onSelectSubMask]);
 
   useEffect(() => {
-    const hasPatches = (adjustments.aiPatches || []).length > 0;
-
-    if (hasPatches) {
-      setIsSettingsPanelEverOpened(true);
-    }
-
     if (activePatchContainerId) {
       const shouldAutoExpand = !hasPerformedInitialSelection.current || activeSubMaskId;
       if (shouldAutoExpand) {
@@ -464,7 +622,6 @@ export default function AIPanel() {
         });
       }
       hasPerformedInitialSelection.current = true;
-      setIsSettingsPanelEverOpened(true);
     }
   }, [activePatchContainerId, activeSubMaskId, adjustments.aiPatches, onSelectPatchContainer, onSelectSubMask]);
 
@@ -574,7 +731,7 @@ export default function AIPanel() {
     return subMask;
   };
 
-  const handleAddAiPatchContainer = (type: Mask, options?: { heal?: boolean }) => {
+  const handleAddAiPatchContainer = (type: Mask, options?: { tool?: RetouchTool }) => {
     const subMask = createMaskLogic(type);
 
     let name: string;
@@ -589,22 +746,34 @@ export default function AIPanel() {
       name = t('editor.ai.patches.aiEdit', { count });
     }
 
-    // Heal is a brush container that carries a clone offset. The flag is a
+    // Heal and Clone are brush containers that carry a clone offset; an
+    // Enhance one is marked so the panel opens its controls. The tool is a
     // parameter, not state: state set in the same click is not visible here.
-    const isHeal = !!options?.heal && type === Mask.Brush;
+    const tool = options?.tool;
+    const isHeal = (tool === 'heal' || tool === 'clone') && type === Mask.Brush;
+    const count = (adjustments.aiPatches || []).length + 1;
     const newContainer: AiPatch = {
       id: uuidv4(),
       invert: false,
       isLoading: false,
-      name: isHeal ? t('editor.ai.patches.heal', { count: (adjustments.aiPatches || []).length + 1 }) : name,
+      name:
+        tool === 'heal'
+          ? t('editor.ai.patches.heal', { count })
+          : tool === 'clone'
+            ? t('editor.ai.patches.clone', { count, defaultValue: 'Clone {{count}}' })
+            : tool === 'enhance'
+              ? t('editor.ai.patches.enhance', { count, defaultValue: 'Enhance {{count}}' })
+              : name,
       patchData: null,
       prompt: '',
       subMasks: [subMask],
       visible: true,
       // A heal patch keeps its own source offset, so the source stays
       // draggable long after the clone was applied.
-      ...(isHeal ? { patchType: 'heal', cloneOffset: { x: 0, y: -220 } } : {}),
+      ...(isHeal ? { patchType: tool, cloneOffset: { x: 0, y: -220 } } : {}),
+      ...(tool === 'enhance' ? { patchType: 'enhance' } : {}),
     } as AiPatch;
+    if (tool) setPickedTool(tool);
 
     setAdjustments((prev: Adjustments) => ({ ...prev, aiPatches: [...(prev.aiPatches || []), newContainer] }));
     onSelectPatchContainer(newContainer.id);
@@ -615,11 +784,49 @@ export default function AIPanel() {
     if (type === Mask.AiForeground) handleGenerateAiForegroundMask(subMask.id);
   };
 
+  // The tool on show: the selected retouch's own, else the one picked last.
+  const activeTool: RetouchTool | null = activeContainer ? toolOf(activeContainer) : pickedTool;
+
+  /**
+   * Picking a tool, as in Lightroom: paint straight after. Heal and Clone
+   * keep every spot in one retouch each (each stroke is its own spot), so
+   * picking one again goes back to it; Remove and Enhance start a new one,
+   * unless the selected one of that tool has nothing painted yet.
+   */
+  const handlePickTool = (tool: RetouchTool) => {
+    setPickedTool(tool);
+    const patches = adjustments.aiPatches || [];
+    const isEmpty = (p: AiPatch) =>
+      !p.patchData &&
+      p.subMasks.every((sm) => {
+        const lines = (sm.parameters as { lines?: unknown[] } | undefined)?.lines;
+        return !Array.isArray(lines) || lines.length === 0;
+      });
+    const reuse =
+      tool === 'heal' || tool === 'clone'
+        ? [...patches].reverse().find((p) => toolOf(p) === tool && p.visible)
+        : activeContainer && toolOf(activeContainer) === tool && isEmpty(activeContainer)
+          ? activeContainer
+          : undefined;
+    if (reuse) {
+      const brush = reuse.subMasks.find((sm) => SUB_MASK_CONFIG[sm.type]?.showBrushTools) || reuse.subMasks[0];
+      onSelectPatchContainer(reuse.id);
+      onSelectSubMask(brush?.id ?? null);
+      selectBrushToolForNewMask();
+      return;
+    }
+    if (tool === 'remove') {
+      handleAddAiPatchContainer(detectObjects ? Mask.AiPaint : Mask.Brush, { tool });
+    } else {
+      handleAddAiPatchContainer(Mask.Brush, { tool });
+    }
+  };
+
   // The healing brush asked for by key (H, as Lightroom).
   const pendingRequest = useEditorRequests((r) => r.request);
   useEffect(() => {
     if (!useEditorRequests.getState().take('heal')) return;
-    handleAddAiPatchContainer(Mask.Brush, { heal: true });
+    handlePickTool('heal');
   }, [pendingRequest]);
 
   const handleAddSubMask = (
@@ -866,13 +1073,11 @@ export default function AIPanel() {
         icon: maskType.icon,
         onClick: () => handleAddAiPatchContainer(maskType.type),
       })),
-      {
-        label: t('editor.ai.settings.healCreate'),
-        icon: Stamp,
-        onClick: () => {
-          handleAddAiPatchContainer(Mask.Brush, { heal: true });
-        },
-      },
+      ...RETOUCH_TOOLS.map((tool) => ({
+        label: t(`editor.ai.tools.${tool.id}`, { defaultValue: tool.label }),
+        icon: tool.icon,
+        onClick: () => handlePickTool(tool.id),
+      })),
     ];
 
     showContextMenu(e.clientX, e.clientY, [
@@ -1040,201 +1245,184 @@ export default function AIPanel() {
           </button>
         </div>
 
-        <div className="flex-1 overflow-y-auto overflow-x-hidden flex flex-col min-h-0 p-4">
-          <AnimatePresence mode="wait">
-            {(adjustments.aiPatches || []).length === 0 ? (
-              <motion.div
-                key="ai-grid"
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.2 }}
-                className="z-10 shrink-0"
-                onClick={handleDeselect}
-              >
-                {!selectedImage ? (
-                  <Text
-                    variant={TextVariants.heading}
-                    color={TextColors.secondary}
-                    weight={TextWeights.normal}
-                    className="text-center mt-4"
-                  >
-                    {t('editor.ai.noImageSelected')}
-                  </Text>
-                ) : (
-                  <>
-                    <ConnectionStatus
-                      aiProvider={aiProvider}
-                      isAIConnectorConnected={isAIConnectorConnected}
-                      isSignedIn={!!isSignedIn}
-                      isPro={!!isPro}
-                      cloudUsage={cloudUsage}
-                    />
-                    <Text variant={TextVariants.heading} className="mb-2 mt-8">
-                      {t('editor.ai.createNewTitle')}
-                    </Text>
-                    <div className="grid grid-cols-3 gap-2" onClick={(e) => e.stopPropagation()}>
-                      {AI_PANEL_CREATION_TYPES.map((maskType: MaskType) => (
-                        <DraggableGridItem
-                          key={maskType.type}
-                          maskType={maskType}
-                          isGenerating={isGeneratingAi}
-                          onClick={() => handleAddAiPatchContainer(maskType.type)}
-                        />
-                      ))}
-                    </div>
-                    <button
-                      className="w-full mt-2 px-3 py-2 bg-bg-tertiary rounded-md hover:bg-card-active transition-colors text-sm text-text-primary disabled:opacity-40"
-                      disabled={isGeneratingAi}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleAddAiPatchContainer(Mask.Brush, { heal: true });
-                      }}
-                    >
-                      {t('editor.ai.settings.healCreate')}
-                    </button>
-                  </>
-                )}
-              </motion.div>
-            ) : (
-              <motion.div
-                key="ai-list"
-                ref={setRootDroppableRef}
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.2 }}
-                className={`flex flex-col transition-colors ${isRootOver ? 'bg-surface' : ''}`}
-                onClick={handleDeselect}
-              >
-                <Text variant={TextVariants.heading} className="mb-2">
-                  {t('editor.ai.editsTitle')}
-                </Text>
-
-                <button
-                  className="w-full mb-2 px-3 py-2 bg-bg-tertiary rounded-md hover:bg-card-active transition-colors text-sm text-text-primary disabled:opacity-40"
-                  disabled={isGeneratingAi}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleAddAiPatchContainer(Mask.Brush, { heal: true });
-                  }}
-                >
-                  {t('editor.ai.settings.healCreate')}
-                </button>
-
-                <AnimatePresence
-                  initial={false}
-                  mode="popLayout"
-                  onExitComplete={() => {
-                    if (pendingAction) {
-                      pendingAction();
-                      setPendingAction(null);
-                    }
-                  }}
-                >
-                  {(adjustments.aiPatches || []).map((container) => (
-                    <ContainerRow
-                      key={container.id}
-                      container={container}
-                      isSelected={activePatchContainerId === container.id && activeSubMaskId === null}
-                      hasActiveChild={activePatchContainerId === container.id && activeSubMaskId !== null}
-                      isExpanded={expandedContainers.has(container.id)}
-                      onToggle={() => handleToggleExpand(container.id)}
-                      onSelect={() => {
-                        onSelectPatchContainer(container.id);
-                        onSelectSubMask(null);
-                      }}
-                      renamingId={renamingId}
-                      setRenamingId={setRenamingId}
-                      tempName={tempName}
-                      setTempName={setTempName}
-                      updateContainer={updatePatch}
-                      handleDelete={handleDeleteContainer}
-                      handleDuplicate={handleDuplicatePatchContainer}
-                      handleDuplicateAndInvert={handleDuplicateAndInvertPatchContainer}
-                      handlePastePatch={handlePastePatch}
-                      copyPatchToClipboard={copyPatchToClipboard}
-                      copiedPatch={copiedPatch}
-                      setAdjustments={setAdjustments}
-                      activeDragItem={activeDragItem}
-                      activeSubMaskId={activeSubMaskId}
-                      onSelectContainer={onSelectPatchContainer}
-                      onSelectSubMask={onSelectSubMask}
-                      updateSubMask={updateSubMask}
-                      handleDeleteSubMask={handleDeleteSubMask}
-                      handleDuplicateSubMask={handleDuplicateSubMask}
-                      handleDuplicateAndInvertSubMask={handleDuplicateAndInvertSubMask}
-                      handlePasteSubMask={handlePasteSubMask}
-                      copySubMaskToClipboard={copySubMaskToClipboard}
-                      copiedSubMask={copiedSubMask}
-                      analyzingSubMaskId={analyzingSubMaskId}
-                      onAddComponent={(e: React.MouseEvent) => handleAddAiContextMenu(e, container.id)}
-                    />
-                  ))}
-                </AnimatePresence>
-
-                <AnimatePresence>
-                  {activeDragItem?.type === 'Creation' && (adjustments.aiPatches || []).length > 0 && (
-                    <NewMaskDropZone isOver={isRootOver} />
-                  )}
-                </AnimatePresence>
-
-                <Text
-                  as="div"
-                  weight={TextWeights.medium}
-                  className="flex items-center gap-2 p-2 rounded-md transition-colors transition-opacity opacity-70 hover:opacity-100 hover:bg-card-active cursor-pointer hover:text-text-primary"
-                  onClick={(e) => handleAddAiContextMenu(e, null)}
-                >
-                  <div className="p-0.5">
-                    <Plus size={18} />
-                  </div>
-                  <span>{t('editor.ai.addNewEdit')}</span>
-                </Text>
-              </motion.div>
-            )}
-          </AnimatePresence>
-
-          <div className="h-4 shrink-0 w-full" onClick={handleDeselect} />
-
-          <AnimatePresence>
-            {isSettingsPanelEverOpened && (
-              <motion.div
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.2, ease: 'easeOut' }}
-                className="flex-1 min-h-0"
-              >
-                <Text variant={TextVariants.heading} className="mb-2">
-                  {t('editor.ai.editSettingsTitle')}
-                </Text>
-                <SettingsPanel
-                  container={activeContainer || null}
-                  activeSubMask={activeSubMaskData || null}
-                  aiModelDownloadStatus={aiModelDownloadStatus}
-                  brushSettings={brushSettings}
-                  setBrushSettings={setBrushSettings}
-                  updateContainer={updatePatch}
-                  updateSubMask={updateSubMask}
-                  isGeneratingAi={isGeneratingAi}
-                  isGeneratingAiMask={isGeneratingAiMask}
-                  onGenerativeReplace={handleGenerativeReplace}
-                  onReblendReplacement={handleReblendReplacement}
-                  onSelectAiPatchVariant={handleSelectAiPatchVariant}
-                  onAdjustFillArea={handleAdjustFillArea}
-                  onCloneStamp={handleCloneStamp}
-                  onSpotEnhance={handleSpotEnhance}
-                  onRespotEnhance={handleRespotEnhance}
-                  collapsibleState={collapsibleState}
-                  setCollapsibleState={setCollapsibleState}
-                  isGenerativeAvailable={isGenerativeAvailable}
+        <div className="flex-1 overflow-y-auto overflow-x-hidden flex flex-col min-h-0 p-4 gap-5">
+          {!selectedImage ? (
+            <Text
+              variant={TextVariants.heading}
+              color={TextColors.secondary}
+              weight={TextWeights.normal}
+              className="text-center mt-4"
+            >
+              {t('editor.ai.noImageSelected')}
+            </Text>
+          ) : (
+            <>
+              <RetouchTools active={activeTool} disabled={isGeneratingAi} onPick={handlePickTool} />
+              <BrushTools settings={brushSettings} onSettingsChange={setBrushSettings} />
+              {activeTool === 'remove' && (
+                <Switch
+                  checked={detectObjects}
+                  label={t('editor.ai.settings.detectObjects', { defaultValue: 'Detect objects' })}
+                  onChange={setDetectObjects}
+                  tooltip={t('editor.ai.settings.detectObjectsTooltip', {
+                    defaultValue:
+                      'Paint roughly over an object and the selection snaps to it (AI Paint). Applies to the next removal.',
+                  })}
                 />
-              </motion.div>
-            )}
-          </AnimatePresence>
+              )}
+              <SettingsPanel
+                container={activeContainer || null}
+                activeSubMask={activeSubMaskData || null}
+                aiModelDownloadStatus={aiModelDownloadStatus}
+                updateContainer={updatePatch}
+                updateSubMask={updateSubMask}
+                isGeneratingAi={isGeneratingAi}
+                isGeneratingAiMask={isGeneratingAiMask}
+                onGenerativeReplace={handleGenerativeReplace}
+                onReblendReplacement={handleReblendReplacement}
+                onSelectAiPatchVariant={handleSelectAiPatchVariant}
+                onAdjustFillArea={handleAdjustFillArea}
+                onCloneStamp={handleCloneStamp}
+                onSpotEnhance={handleSpotEnhance}
+                onRespotEnhance={handleRespotEnhance}
+                collapsibleState={collapsibleState}
+                setCollapsibleState={setCollapsibleState}
+                isGenerativeAvailable={isGenerativeAvailable}
+                tool={activeTool}
+              />
+
+              <div className="flex flex-col gap-1" onClick={(e) => e.stopPropagation()}>
+                <Text variant={TextVariants.heading} className="mb-1">
+                  {t('editor.ai.selectToRemove', { defaultValue: 'Select what to change' })}
+                </Text>
+                {SELECTION_GROUPS.map((group) => (
+                  <DisclosureRow
+                    key={group.id}
+                    icon={group.icon}
+                    title={t(`editor.ai.groups.${group.id}`, { defaultValue: group.title })}
+                    open={openGroups.has(group.id)}
+                    onToggle={() =>
+                      setOpenGroups((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(group.id)) next.delete(group.id);
+                        else next.add(group.id);
+                        return next;
+                      })
+                    }
+                  >
+                    <div className="grid grid-cols-3 gap-2 p-2">
+                      {group.types.map((type) => {
+                        const maskType = AI_PANEL_CREATION_TYPES.find((m) => m.type === type);
+                        return maskType ? (
+                          <DraggableGridItem
+                            key={maskType.type}
+                            maskType={maskType}
+                            isGenerating={isGeneratingAi}
+                            onClick={() => handleAddAiPatchContainer(maskType.type)}
+                          />
+                        ) : null;
+                      })}
+                    </div>
+                  </DisclosureRow>
+                ))}
+              </div>
+
+              <DisclosureRow
+                icon={Wand2}
+                title={t('editor.ai.onThisPhoto', {
+                  defaultValue: 'On this photo ({{count}})',
+                  count: (adjustments.aiPatches || []).length,
+                })}
+                open={listOpen}
+                onToggle={() => setListOpen((open) => !open)}
+              >
+                <div
+                  ref={setRootDroppableRef}
+                  className={`flex flex-col p-1 transition-colors ${isRootOver ? 'bg-surface' : ''}`}
+                  onClick={handleDeselect}
+                >
+                  <AnimatePresence
+                    initial={false}
+                    mode="popLayout"
+                    onExitComplete={() => {
+                      if (pendingAction) {
+                        pendingAction();
+                        setPendingAction(null);
+                      }
+                    }}
+                  >
+                    {(adjustments.aiPatches || []).map((container) => (
+                      <ContainerRow
+                        key={container.id}
+                        container={container}
+                        isSelected={activePatchContainerId === container.id && activeSubMaskId === null}
+                        hasActiveChild={activePatchContainerId === container.id && activeSubMaskId !== null}
+                        isExpanded={expandedContainers.has(container.id)}
+                        onToggle={() => handleToggleExpand(container.id)}
+                        onSelect={() => {
+                          onSelectPatchContainer(container.id);
+                          onSelectSubMask(null);
+                        }}
+                        renamingId={renamingId}
+                        setRenamingId={setRenamingId}
+                        tempName={tempName}
+                        setTempName={setTempName}
+                        updateContainer={updatePatch}
+                        handleDelete={handleDeleteContainer}
+                        handleDuplicate={handleDuplicatePatchContainer}
+                        handleDuplicateAndInvert={handleDuplicateAndInvertPatchContainer}
+                        handlePastePatch={handlePastePatch}
+                        copyPatchToClipboard={copyPatchToClipboard}
+                        copiedPatch={copiedPatch}
+                        setAdjustments={setAdjustments}
+                        activeDragItem={activeDragItem}
+                        activeSubMaskId={activeSubMaskId}
+                        onSelectContainer={onSelectPatchContainer}
+                        onSelectSubMask={onSelectSubMask}
+                        updateSubMask={updateSubMask}
+                        handleDeleteSubMask={handleDeleteSubMask}
+                        handleDuplicateSubMask={handleDuplicateSubMask}
+                        handleDuplicateAndInvertSubMask={handleDuplicateAndInvertSubMask}
+                        handlePasteSubMask={handlePasteSubMask}
+                        copySubMaskToClipboard={copySubMaskToClipboard}
+                        copiedSubMask={copiedSubMask}
+                        analyzingSubMaskId={analyzingSubMaskId}
+                        onAddComponent={(e: React.MouseEvent) => handleAddAiContextMenu(e, container.id)}
+                      />
+                    ))}
+                  </AnimatePresence>
+
+                  <AnimatePresence>
+                    {activeDragItem?.type === 'Creation' && (adjustments.aiPatches || []).length > 0 && (
+                      <NewMaskDropZone isOver={isRootOver} />
+                    )}
+                  </AnimatePresence>
+
+                  <Text
+                    as="div"
+                    weight={TextWeights.medium}
+                    className="flex items-center gap-2 p-2 rounded-md transition-colors transition-opacity opacity-70 hover:opacity-100 hover:bg-card-active cursor-pointer hover:text-text-primary"
+                    onClick={(e) => handleAddAiContextMenu(e, null)}
+                  >
+                    <div className="p-0.5">
+                      <Plus size={18} />
+                    </div>
+                    <span>{t('editor.ai.addNewEdit')}</span>
+                  </Text>
+                </div>
+              </DisclosureRow>
+
+              <ConnectionStatus
+                aiProvider={aiProvider}
+                isAIConnectorConnected={isAIConnectorConnected}
+                isSignedIn={!!isSignedIn}
+                isPro={!!isPro}
+                cloudUsage={cloudUsage}
+              />
+            </>
+          )}
         </div>
       </div>
-
       <DragOverlay dropAnimation={{ duration: 150, easing: 'cubic-bezier(0.18, 0.67, 0.6, 1.22)' }}>
         {activeDragItem ? (
           <div className="w-(--sidebar-width,280px) pointer-events-none">
@@ -1874,8 +2062,6 @@ function SettingsPanel({
   container,
   activeSubMask,
   aiModelDownloadStatus,
-  brushSettings,
-  setBrushSettings,
   updateContainer,
   updateSubMask,
   isGeneratingAi,
@@ -1890,6 +2076,7 @@ function SettingsPanel({
   collapsibleState,
   setCollapsibleState,
   isGenerativeAvailable,
+  tool,
 }: any) {
   const { t } = useTranslation();
   const { appSettings, handleSettingsChange } = useSettingsStore();
@@ -1931,28 +2118,28 @@ function SettingsPanel({
   // It is deterministic and engine-free, so the result follows the markers
   // instead of waiting for a button press.
   const healTimer = useRef<any>(null);
-  const healSignature =
-    (container as any)?.patchType === 'heal'
-      ? JSON.stringify([
-          (container as any)?.cloneOffset,
-          (container?.subMasks || []).map((sm: any) =>
-            ((sm.parameters as any)?.lines || []).map((line: any) => [
-              line.points?.length,
-              line.points?.[0]?.x,
-              line.points?.[0]?.y,
-              // Each stroke carries its own source, so dragging one must
-              // re-run the blend even though nothing else changed.
-              line.cloneOffset?.x,
-              line.cloneOffset?.y,
-              // Refresh source turns the current one down: heal again.
-              line.rejectedSources?.length,
-            ]),
-          ),
-        ])
-      : '';
+  const isRepair = (container as any)?.patchType === 'heal' || (container as any)?.patchType === 'clone';
+  const healSignature = isRepair
+    ? JSON.stringify([
+        (container as any)?.cloneOffset,
+        (container?.subMasks || []).map((sm: any) =>
+          ((sm.parameters as any)?.lines || []).map((line: any) => [
+            line.points?.length,
+            line.points?.[0]?.x,
+            line.points?.[0]?.y,
+            // Each stroke carries its own source, so dragging one must
+            // re-run the blend even though nothing else changed.
+            line.cloneOffset?.x,
+            line.cloneOffset?.y,
+            // Refresh source turns the current one down: heal again.
+            line.rejectedSources?.length,
+          ]),
+        ),
+      ])
+    : '';
   const healApplied = useRef<string>('');
   useEffect(() => {
-    if (!container || (container as any).patchType !== 'heal') return;
+    if (!container || !isRepair) return;
     const strokes = (container.subMasks || []).reduce(
       (n: number, sm: any) => n + ((sm.parameters as any)?.lines || []).length,
       0,
@@ -2112,11 +2299,149 @@ function SettingsPanel({
   const handleToggleSection = (section: string) =>
     setCollapsibleState((prev: any) => ({ ...prev, [section]: !prev[section] }));
 
+  // Nothing selected: what the picked tool does, until something is painted.
+  if (!container) {
+    return (
+      <Text variant={TextVariants.small} className="block text-text-secondary">
+        {t(`editor.ai.tools.${tool ?? 'remove'}Start`, { defaultValue: TOOL_START[(tool ?? 'remove') as RetouchTool] })}
+      </Text>
+    );
+  }
+  const isSky = (container as any)?.patchType === 'sky';
+  // A fill: Remove's, or any older retouch made from a selection.
+  const isFill = !isRepair && !isSky && tool !== 'enhance';
+  const generative = isEngineFill || generateMode || !useFastInpaint;
   return (
-    <div
-      className={`space-y-2 transition-opacity duration-300 ${!isActive ? 'opacity-50 pointer-events-none' : ''}`}
-      onClick={(e) => e.stopPropagation()}
-    >
+    <div className="space-y-3" onClick={(e) => e.stopPropagation()}>
+      <div className="flex items-center gap-2">
+        <Text variant={TextVariants.heading} className="flex-1 truncate">
+          {container.name}
+        </Text>
+        {(isGeneratingAi || container.isLoading) && <Loader2 size={14} className="animate-spin text-text-secondary" />}
+      </div>
+      {isRepair && (
+        <div className="p-2 bg-bg-tertiary rounded-md">
+          <Text variant={TextVariants.heading} className="mb-2">
+            {t('editor.ai.settings.cloneTitle')}
+          </Text>
+          <Text variant={TextVariants.small} className="block text-text-secondary">
+            {t('editor.ai.settings.cloneHint')}
+          </Text>
+          <HealSpotActions />
+        </div>
+      )}
+      {(container as any)?.patchType === 'sky' && (
+        <div className="p-2 bg-bg-tertiary rounded-md">
+          <Text variant={TextVariants.heading} className="mb-2">
+            {t('editor.ai.settings.skyTitle', { defaultValue: 'Replaced sky' })}
+          </Text>
+          <Text variant={TextVariants.small} className="block text-text-secondary">
+            {t('editor.ai.settings.skyHint', {
+              defaultValue: 'Made by Sky Replace. Hide or fade it here; to change the sky itself, open the Sky panel.',
+            })}
+          </Text>
+        </div>
+      )}
+      {isFill && (
+        <div className="space-y-3">
+          {aiModelDownloadStatus && aiModelDownloadStatus.includes('Inpainting') && (
+            <Text
+              as="div"
+              variant={TextVariants.small}
+              color={TextColors.accent}
+              weight={TextWeights.medium}
+              className="p-3 bg-card-active rounded-md border border-surface flex items-center gap-3"
+            >
+              <Loader2 size={16} className="animate-spin shrink-0" />
+              <div className="leading-relaxed">
+                <Text variant={TextVariants.small}>{t('editor.ai.settings.downloading')}</Text>
+                <span>{aiModelDownloadStatus}</span>
+              </div>
+            </Text>
+          )}
+          <Switch
+            checked={generative}
+            disabled={!isGenerativeAvailable || isEngineFill || generateMode}
+            label={t('editor.ai.settings.useGenerativeAi', { defaultValue: 'Use Generative AI' })}
+            onChange={(on: boolean) => setUseFastInpaint(!on)}
+            tooltip={
+              !isGenerativeAvailable
+                ? t('editor.ai.settings.basicInpaintTooltipDisabled')
+                : isEngineFill || generateMode
+                  ? t('editor.ai.settings.generativeChosen', {
+                      defaultValue: 'The chosen model (or Replace selected content) always generates.',
+                    })
+                  : t('editor.ai.settings.generativeTooltip', {
+                      defaultValue:
+                        'On: the AI model invents what belongs there, and can follow a prompt (Replace with…). Off: a quick fill from the surrounding pixels.',
+                    })
+            }
+          />
+          <Text variant={TextVariants.small}>
+            {isQuickErasePatch
+              ? t('editor.ai.settings.quickEraseDesc')
+              : useFastInpaint
+                ? t('editor.ai.settings.fastInpaintDesc')
+                : t('editor.ai.settings.generativeDesc')}
+          </Text>
+          <Button
+            className="w-full"
+            disabled={isGeneratingAi || displayContainer.isLoading || displayContainer.subMasks.length === 0}
+            onClick={handleGenerateClick}
+          >
+            {isGeneratingAi || displayContainer.isLoading ? (
+              <Loader2 size={16} className="animate-spin" />
+            ) : (
+              <Send size={16} />
+            )}
+            <span className="ml-2">
+              {isGeneratingAi || displayContainer.isLoading
+                ? t('editor.ai.settings.generating')
+                : generateMode || prompt.trim()
+                  ? 'Replace selection'
+                  : isEngineFill
+                    ? prompt.trim()
+                      ? t('editor.ai.settings.generateWithAiButton')
+                      : t('editor.ai.settings.inpaintSelectionButton')
+                    : useFastInpaint
+                      ? t('editor.ai.settings.inpaintSelectionButton')
+                      : t('editor.ai.settings.generateWithAiButton')}
+            </span>
+          </Button>
+          {!generateMode &&
+            !prompt.trim() &&
+            displayContainer.needsPromptReason !== undefined &&
+            !displayContainer.patchData && (
+              <Text variant={TextVariants.small} className="block mt-2 text-text-secondary">
+                Only {displayContainer.needsPromptReason}% of the area around this selection has usable detail, so there
+                is nothing to rebuild from. Describe what should be here and run it again.
+              </Text>
+            )}
+          {(displayContainer.patchData?.replacementRunId ||
+            displayContainer.patchData?.reconstructActiveKind === 'context-replace') && (
+            <ReplacementBlendControls
+              key={`${displayContainer.id}-${displayContainer.patchData?.replacementRunId ?? displayContainer.patchData?.reconstructDebugRunId}`}
+              patch={displayContainer}
+              disabled={isGeneratingAi || displayContainer.isLoading}
+              onApply={onReblendReplacement}
+            />
+          )}
+          {displayContainer.patchData && onAdjustFillArea && (
+            <>
+              <button
+                className="w-full mt-2 px-3 py-2 bg-bg-primary text-text-secondary rounded-md hover:text-text-primary transition-colors text-sm"
+                onClick={() => container && onAdjustFillArea(container.id)}
+              >
+                Adjust this area
+              </button>
+              <Text variant={TextVariants.small} className="block mt-1 text-text-secondary">
+                Adds a mask over the filled area so you can set its exposure, colour and contrast by eye in the Masks
+                panel.
+              </Text>
+            </>
+          )}
+        </div>
+      )}
       {container?.patchData && (
         <div className="p-2 bg-bg-tertiary rounded-md">
           <Text variant={TextVariants.heading} className="mb-2">
@@ -2191,456 +2516,327 @@ function SettingsPanel({
           />
         </div>
       )}
-      {(container as any)?.patchType === 'heal' && (
-        <div className="p-2 bg-bg-tertiary rounded-md">
-          <Text variant={TextVariants.heading} className="mb-2">
-            {t('editor.ai.settings.cloneTitle')}
-          </Text>
-          <Text variant={TextVariants.small} className="block text-text-secondary">
-            {t('editor.ai.settings.cloneHint')}
-          </Text>
-          <HealSpotActions />
-        </div>
-      )}
-
-      {(container as any)?.patchType === 'sky' && (
-        <div className="p-2 bg-bg-tertiary rounded-md">
-          <Text variant={TextVariants.heading} className="mb-2">
-            {t('editor.ai.settings.skyTitle', { defaultValue: 'Replaced sky' })}
-          </Text>
-          <Text variant={TextVariants.small} className="block text-text-secondary">
-            {t('editor.ai.settings.skyHint', {
-              defaultValue: 'Made by Sky Replace. Hide or fade it here; to change the sky itself, open the Sky panel.',
-            })}
-          </Text>
-        </div>
-      )}
-
-      {(container as any)?.patchType !== 'heal' && (container as any)?.patchType !== 'sky' && (
+      {isFill && (
         <CollapsibleSection
-          title={t('editor.ai.settings.generativeReplaceTitle')}
+          title={t('editor.ai.settings.replaceWith', { defaultValue: 'Replace with…' })}
           isOpen={collapsibleState.generative}
           onToggle={() => handleToggleSection('generative')}
           canToggleVisibility={false}
           isContentVisible={true}
         >
-          <div className="space-y-4 pt-2">
-            {aiModelDownloadStatus && aiModelDownloadStatus.includes('Inpainting') && (
-              <Text
-                as="div"
-                variant={TextVariants.small}
-                color={TextColors.accent}
-                weight={TextWeights.medium}
-                className="p-3 bg-card-active rounded-md border border-surface flex items-center gap-3"
-              >
-                <Loader2 size={16} className="animate-spin shrink-0" />
-                <div className="leading-relaxed">
-                  <Text variant={TextVariants.small}>{t('editor.ai.settings.downloading')}</Text>
-                  <span>{aiModelDownloadStatus}</span>
-                </div>
+          <div className="space-y-3 pt-2">
+            <div className="mb-3">
+              <Text variant={TextVariants.small} weight={TextWeights.medium} className="mb-1 block">
+                {t('modelRegistry.model')}
               </Text>
+              <ModelPicker
+                taskType={ModelTaskType.Inpaint}
+                value={appSettings?.preferredModels?.inpaint ?? null}
+                onChange={handleInpaintModelChange}
+              />
+            </div>
+            <div className="mt-3">
+              <Switch
+                checked={generateMode}
+                disabled={isGeneratingAi || displayContainer.isLoading}
+                label="Replace selected content"
+                onChange={setGenerateMode}
+                tooltip="Generate a replacement using the selection and surrounding scene. Leave the prompt blank for automatic content, or describe what should replace the selection. Turn off and clear the prompt for fast texture repair."
+              />
+            </div>
+            {generateMode && (
+              <div className="mt-3 p-2 bg-bg-tertiary rounded-md">
+                <Text variant={TextVariants.small} className="block text-text-secondary mt-1">
+                  The model sees your selection with surrounding scene context and replaces it in one pass. Describe the
+                  new content, or leave the prompt blank for an automatic fill. Lighting and perspective come from the
+                  photo; only the selected area is applied.
+                </Text>
+              </div>
             )}
-
-            <Text variant={TextVariants.small}>
-              {isQuickErasePatch
-                ? t('editor.ai.settings.quickEraseDesc')
-                : useFastInpaint
-                  ? t('editor.ai.settings.fastInpaintDesc')
-                  : t('editor.ai.settings.generativeDesc')}
-            </Text>
-
-            <div>
-              <div className="mb-3">
+            {isFluxSelected && (
+              <div className="mt-3 p-2 bg-bg-tertiary rounded-md">
+                <div className="flex items-center justify-between mb-1">
+                  <Text variant={TextVariants.heading}>LoRAs</Text>
+                  <button
+                    className="text-xs px-2 py-1 rounded-md bg-bg-primary text-text-secondary hover:text-text-primary transition-colors"
+                    onClick={refreshLoras}
+                    title="Re-read the loras folder"
+                  >
+                    Refresh
+                  </button>
+                </div>
+                <Text variant={TextVariants.small} className="mb-2 block text-text-secondary">
+                  Flux only. Each one nudges the model's style; strength 0.5–0.8 is usually plenty.
+                </Text>
+                {availableLoras.length === 0 && (
+                  <Text variant={TextVariants.small} className="block text-text-secondary">
+                    None installed. Drop <code>.safetensors</code> files into{' '}
+                    <span className="break-all">{loraFolder || 'the engine models/loras folder'}</span> and switch the
+                    model picker away and back to refresh.
+                  </Text>
+                )}
+                {availableLoras.map((name: string) => {
+                  const active = loras.find((l) => l.name === name);
+                  return (
+                    <div key={name} className="mb-2">
+                      <Switch
+                        checked={!!active}
+                        disabled={isGeneratingAi || displayContainer.isLoading}
+                        label={name.replace(/\.(safetensors|ckpt|pt)$/i, '')}
+                        onChange={(on: boolean) =>
+                          setLoras((prev) =>
+                            on ? [...prev, { name, strength: 0.8 }] : prev.filter((l) => l.name !== name),
+                          )
+                        }
+                      />
+                      {active && (
+                        <Slider
+                          label="Strength"
+                          min={0}
+                          max={150}
+                          step={5}
+                          defaultValue={80}
+                          value={Math.round(active.strength * 100)}
+                          onChange={(e: any) =>
+                            setLoras((prev) =>
+                              prev.map((l) => (l.name === name ? { ...l, strength: Number(e.target.value) / 100 } : l)),
+                            )
+                          }
+                          onDragStateChange={(dragging: boolean) => {
+                            if (dragging) {
+                              loraDrag.current = true;
+                              return;
+                            }
+                            if (!loraDrag.current) return;
+                            loraDrag.current = false;
+                            if (container) updateContainer(container.id, { loras });
+                          }}
+                          suffix="%"
+                        />
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {isReconstructPatch && !generateMode && !prompt.trim() && (
+              <div className="mt-3">
+                <Switch
+                  checked={reconstructSinglePath}
+                  disabled={isGeneratingAi || displayContainer.isLoading}
+                  label="Single path test"
+                  onChange={setReconstructSinglePath}
+                  tooltip="Experimental: run this Reconstruct selection as one prompt-conditioned engine pass, without fast cleanup or fallback substitution."
+                />
+              </div>
+            )}
+            <AnimatePresence>
+              {(generateMode || isEngineFill || !useFastInpaint) && (
+                <motion.div
+                  animate={{ opacity: 1, height: 'auto', marginTop: '0.75rem' }}
+                  className="overflow-hidden"
+                  exit={{ opacity: 0, height: 0, marginTop: 0 }}
+                  initial={{ opacity: 0, height: 0, marginTop: 0 }}
+                  transition={{ duration: 0.2 }}
+                >
+                  <div className="flex items-center gap-2">
+                    <Input
+                      className="grow"
+                      disabled={isGeneratingAi || displayContainer.isLoading}
+                      onChange={(e: any) => {
+                        setPrompt(e.target.value);
+                      }}
+                      onBlur={() => isActive && updateContainer(container.id, { prompt })}
+                      onKeyDown={(e: any) => {
+                        if (e.key === 'Enter') handleGenerateClick();
+                      }}
+                      placeholder={
+                        generateMode
+                          ? 'Optional: blue sky with soft clouds, a red linen shirt…'
+                          : t('editor.ai.settings.placeholder')
+                      }
+                      type="text"
+                      value={prompt}
+                    />
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+        </CollapsibleSection>
+      )}
+      {!isRepair && !isSky && (
+        <>
+          <CollapsibleSection
+            title={t('editor.ai.settings.spotEnhanceTitle')}
+            isOpen={tool === 'enhance' || collapsibleState.spotEnhance}
+            onToggle={() => handleToggleSection('spotEnhance')}
+            canToggleVisibility={false}
+            isContentVisible={true}
+          >
+            <div className="space-y-4 pt-2">
+              <Text variant={TextVariants.small}>{t('editor.ai.settings.spotEnhanceDesc')}</Text>
+              <div>
+                <Text variant={TextVariants.small} weight={TextWeights.medium} className="mb-1 block">
+                  {t('editor.ai.settings.spotEnhanceMode')}
+                </Text>
+                <Dropdown
+                  options={[
+                    { label: t('editor.ai.settings.spotSharpen'), value: 'upscale' },
+                    { label: t('settings.processing.aiModels.deblur'), value: 'deblur' },
+                    { label: t('settings.processing.aiModels.restore'), value: 'restore' },
+                  ]}
+                  value={spotTask}
+                  onChange={(v: any) => setSpotTask(v)}
+                />
+              </div>
+              <div>
                 <Text variant={TextVariants.small} weight={TextWeights.medium} className="mb-1 block">
                   {t('modelRegistry.model')}
                 </Text>
                 <ModelPicker
-                  taskType={ModelTaskType.Inpaint}
-                  value={appSettings?.preferredModels?.inpaint ?? null}
-                  onChange={handleInpaintModelChange}
-                />
-              </div>
-
-              {!isEngineFill && !generateMode && (
-                <Switch
-                  checked={useFastInpaint}
-                  disabled={!isGenerativeAvailable}
-                  label={t('editor.ai.settings.useBasicInpaint')}
-                  onChange={setUseFastInpaint}
-                  tooltip={
-                    !isGenerativeAvailable
-                      ? t('editor.ai.settings.basicInpaintTooltipDisabled')
-                      : t('editor.ai.settings.basicInpaintTooltipEnabled')
+                  taskType={
+                    spotTask === 'deblur'
+                      ? ModelTaskType.Deblur
+                      : spotTask === 'restore'
+                        ? ModelTaskType.Restore
+                        : ModelTaskType.Upscale
                   }
-                />
-              )}
-
-              <div className="mt-3">
-                <Switch
-                  checked={generateMode}
-                  disabled={isGeneratingAi || displayContainer.isLoading}
-                  label="Replace selected content"
-                  onChange={setGenerateMode}
-                  tooltip="Generate a replacement using the selection and surrounding scene. Leave the prompt blank for automatic content, or describe what should replace the selection. Turn off and clear the prompt for fast texture repair."
+                  value={appSettings?.preferredModels?.[spotTask] ?? null}
+                  onChange={(modelId: string) => {
+                    if (!appSettings) return;
+                    handleSettingsChange({
+                      ...appSettings,
+                      preferredModels: { ...(appSettings.preferredModels || {}), [spotTask]: modelId },
+                    });
+                  }}
                 />
               </div>
-
-              {generateMode && (
-                <div className="mt-3 p-2 bg-bg-tertiary rounded-md">
-                  <Text variant={TextVariants.small} className="block text-text-secondary mt-1">
-                    The model sees your selection with surrounding scene context and replaces it in one pass. Describe
-                    the new content, or leave the prompt blank for an automatic fill. Lighting and perspective come from
-                    the photo; only the selected area is applied.
-                  </Text>
-                </div>
-              )}
-
-              {isFluxSelected && (
-                <div className="mt-3 p-2 bg-bg-tertiary rounded-md">
-                  <div className="flex items-center justify-between mb-1">
-                    <Text variant={TextVariants.heading}>LoRAs</Text>
-                    <button
-                      className="text-xs px-2 py-1 rounded-md bg-bg-primary text-text-secondary hover:text-text-primary transition-colors"
-                      onClick={refreshLoras}
-                      title="Re-read the loras folder"
+              <Slider
+                label={t('modals.enhance.strengthLabel')}
+                value={spotStrength}
+                min={10}
+                max={100}
+                step={5}
+                defaultValue={70}
+                onChange={(e: any) => setSpotStrength(Number(e.target.value))}
+              />
+              <Slider
+                label={t('modals.enhance.textureLabel')}
+                value={spotTexture}
+                min={0}
+                max={100}
+                step={5}
+                defaultValue={40}
+                onChange={(e: any) => setSpotTexture(Number(e.target.value))}
+              />
+              <Slider
+                label={t('modals.enhance.grainLabel')}
+                value={spotGrain}
+                min={0}
+                max={100}
+                step={5}
+                defaultValue={50}
+                onChange={(e: any) => setSpotGrain(Number(e.target.value))}
+              />
+              <Button
+                className="w-full"
+                disabled={isGeneratingAi || displayContainer.isLoading || displayContainer.subMasks.length === 0}
+                onClick={() =>
+                  container &&
+                  onSpotEnhance(container.id, spotTask, spotStrength / 100, spotTexture / 100, spotGrain / 100)
+                }
+              >
+                {isGeneratingAi || displayContainer.isLoading ? (
+                  <Loader2 size={16} className="animate-spin" />
+                ) : (
+                  <Sparkles size={16} />
+                )}
+                <span className="ml-2">
+                  {isGeneratingAi || displayContainer.isLoading
+                    ? t('editor.ai.settings.generating')
+                    : t('editor.ai.settings.spotEnhanceButton')}
+                </span>
+              </Button>
+            </div>
+          </CollapsibleSection>
+        </>
+      )}
+      {!isRepair && (
+        <>
+          <CollapsibleSection
+            title={
+              isComponentMode
+                ? t('editor.ai.settings.componentPropertiesTitle', { name: getSubMaskName(activeSubMask) })
+                : t('editor.ai.settings.selectionPropertiesTitle')
+            }
+            isOpen={collapsibleState.properties}
+            onToggle={() => handleToggleSection('properties')}
+            canToggleVisibility={false}
+            isContentVisible={true}
+          >
+            <div className="space-y-4 pt-2">
+              <Switch
+                checked={!!(isComponentMode ? activeSubMask.invert : displayContainer.invert)}
+                label={
+                  isComponentMode ? t('editor.ai.settings.invertComponent') : t('editor.ai.settings.invertSelection')
+                }
+                onChange={(v) =>
+                  isComponentMode
+                    ? updateSubMask(activeSubMask.id, { invert: v })
+                    : updateContainer(container.id, { invert: v })
+                }
+              />
+              {isComponentMode && (
+                <>
+                  {(activeSubMask.type === Mask.AiSubject || activeSubMask.type === Mask.AiPaint) && (
+                    <SubjectSelectionControls
+                      parameters={activeSubMask.parameters}
+                      paint={activeSubMask.type === Mask.AiPaint}
+                      onChange={(parameters) => updateSubMask(activeSubMask.id, { parameters })}
+                    />
+                  )}
+                  {isAiMask && aiModelDownloadStatus && (
+                    <Text
+                      as="div"
+                      variant={TextVariants.small}
+                      color={TextColors.accent}
+                      weight={TextWeights.medium}
+                      className="p-3 bg-card-active rounded-md border border-surface flex items-center gap-3"
                     >
-                      Refresh
-                    </button>
-                  </div>
-                  <Text variant={TextVariants.small} className="mb-2 block text-text-secondary">
-                    Flux only. Each one nudges the model's style; strength 0.5–0.8 is usually plenty.
-                  </Text>
-                  {availableLoras.length === 0 && (
-                    <Text variant={TextVariants.small} className="block text-text-secondary">
-                      None installed. Drop <code>.safetensors</code> files into{' '}
-                      <span className="break-all">{loraFolder || 'the engine models/loras folder'}</span> and switch the
-                      model picker away and back to refresh.
+                      <Loader2 size={16} className="animate-spin shrink-0" />
+                      <div className="leading-relaxed">
+                        <Text variant={TextVariants.small}>{t('editor.ai.settings.aiModelDownloading')}</Text>
+                        <span>{aiModelDownloadStatus}</span>
+                      </div>
                     </Text>
                   )}
-                  {availableLoras.map((name: string) => {
-                    const active = loras.find((l) => l.name === name);
-                    return (
-                      <div key={name} className="mb-2">
-                        <Switch
-                          checked={!!active}
-                          disabled={isGeneratingAi || displayContainer.isLoading}
-                          label={name.replace(/\.(safetensors|ckpt|pt)$/i, '')}
-                          onChange={(on: boolean) =>
-                            setLoras((prev) =>
-                              on ? [...prev, { name, strength: 0.8 }] : prev.filter((l) => l.name !== name),
-                            )
-                          }
-                        />
-                        {active && (
-                          <Slider
-                            label="Strength"
-                            min={0}
-                            max={150}
-                            step={5}
-                            defaultValue={80}
-                            value={Math.round(active.strength * 100)}
-                            onChange={(e: any) =>
-                              setLoras((prev) =>
-                                prev.map((l) =>
-                                  l.name === name ? { ...l, strength: Number(e.target.value) / 100 } : l,
-                                ),
-                              )
-                            }
-                            onDragStateChange={(dragging: boolean) => {
-                              if (dragging) {
-                                loraDrag.current = true;
-                                return;
-                              }
-                              if (!loraDrag.current) return;
-                              loraDrag.current = false;
-                              if (container) updateContainer(container.id, { loras });
-                            }}
-                            suffix="%"
-                          />
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
+                  {subMaskConfig.parameters?.map((param: any) => (
+                    <Slider
+                      key={param.key}
+                      label={t(('editor.ai.params.' + param.key) as any)}
+                      min={param.min}
+                      max={param.max}
+                      step={param.step}
+                      defaultValue={param.defaultValue}
+                      value={(activeSubMask.parameters[param.key] || 0) * (param.multiplier || 1)}
+                      onChange={(e: any) =>
+                        updateSubMask(activeSubMask.id, {
+                          parameters: {
+                            ...activeSubMask.parameters,
+                            [param.key]: parseFloat(e.target.value) / (param.multiplier || 1),
+                          },
+                        })
+                      }
+                      {...(param.key !== 'grow' && { fillOrigin: 'min' })}
+                    />
+                  ))}
+                </>
               )}
-
-              {isReconstructPatch && !generateMode && !prompt.trim() && (
-                <div className="mt-3">
-                  <Switch
-                    checked={reconstructSinglePath}
-                    disabled={isGeneratingAi || displayContainer.isLoading}
-                    label="Single path test"
-                    onChange={setReconstructSinglePath}
-                    tooltip="Experimental: run this Reconstruct selection as one prompt-conditioned engine pass, without fast cleanup or fallback substitution."
-                  />
-                </div>
-              )}
-
-              <AnimatePresence>
-                {(generateMode || isEngineFill || !useFastInpaint) && (
-                  <motion.div
-                    animate={{ opacity: 1, height: 'auto', marginTop: '0.75rem' }}
-                    className="overflow-hidden"
-                    exit={{ opacity: 0, height: 0, marginTop: 0 }}
-                    initial={{ opacity: 0, height: 0, marginTop: 0 }}
-                    transition={{ duration: 0.2 }}
-                  >
-                    <div className="flex items-center gap-2">
-                      <Input
-                        className="grow"
-                        disabled={isGeneratingAi || displayContainer.isLoading}
-                        onChange={(e: any) => {
-                          setPrompt(e.target.value);
-                        }}
-                        onBlur={() => isActive && updateContainer(container.id, { prompt })}
-                        onKeyDown={(e: any) => {
-                          if (e.key === 'Enter') handleGenerateClick();
-                        }}
-                        placeholder={
-                          generateMode
-                            ? 'Optional: blue sky with soft clouds, a red linen shirt…'
-                            : t('editor.ai.settings.placeholder')
-                        }
-                        type="text"
-                        value={prompt}
-                      />
-                    </div>
-                  </motion.div>
-                )}
-              </AnimatePresence>
             </div>
-
-            <Button
-              className="w-full"
-              disabled={isGeneratingAi || displayContainer.isLoading || displayContainer.subMasks.length === 0}
-              onClick={handleGenerateClick}
-            >
-              {isGeneratingAi || displayContainer.isLoading ? (
-                <Loader2 size={16} className="animate-spin" />
-              ) : (
-                <Send size={16} />
-              )}
-              <span className="ml-2">
-                {isGeneratingAi || displayContainer.isLoading
-                  ? t('editor.ai.settings.generating')
-                  : generateMode || prompt.trim()
-                    ? 'Replace selection'
-                    : isEngineFill
-                      ? prompt.trim()
-                        ? t('editor.ai.settings.generateWithAiButton')
-                        : t('editor.ai.settings.inpaintSelectionButton')
-                      : useFastInpaint
-                        ? t('editor.ai.settings.inpaintSelectionButton')
-                        : t('editor.ai.settings.generateWithAiButton')}
-              </span>
-            </Button>
-
-            {!generateMode &&
-              !prompt.trim() &&
-              displayContainer.needsPromptReason !== undefined &&
-              !displayContainer.patchData && (
-                <Text variant={TextVariants.small} className="block mt-2 text-text-secondary">
-                  Only {displayContainer.needsPromptReason}% of the area around this selection has usable detail, so
-                  there is nothing to rebuild from. Describe what should be here and run it again.
-                </Text>
-              )}
-
-            {(displayContainer.patchData?.replacementRunId ||
-              displayContainer.patchData?.reconstructActiveKind === 'context-replace') && (
-              <ReplacementBlendControls
-                key={`${displayContainer.id}-${displayContainer.patchData?.replacementRunId ?? displayContainer.patchData?.reconstructDebugRunId}`}
-                patch={displayContainer}
-                disabled={isGeneratingAi || displayContainer.isLoading}
-                onApply={onReblendReplacement}
-              />
-            )}
-
-            {displayContainer.patchData && onAdjustFillArea && (
-              <>
-                <button
-                  className="w-full mt-2 px-3 py-2 bg-bg-primary text-text-secondary rounded-md hover:text-text-primary transition-colors text-sm"
-                  onClick={() => container && onAdjustFillArea(container.id)}
-                >
-                  Adjust this area
-                </button>
-                <Text variant={TextVariants.small} className="block mt-1 text-text-secondary">
-                  Adds a mask over the filled area so you can set its exposure, colour and contrast by eye in the Masks
-                  panel.
-                </Text>
-              </>
-            )}
-          </div>
-        </CollapsibleSection>
+          </CollapsibleSection>
+        </>
       )}
-
-      <CollapsibleSection
-        title={t('editor.ai.settings.spotEnhanceTitle')}
-        isOpen={collapsibleState.spotEnhance}
-        onToggle={() => handleToggleSection('spotEnhance')}
-        canToggleVisibility={false}
-        isContentVisible={true}
-      >
-        <div className="space-y-4 pt-2">
-          <Text variant={TextVariants.small}>{t('editor.ai.settings.spotEnhanceDesc')}</Text>
-          <div>
-            <Text variant={TextVariants.small} weight={TextWeights.medium} className="mb-1 block">
-              {t('editor.ai.settings.spotEnhanceMode')}
-            </Text>
-            <Dropdown
-              options={[
-                { label: t('editor.ai.settings.spotSharpen'), value: 'upscale' },
-                { label: t('settings.processing.aiModels.deblur'), value: 'deblur' },
-                { label: t('settings.processing.aiModels.restore'), value: 'restore' },
-              ]}
-              value={spotTask}
-              onChange={(v: any) => setSpotTask(v)}
-            />
-          </div>
-          <div>
-            <Text variant={TextVariants.small} weight={TextWeights.medium} className="mb-1 block">
-              {t('modelRegistry.model')}
-            </Text>
-            <ModelPicker
-              taskType={
-                spotTask === 'deblur'
-                  ? ModelTaskType.Deblur
-                  : spotTask === 'restore'
-                    ? ModelTaskType.Restore
-                    : ModelTaskType.Upscale
-              }
-              value={appSettings?.preferredModels?.[spotTask] ?? null}
-              onChange={(modelId: string) => {
-                if (!appSettings) return;
-                handleSettingsChange({
-                  ...appSettings,
-                  preferredModels: { ...(appSettings.preferredModels || {}), [spotTask]: modelId },
-                });
-              }}
-            />
-          </div>
-          <Slider
-            label={t('modals.enhance.strengthLabel')}
-            value={spotStrength}
-            min={10}
-            max={100}
-            step={5}
-            defaultValue={70}
-            onChange={(e: any) => setSpotStrength(Number(e.target.value))}
-          />
-          <Slider
-            label={t('modals.enhance.textureLabel')}
-            value={spotTexture}
-            min={0}
-            max={100}
-            step={5}
-            defaultValue={40}
-            onChange={(e: any) => setSpotTexture(Number(e.target.value))}
-          />
-          <Slider
-            label={t('modals.enhance.grainLabel')}
-            value={spotGrain}
-            min={0}
-            max={100}
-            step={5}
-            defaultValue={50}
-            onChange={(e: any) => setSpotGrain(Number(e.target.value))}
-          />
-          <Button
-            className="w-full"
-            disabled={isGeneratingAi || displayContainer.isLoading || displayContainer.subMasks.length === 0}
-            onClick={() =>
-              container && onSpotEnhance(container.id, spotTask, spotStrength / 100, spotTexture / 100, spotGrain / 100)
-            }
-          >
-            {isGeneratingAi || displayContainer.isLoading ? (
-              <Loader2 size={16} className="animate-spin" />
-            ) : (
-              <Sparkles size={16} />
-            )}
-            <span className="ml-2">
-              {isGeneratingAi || displayContainer.isLoading
-                ? t('editor.ai.settings.generating')
-                : t('editor.ai.settings.spotEnhanceButton')}
-            </span>
-          </Button>
-        </div>
-      </CollapsibleSection>
-
-      <CollapsibleSection
-        title={
-          isComponentMode
-            ? t('editor.ai.settings.componentPropertiesTitle', { name: getSubMaskName(activeSubMask) })
-            : t('editor.ai.settings.selectionPropertiesTitle')
-        }
-        isOpen={collapsibleState.properties}
-        onToggle={() => handleToggleSection('properties')}
-        canToggleVisibility={false}
-        isContentVisible={true}
-      >
-        <div className="space-y-4 pt-2">
-          <Switch
-            checked={!!(isComponentMode ? activeSubMask.invert : displayContainer.invert)}
-            label={isComponentMode ? t('editor.ai.settings.invertComponent') : t('editor.ai.settings.invertSelection')}
-            onChange={(v) =>
-              isComponentMode
-                ? updateSubMask(activeSubMask.id, { invert: v })
-                : updateContainer(container.id, { invert: v })
-            }
-          />
-
-          {isComponentMode && (
-            <>
-              {(activeSubMask.type === Mask.AiSubject || activeSubMask.type === Mask.AiPaint) && (
-                <SubjectSelectionControls
-                  parameters={activeSubMask.parameters}
-                  paint={activeSubMask.type === Mask.AiPaint}
-                  onChange={(parameters) => updateSubMask(activeSubMask.id, { parameters })}
-                />
-              )}
-              {isAiMask && aiModelDownloadStatus && (
-                <Text
-                  as="div"
-                  variant={TextVariants.small}
-                  color={TextColors.accent}
-                  weight={TextWeights.medium}
-                  className="p-3 bg-card-active rounded-md border border-surface flex items-center gap-3"
-                >
-                  <Loader2 size={16} className="animate-spin shrink-0" />
-                  <div className="leading-relaxed">
-                    <Text variant={TextVariants.small}>{t('editor.ai.settings.aiModelDownloading')}</Text>
-                    <span>{aiModelDownloadStatus}</span>
-                  </div>
-                </Text>
-              )}
-
-              {subMaskConfig.parameters?.map((param: any) => (
-                <Slider
-                  key={param.key}
-                  label={t(('editor.ai.params.' + param.key) as any)}
-                  min={param.min}
-                  max={param.max}
-                  step={param.step}
-                  defaultValue={param.defaultValue}
-                  value={(activeSubMask.parameters[param.key] || 0) * (param.multiplier || 1)}
-                  onChange={(e: any) =>
-                    updateSubMask(activeSubMask.id, {
-                      parameters: {
-                        ...activeSubMask.parameters,
-                        [param.key]: parseFloat(e.target.value) / (param.multiplier || 1),
-                      },
-                    })
-                  }
-                  {...(param.key !== 'grow' && { fillOrigin: 'min' })}
-                />
-              ))}
-
-              {subMaskConfig.showBrushTools && brushSettings && (
-                <BrushTools settings={brushSettings} onSettingsChange={setBrushSettings} />
-              )}
-            </>
-          )}
-        </div>
-      </CollapsibleSection>
     </div>
   );
 }
