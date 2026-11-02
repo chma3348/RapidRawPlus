@@ -123,7 +123,9 @@ impl Summary {
 }
 
 /// How much of the source to develop. Thumbnails never share a cache with
-/// the editor, so this cannot leak a fast demosaic into an edit.
+/// the editor, so this cannot leak a fast demosaic into an edit (the other
+/// way round is fine: a thumbnail uses the editor's full decode when it
+/// has one, see `V3Caches::aside`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Quality {
     /// Full demosaic; what the editor and exports use.
@@ -301,6 +303,46 @@ pub struct V3Caches {
 impl V3Caches {
     const SUMMARIES: usize = 64;
 
+    /// A set of its own for a side job on `path` (an export, a thumbnail, a
+    /// size estimate), so it never waits on the editor's caches or pushes
+    /// the editor's pictures out of them (a full-size export's stages are
+    /// half a gigabyte each), and is let go of when the job is done. It
+    /// starts with what the editor has already decoded of that photo, and
+    /// what the photo's range masks sample, so the job need not decode it
+    /// again; borrowing them changes nothing of the editor's, not even the
+    /// order its pictures are kept in.
+    fn aside(editor: &V3Caches, path: &str) -> Self {
+        let (path, _) = crate::file_management::parse_virtual_path(path);
+        let frames: Vec<SourceCache> = editor
+            .source
+            .lock()
+            .map(|c| {
+                c.0.iter()
+                    .filter(|c| c.key.path == path)
+                    .map(|c| SourceCache {
+                        key: c.key.clone(),
+                        frame: c.frame.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        // Only with the picture: these were made from the editor's decode.
+        let (sampling, noise) = if frames.is_empty() {
+            (None, None)
+        } else {
+            (
+                editor.sampling.lock().ok().and_then(|c| c.clone()),
+                editor.noise.lock().ok().and_then(|c| c.clone()),
+            )
+        };
+        Self {
+            source: Mutex::new(Sources(frames)),
+            sampling: Mutex::new(sampling),
+            noise: Mutex::new(noise),
+            ..Self::default()
+        }
+    }
+
     /// Zoomed back out: the full-size stages behind the sharp region are no
     /// longer needed; the whole picture on screen keeps its own.
     pub fn release_full_size(&self) {
@@ -445,9 +487,57 @@ pub struct EngineCache {
     device: Arc<wgpu::Device>,
     engine: ColorEngine,
 }
+
+/// The app's one GPU renderer, locked for each pass it runs and no longer:
+/// the CPU work between a render's passes (local detail, mask blends) must
+/// not hold up thumbnails and exports rendering alongside.
+struct SharedEngine<'a> {
+    state: &'a AppState,
+    context: &'a GpuContext,
+}
+
+impl SharedEngine<'_> {
+    fn with<T>(&self, pass: impl FnOnce(&ColorEngine) -> Result<T>) -> Result<T> {
+        let mut cache = self
+            .state
+            .v3_engine
+            .lock()
+            .map_err(|_| anyhow::anyhow!("V3 renderer unavailable"))?;
+        if cache
+            .as_ref()
+            .is_none_or(|c| !Arc::ptr_eq(&c.device, &self.context.device))
+        {
+            *cache = Some(EngineCache {
+                device: self.context.device.clone(),
+                engine: ColorEngine::new(self.context.clone())?,
+            });
+        }
+        pass(&cache.as_ref().unwrap().engine)
+    }
+
+    fn render(
+        &self,
+        input: &image::Rgba32FImage,
+        plan: &RenderPlan,
+        capture: bool,
+    ) -> Result<RenderedFrame> {
+        self.with(|engine| engine.render(input, plan, capture))
+    }
+
+    fn render_graded(
+        &self,
+        input: &image::Rgba32FImage,
+        plan: &RenderPlan,
+    ) -> Result<image::Rgba32FImage> {
+        self.with(|engine| engine.render_graded(input, plan))
+    }
+}
 pub struct DetailCache {
     source: Arc<DecodedFrame>,
     key: u64,
+    /// The part of the picture this was made over (`part_to_make`); the
+    /// whole when `None`.
+    window: Option<super::renderer::Rect>,
     image: HalfImage,
 }
 
@@ -459,10 +549,35 @@ pub struct DetailCache {
 struct Window {
     rect: (u32, u32, u32, u32),
     ext: (u32, u32, u32, u32),
+    /// The larger part the spatial stages are made over and cached for once
+    /// the view pans (`kept_window`, `part_to_make`), so a pan nearby finds
+    /// them made; cut to `ext` for the render.
+    kept: (u32, u32, u32, u32),
 }
+
+/// Whether a cache entry made over `held` (`None`: the whole picture) has
+/// everything a render of `needed` reads. Any part containing the window
+/// gives its pixels exactly: a larger part only puts its edges further away.
+fn covers(held: Option<super::renderer::Rect>, needed: Option<super::renderer::Rect>) -> bool {
+    match (held, needed) {
+        (None, None) => true,
+        (Some(h), Some(n)) => {
+            h.0 <= n.0 && h.1 <= n.1 && n.0 + n.2 <= h.0 + h.2 && n.1 + n.3 <= h.1 + h.3
+        }
+        _ => false,
+    }
+}
+
+/// `needed` as a rectangle within `held`, which contains it.
+fn within(held: super::renderer::Rect, needed: super::renderer::Rect) -> super::renderer::Rect {
+    (needed.0 - held.0, needed.1 - held.1, needed.2, needed.3)
+}
+
 pub struct NeighbourhoodCache {
     source: Arc<DecodedFrame>,
     key: u64,
+    /// As `DetailCache::window`.
+    window: Option<super::renderer::Rect>,
     blurs: Arc<Vec<[f32; 4]>>,
     tones: super::plan::PhotoTones,
 }
@@ -638,8 +753,22 @@ fn source_for_cancellable(
         input,
     } = locate(&path, pair, quality)?;
     // The lock is held only to look, never while decoding: a decode takes
-    // hundreds of milliseconds and must not block another render.
-    if let Some(frame) = caches.source.lock().ok().and_then(|mut c| c.find(&key)) {
+    // hundreds of milliseconds and must not block another render. A
+    // thumbnail takes the full development when it is there already (the
+    // editor's, lent by `V3Caches::aside`): no decode at all, and the same
+    // picture at least as well developed.
+    if let Some(frame) = caches.source.lock().ok().and_then(|mut c| {
+        c.find(&key).or_else(|| {
+            (quality == Quality::Thumbnail)
+                .then(|| {
+                    c.find(&SourceKey {
+                        quality: Quality::Full,
+                        ..key.clone()
+                    })
+                })
+                .flatten()
+        })
+    }) {
         return Ok(frame);
     }
     let preview = if stands_in {
@@ -1068,14 +1197,16 @@ fn mask_bitmap(
 /// against everything that determines them, so dragging any other slider does
 /// not redo a spatial pass.
 #[allow(clippy::too_many_arguments)]
-/// `picture`: the prepared picture's key (geometry, patches, size, and the
-/// window of it when only part is rendered).
+/// `picture`: the prepared picture's key (geometry, patches, size).
+/// `image`: the prepared picture, or when only part is rendered, the part
+/// of it given (`part_to_make`); the result is of the window's `ext` part.
 fn spatial(
     caches: &V3Caches,
     source: &Arc<DecodedFrame>,
-    image: Arc<DynamicImage>,
+    image: &dyn Fn(Option<super::renderer::Rect>) -> Arc<DynamicImage>,
     controls: &Controls,
-    picture: (u64, u64, Option<u32>, Option<super::renderer::Rect>),
+    picture: (u64, u64, Option<u32>),
+    window: Option<Window>,
     scale: f32,
     whole_airlight: Option<[f32; 3]>,
 ) -> Result<Arc<DynamicImage>> {
@@ -1101,11 +1232,25 @@ fn spatial(
     picture.hash(&mut hasher);
     scale.to_bits().hash(&mut hasher);
     let key = hasher.finish();
-    if let Ok(mut cache) = caches.detail.lock()
-        && let Some(c) = cache.find(|c| Arc::ptr_eq(&c.source, source) && c.key == key)
-    {
-        return Ok(c.image.picture());
+    let needed = window.map(|w| w.ext);
+    let cut = |image: &HalfImage, held: Option<super::renderer::Rect>| match (held, needed) {
+        (Some(held), Some(needed)) => image.crop(within(held, needed)),
+        _ => image.picture(),
+    };
+    let mut panning = false;
+    if let Ok(mut cache) = caches.detail.lock() {
+        if let Some(c) = cache
+            .find(|c| Arc::ptr_eq(&c.source, source) && c.key == key && covers(c.window, needed))
+        {
+            return Ok(cut(&c.image, c.window));
+        }
+        panning = cache
+            .0
+            .iter()
+            .any(|c| Arc::ptr_eq(&c.source, source) && c.key == key && c.window.is_some());
     }
+    let held = part_to_make(window, panning);
+    let image = image(held);
     // Luminance in the source's own primaries: the prepared image has not
     // been converted to the working space yet.
     let y = super::spaces::rgb_to_xyz(source.color.primaries).row(1);
@@ -1131,11 +1276,12 @@ fn spatial(
         source.color.primaries,
     );
     let stored = HalfImage::new(&DynamicImage::ImageRgba32F(pixels));
-    let result = stored.picture();
+    let result = cut(&stored, held);
     if let Ok(mut cache) = caches.detail.lock() {
         cache.put(DetailCache {
             source: source.clone(),
             key,
+            window: held,
             image: stored,
         });
     }
@@ -1166,20 +1312,51 @@ fn photo_noise(caches: &V3Caches, source: &Arc<DecodedFrame>) -> f32 {
 /// light for scene data, which it saw from RAW files, and sRGB code values
 /// for display-referred pictures. Values are in linear sRGB primaries, where
 /// those functions work. Two entries per pixel, tonal then structure.
+/// `image` and `window` as for `spatial`.
 fn neighbourhood(
     caches: &V3Caches,
     source: &Arc<DecodedFrame>,
-    image: &DynamicImage,
+    image: &dyn Fn(Option<super::renderer::Rect>) -> Arc<DynamicImage>,
     key: u64,
+    window: Option<Window>,
     display: Option<&super::cube::CubeLut>,
     short_edge: usize,
 ) -> (Arc<Vec<[f32; 4]>>, super::plan::PhotoTones) {
-    if let Ok(mut cache) = caches.neighbourhood.lock()
-        && let Some(c) = cache.find(|c| Arc::ptr_eq(&c.source, source) && c.key == key)
-    {
-        return (c.blurs.clone(), c.tones);
+    let needed = window.map(|w| w.ext);
+    let cut = |blurs: &Arc<Vec<[f32; 4]>>, held: Option<super::renderer::Rect>| {
+        use rayon::prelude::*;
+        match (held, needed) {
+            (Some(held), Some(needed)) if held != needed => {
+                let (x, y, w, h) = within(held, needed);
+                let stride = held.2 as usize * 2;
+                Arc::new(
+                    (y as usize..(y + h) as usize)
+                        .into_par_iter()
+                        .flat_map_iter(|row| {
+                            let start = row * stride + x as usize * 2;
+                            blurs[start..start + w as usize * 2].iter().copied()
+                        })
+                        .collect(),
+                )
+            }
+            _ => blurs.clone(),
+        }
+    };
+    let mut panning = false;
+    if let Ok(mut cache) = caches.neighbourhood.lock() {
+        if let Some(c) = cache
+            .find(|c| Arc::ptr_eq(&c.source, source) && c.key == key && covers(c.window, needed))
+        {
+            return (cut(&c.blurs, c.window), c.tones);
+        }
+        panning = cache
+            .0
+            .iter()
+            .any(|c| Arc::ptr_eq(&c.source, source) && c.key == key && c.window.is_some());
     }
-    let pixels = float_pixels(image);
+    let held = part_to_make(window, panning);
+    let image = image(held);
+    let pixels = float_pixels(&image);
     let (w, h) = (pixels.width() as usize, pixels.height() as usize);
     let m = spaces::conversion(source.color.primaries, Primaries::Srgb)
         .transpose()
@@ -1316,15 +1493,17 @@ fn neighbourhood(
         ]);
     }
     let blurs = Arc::new(blurs);
+    let result = cut(&blurs, held);
     if let Ok(mut cache) = caches.neighbourhood.lock() {
         cache.put(NeighbourhoodCache {
             source: source.clone(),
             key,
-            blurs: blurs.clone(),
+            window: held,
+            blurs,
             tones,
         });
     }
-    (blurs, tones)
+    (result, tones)
 }
 
 /// The tone zones' key of a pixel's working values: their brightness by
@@ -1439,10 +1618,46 @@ fn region_window(
     if area(x1 - x0, y1 - y0) * 10 > area(canvas.0, canvas.1) * 8 {
         return Ok(None);
     }
+    let ext = (x0, y0, x1 - x0, y1 - y0);
     Ok(Some(Window {
         rect,
-        ext: (x0, y0, x1 - x0, y1 - y0),
+        ext,
+        kept: kept_window(rect, ext, canvas),
     }))
+}
+
+/// What a spatial stage not found cached is made over: the whole picture,
+/// or for a window, the window — unless one made for another window at this
+/// size and setting is cached (the view has been panned), when it is the
+/// window's larger `kept` part, so the pans after this one find it made. A
+/// first zoomed-in view, or a slider moving, costs no more than its window.
+fn part_to_make(window: Option<Window>, panning: bool) -> Option<super::renderer::Rect> {
+    window.map(|w| if panning { w.kept } else { w.ext })
+}
+
+/// The part of the picture a window's spatial stages (detail, the tone
+/// controls' neighbourhood) are made over and cached for once the view
+/// pans: its `ext` with a quarter of the region's size more on every side,
+/// out to a grid, so the window a short pan asks for next lies inside it
+/// and finds them made (they are most of a zoomed-in render's cost). The
+/// pixels the window needs come out the same: a larger part only puts its
+/// edges further from them. Just `ext` when the larger part would be most
+/// of the picture.
+fn kept_window(
+    rect: super::renderer::Rect,
+    ext: super::renderer::Rect,
+    canvas: (u32, u32),
+) -> super::renderer::Rect {
+    const GRID: u32 = 256;
+    let (sx, sy) = (rect.2 / 4, rect.3 / 4);
+    let x0 = ext.0.saturating_sub(sx) / GRID * GRID;
+    let y0 = ext.1.saturating_sub(sy) / GRID * GRID;
+    let x1 = ((ext.0 + ext.2 + sx).div_ceil(GRID) * GRID).min(canvas.0);
+    let y1 = ((ext.1 + ext.3 + sy).div_ceil(GRID) * GRID).min(canvas.1);
+    if (x1 - x0) as u64 * (y1 - y0) as u64 * 10 > canvas.0 as u64 * canvas.1 as u64 * 8 {
+        return ext;
+    }
+    (x0, y0, x1 - x0, y1 - y0)
 }
 
 /// Cut a render down to the region asked for: from the window processed
@@ -1715,7 +1930,9 @@ pub fn render_file(
 }
 
 /// A library thumbnail: speed demosaic, and a cache set of its own so it
-/// never evicts what the editor is working on.
+/// never evicts what the editor is working on. The photo open in the
+/// editor (saving an edit makes its thumbnail again) is drawn from the
+/// editor's decoded picture instead of being decoded once more.
 pub fn render_thumbnail(
     context: &GpuContext,
     state: &AppState,
@@ -1723,7 +1940,7 @@ pub fn render_thumbnail(
     edits: &Value,
     max_dimension: u32,
 ) -> Result<RenderedFrame> {
-    let caches = V3Caches::default();
+    let caches = V3Caches::aside(&state.v3, path);
     render(
         context,
         state,
@@ -1747,7 +1964,7 @@ pub fn render_aside(
     edits: &Value,
     max_dimension: Option<u32>,
 ) -> Result<RenderedFrame> {
-    let caches = V3Caches::default();
+    let caches = V3Caches::aside(&state.v3, path);
     render(
         context,
         state,
@@ -1758,6 +1975,33 @@ pub fn render_aside(
         max_dimension,
         false,
         OutputSpace::Srgb,
+        None,
+    )
+}
+
+/// A file export: the whole photo at full size in `space`, exactly as
+/// `render_for_output` makes it, with a cache set of its own
+/// (`V3Caches::aside`), so a batch's exports neither wait on each other
+/// and the editor at the shared caches nor push the open photo's pictures
+/// out of them.
+pub fn render_for_export(
+    context: &GpuContext,
+    state: &AppState,
+    path: &str,
+    edits: &Value,
+    space: OutputSpace,
+) -> Result<RenderedFrame> {
+    let caches = V3Caches::aside(&state.v3, path);
+    render(
+        context,
+        state,
+        &caches,
+        Quality::Full,
+        path,
+        edits,
+        None,
+        false,
+        space,
         None,
     )
 }
@@ -1903,17 +2147,20 @@ fn render(
         }
         hasher.finish()
     };
-    let mut prepared = caches
+    let same = |p: &PreparedCache| {
+        Arc::ptr_eq(&p.source, &source)
+            && p.transform == transform
+            && p.patches == patches
+            && p.dimension == max_dimension
+    };
+    // The lock is held only to look and to store, never while the picture
+    // is made: at full size that takes seconds, and the editor's other
+    // renders must not wait for it.
+    let found = caches
         .prepared
         .lock()
-        .map_err(|_| anyhow::anyhow!("V3 preview cache unavailable"))?;
-    let found = prepared
-        .find(|p| {
-            Arc::ptr_eq(&p.source, &source)
-                && p.transform == transform
-                && p.patches == patches
-                && p.dimension == max_dimension
-        })
+        .map_err(|_| anyhow::anyhow!("V3 preview cache unavailable"))?
+        .find(same)
         .map(|p| (p.image.clone(), p.offset, p.scale, p.full));
     let (stored, offset, scale, full) = if let Some(found) = found {
         found
@@ -1986,19 +2233,23 @@ fn render(
         let scale = image.width() as f32 / full_width as f32;
         let stored = Arc::new(HalfImage::new(&image));
         drop(image);
-        prepared.put(PreparedCache {
-            full,
-            source: source.clone(),
-            transform,
-            patches,
-            dimension: max_dimension,
-            image: stored.clone(),
-            offset,
-            scale,
-        });
+        // Unless a render alongside made the same meanwhile.
+        if let Ok(mut prepared) = caches.prepared.lock()
+            && prepared.find(same).is_none()
+        {
+            prepared.put(PreparedCache {
+                full,
+                source: source.clone(),
+                transform,
+                patches,
+                dimension: max_dimension,
+                image: stored.clone(),
+                offset,
+                scale,
+            });
+        }
         (stored, offset, scale, full)
     };
-    drop(prepared);
     let canvas = (stored.width, stored.height);
     let masks: Vec<crate::mask_generation::MaskDefinition> =
         serde_json::from_value(edits.get("masks").cloned().unwrap_or(serde_json::json!([])))
@@ -2025,18 +2276,11 @@ fn render(
     let whole_tones = window.map(|_| whole_tones(caches, &source, &stored));
     // Built lazily: only a pass whose tone controls move needs it.
     let domain = display_domain(&pair, &source)?;
+    // The window's part is in each entry (`covers`), not in the key.
     let neighbourhood_key = {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        (
-            transform,
-            patches,
-            max_dimension,
-            image.width(),
-            image.height(),
-            window.map(|w| w.ext),
-        )
-            .hash(&mut hasher);
+        (transform, patches, max_dimension, canvas).hash(&mut hasher);
         domain
             .as_ref()
             .map(|(_, output)| &output.digest)
@@ -2044,13 +2288,20 @@ fn render(
         hasher.finish()
     };
     let unedited = image.clone();
+    // What the spatial stages are made from when not cached: the part of
+    // the picture they ask for (`part_to_make`), or the whole.
+    let kept = |part: Option<super::renderer::Rect>| match part {
+        Some(part) if Some(part) != window.map(|w| w.ext) => stored.crop(part),
+        _ => unedited.clone(),
+    };
     let neighbourhood_for = |tone: &super::controls::Tone| {
         (!tone.is_neutral()).then(|| {
             let (blurs, tones) = neighbourhood(
                 caches,
                 &source,
-                &unedited,
+                &kept,
                 neighbourhood_key,
+                window,
                 domain.as_ref().map(|(_, output)| output.as_ref()),
                 canvas.0.min(canvas.1) as usize,
             );
@@ -2065,12 +2316,14 @@ fn render(
     let image = if controls.detail.is_neutral() && super::optics::is_neutral(&controls.effects) {
         image
     } else {
+        drop(image);
         spatial(
             caches,
             &source,
-            image,
+            &kept,
             &controls,
-            (transform, patches, max_dimension, window.map(|w| w.ext)),
+            (transform, patches, max_dimension),
+            window,
             scale,
             whole_airlight,
         )?
@@ -2095,20 +2348,7 @@ fn render(
         None
     };
     watch.lap("mask sampling");
-    let mut cache = state
-        .v3_engine
-        .lock()
-        .map_err(|_| anyhow::anyhow!("V3 renderer unavailable"))?;
-    if cache
-        .as_ref()
-        .is_none_or(|c| !Arc::ptr_eq(&c.device, &context.device))
-    {
-        *cache = Some(EngineCache {
-            device: context.device.clone(),
-            engine: ColorEngine::new(context.clone())?,
-        });
-    }
-    let engine = &cache.as_ref().unwrap().engine;
+    let engine = SharedEngine { state, context };
     let grain = super::controls::Effects {
         grain_amount: controls.effects.grain_amount,
         grain_size: controls.effects.grain_size,
@@ -2803,6 +3043,53 @@ mod audit_tests {
     }
 
     #[test]
+    fn a_side_job_borrows_the_editors_picture_without_disturbing_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let photos: Vec<String> = (0..3)
+            .map(|i| grey_photo(dir.path(), &format!("a{i}.png"), 50 + i as u8 * 40))
+            .collect();
+        let state = AppState::default();
+        let first = source(&state, &photos[0]).unwrap();
+        let open = source(&state, &photos[1]).unwrap();
+        // An export of the photo decoded earlier uses the editor's picture
+        // of it, and the open photo stays the newest.
+        let aside = V3Caches::aside(&state.v3, &photos[0]);
+        let pair = super::super::identity::resolve(&state, &serde_json::json!({})).unwrap();
+        let borrowed = source_for(&aside, &photos[0], &pair, Quality::Full).unwrap();
+        assert!(Arc::ptr_eq(&borrowed, &first));
+        assert!(Arc::ptr_eq(&state.v3.newest_source().unwrap(), &open));
+        // A thumbnail takes the full development too.
+        let thumb = source_for(&aside, &photos[0], &pair, Quality::Thumbnail).unwrap();
+        assert!(Arc::ptr_eq(&thumb, &first));
+        // One the editor never decoded is decoded aside, and never joins the
+        // editor's pictures.
+        let other = V3Caches::aside(&state.v3, &photos[2]);
+        source_for(&other, &photos[2], &pair, Quality::Full).unwrap();
+        assert!(!state.v3.holds_source(&photos[2]));
+    }
+
+    #[test]
+    fn a_kept_window_contains_the_window_on_a_grid() {
+        let canvas = (7008, 4672);
+        let rect = (2102, 1401, 1753, 1169);
+        let ext = (1800, 1100, 2357, 1771);
+        let kept = kept_window(rect, ext, canvas);
+        assert!(covers(Some(kept), Some(ext)));
+        assert_eq!((kept.0 % 256, kept.1 % 256), (0, 0));
+        assert!(kept.0 + kept.2 <= canvas.0 && kept.1 + kept.3 <= canvas.1);
+        // A short pan's window lies inside it.
+        let panned = (ext.0 + rect.2 / 5, ext.1, ext.2, ext.3);
+        assert!(covers(Some(kept), Some(panned)));
+        // At an edge it stops at the picture's.
+        let edge = kept_window((6000, 4000, 1000, 672), (5700, 3700, 1308, 972), canvas);
+        assert_eq!((edge.0 + edge.2, edge.1 + edge.3), canvas);
+        // Most of the picture: no larger than the window.
+        let big = (100, 100, 6800, 4400);
+        assert_eq!(kept_window((400, 400, 6200, 3800), big, canvas), big);
+        assert!(!covers(Some(kept), None) && !covers(None, Some(ext)) && covers(None, None));
+    }
+
+    #[test]
     fn saving_the_photo_left_neither_decodes_it_nor_displaces_the_open_one() {
         let dir = tempfile::tempdir().unwrap();
         let left = grey_photo(dir.path(), "left.png", 60);
@@ -2875,9 +3162,10 @@ mod audit_tests {
             let cached = spatial(
                 &warm.v3,
                 &source,
-                image.clone(),
+                &|_| image.clone(),
                 &controls,
-                (0, 0, None, None),
+                (0, 0, None),
+                None,
                 1.,
                 None,
             )
@@ -2885,9 +3173,10 @@ mod audit_tests {
             let fresh = spatial(
                 &V3Caches::default(),
                 &source,
-                image.clone(),
+                &|_| image.clone(),
                 &controls,
-                (0, 0, None, None),
+                (0, 0, None),
+                None,
                 1.,
                 None,
             )
