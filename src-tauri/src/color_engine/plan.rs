@@ -24,9 +24,10 @@ pub(crate) struct GpuParameters {
     pub range_center: [[f32; 4]; 8],
     pub range_width: [[f32; 4]; 8],
     pub range_adjustment: [[f32; 4]; 8],
-    /// Width, height, and the first pixel of the chunk being rendered — the
+    /// Width, height, the first pixel of the chunk being rendered — the
     /// pass walks the image as a flat list, and effects need to know where a
-    /// pixel is. Set by the renderer per chunk.
+    /// pixel is — and the first pixel of the bound neighbourhood. Set by the
+    /// renderer per chunk.
     pub frame: [u32; 4],
     /// [vignette amount, midpoint, roundness, feather],
     /// [grain amplitude, cell size in full-resolution pixels, roughness,
@@ -227,8 +228,9 @@ pub struct RenderPlan {
     config: PipelineConfig,
     pub(crate) parameters: GpuParameters,
     pub(crate) cube: Option<std::sync::Arc<CubeLut>>,
-    /// The creative LUT's lattice, padded to `vec4`, when one is set.
-    pub(crate) look: Option<Vec<[f32; 4]>>,
+    /// The creative LUT, when one is set. The renderer pads it to `vec4`
+    /// for the GPU only when it changes, not on every pass.
+    pub(crate) look: Option<std::sync::Arc<crate::lut_processing::Lut>>,
     /// Per pixel, the previous engine's tonal (3.5 px) and structure (40 px)
     /// blurs of the unedited picture, which its local tone controls read.
     pub(crate) neighbourhood: Option<std::sync::Arc<Vec<[f32; 4]>>>,
@@ -536,13 +538,7 @@ impl RenderPlan {
             look.intensity.is_finite() && look.exposure.is_finite(),
             "Invalid LUT settings"
         );
-        self.look = Some(
-            look.lut
-                .data
-                .chunks_exact(3)
-                .map(|c| [c[0], c[1], c[2], 0.])
-                .collect(),
-        );
+        self.look = Some(look.lut.clone());
         self.parameters.look = [
             look.intensity.clamp(0., 1.),
             look.exposure.clamp(-3., 3.).exp2(),
@@ -630,7 +626,7 @@ impl RenderPlan {
             hash.update(cube.digest.as_bytes());
         }
         if let Some(look) = &self.look {
-            hash.update(bytemuck::cast_slice(look));
+            hash.update(bytemuck::cast_slice(&padded_lattice(look)));
             hash.update(bytemuck::bytes_of(&self.parameters.look));
             hash.update(bytemuck::bytes_of(&self.parameters.look_flags));
         }
@@ -646,6 +642,14 @@ impl RenderPlan {
         hash.update(source_revision.as_bytes());
         hash.finalize().to_hex().to_string()
     }
+}
+
+/// A LUT's lattice as the GPU reads it: each entry padded to `vec4`.
+pub(crate) fn padded_lattice(lut: &crate::lut_processing::Lut) -> Vec<[f32; 4]> {
+    lut.data
+        .chunks_exact(3)
+        .map(|c| [c[0], c[1], c[2], 0.])
+        .collect()
 }
 
 /// Per band (red, orange, yellow, green, aqua, blue, purple, magenta), how

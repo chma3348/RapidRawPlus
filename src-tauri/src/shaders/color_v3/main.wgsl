@@ -140,9 +140,13 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     var key: f32;
     var detail_base: f32;
     if parameters.basic_flags.z == 1u {
-        tonal = neighbourhood[id.x * 2u].rgb;
-        structure = neighbourhood[id.x * 2u + 1u].rgb;
-        let packed = unpack2x16float(bitcast<u32>(neighbourhood[id.x * 2u + 1u].w));
+        // The bound neighbourhood starts at pixel `frame.w`: the whole
+        // picture's when it stays on the GPU between passes, this chunk's
+        // otherwise.
+        let at = (parameters.frame.z + id.x - parameters.frame.w) * 2u;
+        tonal = neighbourhood[at].rgb;
+        structure = neighbourhood[at + 1u].rgb;
+        let packed = unpack2x16float(bitcast<u32>(neighbourhood[at + 1u].w));
         key = packed.x;
         detail_base = packed.y;
     } else {
