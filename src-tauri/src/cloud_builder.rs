@@ -91,17 +91,25 @@ fn emit(app: &tauri::AppHandle) {
 /// Whether `photo` (only in the cloud) still needs something built here.
 /// Only photographs: a folder's videos are listed with its photos, but there
 /// is nothing to make from one, and reading it would download it whole.
-fn needs_work(photo: &Path, thumbs: Option<&Path>) -> bool {
+fn needs_work(photo: &Path, thumbs: Option<&Thumbs>) -> bool {
     if !crate::formats::is_supported_image_file(photo) {
         return false;
     }
     match smart_preview::mode_for(photo) {
         Mode::Previews => preview_needed(photo),
-        Mode::Thumbnails => thumbs.is_some_and(|t| {
-            !crate::file_management::has_cached_thumbnail(&photo.to_string_lossy(), t)
+        Mode::Thumbnails => thumbs.is_some_and(|(dir, keys)| {
+            !crate::file_management::has_cached_thumbnail(&photo.to_string_lossy(), dir, keys)
         }),
         Mode::Nothing => false,
     }
+}
+
+/// The thumbnail cache, and how its thumbnails are keyed now.
+type Thumbs = (PathBuf, crate::file_management::ThumbnailKeys);
+
+fn thumbs(app: &tauri::AppHandle) -> Option<Thumbs> {
+    let dir = crate::file_management::get_thumb_cache_dir(app).ok()?;
+    Some((dir, crate::file_management::ThumbnailKeys::current(app)))
 }
 
 /// Whether `photo` has no preview made from its current version. A preview
@@ -118,17 +126,18 @@ fn preview_needed(photo: &Path) -> bool {
 /// Queue the cloud-only photos among `photos` (a folder just listed) that
 /// need a preview or thumbnail, ahead of anything queued before.
 pub fn enqueue(app: &tauri::AppHandle, photos: Vec<PathBuf>) {
-    let thumbs = crate::file_management::get_thumb_cache_dir(app).ok();
+    let thumbs = thumbs(app);
     let wanted: Vec<PathBuf> = photos
         .into_iter()
-        .filter(|p| crate::cloud_files::is_cloud_only(p) && needs_work(p, thumbs.as_deref()))
+        .filter(|p| crate::cloud_files::is_cloud_only(p) && needs_work(p, thumbs.as_ref()))
         .collect();
     if wanted.is_empty() {
         return;
     }
+    let wanted_set: HashSet<&Path> = wanted.iter().map(PathBuf::as_path).collect();
     {
         let mut q = QUEUE.0.lock().unwrap();
-        q.items.retain(|p| !wanted.contains(p));
+        q.items.retain(|p| !wanted_set.contains(p.as_path()));
         for p in wanted.into_iter().rev() {
             if !q.building.contains(&p) {
                 q.items.push_front(p);
@@ -209,8 +218,8 @@ fn worker(app: tauri::AppHandle) {
 /// it back to the cloud.
 fn build(app: &tauri::AppHandle, photo: &Path) -> Result<(), String> {
     let was_cloud_only = crate::cloud_files::is_cloud_only(photo);
-    let thumbs = crate::file_management::get_thumb_cache_dir(app).ok();
-    if !needs_work(photo, thumbs.as_deref()) {
+    let thumbs = thumbs(app);
+    if !needs_work(photo, thumbs.as_ref()) {
         return Ok(());
     }
     let path_str = photo.to_string_lossy().into_owned();
@@ -237,8 +246,8 @@ fn build(app: &tauri::AppHandle, photo: &Path) -> Result<(), String> {
         let state = app.state::<crate::AppState>();
         let gpu = crate::gpu_processing::get_or_init_gpu_context(&state, app).ok();
         let settings = crate::app_settings::load_settings(app.clone()).unwrap_or_default();
-        if let Some(dir) = &thumbs
-            && let Some((data, rating, is_edited)) =
+        if let Some((dir, _)) = &thumbs
+            && let Some((data, _, is_edited)) =
                 crate::file_management::generate_single_thumbnail_and_cache(
                     &path_str,
                     dir,
@@ -250,7 +259,7 @@ fn build(app: &tauri::AppHandle, photo: &Path) -> Result<(), String> {
         {
             let _ = app.emit(
                 "thumbnail-generated",
-                serde_json::json!({ "path": path_str, "data": data, "rating": rating, "is_edited": is_edited }),
+                serde_json::json!({ "path": path_str, "data": data, "is_edited": is_edited }),
             );
         }
         Ok(())
@@ -293,12 +302,12 @@ fn wait_for_thumbnail_readers(app: &tauri::AppHandle, photo: &Path) {
 /// how what it shows gets built. Never reads a cloud-only file: only file
 /// metadata, and the headers of previews already here.
 pub fn request(app: &tauri::AppHandle, photos: &[String]) {
-    let thumbs = crate::file_management::get_thumb_cache_dir(app).ok();
+    let thumbs = thumbs(app);
     let mut wanted: Vec<PathBuf> = photos
         .iter()
         .filter(|p| !p.contains("?vc="))
         .map(PathBuf::from)
-        .filter(|p| crate::cloud_files::is_cloud_only(p) && needs_work(p, thumbs.as_deref()))
+        .filter(|p| crate::cloud_files::is_cloud_only(p) && needs_work(p, thumbs.as_ref()))
         .collect();
     let mut q = QUEUE.0.lock().unwrap();
     // One that has failed every try (a file nothing can decode) is not
@@ -316,8 +325,9 @@ pub fn request(app: &tauri::AppHandle, photos: &[String]) {
             true
         }
     });
+    let already_queued: HashSet<PathBuf> = front.iter().cloned().collect();
     for p in &wanted {
-        if !front.contains(p) && !q.building.contains(p) {
+        if !already_queued.contains(p) && !q.building.contains(p) {
             front.push_back(p.clone());
             changed = true;
         }

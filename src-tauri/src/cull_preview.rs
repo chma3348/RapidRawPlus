@@ -71,7 +71,8 @@ fn jpeg(image: &DynamicImage, profile: Option<Vec<u8>>) -> Result<Vec<u8>, Strin
 fn cached_thumbnail(path: &str, app_handle: &tauri::AppHandle) -> Option<Vec<u8>> {
     use base64::Engine as _;
     let dir = crate::file_management::get_thumb_cache_dir(app_handle).ok()?;
-    if !crate::file_management::has_cached_thumbnail(path, &dir) {
+    let keys = crate::file_management::ThumbnailKeys::current(app_handle);
+    if !crate::file_management::has_cached_thumbnail(path, &dir, &keys) {
         return None;
     }
     let settings = crate::app_settings::load_settings(app_handle.clone()).unwrap_or_default();

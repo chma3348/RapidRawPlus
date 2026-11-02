@@ -1364,24 +1364,117 @@ fn store_primary_exif(
     .map(|_| ())
 }
 
+/// The EXIF kept beside a photo: in its sidecar, or in RapidRAW's older
+/// `.rrexif` file. Only reads: the old file is folded into the sidecar
+/// when the photo is opened (`persist_exif_if_missing`), not when it is
+/// merely listed.
 pub fn read_exif_sidecar(image_path: &Path) -> Option<HashMap<String, String>> {
     let metadata = load_primary_metadata(image_path);
     if let Some(exif) = metadata.exif {
         return Some(exif);
     }
+    read_legacy_exif(image_path)
+}
 
-    let legacy = legacy_exif_path(image_path);
-    if legacy.exists()
-        && let Ok(content) = fs::read_to_string(&legacy)
-        && let Ok(map) = serde_json::from_str::<HashMap<String, String>>(&content)
-    {
-        if store_primary_exif(image_path, map.clone(), false).is_ok() {
-            let _ = fs::remove_file(&legacy);
-        }
-        return Some(map);
+fn read_legacy_exif(image_path: &Path) -> Option<HashMap<String, String>> {
+    let content = fs::read_to_string(legacy_exif_path(image_path)).ok()?;
+    serde_json::from_str::<HashMap<String, String>>(&content).ok()
+}
+
+/// EXIF read from photos' own headers this session, so that listing a
+/// folder again does not read every header again, now that browsing no
+/// longer stores it in sidecars. Keyed by the file's size and time, so a
+/// photo rewritten is read afresh; the least recently read go first.
+mod remembered {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{LazyLock, Mutex};
+    use std::time::SystemTime;
+
+    const CAPACITY: usize = 8192;
+    type Version = (u64, Option<SystemTime>);
+    struct Entry {
+        version: Version,
+        exif: HashMap<String, String>,
+        used: u64,
+    }
+    #[derive(Default)]
+    struct Memory {
+        entries: HashMap<PathBuf, Entry>,
+        tick: u64,
+    }
+    static MEMORY: LazyLock<Mutex<Memory>> = LazyLock::new(Default::default);
+
+    fn version(path: &Path) -> Option<Version> {
+        let meta = std::fs::metadata(path).ok()?;
+        Some((meta.len(), meta.modified().ok()))
     }
 
-    None
+    pub fn get(path: &Path) -> Option<HashMap<String, String>> {
+        let version = version(path)?;
+        let mut memory = MEMORY.lock().unwrap_or_else(|e| e.into_inner());
+        memory.tick += 1;
+        let tick = memory.tick;
+        let entry = memory.entries.get_mut(path)?;
+        if entry.version != version {
+            return None;
+        }
+        entry.used = tick;
+        Some(entry.exif.clone())
+    }
+
+    pub fn put(path: &Path, exif: &HashMap<String, String>) {
+        let Some(version) = version(path) else {
+            return;
+        };
+        let mut memory = MEMORY.lock().unwrap_or_else(|e| e.into_inner());
+        if memory.entries.len() >= CAPACITY && !memory.entries.contains_key(path) {
+            // An eighth at a time, so this sort is rare.
+            let mut by_use: Vec<(u64, PathBuf)> = memory
+                .entries
+                .iter()
+                .map(|(p, e)| (e.used, p.clone()))
+                .collect();
+            by_use.sort_unstable();
+            for (_, p) in by_use.into_iter().take(CAPACITY / 8) {
+                memory.entries.remove(&p);
+            }
+        }
+        memory.tick += 1;
+        let used = memory.tick;
+        memory.entries.insert(
+            path.to_path_buf(),
+            Entry {
+                version,
+                exif: exif.clone(),
+                used,
+            },
+        );
+    }
+}
+
+/// A photo's EXIF from what is already known of it (its sidecar, the old
+/// `.rrexif` file, or this session's memory), never reading the photo.
+pub fn known_exif(image_path: &Path) -> Option<HashMap<String, String>> {
+    read_exif_sidecar(image_path).or_else(|| remembered::get(image_path))
+}
+
+/// A photo's EXIF for a sidecar about to be saved anyway (an edit pasted
+/// onto it): what is known of it, or read from the photo's header. Never
+/// a photo only in the cloud (reading it would download it).
+pub fn exif_for_saving(image_path: &Path) -> Option<HashMap<String, String>> {
+    if let Some(known) = known_exif(image_path) {
+        return Some(known);
+    }
+    if crate::cloud_files::is_cloud_only(image_path) {
+        return None;
+    }
+    let path_str = image_path.to_string_lossy();
+    let exif = match crate::file_management::read_file_mapped(image_path) {
+        Ok(mmap) => read_exif_data(&path_str, &mmap),
+        Err(_) => read_exif_data(&path_str, &fs::read(image_path).ok()?),
+    };
+    (!exif.is_empty()).then_some(exif)
 }
 
 pub fn read_exif_data_from_bytes(path: &str, file_bytes: &[u8]) -> HashMap<String, String> {
@@ -1401,17 +1494,20 @@ pub fn read_exif_data_from_bytes(path: &str, file_bytes: &[u8]) -> HashMap<Strin
     exif_data
 }
 
+/// A photo's EXIF: from what is known of it, otherwise from `file_bytes`
+/// (the photo). What is read is remembered for the session, not written
+/// into a sidecar: browsing a folder must not create files in it (in a
+/// cloud folder, every one would sync). Opening a photo stores its EXIF
+/// (`persist_exif_if_missing`).
 pub fn read_exif_data(path: &str, file_bytes: &[u8]) -> HashMap<String, String> {
     let source_path = Path::new(path);
-    if let Some(sidecar_exif) = read_exif_sidecar(source_path) {
-        return sidecar_exif;
+    if let Some(known) = known_exif(source_path) {
+        return known;
     }
 
     let exif_map = read_exif_data_from_bytes(path, file_bytes);
-    if !exif_map.is_empty()
-        && let Err(e) = store_primary_exif(source_path, exif_map.clone(), true)
-    {
-        log::warn!("{e}");
+    if !exif_map.is_empty() {
+        remembered::put(source_path, &exif_map);
     }
     exif_map
 }

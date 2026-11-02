@@ -26,14 +26,30 @@ pub(crate) fn version(path: &Path) -> Result<Version> {
     })
 }
 type Key = (PathBuf, Version);
-static HASHES: OnceLock<Mutex<HashMap<Key, String>>> = OnceLock::new();
+/// Digests by file version, with when each was last used: the least
+/// recently used goes when it is full, so thumbnails made in the
+/// background never push out the photo the editor is on.
+#[derive(Default)]
+struct Hashes {
+    entries: HashMap<Key, (String, u64)>,
+    tick: u64,
+}
+const CAPACITY: usize = 64;
+static HASHES: OnceLock<Mutex<Hashes>> = OnceLock::new();
 pub(crate) fn digest(path: &Path, fresh: bool) -> Result<(String, Option<Vec<u8>>)> {
     let before = version(path)?;
     let key = (path.to_path_buf(), before.clone());
-    let cache = HASHES.get_or_init(|| Mutex::new(HashMap::new()));
+    let cache = HASHES.get_or_init(Default::default);
     if cfg!(unix)
         && !fresh
-        && let Some(hash) = cache.lock().ok().and_then(|c| c.get(&key).cloned())
+        && let Some(hash) = cache.lock().ok().and_then(|mut c| {
+            c.tick += 1;
+            let tick = c.tick;
+            c.entries.get_mut(&key).map(|(hash, used)| {
+                *used = tick;
+                hash.clone()
+            })
+        })
     {
         return Ok((hash, None));
     }
@@ -45,11 +61,19 @@ pub(crate) fn digest(path: &Path, fresh: bool) -> Result<(String, Option<Vec<u8>
     );
     let hash = blake3::hash(&bytes).to_hex().to_string();
     if let Ok(mut cache) = cache.lock() {
-        cache.retain(|(p, _), _| p != path);
-        if cache.len() >= 64 {
-            cache.clear();
+        cache.entries.retain(|(p, _), _| p != path);
+        if cache.entries.len() >= CAPACITY
+            && let Some(oldest) = cache
+                .entries
+                .iter()
+                .min_by_key(|(_, (_, used))| *used)
+                .map(|(k, _)| k.clone())
+        {
+            cache.entries.remove(&oldest);
         }
-        cache.insert(key, hash.clone());
+        cache.tick += 1;
+        let used = cache.tick;
+        cache.entries.insert(key, (hash.clone(), used));
     }
     Ok((hash, Some(bytes)))
 }
@@ -77,5 +101,27 @@ mod tests {
         std::fs::rename(replacement, &path).unwrap();
         assert_ne!(digest(&path, false).unwrap().0, before);
         assert!(digest(&path, true).unwrap().1.is_some());
+    }
+
+    /// A file in use stays cached while many others pass through.
+    #[test]
+    fn the_file_in_use_outlasts_a_stream_of_others() {
+        if !cfg!(unix) {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let kept = dir.path().join("editing");
+        std::fs::write(&kept, b"the open photo").unwrap();
+        digest(&kept, false).unwrap();
+        for i in 0..(CAPACITY * 3) {
+            let other = dir.path().join(format!("thumb{i}"));
+            std::fs::write(&other, format!("{i}")).unwrap();
+            digest(&other, false).unwrap();
+            // The editor renders again now and then.
+            if i % 16 == 0 {
+                assert!(digest(&kept, false).unwrap().1.is_none(), "evicted at {i}");
+            }
+        }
+        assert!(digest(&kept, false).unwrap().1.is_none());
     }
 }
