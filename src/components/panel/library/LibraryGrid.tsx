@@ -4,6 +4,7 @@ import { ChevronUp, ChevronDown } from 'lucide-react';
 import debounce from 'lodash.debounce';
 import { useTranslation } from 'react-i18next';
 import { Row } from './LibraryItems';
+import { useShallow } from 'zustand/react/shallow';
 import { useLibraryStore } from '../../../store/useLibraryStore';
 import { LibraryViewMode, SortDirection, ThumbnailSize } from '../../ui/AppProperties';
 import Text from '../../ui/Text';
@@ -172,7 +173,14 @@ export default function LibraryGrid(props: any) {
     thumbnailSizeOptions,
     onThumbnailSizeChange,
   } = props;
-  const { listColumnWidths, setLibrary, sortCriteria, setSortCriteria } = useLibraryStore();
+  const { listColumnWidths, setLibrary, sortCriteria, setSortCriteria } = useLibraryStore(
+    useShallow((s) => ({
+      listColumnWidths: s.listColumnWidths,
+      setLibrary: s.setLibrary,
+      sortCriteria: s.sortCriteria,
+      setSortCriteria: s.setSortCriteria,
+    })),
+  );
   const [gridSize, setGridSize] = useState({ height: 0, width: 0 });
   const [listHandle, setListHandle] = useListCallbackRef();
   const [collapsedRecursiveFolders, setCollapsedRecursiveFolders] = useState<Set<string>>(new Set());
@@ -378,9 +386,20 @@ export default function LibraryGrid(props: any) {
       for (const group of groups) {
         if (group.images.length === 0) continue;
 
+        const imageIndex = group.images.findIndex((img) => img.path === activePath);
+        // A collapsed folder shows only its header: that is where its
+        // photos are.
+        if (collapsedRecursiveFolders.has(group.path)) {
+          if (imageIndex !== -1) {
+            found = true;
+            break;
+          }
+          targetTop += headerHeight;
+          continue;
+        }
+
         targetTop += headerHeight;
 
-        const imageIndex = group.images.findIndex((img) => img.path === activePath);
         if (imageIndex !== -1) {
           const rowIndex = Math.floor(imageIndex / columnCount);
           targetTop += rowIndex * rowHeight;
@@ -418,7 +437,16 @@ export default function LibraryGrid(props: any) {
         });
       }
     }
-  }, [activePath, gridData, multiSelectedPaths.length, listHandle, currentFolderPath, imageList, libraryViewMode]);
+  }, [
+    activePath,
+    gridData,
+    multiSelectedPaths.length,
+    listHandle,
+    currentFolderPath,
+    imageList,
+    libraryViewMode,
+    collapsedRecursiveFolders,
+  ]);
 
   const memoizedRowProps = useMemo(() => {
     if (!gridData) return {};
@@ -459,6 +487,17 @@ export default function LibraryGrid(props: any) {
     handleToggleRecursiveFolder,
   ]);
 
+  // A new function only when the layout changes: the list re-measures its
+  // rows whenever it gets one.
+  const getItemSize = useCallback(
+    (index: number) => {
+      if (!gridData) return 0;
+      if (gridData.rows[index].type === 'footer') return gridData.isListView ? 24 : gridData.OUTER_PADDING;
+      return gridData.rows[index].type === 'header' ? gridData.headerHeight : gridData.rowHeight;
+    },
+    [gridData],
+  );
+
   if (!gridData) {
     return (
       <div
@@ -469,11 +508,6 @@ export default function LibraryGrid(props: any) {
       />
     );
   }
-
-  const getItemSize = (index: number) => {
-    if (gridData.rows[index].type === 'footer') return gridData.isListView ? 24 : gridData.OUTER_PADDING;
-    return gridData.rows[index].type === 'header' ? gridData.headerHeight : gridData.rowHeight;
-  };
 
   const handleHeaderSort = (key: string) => {
     props.onClearSelection();
@@ -506,8 +540,10 @@ export default function LibraryGrid(props: any) {
             onSortChange={handleHeaderSort}
           />
         )}
+        {/* Not keyed by width: resizing (a panel dragged) re-lays the rows
+            out instead of mounting every visible tile again. */}
         <div
-          key={`${gridSize.width}-${thumbnailSize}-${libraryViewMode}-${sortCriteria.key}-${sortCriteria.order}-${thumbnailAspectRatio}`}
+          key={`${thumbnailSize}-${libraryViewMode}-${sortCriteria.key}-${sortCriteria.order}-${thumbnailAspectRatio}`}
           style={{ height: gridData.isListView ? gridSize.height - 36 : gridSize.height, width: gridSize.width }}
         >
           <List

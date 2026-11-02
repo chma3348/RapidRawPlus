@@ -58,6 +58,11 @@ export interface AppModalsProps {
   handleRenameAlbumItem: (newName: string) => Promise<void>;
 }
 
+const NO_THUMBNAILS: Record<string, string> = {};
+
+/** One photo's thumbnail, rendering again only when that one changes. */
+const useThumbnail = (path: string | null) => useProcessStore((state) => (path ? state.thumbnails[path] : undefined));
+
 export default function AppModals(props: AppModalsProps) {
   const { t } = useTranslation();
   const { appSettings, handleSettingsChange } = useSettingsStore(
@@ -119,12 +124,31 @@ export default function AppModals(props: AppModalsProps) {
     })),
   );
 
-  const { thumbnails, aiModelDownloadStatus } = useProcessStore(
-    useShallow((state) => ({
-      thumbnails: state.thumbnails,
-      aiModelDownloadStatus: state.aiModelDownloadStatus,
-    })),
-  );
+  // The whole thumbnails map only while a modal that shows many is open;
+  // otherwise just the few photos the open modals show, so the modals do
+  // not render again for every thumbnail that arrives.
+  const showsManyThumbnails = cullingModalState.isOpen || collageModalState.isOpen;
+  const middleOf = (paths: string[]) => (paths.length > 0 ? paths[Math.floor(paths.length / 2)] : null);
+  const panoramaPath = middleOf(panoramaModalState.stitchingSourcePaths);
+  const hdrPath = middleOf(hdrModalState.stitchingSourcePaths);
+  const denoisePath = denoiseModalState.targetPaths[0] ?? null;
+  const enhancePath = enhanceModalState.targetPaths[0] ?? null;
+  const expandPath = expandModalState.targetPaths[0] ?? null;
+  const shown: Array<[string | null, string | undefined]> = [
+    [panoramaPath, useThumbnail(panoramaPath)],
+    [hdrPath, useThumbnail(hdrPath)],
+    [denoisePath, useThumbnail(denoisePath)],
+    [enhancePath, useThumbnail(enhancePath)],
+    [expandPath, useThumbnail(expandPath)],
+  ];
+  const allThumbnails = useProcessStore((state) => (showsManyThumbnails ? state.thumbnails : NO_THUMBNAILS));
+  const thumbnails: Record<string, string> = showsManyThumbnails ? allThumbnails : { ...NO_THUMBNAILS };
+  if (!showsManyThumbnails) {
+    for (const [path, data] of shown) {
+      if (path && data) thumbnails[path] = data;
+    }
+  }
+  const aiModelDownloadStatus = useProcessStore((state) => state.aiModelDownloadStatus);
 
   const { selectedImage, finalPreviewUrl } = useEditorStore(
     useShallow((state) => ({

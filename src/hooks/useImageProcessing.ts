@@ -724,7 +724,11 @@ export function useImageProcessing(
             if (v3) (delta as Record<string, unknown>).v3 = v3;
             if (Object.keys(delta).length > 0) {
               otherPaths.forEach((p) => globalImageCache.delete(p));
-              invoke(Invokes.ApplyAdjustmentsToPaths, { paths: otherPaths, adjustments: delta }).catch((err) => {
+              invoke(Invokes.ApplyAdjustmentsToPaths, {
+                paths: otherPaths,
+                adjustments: delta,
+                sourcePath: selectedImage.path,
+              }).catch((err) => {
                 console.error('Failed to apply adjustments to multi-selection:', err);
               });
             }

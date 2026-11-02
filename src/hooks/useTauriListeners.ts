@@ -13,6 +13,7 @@ interface TauriListenerProps {
   handleSelectSubfolder: (path: string, isNewRoot?: boolean, preloadedImages?: any[], expandParents?: boolean) => void;
   refreshImageList: () => void;
   markGenerated: (path: string) => void;
+  clearThumbnailQueue: () => void;
 }
 
 export function useTauriListeners({
@@ -20,48 +21,67 @@ export function useTauriListeners({
   handleSelectSubfolder,
   refreshImageList,
   markGenerated,
+  clearThumbnailQueue,
 }: TauriListenerProps) {
-  const refs = useRef({ refreshAllFolderTrees, handleSelectSubfolder, refreshImageList, markGenerated });
+  const refs = useRef({
+    refreshAllFolderTrees,
+    handleSelectSubfolder,
+    refreshImageList,
+    markGenerated,
+    clearThumbnailQueue,
+  });
 
   useEffect(() => {
-    refs.current = { refreshAllFolderTrees, handleSelectSubfolder, refreshImageList, markGenerated };
+    refs.current = {
+      refreshAllFolderTrees,
+      handleSelectSubfolder,
+      refreshImageList,
+      markGenerated,
+      clearThumbnailQueue,
+    };
   });
 
   const thumbnailBuffer = useRef<Record<string, string>>({});
-  const ratingBuffer = useRef<Record<string, number>>({});
   const editStatusBuffer = useRef<Record<string, boolean>>({});
   const flushHandle = useRef<number | null>(null);
 
   useEffect(() => {
     let isEffectActive = true;
 
+    // Only what actually changed is applied: the library re-sorts and the
+    // grid rebuilds its rows whenever the photo list changes, and a folder's
+    // thumbnails arrive a frame's worth at a time. A thumbnail's rating is
+    // not taken at all: it was read before a render that can take seconds,
+    // and a rating given meanwhile must stay.
     const flushThumbnailBatch = () => {
       flushHandle.current = null;
       if (!isEffectActive) return;
 
       const pendingThumbs = thumbnailBuffer.current;
-      const pendingRatings = ratingBuffer.current;
       const pendingEdits = editStatusBuffer.current;
 
       thumbnailBuffer.current = {};
-      ratingBuffer.current = {};
       editStatusBuffer.current = {};
 
-      if (Object.keys(pendingThumbs).length > 0) {
+      const current = useProcessStore.getState().thumbnails;
+      const newThumbs = Object.keys(pendingThumbs).filter((path) => current[path] !== pendingThumbs[path]);
+      if (newThumbs.length > 0) {
         useProcessStore.getState().setProcess((state) => ({
           thumbnails: { ...state.thumbnails, ...pendingThumbs },
         }));
       }
 
-      if (Object.keys(pendingRatings).length > 0 || Object.keys(pendingEdits).length > 0) {
+      const { imageList } = useLibraryStore.getState();
+      const changesEditStatus = imageList.some(
+        (img) => pendingEdits[img.path] !== undefined && pendingEdits[img.path] !== img.is_edited,
+      );
+      if (changesEditStatus) {
         useLibraryStore.getState().setLibrary((state) => ({
-          imageRatings: { ...state.imageRatings, ...pendingRatings },
-          imageList:
-            Object.keys(pendingEdits).length > 0
-              ? state.imageList.map((img) =>
-                  pendingEdits[img.path] !== undefined ? { ...img, is_edited: pendingEdits[img.path] } : img,
-                )
-              : state.imageList,
+          imageList: state.imageList.map((img) =>
+            pendingEdits[img.path] !== undefined && pendingEdits[img.path] !== img.is_edited
+              ? { ...img, is_edited: pendingEdits[img.path] }
+              : img,
+          ),
         }));
       }
     };
@@ -106,21 +126,27 @@ export function useTauriListeners({
       }),
       listen('thumbnail-generated', (event: any) => {
         if (!isEffectActive) return;
-        const { path, data, rating, is_edited } = event.payload;
+        const { path, data, is_edited } = event.payload;
 
         if (data) {
           thumbnailBuffer.current[path] = data;
           refs.current.markGenerated(path);
         }
-        if (rating !== undefined) {
-          ratingBuffer.current[path] = rating;
-        }
         if (is_edited !== undefined) {
           editStatusBuffer.current[path] = is_edited;
         }
-        if (data || rating !== undefined || is_edited !== undefined) {
+        if (data || is_edited !== undefined) {
           scheduleFlush();
         }
+      }),
+      // "Clear cache": the thumbnails shown are dropped, and the grid asks
+      // for them again (made anew).
+      listen('thumbnail-cache-cleared', () => {
+        if (!isEffectActive) return;
+        thumbnailBuffer.current = {};
+        refs.current.clearThumbnailQueue();
+        useProcessStore.getState().setProcess({ thumbnails: {} });
+        useLibraryStore.getState().setLibrary((state) => ({ imageList: [...state.imageList] }));
       }),
       listen('ai-model-download-start', (event: any) => {
         if (isEffectActive) useProcessStore.getState().setProcess({ aiModelDownloadStatus: event.payload });
@@ -427,7 +453,7 @@ export function useTauriListeners({
         flushHandle.current = null;
       }
       thumbnailBuffer.current = {};
-      ratingBuffer.current = {};
+      editStatusBuffer.current = {};
       listeners.forEach((p) => p.then((unlisten) => unlisten()));
     };
   }, []);

@@ -431,6 +431,7 @@ function App() {
     handleSelectSubfolder,
     refreshImageList: handleLibraryRefresh,
     markGenerated,
+    clearThumbnailQueue,
   });
 
   const handleToggleFullScreen = useCallback(() => {
