@@ -43,8 +43,19 @@ export default function ColorSampleControls({
         )}
         onChange={(value) =>
           // A colour band has no point to grow from, so the wand starts from
-          // the next click instead.
-          onChange(value ? { contiguous: true, swatchHue: undefined, swatchWidth: undefined } : { contiguous: false })
+          // the next click instead (not from a click made before the band).
+          onChange(
+            value
+              ? {
+                  contiguous: true,
+                  swatchHue: undefined,
+                  swatchWidth: undefined,
+                  ...(parameters?.swatchHue !== undefined && samples.length === 0
+                    ? { targetX: -10000, targetY: -10000 }
+                    : {}),
+                }
+              : { contiguous: false },
+          )
         }
       />
       <Text variant={TextVariants.small} className="opacity-70">

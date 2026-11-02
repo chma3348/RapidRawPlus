@@ -1997,6 +1997,10 @@ fn wand_bitmap(
         .for_each(|(y_out, row)| {
             for (x_out, out) in row.iter_mut().enumerate() {
                 let mut sum = 0.0f32;
+                // Average over the samples that land on the photo, so the
+                // first row and column aren't dimmed by offsets that fall
+                // off its edge.
+                let mut on_source = 0u32;
                 for (dx, dy) in offsets {
                     let (sx, sy) = map.map(
                         (x_out as f32 + dx + crop_offset.0) * inv_scale,
@@ -2005,6 +2009,7 @@ fn wand_bitmap(
                     if sx < 0.0 || sy < 0.0 || sx >= source.0 as f32 || sy >= source.1 as f32 {
                         continue;
                     }
+                    on_source += 1;
                     let connected = sample_cells(&add_cells, &grid, sx, sy);
                     if connected <= 0.0 {
                         continue;
@@ -2030,7 +2035,10 @@ fn wand_bitmap(
                     }
                     sum += a;
                 }
-                let alpha = sum / offsets.len() as f32;
+                if on_source == 0 {
+                    continue;
+                }
+                let alpha = sum / on_source as f32;
                 if alpha > 0.003 {
                     *out = (alpha * 255.0) as u8;
                 }
@@ -3067,6 +3075,32 @@ mod wand_tests {
             &picture,
         );
         assert!(none.pixels().all(|p| p[0] == 0));
+    }
+
+    /// A preview-size wand over a field that reaches the frame keeps its
+    /// first row and column fully selected (the supersampling offsets that
+    /// fall off the photo there used to halve them).
+    #[test]
+    fn wand_preview_keeps_the_frame_edge() {
+        let picture =
+            DynamicImage::ImageRgba8(RgbaImage::from_pixel(400, 300, Rgba([200, 210, 230, 255])));
+        let params = json!({"samples": [sample(200.0, 150.0, false)], "tolerance": 20,
+            "feather": 0, "solidify": 0, "clean": 0, "grow": 0, "contiguous": true});
+        for scale in [0.5f32, 0.32] {
+            let (w, h) = ((400.0 * scale) as u32, (300.0 * scale) as u32);
+            let mask = generate_photo_mask_bitmap(
+                &def(params.clone()),
+                w,
+                h,
+                scale,
+                (0.0, 0.0),
+                Some(&picture),
+                Orientation::default(),
+            )
+            .unwrap();
+            let low = mask.pixels().map(|p| p[0]).min().unwrap();
+            assert!(low > 250, "scale {scale}: weakest pixel {low}");
+        }
     }
 
     /// A bright field split by a dark line with one opening: a pinhole of a

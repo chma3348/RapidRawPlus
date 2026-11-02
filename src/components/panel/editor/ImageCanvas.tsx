@@ -5,7 +5,7 @@ import { Stage, Layer, Ellipse, Line, Transformer, Group, Circle, Rect } from 'r
 import { PercentCrop, Crop } from 'react-image-crop';
 import PickerLoupe from './PickerLoupe';
 import { Adjustments, AiPatch, Coord, MaskContainer } from '../../../utils/adjustments';
-import { ColorSample, MAX_COLOR_SAMPLES, Mask, SubMask, SubMaskMode, ToolType } from '../right/Masks';
+import { addColorSample, ColorSample, Mask, SubMask, SubMaskMode, ToolType } from '../right/Masks';
 import { AppSettings, BrushSettings, SelectedImage } from '../../ui/AppProperties';
 import { RenderSize } from '../../../hooks/useImageRenderSize';
 import type { OverlayMode } from '../right/CropPanel';
@@ -1851,7 +1851,12 @@ const ImageCanvas = memo(
 
           let newParams = { ...activeSubMask.parameters };
           if (activeSubMask.type === Mask.Color) {
-            const prior: Array<ColorSample> = Array.isArray(newParams.samples) ? newParams.samples : [];
+            let prior: Array<ColorSample> = Array.isArray(newParams.samples) ? newParams.samples : [];
+            // A mask from before multi-sample keeps its one click as
+            // targetX/Y; count it, so Option-click subtracts from it.
+            if (prior.length === 0 && newParams.swatchHue === undefined && (newParams.targetX ?? -10000) > -1000) {
+              prior = [{ x: newParams.targetX, y: newParams.targetY }];
+            }
             const shift = !!(e.evt && (e.evt as MouseEvent).shiftKey);
             const option = !!(e.evt && (e.evt as MouseEvent).altKey);
             // Photoshop's clicks: Shift-click adds a sample (an area, when
@@ -1859,7 +1864,7 @@ const ImageCanvas = memo(
             // a fresh selection. Sampling a color also leaves swatch mode.
             newParams.samples =
               shift || (option && prior.length > 0)
-                ? [...prior, option ? { x, y, subtract: true } : { x, y }].slice(-MAX_COLOR_SAMPLES)
+                ? addColorSample(prior, option ? { x, y, subtract: true } : { x, y })
                 : [{ x, y }];
             delete newParams.swatchHue;
             delete newParams.swatchWidth;

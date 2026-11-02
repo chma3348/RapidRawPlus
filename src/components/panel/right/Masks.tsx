@@ -75,10 +75,30 @@ export interface ColorSelectParameters {
    * is the global colour range.
    */
   contiguous?: boolean;
+  /** The single click point older masks used; -10000 when there is none. */
+  targetX?: number;
+  targetY?: number;
 }
 
 /** Most colour samples kept; the oldest goes first. */
 export const MAX_COLOR_SAMPLES = 8;
+
+/**
+ * Appends a sample, dropping the oldest when over the cap. A subtract sample
+ * goes first, and the last add sample is never dropped, so a long run of
+ * Option-clicks can't leave a selection with nothing to select.
+ */
+export function addColorSample(prior: Array<ColorSample>, sample: ColorSample): Array<ColorSample> {
+  const next = [...prior, sample];
+  while (next.length > MAX_COLOR_SAMPLES) {
+    const oldestSubtract = next.findIndex((s, i) => s.subtract && i < next.length - 1);
+    const adds = next.filter((s) => !s.subtract).length;
+    const oldestAdd = next.findIndex((s) => !s.subtract);
+    const drop = oldestSubtract >= 0 ? oldestSubtract : adds > 1 || sample.subtract ? oldestAdd : 0;
+    next.splice(drop, 1);
+  }
+  return next;
+}
 
 export interface SubMask {
   id: string;
