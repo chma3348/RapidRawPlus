@@ -1174,7 +1174,8 @@ export default function AIPanel() {
 
       if (over?.id === 'ai-list-root' || !over) {
         setAdjustments((prev: Adjustments) => {
-          const newPatches = JSON.parse(JSON.stringify(prev.aiPatches));
+          // Only the sub-mask lists change: the fills' data is shared, not copied.
+          const newPatches = prev.aiPatches.map((p) => ({ ...p, subMasks: [...p.subMasks] }));
           const sourceContainer = newPatches.find((p: AiPatch) => p.id === sourceContainerId);
           if (!sourceContainer) return prev;
           const subMaskIndex = sourceContainer.subMasks.findIndex((sm: SubMask) => sm.id === dragData.item!.id);

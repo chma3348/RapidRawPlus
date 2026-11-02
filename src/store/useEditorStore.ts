@@ -6,6 +6,7 @@ import { ChannelConfig } from '../components/adjustments/Curves';
 import { ImageDimensions } from '../hooks/useImageRenderSize';
 import { ToolType } from '../components/panel/right/Masks';
 import { OverlayMode } from '../components/panel/right/CropPanel';
+import { SentPatches, sameJson } from '../utils/backendPayload';
 
 export interface InteractivePatch {
   url: string;
@@ -86,7 +87,7 @@ interface EditorState {
   isGeneratingAi: boolean;
   isAIConnectorConnected: boolean;
   hasRenderedFirstFrame: boolean;
-  patchesSentToBackend: Set<string>;
+  patchesSentToBackend: SentPatches;
   /** The photo the backend has finished opening (its load_image resolved).
    * Renders wait for it: the editor shows a remembered photo at once, while
    * the backend may still be decoding it. */
@@ -125,12 +126,24 @@ export function rememberSavedAdjustments(path: string, adjustments: Adjustments)
 /** Whether `adjustments` differ from what `path`'s sidecar is known to hold
  * (unknown counts as different). Same object first: edits replace what they
  * change, so an untouched photo's adjustments are usually the very object
- * loaded, and the JSON comparison is the fallback. */
+ * loaded. Otherwise compared as JSON, part by part: parts an edit left alone
+ * are the same objects and skipped, so fills' megabytes are not written out
+ * twice after every slider move. */
 export function adjustmentsUnsaved(path: string, adjustments: Adjustments): boolean {
   const saved = savedAdjustments.get(path);
   if (saved === undefined) return true;
-  if (saved === adjustments) return false;
-  return JSON.stringify(saved) !== JSON.stringify(adjustments);
+  return !sameJson(saved, adjustments);
+}
+
+/**
+ * The editor's debounced history push (useEditorActions), registered by the
+ * editor: undo, redo and history jumps first record an edit still waiting
+ * (else an undo then skips it, and its late push wipes the redo steps), and
+ * a history reset (another photo) drops it, so it never lands there.
+ */
+let pendingHistory: { flush: () => void; cancel: () => void } | null = null;
+export function setPendingHistory(debounced: { flush: () => void; cancel: () => void }) {
+  pendingHistory = debounced;
 }
 
 export const useEditorStore = create<EditorState>((set) => ({
@@ -190,7 +203,7 @@ export const useEditorStore = create<EditorState>((set) => ({
   isGeneratingAi: false,
   isMaskControlHovered: false,
   hasRenderedFirstFrame: false,
-  patchesSentToBackend: new Set<string>(),
+  patchesSentToBackend: new SentPatches(),
   loadedPath: null,
 
   setEditor: (updater) =>
@@ -211,7 +224,8 @@ export const useEditorStore = create<EditorState>((set) => ({
       return { history: newHistory, historyIndex: newHistory.length - 1 };
     }),
 
-  undo: () =>
+  undo: () => {
+    pendingHistory?.flush();
     set((state) => {
       if (state.historyIndex > 0) {
         const newIndex = state.historyIndex - 1;
@@ -220,9 +234,11 @@ export const useEditorStore = create<EditorState>((set) => ({
         return { historyIndex: newIndex, adjustments: state.isGeneratingAi ? restored : settleAiPatches(restored) };
       }
       return state;
-    }),
+    });
+  },
 
-  redo: () =>
+  redo: () => {
+    pendingHistory?.flush();
     set((state) => {
       if (state.historyIndex < state.history.length - 1) {
         const newIndex = state.historyIndex + 1;
@@ -231,20 +247,27 @@ export const useEditorStore = create<EditorState>((set) => ({
         return { historyIndex: newIndex, adjustments: state.isGeneratingAi ? restored : settleAiPatches(restored) };
       }
       return state;
-    }),
+    });
+  },
 
-  resetHistory: (initialState) =>
+  resetHistory: (initialState) => {
+    pendingHistory?.cancel();
     set({
       history: [currentColorEngine(initialState)],
       historyIndex: 0,
       adjustments: currentColorEngine(initialState),
-    }),
+    });
+  },
 
-  goToHistoryIndex: (index) =>
+  goToHistoryIndex: (index) => {
+    pendingHistory?.flush();
     set((state) => {
       if (index >= 0 && index < state.history.length) {
-        return { historyIndex: index, adjustments: currentColorEngine(state.history[index]) };
+        // A step recorded mid-run must not bring back a spinner once it ended.
+        const restored = currentColorEngine(state.history[index]);
+        return { historyIndex: index, adjustments: state.isGeneratingAi ? restored : settleAiPatches(restored) };
       }
       return state;
-    }),
+    });
+  },
 }));

@@ -16,11 +16,18 @@ import { Mask, SubMask } from './right/Masks';
 import { Panel, TransformState, Invokes } from '../ui/AppProperties';
 import Text from '../ui/Text';
 import { TextColors, TextVariants, TextWeights } from '../../types/typography';
-import { useEditorStore } from '../../store/useEditorStore';
+import { setPendingHistory, useEditorStore } from '../../store/useEditorStore';
+import { debouncedSetHistory } from '../../hooks/useEditorActions';
+import { blankSentSubMasks, maskOverlayAdjustments } from '../../utils/backendPayload';
 import { useSettingsStore } from '../../store/useSettingsStore';
 import { useUIStore } from '../../store/useUIStore';
 import { useLibraryStore } from '../../store/useLibraryStore';
 import { useAiMasking } from '../../hooks/useAiMasking';
+
+// The editor's edits (strokes, gradients, crop, straighten) are recorded by
+// the shared history debounce: leaving a photo cancels it, and undo, redo
+// and history jumps record what it holds first.
+setPendingHistory(debouncedSetHistory);
 
 const parseRgb = (rgbStr: string): [number, number, number, number] => {
   const match = rgbStr.match(/[\d.]+/g);
@@ -124,13 +131,10 @@ export default function Editor({ onBackToLibrary, onContextMenu, transformWrappe
   const undo = useEditorStore((s) => s.undo);
   const redo = useEditorStore((s) => s.redo);
   const goToHistoryIndex = useEditorStore((s) => s.goToHistoryIndex);
-  const pushHistory = useEditorStore((s) => s.pushHistory);
   const canUndo = adjustmentsHistoryIndex > 0;
   const canRedo = adjustmentsHistoryIndex < adjustmentsHistory.length - 1;
 
   const isAndroid = osPlatform === 'android';
-
-  const debouncedSetHistory = useMemo(() => debounce((newAdj: Adjustments) => pushHistory(newAdj), 500), [pushHistory]);
 
   const setAdjustments = useCallback(
     (value: Partial<Adjustments> | ((prev: Adjustments) => Adjustments)) => {
@@ -141,7 +145,7 @@ export default function Editor({ onBackToLibrary, onContextMenu, transformWrappe
         return { adjustments: newAdjustments };
       });
     },
-    [debouncedSetHistory, setEditor],
+    [setEditor],
   );
   const { handleGenerateAiMask, handleGenerateAiPaintMask, handleQuickErase } = useAiMasking();
   const [crop, setCrop] = useState<Crop | null>(null);
@@ -257,16 +261,16 @@ export default function Editor({ onBackToLibrary, onContextMenu, transformWrappe
 
   const updateSubMaskLocal = useCallback(
     (subMaskId: string, updatedData: any) => {
+      // Called on every drag frame: only the container holding the sub-mask
+      // is rebuilt, the others are kept as they are.
+      const update = <T extends { subMasks: SubMask[] }>(c: T): T =>
+        c.subMasks.some((sm: SubMask) => sm.id === subMaskId)
+          ? { ...c, subMasks: c.subMasks.map((sm: SubMask) => (sm.id === subMaskId ? { ...sm, ...updatedData } : sm)) }
+          : c;
       setAdjustments((prev: Adjustments) => ({
         ...prev,
-        masks: prev.masks.map((c: MaskContainer) => ({
-          ...c,
-          subMasks: c.subMasks.map((sm: SubMask) => (sm.id === subMaskId ? { ...sm, ...updatedData } : sm)),
-        })),
-        aiPatches: (prev.aiPatches || []).map((p: AiPatch) => ({
-          ...p,
-          subMasks: p.subMasks.map((sm: SubMask) => (sm.id === subMaskId ? { ...sm, ...updatedData } : sm)),
-        })),
+        masks: prev.masks.map((c: MaskContainer) => update(c)),
+        aiPatches: (prev.aiPatches || []).map((p: AiPatch) => update(p)),
       }));
     },
     [setAdjustments],
@@ -1050,28 +1054,15 @@ export default function Editor({ onBackToLibrary, onContextMenu, transformWrappe
     try {
       const cropOffset = [jsAdjustments.crop?.x || 0, jsAdjustments.crop?.y || 0];
 
-      const { patchesSentToBackend } = useEditorStore.getState();
-
-      const stripSubMasks = (subMasks: any[]) => {
-        if (!Array.isArray(subMasks)) return;
-        subMasks.forEach((sm) => {
-          if (sm.id && sm.parameters && patchesSentToBackend.has(sm.id)) {
-            if (sm.parameters.mask_data_base64 !== undefined) sm.parameters.mask_data_base64 = null;
-            if (sm.parameters.maskDataBase64 !== undefined) sm.parameters.maskDataBase64 = null;
-          }
-        });
+      // Sent on every brush move and slider tick, so only what the overlay
+      // reads: the mask (its bitmaps left out where the backend holds them,
+      // and none of a fill's picture) and the geometry its colour,
+      // luminance and clipped parts sample through. Nothing is copied whole.
+      const { patchData: _patchData, sky: _sky, ...def } = maskDef;
+      const strippedMaskDef = {
+        ...def,
+        subMasks: blankSentSubMasks(maskDef.subMasks, useEditorStore.getState().patchesSentToBackend),
       };
-
-      const strippedAdjustments = structuredClone(jsAdjustments);
-      if (strippedAdjustments.masks) {
-        strippedAdjustments.masks.forEach((m: any) => stripSubMasks(m.subMasks));
-      }
-      if (strippedAdjustments.aiPatches) {
-        strippedAdjustments.aiPatches.forEach((p: any) => stripSubMasks(p.subMasks));
-      }
-
-      const strippedMaskDef = structuredClone(maskDef);
-      stripSubMasks(strippedMaskDef.subMasks);
 
       const dataUrl: string = await invoke(Invokes.GenerateMaskOverlay, {
         cropOffset,
@@ -1079,7 +1070,7 @@ export default function Editor({ onBackToLibrary, onContextMenu, transformWrappe
         maskDef: strippedMaskDef,
         scale: renderSize.scale,
         width: Math.round(renderSize.width),
-        jsAdjustments: strippedAdjustments,
+        jsAdjustments: maskOverlayAdjustments(jsAdjustments),
         matte: useEditorStore.getState().maskMatteView,
       });
 

@@ -1231,7 +1231,8 @@ export default function MasksPanel() {
 
       if (over?.id === 'mask-list-root' || !over) {
         setAdjustments((prev: Adjustments) => {
-          const newMasks = JSON.parse(JSON.stringify(prev.masks));
+          // Only the sub-mask lists change: the masks' bitmaps are shared, not copied.
+          const newMasks = prev.masks.map((m) => ({ ...m, subMasks: [...m.subMasks] }));
           const sourceContainer = newMasks.find((m: MaskContainer) => m.id === sourceContainerId);
           if (!sourceContainer) return prev;
           const subMaskIndex = sourceContainer.subMasks.findIndex((sm: SubMask) => sm.id === dragData.item!.id);

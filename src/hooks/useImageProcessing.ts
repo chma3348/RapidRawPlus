@@ -9,6 +9,7 @@ import { Adjustments, COPYABLE_ADJUSTMENT_KEYS, changedV3, v3ForPaste } from '..
 import { Invokes, Panel } from '../components/ui/AppProperties';
 import { debouncedSave } from './useEditorActions';
 import { globalImageCache } from '../utils/ImageLRUCache';
+import { blankSentData, sameJson } from '../utils/backendPayload';
 
 /** Decode a picture before it is put on screen: swapped in only once it can
  *  be painted, it never leaves a gap (a "blink") while it decodes. */
@@ -39,6 +40,10 @@ function saveIfChanged(path: string, adjustments: Adjustments): boolean {
   debouncedSave(path, adjustments);
   return true;
 }
+
+/** The original (before/after) is rendered without masks or fills, which
+ *  generate_original_transformed_preview drops anyway: they need not cross. */
+const withoutLayers = (adjustments: Adjustments): Adjustments => ({ ...adjustments, masks: [], aiPatches: [] });
 
 /** While a slider moves: the whole picture no larger than this, and zoomed
  *  in, the view at this fraction of its size; smaller still for the rest of
@@ -194,50 +199,12 @@ export function useImageProcessing(
       const currentPath = selectedImage?.path;
       if (!currentPath) return;
 
-      const payload = structuredClone(currentAdjustments);
+      // Fill and mask data the backend already holds is left out (it puts
+      // its copy back); data changed since it was sent goes in full. Copied
+      // only where something is left out: never the megabytes themselves.
       const { patchesSentToBackend } = useEditorStore.getState();
-      const newlySentPatches = new Set<string>();
-
-      const processSubMasks = (subMasks: any[]) => {
-        if (!Array.isArray(subMasks)) return;
-        subMasks.forEach((sm: any) => {
-          if (sm.id && sm.parameters) {
-            const keys = ['mask_data_base64', 'maskDataBase64'];
-            let foundMaskData = false;
-
-            for (const key of keys) {
-              if (sm.parameters[key] !== undefined && sm.parameters[key] !== null) {
-                foundMaskData = true;
-                if (patchesSentToBackend.has(sm.id)) {
-                  sm.parameters[key] = null;
-                }
-              }
-            }
-            if (foundMaskData && !patchesSentToBackend.has(sm.id)) {
-              newlySentPatches.add(sm.id);
-            }
-          }
-        });
-      };
-
-      if (payload.aiPatches && Array.isArray(payload.aiPatches)) {
-        payload.aiPatches.forEach((p: any) => {
-          if (p.id && p.patchData && !p.isLoading) {
-            if (patchesSentToBackend.has(p.id)) {
-              p.patchData = null;
-            } else {
-              newlySentPatches.add(p.id);
-            }
-          }
-          if (p.subMasks) processSubMasks(p.subMasks);
-        });
-      }
-
-      if (payload.masks && Array.isArray(payload.masks)) {
-        payload.masks.forEach((container: any) => {
-          if (container.subMasks) processSubMasks(container.subMasks);
-        });
-      }
+      const generation = patchesSentToBackend.generation;
+      const { payload, fresh } = blankSentData(currentAdjustments, patchesSentToBackend);
 
       // A zoom tile has its own sequence: it must not make a whole-picture
       // preview in flight look stale, nor be judged against one.
@@ -255,9 +222,8 @@ export function useImageProcessing(
           activeWaveformChannel: activeWaveformChannelRef.current || null,
         });
 
-        if (newlySentPatches.size > 0) {
-          newlySentPatches.forEach((id) => patchesSentToBackend.add(id));
-        }
+        // Not if the photo was opened again meanwhile: the backend forgot it.
+        if (fresh.length > 0) patchesSentToBackend.record(fresh, generation);
 
         if (currentPath !== selectedImagePathRef.current) return;
 
@@ -435,7 +401,9 @@ export function useImageProcessing(
   const generateUncroppedPreview = useCallback(
     (currentAdjustments: Adjustments) => {
       if (!selectedImage || !isReady || selectedImage.isVideo) return;
-      invoke(Invokes.GenerateUncroppedPreview, { jsAdjustments: currentAdjustments }).catch((err) =>
+      // Fill and mask data the backend holds is left out; it puts its copy back.
+      const { payload } = blankSentData(currentAdjustments, useEditorStore.getState().patchesSentToBackend);
+      invoke(Invokes.GenerateUncroppedPreview, { jsAdjustments: payload }).catch((err) =>
         console.error('Failed to generate uncropped preview:', err),
       );
     },
@@ -559,7 +527,7 @@ export function useImageProcessing(
         if (targetRes > currentOriginalResRef.current) {
           try {
             const base64Data: string = await invoke('generate_original_transformed_preview', {
-              jsAdjustments: currentAdjustments,
+              jsAdjustments: withoutLayers(currentAdjustments),
               targetResolution: targetRes,
             });
             currentOriginalResRef.current = targetRes;
@@ -714,7 +682,7 @@ export function useImageProcessing(
               // v3's settings go part by part, below.
               if (key === 'v3') continue;
               if (includedKeys.includes(key as string)) {
-                if (JSON.stringify(adjustments[key]) !== JSON.stringify(prev.adjustments[key])) {
+                if (!sameJson(adjustments[key], prev.adjustments[key])) {
                   (delta as any)[key] = adjustments[key];
                 }
               }
@@ -808,7 +776,7 @@ export function useImageProcessing(
         try {
           const targetRes = calculateTargetRes();
           const base64Data: string = await invoke('generate_original_transformed_preview', {
-            jsAdjustments: adjustments,
+            jsAdjustments: withoutLayers(adjustments),
             targetResolution: targetRes,
           });
           if (isEffectActive) {

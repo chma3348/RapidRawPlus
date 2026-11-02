@@ -2454,6 +2454,11 @@ const ImageCanvas = memo(
 
       function onGlobalMove(e: MouseEvent | TouchEvent) {
         if (!isDrawing.current) return;
+        // A move over the stage reaches handleMove through the stage's own
+        // handler; this one takes only a drag that has left it, so no move
+        // is handled (and no sub-mask updated) twice.
+        const host = drawingStageRef.current?.container?.();
+        if (host && e.target instanceof Node && host.contains(e.target)) return;
         handleMove(e);
       }
 

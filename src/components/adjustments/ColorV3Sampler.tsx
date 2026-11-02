@@ -1,6 +1,9 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useTranslation } from 'react-i18next';
+
+// Numbers each change to what the picker shows (see `key` below).
+let inspections = 0;
 
 interface Inspection {
   image: string;
@@ -25,7 +28,11 @@ export default function ColorV3Sampler({
   const [result, setResult] = useState<Inspection | null>(null);
   const [displayPath, setDisplayPath] = useState('');
   const [loadedKey, setLoadedKey] = useState('');
-  const key = JSON.stringify([path, edits, index, open]);
+  // Which inspection is current: a new one whenever the photo, its edits,
+  // the range or the picker's state change. The edits are the whole
+  // adjustments (fills run to megabytes), so they are told apart by
+  // reference, not written out on every render; an edit replaces them.
+  const key = useMemo(() => String(++inspections), [path, edits, index, open]);
   const current = useRef(key);
   current.current = key;
   const sequence = useRef(0);

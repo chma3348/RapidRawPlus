@@ -12,6 +12,7 @@ import { Invokes, LibraryViewMode, ImageFile } from '../components/ui/AppPropert
 import { isVideoPath } from '../utils/media';
 import { INITIAL_ADJUSTMENTS, normalizeLoadedAdjustments } from '../utils/adjustments';
 import { currentColorEngine } from '../utils/currentColorEngine';
+import { sameJson } from '../utils/backendPayload';
 import { globalImageCache } from '../utils/ImageLRUCache';
 import { debouncedSave, debouncedSetHistory } from './useEditorActions';
 import { offerAdobeImport } from '../components/modals/AdobeImportModal';
@@ -264,7 +265,7 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
             // selection, another app).
             const { adjustments: current, isSliderDragging } = useEditorStore.getState();
             if (isSliderDragging || adjustmentsUnsaved(path, current)) return;
-            if (JSON.stringify(current) !== JSON.stringify(currentColorEngine(freshAdjustments))) {
+            if (!sameJson(current, currentColorEngine(freshAdjustments))) {
               setEditor({ adjustments: freshAdjustments });
               resetHistory(freshAdjustments);
               const loaded = useEditorStore.getState().adjustments;

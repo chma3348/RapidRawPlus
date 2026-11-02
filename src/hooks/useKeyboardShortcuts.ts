@@ -52,6 +52,8 @@ export const useKeyboardShortcuts = ({
   const { handleRotate, handleCopyAdjustments, handlePasteAdjustments, handleAutoAdjustments, setAdjustments } =
     useEditorActions();
   const { handleRate, handleSetColorLabel } = useLibraryActions();
+  // Rebinding a key takes effect at once: the map below is built from it.
+  const keybinds = useSettingsStore((s) => s.appSettings?.keybinds);
 
   const sortedListRef = useRef(sortedImageList);
   useEffect(() => {
@@ -72,7 +74,6 @@ export const useKeyboardShortcuts = ({
     // moment it is runs. An action keeps its extra keys (aliases) while it
     // keeps its default.
     const comboMap = new Map<string, string[]>();
-    const keybinds = useSettingsStore.getState().appSettings?.keybinds;
     const bind = (combo: string[], action: string) => {
       if (combo.length === 0) return;
       const key = combo.join('+');
@@ -928,5 +929,6 @@ export const useKeyboardShortcuts = ({
     handleSetColorLabel,
     handleAutoAdjustments,
     setAdjustments,
+    keybinds,
   ]);
 };
