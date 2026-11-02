@@ -1860,6 +1860,9 @@ const ImageCanvas = memo(
           }
           newParams.targetX = x;
           newParams.targetY = y;
+          // The orientation these points were clicked under, which the backend
+          // needs to find them on the photo. The mask itself is placed with the
+          // photo's current orientation, so it follows later turns and flips.
           newParams.rotation = adjustments.rotation || 0;
           newParams.flipHorizontal = adjustments.flipHorizontal || false;
           newParams.flipVertical = adjustments.flipVertical || false;

@@ -381,11 +381,10 @@ export function useAiMasking() {
         mode: 'additive',
         parameters: {
           maskDataBase64: maskData,
-          // The patch mask is in ORIGINAL image space. Carry the photo's
-          // current orientation so the display path transforms it into view
-          // space — exactly the convention ai-subject masks use. Leaving
-          // these at identity puts the mask in the wrong place on any
-          // flipped or rotated photo.
+          // The patch mask is in ORIGINAL image space. Renders and the
+          // overlay place it with the photo's CURRENT orientation (as every
+          // AI mask), so it follows later turns and flips; these record the
+          // orientation it was made under, as ai-subject masks do.
           rotation: adjustments.rotation ?? 0,
           flipHorizontal: !!adjustments.flipHorizontal,
           flipVertical: !!adjustments.flipVertical,
