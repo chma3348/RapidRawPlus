@@ -3141,10 +3141,6 @@ async fn replace_region_in_context(
     ))
 }
 
-/// The least scene, in photo pixels on the longer side, a replacement's
-/// model canvas is cut from.
-const REPLACEMENT_MIN_CONTEXT: u32 = 512;
-
 /// About a megapixel: what Flux Fill is trained around. Its cost grows with
 /// the canvas (1536x1024 is 6144 image tokens), so a larger canvas is
 /// minutes of waiting for detail that the downscaled crop does not carry.
@@ -3183,13 +3179,12 @@ fn replacement_context_bounds(mask: &GrayImage) -> (u32, u32, u32, u32) {
     if x0 == w {
         return (0, 0, w, h);
     }
-    // Context in proportion to the selection — half its span each side —
-    // and never so little that the model sees under about 512 pixels of the
-    // scene. It used to be at least a twelfth of the frame (500 pixels on a
-    // 6000-pixel photo), so a small spot cost as much as a 3-megapixel area.
-    let span = (x1 - x0 + 1).max(y1 - y0 + 1);
-    let pad = (span / 2)
-        .max(REPLACEMENT_MIN_CONTEXT.saturating_sub(span) / 2)
+    // Half the selection's span each side, and at least a twelfth of the
+    // frame. A tighter crop around a small spot (tried 2026-11-01) left the
+    // spot filling half the canvas, and Flux drew a new object there instead
+    // of removing it; the canvas cap keeps this context affordable instead.
+    let pad = ((x1 - x0 + 1).max(y1 - y0 + 1) / 2)
+        .max(w.max(h) / 12)
         .max(16);
     x0 = x0.saturating_sub(pad);
     y0 = y0.saturating_sub(pad);
@@ -3263,11 +3258,10 @@ mod context_replacement_tests {
         );
     }
 
-    /// A small spot on a big photo gets context in proportion to it (but
-    /// not under ~512 px), not a twelfth of the frame; a large area keeps
-    /// half its span each side.
+    /// A small spot keeps a twelfth of the frame around it, so it stays a
+    /// small share of the canvas; a large area keeps half its span each side.
     #[test]
-    fn replacement_context_scales_with_the_selection() {
+    fn replacement_context_keeps_a_spot_small_in_the_canvas() {
         let spot = GrayImage::from_fn(6000, 4000, |x, y| {
             image::Luma([if (3000..3050).contains(&x) && (2000..2040).contains(&y) {
                 255
@@ -3276,8 +3270,7 @@ mod context_replacement_tests {
             }])
         });
         let (_, _, w, h) = replacement_context_bounds(&spot);
-        assert!((512..=520).contains(&w), "spot context {w}x{h}");
-        assert!((500..=520).contains(&h), "spot context {w}x{h}");
+        assert!(w >= 1000 && h >= 1000, "spot context {w}x{h}");
 
         let area = GrayImage::from_fn(6000, 4000, |x, y| {
             image::Luma([if (2000..3000).contains(&x) && (1500..2000).contains(&y) {
