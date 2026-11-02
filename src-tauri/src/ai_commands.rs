@@ -5377,6 +5377,7 @@ pub async fn invoke_generative_replace_with_mask_def(
             is_linear,
             reconstruct_fill,
             content_aware_seed(&previous_attempts, &patch_definition.id),
+            orientation_steps,
         )
         .await?
     } else if let Some((_, model)) = engine_model {
@@ -5763,12 +5764,16 @@ fn content_aware_seed(previous_attempts: &Value, patch_id: &str) -> u64 {
 /// Content-aware fill (content_aware.rs) through the same contract as the
 /// other fills: display-encoded pixels in, the whole frame back with the
 /// gamma flag set exactly as the LaMa and engine paths set it.
+///
+/// The fill runs on the stored (unturned) pixels; `orientation_steps` says
+/// which stored axis is the displayed vertical, for its height prior.
 async fn run_content_aware_patch(
     source_image: DynamicImage,
     mask: GrayImage,
     is_linear: bool,
     exclude_clipped: bool,
     seed: u64,
+    orientation_steps: u8,
 ) -> Result<EngineInpaintResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let started = std::time::Instant::now();
@@ -5784,8 +5789,9 @@ async fn run_content_aware_patch(
             &crate::content_aware::Options {
                 seed,
                 exclude_clipped,
+                orientation_steps,
             },
-        );
+        )?;
         log::info!(
             "[fill] content-aware: seed {seed}, clipped sources {}, {:.2}s",
             if exclude_clipped {
@@ -5795,14 +5801,14 @@ async fn run_content_aware_patch(
             },
             started.elapsed().as_secs_f32()
         );
-        EngineInpaintResult {
+        Ok(EngineInpaintResult {
             image: filled,
             is_linear,
             active_kind: Some("content-aware"),
-        }
+        })
     })
     .await
-    .map_err(|e| format!("Content-aware fill failed: {e}"))
+    .map_err(|e| format!("Content-aware fill failed: {e}"))?
 }
 
 /// Encodes a full-size result image + mask into the aiPatches payload the
@@ -8429,5 +8435,40 @@ mod stored_patch_tests {
             };
             assert_eq!(v2(&stored), v2(&whole), "v2, feather {feather}");
         }
+    }
+
+    /// A content-aware fill with nothing to copy from fails with a message
+    /// the panel can show, rather than coming back as a successful attempt
+    /// that changed nothing.
+    #[test]
+    fn content_aware_with_nothing_to_copy_is_an_error() {
+        let white = DynamicImage::ImageRgba8(RgbaImage::from_pixel(
+            96,
+            64,
+            image::Rgba([255, 255, 255, 255]),
+        ));
+        let mut mask = GrayImage::new(96, 64);
+        for y in 20..40 {
+            for x in 30..60 {
+                mask.put_pixel(x, y, image::Luma([255]));
+            }
+        }
+        let result =
+            tauri::async_runtime::block_on(run_content_aware_patch(white, mask, false, true, 1, 0));
+        match result {
+            Err(e) => assert_eq!(e, crate::content_aware::NOTHING_TO_COPY),
+            Ok(_) => panic!("an unfillable selection came back as a fill"),
+        }
+    }
+
+    /// The editor's quarter turns are what the content-aware fill is told.
+    #[test]
+    fn fill_orientation_reads_the_editors_turns() {
+        let adj = serde_json::json!({"orientationSteps": 3, "flipHorizontal": true});
+        assert_eq!(ai_fill_orientation_from_adjustments(&adj), (3, true, false));
+        assert_eq!(
+            ai_fill_orientation_from_adjustments(&serde_json::json!({})),
+            (0, false, false)
+        );
     }
 }

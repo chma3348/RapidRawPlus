@@ -23,17 +23,29 @@
 //!   the coarser pointers, so the final level copies full-resolution pixels
 //!   (real grain and detail, never an upscaled blur).
 //!
-//! Three things keep it from the classic failures, each measured on the
+//! Four things keep it from the classic failures, each measured on the
 //! fill test set (examples/fill_testset.rs):
 //! * the pyramid's depth follows the hole's thickness, not its span, so the
 //!   coarsest level is never so small that a patch covers half the scene;
 //! * the coarsest level starts from an exemplar fill in Criminisi order
 //!   (edges first), not a smooth blur the search then matches to anything;
 //! * copying from a different height costs extra, so the layers of a
-//!   photograph (sky, horizon, ground) stay in order.
+//!   photograph (sky, horizon, ground) stay in order;
+//! * copying a different kind of surface costs extra: each source's texture
+//!   energy is compared with what the ring around the hole has there, so a
+//!   soft out-of-focus wall is not filled with sharp hair from the subject
+//!   beside it.
 //!
-//! A harmonic seam correction (as healing does) then removes the tone step
-//! the copied texture would otherwise leave at the selection's edge.
+//! Then the seam: a membrane correction (as healing does) gives the whole
+//! fill the tone of the photograph around it, and a Poisson solve on the
+//! copied gradients joins the copies to each other and to the photograph
+//! without a step, keeping their detail.
+//!
+//! (Measured and not adopted: LaMa's fill as a structure guide for the
+//! search. It carried fence wires across a hole, but its smooth, biased
+//! colour steered every textured fill toward the flattest ground in the
+//! frame — cracked mud filled with plain sand, a wall with a flat blob —
+//! in colour, gradient and confidence-weighted forms alike.)
 //!
 //! Distances and votes are taken in the 8-bit display-encoded values every
 //! other fill path hands its models, so the result composites through the
@@ -63,13 +75,17 @@ const CLIPPED_AT: u8 = 250;
 /// photograph votes with weight `GAMMA^-d`.
 const GAMMA: f32 = 1.3;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Options {
     /// Seeds every random choice. The same seed always gives the same fill;
     /// a new seed gives a different, equally plausible one.
     pub seed: u64,
     /// Never copy from clipped-white pixels (for clipped/blown selections).
     pub exclude_clipped: bool,
+    /// Quarter turns the photo is shown at (the editor's `orientationSteps`).
+    /// The image is filled in its stored orientation; on an odd count the
+    /// displayed vertical (which the height prior follows) is the stored x.
+    pub orientation_steps: u8,
 }
 
 /// Small, fast, seedable generator (SplitMix64).
@@ -111,6 +127,13 @@ struct Level {
     usable: Vec<bool>,
     /// Weight of the height prior (see `height_prior`).
     lambda_y: f32,
+    /// The displayed vertical is the stored x axis (photo turned 90°).
+    turned: bool,
+    /// Local texture energy (see `texture_energy`): measured outside the
+    /// hole, interpolated smoothly across it.
+    energy: Option<Vec<f32>>,
+    /// Weight of the texture-energy term.
+    texture_weight: f32,
 }
 
 impl Level {
@@ -167,6 +190,9 @@ impl Level {
             hole,
             usable,
             lambda_y: self.lambda_y,
+            turned: self.turned,
+            energy: None,
+            texture_weight: self.texture_weight,
         }
     }
 
@@ -327,15 +353,86 @@ fn raw_patch_distance(lv: &Level, t: (i32, i32), s: (i32, i32), cap: f32) -> f32
 /// squared 8-bit RGB difference) for a source one level-height away.
 const LAMBDA_Y: f32 = 2400.0;
 
-#[inline]
-fn height_prior(lv: &Level, t: (i32, i32), s: (i32, i32)) -> f32 {
-    let dy = (s.1 - t.1) as f32 / lv.h.max(1) as f32;
-    lv.lambda_y * dy * dy
+/// What copying a different kind of surface costs (see `energy_distance`),
+/// per squared unit of log energy ratio beyond the dead zone; in the
+/// distance's units. Measured on the fill test set: it stops a soft,
+/// out-of-focus wall being filled with sharp hair and a face from the
+/// subject beside it, and leaves fills of uniform texture as they were.
+const TEXTURE_WEIGHT: f32 = 1000.0;
+
+/// Local texture energy of a level: the RMS of its fine detail (luma minus
+/// a small blur) over a window three patches wide. Inside the hole, and wherever
+/// the window reaches into it, the energy is not measured but interpolated
+/// smoothly from the measured ring around it, which is what the fill should
+/// match there.
+fn texture_energy(lv: &Level) -> Vec<f32> {
+    let (w, h) = (lv.w, lv.h);
+    let luma: Vec<[f32; 3]> = lv
+        .px
+        .iter()
+        .map(|p| {
+            let l = 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
+            [l, 0.0, 0.0]
+        })
+        .collect();
+    let low = box_blur2(&luma, w, h, 1);
+    let hp2: Vec<[f32; 3]> = luma
+        .iter()
+        .zip(&low)
+        .map(|(a, b)| {
+            let d = a[0] - b[0];
+            [d * d, 0.0, 0.0]
+        })
+        .collect();
+    let e2 = box_blur2(&hp2, w, h, 3 * R as usize);
+    // Measured only where the window is clear of the hole.
+    let outside: Vec<bool> = lv.hole.iter().map(|b| !b).collect();
+    let d_out = distance_to_known(&outside, w, h);
+    let known: Vec<bool> = (0..w * h)
+        .map(|i| !lv.hole[i] && d_out[i] > (6 * R + 2) as f32)
+        .collect();
+    // Plus a floor for sensor noise, so flat sky compares by ratio sanely.
+    let measured: Vec<f32> = e2.iter().map(|v| v[0].max(0.0).sqrt() + 1.5).collect();
+    smooth_fill(&measured, &known, w, h)
 }
 
 #[inline]
+fn height_prior(lv: &Level, t: (i32, i32), s: (i32, i32)) -> f32 {
+    // Along the displayed vertical: the stored x axis on a turned photo.
+    let dy = if lv.turned {
+        (s.0 - t.0) as f32 / lv.w.max(1) as f32
+    } else {
+        (s.1 - t.1) as f32 / lv.h.max(1) as f32
+    };
+    lv.lambda_y * dy * dy
+}
+
+/// How far the source's texture energy is from what the hole should have
+/// at the target: a smooth patch copied into grainy ground (or the reverse)
+/// shows as a flat blob even when its colour is right.
+#[inline]
+fn energy_distance(lv: &Level, t: (i32, i32), s: (i32, i32)) -> f32 {
+    let Some(e) = &lv.energy else {
+        return 0.0;
+    };
+    let w = lv.w as i32;
+    // A ratio within the dead zone is free: only a clearly different kind
+    // of surface (sharp hair against soft bokeh, smooth sand against
+    // cracked mud) costs, so the term never fragments a coherent copy.
+    let ratio = (e[(t.1 * w + t.0) as usize] / e[(s.1 * w + s.0) as usize])
+        .ln()
+        .abs();
+    let excess = (ratio - ENERGY_DEAD_ZONE).max(0.0);
+    lv.texture_weight * excess * excess
+}
+
+/// Texture energies within this log-ratio of each other (x1.6) count as
+/// the same kind of surface.
+const ENERGY_DEAD_ZONE: f32 = 0.47;
+
+#[inline]
 fn patch_distance(lv: &Level, t: (i32, i32), s: (i32, i32), cap: f32) -> f32 {
-    let prior = height_prior(lv, t, s);
+    let prior = height_prior(lv, t, s) + energy_distance(lv, t, s);
     if prior >= cap {
         return f32::MAX;
     }
@@ -547,6 +644,105 @@ impl LevelCtx<'_> {
             }
         });
         out
+    }
+}
+
+impl LevelCtx<'_> {
+    /// Votes for the fill's gradients rather than its colours: at every
+    /// target pixel, the weighted mean of the forward differences the
+    /// overlapping patches copy there. Where two copied regions meet, their
+    /// colours may disagree but their gradients barely do, so a fill
+    /// rebuilt from these (see `poisson_refine`) has no seam between them.
+    fn vote_gradients(&self, field: &Field, conf: &[f32]) -> Gradients {
+        let (w, h) = (self.lv.w, self.lv.h);
+        let mut sample: Vec<f32> = field
+            .dist
+            .iter()
+            .zip(self.targets)
+            .filter(|(_, t)| **t)
+            .map(|(d, _)| *d)
+            .step_by(7)
+            .collect();
+        let sigma2 = if sample.is_empty() {
+            1.0
+        } else {
+            let k = (sample.len() * 3 / 4).min(sample.len() - 1);
+            let (_, v, _) = sample.select_nth_unstable_by(k, |a, b| a.total_cmp(b));
+            v.max(1.0)
+        };
+        let weight: Vec<f32> = field
+            .dist
+            .iter()
+            .zip(conf)
+            .zip(self.targets)
+            .map(|((d, c), t)| {
+                if *t {
+                    (-d / (2.0 * sigma2)).exp() * c + 1e-8
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let px = &self.lv.px;
+        let mut gx = vec![[0.0f32; 3]; w * h];
+        let mut gy = vec![[0.0f32; 3]; w * h];
+        gx.par_chunks_mut(w)
+            .zip(gy.par_chunks_mut(w))
+            .enumerate()
+            .for_each(|(y, (rx, ry))| {
+                for x in 0..w {
+                    let i = y * w + x;
+                    if !self.targets[i] {
+                        continue;
+                    }
+                    let (mut ax, mut ay) = ([0.0f32; 3], [0.0f32; 3]);
+                    let (mut wx, mut wy) = (0.0f32, 0.0f32);
+                    for dy in -R..=R {
+                        let py = y as i32 + dy;
+                        if py < 0 || py >= h as i32 {
+                            continue;
+                        }
+                        for dx in -R..=R {
+                            let pxx = x as i32 + dx;
+                            if pxx < 0 || pxx >= w as i32 {
+                                continue;
+                            }
+                            let p = py as usize * w + pxx as usize;
+                            let wt = weight[p];
+                            if wt == 0.0 {
+                                continue;
+                            }
+                            let s = field.src[p];
+                            let q = (s.1 - dy) as usize * w + (s.0 - dx) as usize;
+                            // Only differences that stay inside the patch:
+                            // its pixels are all real photograph.
+                            if -dx < R {
+                                let a = px[q];
+                                let b = px[q + 1];
+                                for c in 0..3 {
+                                    ax[c] += wt * (b[c] - a[c]);
+                                }
+                                wx += wt;
+                            }
+                            if -dy < R {
+                                let a = px[q];
+                                let b = px[q + w];
+                                for c in 0..3 {
+                                    ay[c] += wt * (b[c] - a[c]);
+                                }
+                                wy += wt;
+                            }
+                        }
+                    }
+                    if wx > 0.0 {
+                        rx[x] = [ax[0] / wx, ax[1] / wx, ax[2] / wx];
+                    }
+                    if wy > 0.0 {
+                        ry[x] = [ay[0] / wy, ay[1] / wy, ay[2] / wy];
+                    }
+                }
+            });
+        (gx, gy)
     }
 }
 
@@ -780,13 +976,152 @@ fn greedy_init(lv: &mut Level, valid: &[bool], valid_list: &[u32], seed: u64) {
     }
 }
 
+/// A fill's x and y forward differences, per pixel.
+type Gradients = (Vec<[f32; 3]>, Vec<[f32; 3]>);
+
 /// What `synthesize` returns: the level-0 pixels with the hole filled, and
 /// the fill's own estimate of the known pixels just around it.
 struct Synthesized {
     px: Vec<[f32; 3]>,
     ring: Vec<[f32; 3]>,
+    /// What the copied patches say the fill's x and y gradients are
+    /// (forward differences), around and inside the hole.
+    grad: Option<Gradients>,
     /// The hole's half-thickness in pixels (deepest point to the edge).
     depth: f32,
+}
+
+/// Fills the `known == false` pixels of `v` smoothly from the known ones
+/// (push-pull: masked averages down a pyramid, then interpolated back up
+/// and relaxed toward a membrane). Unlike a pinned solve, unknown values
+/// never leak into the coarse averages, so a large gap is not pulled toward
+/// whatever placeholder it held.
+fn smooth_fill(v: &[f32], known: &[bool], w: usize, h: usize) -> Vec<f32> {
+    let n_known = known.iter().filter(|k| **k).count();
+    if n_known == w * h {
+        return v.to_vec();
+    }
+    if n_known == 0 {
+        return vec![0.0; w * h];
+    }
+    if w <= 2 || h <= 2 {
+        let mean = v
+            .iter()
+            .zip(known)
+            .filter(|(_, k)| **k)
+            .map(|(x, _)| *x)
+            .sum::<f32>()
+            / n_known as f32;
+        return v
+            .iter()
+            .zip(known)
+            .map(|(x, k)| if *k { *x } else { mean })
+            .collect();
+    }
+    let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+    let mut cv = vec![0.0f32; cw * ch];
+    let mut ck = vec![false; cw * ch];
+    for y in 0..ch {
+        for x in 0..cw {
+            let (mut sum, mut n) = (0.0f32, 0u32);
+            for (sx, sy) in [
+                (2 * x, 2 * y),
+                (2 * x + 1, 2 * y),
+                (2 * x, 2 * y + 1),
+                (2 * x + 1, 2 * y + 1),
+            ] {
+                if sx < w && sy < h && known[sy * w + sx] {
+                    sum += v[sy * w + sx];
+                    n += 1;
+                }
+            }
+            if n > 0 {
+                cv[y * cw + x] = sum / n as f32;
+                ck[y * cw + x] = true;
+            }
+        }
+    }
+    let coarse = smooth_fill(&cv, &ck, cw, ch);
+    let mut out = v.to_vec();
+    for y in 0..h {
+        let fy = ((y as f32 + 0.5) * 0.5 - 0.5).max(0.0);
+        let y0 = (fy as usize).min(ch - 1);
+        let y1 = (y0 + 1).min(ch - 1);
+        let ty = fy - y0 as f32;
+        for x in 0..w {
+            if known[y * w + x] {
+                continue;
+            }
+            let fx = ((x as f32 + 0.5) * 0.5 - 0.5).max(0.0);
+            let x0 = (fx as usize).min(cw - 1);
+            let x1 = (x0 + 1).min(cw - 1);
+            let tx = fx - x0 as f32;
+            let a = coarse[y0 * cw + x0] * (1.0 - tx) + coarse[y0 * cw + x1] * tx;
+            let b = coarse[y1 * cw + x0] * (1.0 - tx) + coarse[y1 * cw + x1] * tx;
+            out[y * w + x] = a * (1.0 - ty) + b * ty;
+        }
+    }
+    // A few relaxation sweeps (in place) smooth the interpolation's kinks.
+    for _ in 0..4 {
+        for y in 0..h {
+            for x in 0..w {
+                let i = y * w + x;
+                if known[i] {
+                    continue;
+                }
+                let l = out[if x > 0 { i - 1 } else { i }];
+                let r = out[if x + 1 < w { i + 1 } else { i }];
+                let u = out[if y > 0 { i - w } else { i }];
+                let d = out[if y + 1 < h { i + w } else { i }];
+                out[i] = 0.25 * (l + r + u + d);
+            }
+        }
+    }
+    out
+}
+
+/// Box blur of radius `r` (clamped at the borders), run twice: close to a
+/// Gaussian of sigma ~0.8r.
+fn box_blur2(px: &[[f32; 3]], w: usize, h: usize, r: usize) -> Vec<[f32; 3]> {
+    if r == 0 {
+        return px.to_vec();
+    }
+    let pass = |src: &[[f32; 3]], horizontal: bool| -> Vec<[f32; 3]> {
+        let mut out = vec![[0.0f32; 3]; w * h];
+        let (n_lines, len) = if horizontal { (h, w) } else { (w, h) };
+        let at = |line: usize, k: usize| {
+            if horizontal {
+                line * w + k
+            } else {
+                k * w + line
+            }
+        };
+        let norm = 1.0 / (2 * r + 1) as f32;
+        for line in 0..n_lines {
+            let mut acc = [0.0f32; 3];
+            for k in 0..=2 * r {
+                let p = src[at(line, k.saturating_sub(r).min(len - 1))];
+                for c in 0..3 {
+                    acc[c] += p[c];
+                }
+            }
+            for k in 0..len {
+                out[at(line, k)] = [acc[0] * norm, acc[1] * norm, acc[2] * norm];
+                let add = src[at(line, (k + r + 1).min(len - 1))];
+                let sub = src[at(line, k.saturating_sub(r))];
+                for c in 0..3 {
+                    acc[c] += add[c] - sub[c];
+                }
+            }
+        }
+        out
+    };
+    let mut v = px.to_vec();
+    for _ in 0..2 {
+        v = pass(&v, true);
+        v = pass(&v, false);
+    }
+    v
 }
 
 /// Synthesizes the hole of `base` (full resolution), or `None` when there
@@ -805,6 +1140,7 @@ fn synthesize(base: Level, seed: u64) -> Option<Synthesized> {
         return Some(Synthesized {
             ring: base.px,
             px,
+            grad: None,
             depth,
         });
     }
@@ -826,6 +1162,7 @@ fn synthesize(base: Level, seed: u64) -> Option<Synthesized> {
     let n_levels = levels.len();
     let mut field: Option<Field> = None;
     let mut ring = Vec::new();
+    let mut grad = None;
     for li in (0..n_levels).rev() {
         let valid = levels[li].valid_centres();
         let valid_list: Vec<u32> = valid
@@ -836,6 +1173,10 @@ fn synthesize(base: Level, seed: u64) -> Option<Synthesized> {
             .collect();
         if valid_list.is_empty() {
             return None;
+        }
+        if levels[li].texture_weight > 0.0 {
+            let e = texture_energy(&levels[li]);
+            levels[li].energy = Some(e);
         }
         if li == n_levels - 1 {
             greedy_init(&mut levels[li], &valid, &valid_list, mix(seed, 0xC0A25E));
@@ -948,6 +1289,13 @@ fn synthesize(base: Level, seed: u64) -> Option<Synthesized> {
                     }
                 }
                 ring = p;
+                let ctx = LevelCtx {
+                    lv: &levels[0],
+                    valid: &valid,
+                    valid_list: &valid_list,
+                    targets: &targets,
+                };
+                grad = Some(ctx.vote_gradients(&f, &conf));
             } else {
                 levels[li].px = p;
             }
@@ -959,53 +1307,124 @@ fn synthesize(base: Level, seed: u64) -> Option<Synthesized> {
     Some(Synthesized {
         px: levels.swap_remove(0).px,
         ring,
+        grad,
         depth,
     })
 }
 
-/// Removes what is left of a seam. Copied texture keeps the tone of where it
-/// came from; a fill's estimate of the known ring around the hole shows how
-/// far that is from the photograph there. That difference is spread across
-/// the hole as a smooth (harmonic) correction, as healing does, fading over
-/// most of the hole's depth so the copied texture keeps its own contrast.
+/// Removes the tone step a copy would leave at the selection's edge. The
+/// fill's own estimate of the pixels just outside the hole shows how far
+/// its tone is from the photograph there; that difference is spread across
+/// the whole hole as a smooth membrane, as healing does. The copied detail
+/// keeps its contrast (the correction is smooth), and the fill keeps the
+/// surroundings' tone all the way in.
+///
+/// (Measured against the earlier version, which faded this correction out
+/// over three quarters of the hole's depth so the middle kept the tone of
+/// wherever it was copied from: that left a soft lens-shaped patch of
+/// another tone in smooth skies, which a viewer reads as an outline.)
 ///
 /// (Tried and dropped: lifting a clipped selection's fill to the tone of the
 /// glow around it. On lacy clipped cloud the fill sits ~15 levels under that
 /// glow, which shows as bright outlines; the lift narrowed it by 6 and moved
 /// the fill's mean further from the unclipped sky nearby, 0.9 -> 2.3 ΔE.)
+/// So with `fade` (clipped selections) the correction fades out over that
+/// many pixels from the edge instead.
 fn seam_corrected(
     image: &RgbaImage,
-    members: &[u32],
+    inside: &[bool],
     w: usize,
     (cx0, cy0, cw, ch): (usize, usize, usize, usize),
     syn: &Synthesized,
+    fade: Option<f32>,
 ) -> Vec<[f32; 3]> {
-    let to8 = |v: f32| v.round().clamp(0.0, 255.0) as u8;
-    let crop =
-        image::imageops::crop_imm(image, cx0 as u32, cy0 as u32, cw as u32, ch as u32).to_image();
-    let generated = RgbaImage::from_fn(cw as u32, ch as u32, |x, y| {
-        let v = syn.ring[y as usize * cw + x as usize];
-        Rgba([to8(v[0]), to8(v[1]), to8(v[2]), 255])
-    });
-    let mut mask = GrayImage::new(cw as u32, ch as u32);
-    // The hole's own pixels (the object being removed) must not reach the
-    // solve: its coarse levels average them into the boundary values.
-    let mut crop = crop;
-    for &m in members {
-        let (x, y) = (m as usize % w - cx0, m as usize / w - cy0);
-        mask.put_pixel(x as u32, y as u32, image::Luma([255]));
-        crop.put_pixel(x as u32, y as u32, *generated.get_pixel(x as u32, y as u32));
-    }
-    let band = (syn.depth * 0.75).max(8.0);
-    let blended = crate::heal_blend::blend_generated(&crop, &generated, &mask, band);
+    let depth_in = fade.map(|_| distance_to_known(inside, cw, ch));
+    // The ring: known pixels touching the hole.
+    let outside: Vec<bool> = inside.iter().map(|b| !b).collect();
+    let d_out = distance_to_known(&outside, cw, ch);
+    let ring: Vec<bool> = (0..cw * ch)
+        .map(|i| !inside[i] && d_out[i] <= 1.5)
+        .collect();
+    let raw = image.as_raw();
     let mut px = syn.px.clone();
-    for &m in members {
-        let (x, y) = (m as usize % w - cx0, m as usize / w - cy0);
-        let b = blended.get_pixel(x as u32, y as u32);
-        px[y * cw + x] = [b[0] as f32, b[1] as f32, b[2] as f32];
+    for c in 0..3 {
+        let plane: Vec<f32> = (0..cw * ch)
+            .map(|i| {
+                if !ring[i] {
+                    return 0.0;
+                }
+                let (x, y) = (i % cw, i / cw);
+                raw[((cy0 + y) * w + cx0 + x) * 4 + c] as f32 - syn.ring[i][c]
+            })
+            .collect();
+        let corr = smooth_fill(&plane, &ring, cw, ch);
+        for i in 0..cw * ch {
+            if inside[i] {
+                let k = match (&depth_in, fade) {
+                    (Some(d), Some(band)) => (1.0 - d[i] / band).clamp(0.0, 1.0),
+                    _ => 1.0,
+                };
+                px[i][c] += corr[i] * k;
+            }
+        }
     }
     px
 }
+
+/// Rebuilds the hole from the voted gradients (see `vote_gradients`) with
+/// the photograph around it as the boundary: a Poisson solve, by
+/// over-relaxed red-black Gauss-Seidel from the colour fill as the starting
+/// point. The fill then meets the photograph exactly at the selection's
+/// edge and has no seams inside where copied regions meet, while keeping
+/// all of their detail (Darabi et al., "Image Melding", 2012).
+fn poisson_refine(
+    px: &mut [[f32; 3]],
+    inside: &[bool],
+    (gx, gy): (&[[f32; 3]], &[[f32; 3]]),
+    w: usize,
+    h: usize,
+    iterations: usize,
+) {
+    const OMEGA: f32 = 1.9;
+    // The two colours of a checkerboard: each only reads the other, so a
+    // colour's cells update in parallel with the same result as in order.
+    let cells: [Vec<usize>; 2] = std::array::from_fn(|colour| {
+        (0..w * h)
+            .filter(|&i| {
+                let (x, y) = (i % w, i / w);
+                inside[i] && (x + y) % 2 == colour && x > 0 && y > 0 && x + 1 < w && y + 1 < h
+            })
+            .collect()
+    });
+    let mut next: Vec<[f32; 3]> = Vec::new();
+    for _ in 0..iterations {
+        for colour in &cells {
+            let cur = &*px;
+            colour
+                .par_iter()
+                .map(|&i| {
+                    let mut v = [0.0f32; 3];
+                    for c in 0..3 {
+                        let sum = (cur[i + 1][c] - gx[i][c])
+                            + (cur[i - 1][c] + gx[i - 1][c])
+                            + (cur[i + w][c] - gy[i][c])
+                            + (cur[i - w][c] + gy[i - w][c]);
+                        v[c] = (1.0 - OMEGA) * cur[i][c] + OMEGA * 0.25 * sum;
+                    }
+                    v
+                })
+                .collect_into_vec(&mut next);
+            for (&i, v) in colour.iter().zip(&next) {
+                px[i] = *v;
+            }
+        }
+    }
+}
+
+/// Sweeps of the Poisson solve. It starts from the seam-corrected fill, so
+/// only seams and steps a few dozen pixels wide are left for it to remove
+/// (measured: 100 and 400 sweeps scored alike on the fill test set).
+const POISSON_ITERATIONS: usize = 120;
 
 /// Hole pixels filled as one job, with their bounding box.
 struct Group {
@@ -1083,15 +1502,27 @@ fn hole_groups(hole: &[bool], w: usize, h: usize, reach: usize) -> Vec<Group> {
     groups
 }
 
+/// What `fill` says when a selection has nothing around it to copy from.
+pub const NOTHING_TO_COPY: &str =
+    "Nothing nearby to copy from \u{2014} try a smaller selection or Generative AI";
+
 /// Content-aware fill of every pixel `mask` selects (any non-zero value,
 /// grown by two pixels to take in anti-aliased object edges). Returns the
 /// whole image with those pixels rebuilt; the caller composites through its
 /// own (soft) mask.
-pub fn fill(image: &RgbaImage, mask: &GrayImage, options: &Options) -> RgbaImage {
+///
+/// Errors when the mask does not match the image, or when a hole has no
+/// usable photograph anywhere in the frame to copy from (it never hands the
+/// photo back unchanged as if it had filled it).
+pub fn fill(image: &RgbaImage, mask: &GrayImage, options: &Options) -> Result<RgbaImage, String> {
     let (w, h) = (image.width() as usize, image.height() as usize);
     let mut out = image.clone();
     if mask.dimensions() != image.dimensions() {
-        return out;
+        return Err(format!(
+            "Content-aware fill: the selection is {}x{} but the photo is {w}x{h}",
+            mask.width(),
+            mask.height()
+        ));
     }
     // Hole: the selection grown by 2 px.
     let sel: Vec<bool> = mask.as_raw().iter().map(|v| *v > 0).collect();
@@ -1129,6 +1560,7 @@ pub fn fill(image: &RgbaImage, mask: &GrayImage, options: &Options) -> RgbaImage
             true
         })
         .collect();
+    let turned = options.orientation_steps % 2 == 1;
 
     for (gi, group) in hole_groups(&hole, w, h, 24).into_iter().enumerate() {
         let Group {
@@ -1167,6 +1599,9 @@ pub fn fill(image: &RgbaImage, mask: &GrayImage, options: &Options) -> RgbaImage
                     let (x, y) = (m as usize % w, m as usize / w);
                     lhole[(y - cy0) * cw + (x - cx0)] = true;
                 }
+                if !lusable.iter().any(|u| *u) {
+                    return None;
+                }
                 let level = Level {
                     w: cw,
                     h: ch,
@@ -1174,6 +1609,9 @@ pub fn fill(image: &RgbaImage, mask: &GrayImage, options: &Options) -> RgbaImage
                     hole: lhole,
                     usable: lusable,
                     lambda_y: LAMBDA_Y,
+                    turned,
+                    energy: None,
+                    texture_weight: TEXTURE_WEIGHT,
                 };
                 synthesize(level, mix(options.seed, gi as u64)).map(|p| (cx0, cy0, cw, ch, p))
             };
@@ -1185,9 +1623,24 @@ pub fn fill(image: &RgbaImage, mask: &GrayImage, options: &Options) -> RgbaImage
             result = fill_with(margin, &out);
         }
         let Some((cx0, cy0, cw, ch, syn)) = result else {
-            continue;
+            return Err(NOTHING_TO_COPY.to_string());
         };
-        let px = seam_corrected(&out, &members, w, (cx0, cy0, cw, ch), &syn);
+        let mut inside = vec![false; cw * ch];
+        for &m in &members {
+            let (x, y) = (m as usize % w - cx0, m as usize / w - cy0);
+            inside[y * cw + x] = true;
+        }
+        // A clipped selection is ringed by glow: matching the fill to that
+        // ring all the way in would lift it back toward white (measured:
+        // part of a rebuilt sky clipped again). There the correction only
+        // joins the edge, fading out over the hole's depth, as before.
+        let fade = options.exclude_clipped.then(|| (syn.depth * 0.75).max(8.0));
+        let mut px = seam_corrected(&out, &inside, w, (cx0, cy0, cw, ch), &syn, fade);
+        if !options.exclude_clipped
+            && let Some((gx, gy)) = &syn.grad
+        {
+            poisson_refine(&mut px, &inside, (gx, gy), cw, ch, POISSON_ITERATIONS);
+        }
         for &m in &members {
             let (x, y) = (m as usize % w, m as usize / w);
             let p = px[(y - cy0) * cw + (x - cx0)];
@@ -1204,7 +1657,7 @@ pub fn fill(image: &RgbaImage, mask: &GrayImage, options: &Options) -> RgbaImage
             );
         }
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -1260,8 +1713,10 @@ mod tests {
             &Options {
                 seed: 1,
                 exclude_clipped: false,
+                ..Default::default()
             },
-        );
+        )
+        .unwrap();
         let err = in_mask_error(&filled, &truth, &mask);
         // Blur or a wrong phase would sit near 80 (half the stripe contrast).
         assert!(err < 20.0, "in-mask error {err}");
@@ -1298,8 +1753,10 @@ mod tests {
             &Options {
                 seed: 1,
                 exclude_clipped: false,
+                ..Default::default()
             },
-        );
+        )
+        .unwrap();
         let mut brown = 0;
         let mut n = 0;
         for (x, y, v) in mask.enumerate_pixels() {
@@ -1332,24 +1789,30 @@ mod tests {
             &Options {
                 seed: 3,
                 exclude_clipped: false,
+                ..Default::default()
             },
-        );
+        )
+        .unwrap();
         let b = fill(
             &img,
             &mask,
             &Options {
                 seed: 3,
                 exclude_clipped: false,
+                ..Default::default()
             },
-        );
+        )
+        .unwrap();
         let c = fill(
             &img,
             &mask,
             &Options {
                 seed: 4,
                 exclude_clipped: false,
+                ..Default::default()
             },
-        );
+        )
+        .unwrap();
         assert_eq!(a.as_raw(), b.as_raw());
         assert_ne!(a.as_raw(), c.as_raw());
     }
@@ -1374,8 +1837,10 @@ mod tests {
             &Options {
                 seed: 1,
                 exclude_clipped: true,
+                ..Default::default()
             },
-        );
+        )
+        .unwrap();
         for (x, y, v) in mask.enumerate_pixels() {
             if v[0] > 0 {
                 let p = filled.get_pixel(x, y);
@@ -1385,5 +1850,129 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn height_prior_follows_the_displayed_vertical() {
+        let level = |turned| Level {
+            w: 200,
+            h: 100,
+            px: vec![[0.0; 3]; 200 * 100],
+            hole: vec![false; 200 * 100],
+            usable: vec![true; 200 * 100],
+            lambda_y: LAMBDA_Y,
+            turned,
+            energy: None,
+            texture_weight: 0.0,
+        };
+        // Upright: a source above costs, one beside is free.
+        let upright = level(false);
+        assert!(height_prior(&upright, (100, 50), (100, 10)) > 0.0);
+        assert_eq!(height_prior(&upright, (100, 50), (20, 50)), 0.0);
+        // Turned a quarter: the stored x axis is the displayed vertical.
+        let turned = level(true);
+        assert_eq!(height_prior(&turned, (100, 50), (100, 10)), 0.0);
+        assert!(height_prior(&turned, (100, 50), (20, 50)) > 0.0);
+    }
+
+    #[test]
+    fn turned_photo_keeps_its_layers_apart() {
+        // The frame-edge test above, stored turned a quarter: the sky is
+        // the left of the stored image and the hole touches the left edge.
+        let mut rng = Rng::new(5);
+        let (w, h) = (300u32, 600u32);
+        let img = RgbaImage::from_fn(w, h, |x, _| {
+            let n = (rng.next() % 24) as u8;
+            if x < 150 {
+                Rgba([110 + n, 160 + n, 220, 255])
+            } else {
+                Rgba([140 + n, 110 + n, 70 + n / 2, 255])
+            }
+        });
+        let mask = GrayImage::from_fn(w, h, |x, y| {
+            let dx = (x as f32 - 20.0) / 110.0;
+            let dy = (y as f32 - 330.0) / 200.0;
+            Luma([if dx * dx + dy * dy <= 1.0 { 255 } else { 0 }])
+        });
+        let filled = fill(
+            &img,
+            &mask,
+            &Options {
+                seed: 1,
+                orientation_steps: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let (mut brown, mut n) = (0, 0);
+        for (x, y, v) in mask.enumerate_pixels() {
+            if v[0] > 0 && x < 120 {
+                n += 1;
+                if filled.get_pixel(x, y)[2] < 150 {
+                    brown += 1;
+                }
+            }
+        }
+        assert!(
+            brown * 50 < n,
+            "{brown} of {n} sky pixels filled with ground"
+        );
+    }
+
+    #[test]
+    fn a_soft_surface_is_filled_with_soft_texture() {
+        // Left: soft, out-of-focus shading. Right: sharp grain of the same
+        // mean tone. A hole in the soft side must not fill with grain.
+        let mut rng = Rng::new(3);
+        let (w, h) = (240u32, 160u32);
+        let img = RgbaImage::from_fn(w, h, |x, y| {
+            let v = if x < 120 {
+                120.0 + 30.0 * (x as f32 / 9.0).sin() * (y as f32 / 11.0).cos()
+            } else {
+                60.0 + (rng.next() % 120) as f32
+            };
+            let v = v as u8;
+            Rgba([v, v, v, 255])
+        });
+        let mask = square_mask(w, h, 40, 50, 60);
+        let filled = fill(&img, &mask, &Options::default()).unwrap();
+        // Mean absolute Laplacian: grain is ~100, the soft shading ~1.
+        let lap = |im: &RgbaImage, x: u32, y: u32| {
+            let v = |x: u32, y: u32| im.get_pixel(x, y)[0] as f32;
+            (4.0 * v(x, y) - v(x - 1, y) - v(x + 1, y) - v(x, y - 1) - v(x, y + 1)).abs()
+        };
+        let (mut sum, mut n) = (0.0f32, 0.0f32);
+        for y in 52..108 {
+            for x in 42..98 {
+                sum += lap(&filled, x, y);
+                n += 1.0;
+            }
+        }
+        let mean = sum / n;
+        assert!(mean < 8.0, "grain copied into a soft surface: {mean}");
+    }
+
+    #[test]
+    fn nothing_to_copy_is_an_error_not_a_silent_no_op() {
+        // All clipped white with clipped sources excluded: no source exists.
+        let img = RgbaImage::from_pixel(120, 90, Rgba([255, 255, 255, 255]));
+        let mask = square_mask(120, 90, 40, 30, 20);
+        let err = fill(
+            &img,
+            &mask,
+            &Options {
+                seed: 1,
+                exclude_clipped: true,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err, NOTHING_TO_COPY);
+        // A selection covering the whole frame has nothing outside it.
+        let all = GrayImage::from_pixel(120, 90, Luma([255]));
+        let img = stripes(120, 90);
+        assert!(fill(&img, &all, &Options::default()).is_err());
+        // A mismatched mask is an error too, not the photo handed back.
+        assert!(fill(&img, &GrayImage::new(10, 10), &Options::default()).is_err());
     }
 }
