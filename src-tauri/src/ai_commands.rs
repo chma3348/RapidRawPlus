@@ -3260,6 +3260,21 @@ mod context_replacement_tests {
 
     /// A small spot keeps a twelfth of the frame around it, so it stays a
     /// small share of the canvas; a large area keeps half its span each side.
+    /// Try Again keeps counting up (ids and seeds) after the oldest
+    /// attempts are dropped at the cap.
+    #[test]
+    fn fill_attempts_are_capped_and_keep_counting() {
+        let ids: Vec<Value> = (3..=10)
+            .map(|n| serde_json::json!({"id": format!("attempt-{n}")}))
+            .collect();
+        assert_eq!(last_attempt_number(&ids), 10);
+        assert_eq!(last_attempt_number(&[]), 0);
+        assert_eq!(
+            last_attempt_number(&[serde_json::json!({"id": "manual"})]),
+            0
+        );
+    }
+
     #[test]
     fn replacement_context_keeps_a_spot_small_in_the_canvas() {
         let spot = GrayImage::from_fn(6000, 4000, |x, y| {
@@ -5723,10 +5738,6 @@ pub async fn reblend_replacement(
     }).await.map_err(|e|e.to_string())?
 }
 
-/// Encodes a full-size result image + mask into the aiPatches payload the
-/// frontend stores in the sidecar (PNG, not JPEG: deep-shadow fills live at
-/// pixel values 0-5 where JPEG block noise becomes banding under exposure
-/// boosts; the patch is mostly black, so PNG stays small).
 /// The seed for a content-aware attempt: its attempt number, so the first
 /// fill of a selection is always the same and Try Again gives the next one.
 fn content_aware_seed(previous_attempts: &Value, patch_id: &str) -> u64 {
@@ -5736,7 +5747,7 @@ fn content_aware_seed(previous_attempts: &Value, patch_id: &str) -> u64 {
     let attempts = previous
         .get("reconstructVariants")
         .and_then(Value::as_array)
-        .map(|v| v.len())
+        .map(|v| last_attempt_number(v))
         .filter(|n| *n > 0)
         .unwrap_or_else(|| {
             usize::from(
@@ -5794,6 +5805,10 @@ async fn run_content_aware_patch(
     .map_err(|e| format!("Content-aware fill failed: {e}"))
 }
 
+/// Encodes a full-size result image + mask into the aiPatches payload the
+/// frontend stores in the sidecar (PNG, not JPEG: deep-shadow fills live at
+/// pixel values 0-5 where JPEG block noise becomes banding under exposure
+/// boosts; the patch is mostly black, so PNG stays small).
 fn encode_patch_result_value(
     patch_rgba: &RgbaImage,
     patch_is_gamma: bool,
@@ -5908,6 +5923,21 @@ struct ReconstructResponseInputs<'a> {
     active_kind: &'static str,
 }
 
+/// Attempts a selection keeps (Try Again); older ones are dropped.
+const MAX_FILL_ATTEMPTS: usize = 8;
+
+/// The highest `attempt-N` among a selection's attempts (0 when none), so
+/// numbering and seeds keep counting up after old attempts are dropped.
+fn last_attempt_number(variants: &[Value]) -> usize {
+    variants
+        .iter()
+        .filter_map(|v| v.get("id").and_then(Value::as_str))
+        .filter_map(|id| id.strip_prefix("attempt-"))
+        .filter_map(|n| n.parse::<usize>().ok())
+        .max()
+        .unwrap_or(0)
+}
+
 fn attach_reconstruct_response_metadata(
     mut active_payload: Value,
     inputs: ReconstructResponseInputs<'_>,
@@ -5946,15 +5976,7 @@ fn attach_reconstruct_response_metadata(
         ));
     }
 
-    let attempt_index = variants
-        .iter()
-        .filter(|v| {
-            v.get("id")
-                .and_then(Value::as_str)
-                .is_some_and(|id| id.starts_with("attempt-"))
-        })
-        .count()
-        + 1;
+    let attempt_index = last_attempt_number(&variants) + 1;
     let active_id = format!("attempt-{attempt_index}");
     variants.push(reconstruct_variant_from_payload(
         active_id.clone(),
@@ -5965,6 +5987,10 @@ fn attach_reconstruct_response_metadata(
         inputs.debug_run_id,
         inputs.debug_dir.as_deref(),
     ));
+    // Each attempt is a full-frame picture in the sidecar; keep the newest.
+    if variants.len() > MAX_FILL_ATTEMPTS {
+        variants.drain(..variants.len() - MAX_FILL_ATTEMPTS);
+    }
 
     let manifest = serde_json::json!({
         "patchId": inputs.patch_id,

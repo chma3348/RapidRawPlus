@@ -2320,6 +2320,7 @@ function SettingsPanel({
       setOffMethod(stored);
     } else if (!generativePossible) {
       setUseFastInpaint(true);
+      setOffMethod(isQuickErasePatch ? 'fast' : 'content-aware');
     } else {
       // Quick-erase patches prefer the fast LaMa path.
       setUseFastInpaint(isQuickErasePatch && stored !== 'generative');
@@ -2356,12 +2357,21 @@ function SettingsPanel({
       loras,
       fillMethod,
     });
-    onGenerativeReplace(container.id, prompt, fillMethod === 'fast', reconstructSinglePath, generateMode, {
-      contentScale,
-      matchPhoto,
-      loras,
-      fillEngine: fillMethod === 'content-aware' ? 'content-aware' : undefined,
-    });
+    // The single-path engine is a generative route: with Fast AI fill chosen
+    // it would override LaMa and run the engine anyway.
+    onGenerativeReplace(
+      container.id,
+      prompt,
+      fillMethod === 'fast',
+      fillMethod === 'generative' && reconstructSinglePath,
+      generateMode,
+      {
+        contentScale,
+        matchPhoto,
+        loras,
+        fillEngine: fillMethod === 'content-aware' ? 'content-aware' : undefined,
+      },
+    );
   };
 
   const handleVariantClick = (variantId: string) => {

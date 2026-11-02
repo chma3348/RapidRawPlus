@@ -905,6 +905,11 @@ fn main() -> anyhow::Result<()> {
             continue;
         };
         mask.save(run.join(format!("results/{}-selection.png", case.id)))?;
+        // The untouched photo: the truth for a hole, the "before" for a
+        // clipped case (blind A/B pairs are cut from it).
+        original
+            .to_rgba8()
+            .save(run.join(format!("results/{}-original.png", case.id)))?;
         let Some(reg) = region(&mask) else {
             eprintln!("[testset]   empty selection");
             continue;
