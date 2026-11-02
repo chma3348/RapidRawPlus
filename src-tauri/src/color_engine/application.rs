@@ -1019,6 +1019,7 @@ fn mask_bitmap(
     offset: (f32, f32),
     sampled: Option<&Arc<DynamicImage>>,
     picture: (&str, u64, u64, Option<u64>),
+    photo: crate::mask_generation::Orientation,
 ) -> Result<Arc<image::GrayImage>> {
     use std::hash::{Hash, Hasher};
     let mut shape = serde_json::to_value(mask)?;
@@ -1031,6 +1032,7 @@ fn mask_bitmap(
         scale.to_bits(),
         offset.0.to_bits(),
         offset.1.to_bits(),
+        photo.key(),
     )
         .hash(&mut hasher);
     // Range masks depend on the picture too; shape masks do not.
@@ -1042,13 +1044,14 @@ fn mask_bitmap(
         return Ok(hit);
     }
     let bitmap = Arc::new(
-        crate::mask_generation::generate_mask_bitmap(
+        crate::mask_generation::generate_photo_mask_bitmap(
             mask,
             width,
             height,
             scale,
             offset,
             sampled.map(|s| s.as_ref()),
+            photo,
         )
         .context("Could not generate v3 mask")?,
     );
@@ -1617,8 +1620,49 @@ fn exact_gaussian(plane: &[f32], w: usize, h: usize, radius: usize) -> Vec<f32> 
     out
 }
 
-/// What a colour or luminance range mask samples: the picture as it stands
-/// before grading, at full resolution.
+/// Saved settings the picture a range mask samples does not depend on:
+/// those `sampling_edits` clears or replaces, the patches (`patches` stands for
+/// them), and those that only take effect with a control `ungraded` has
+/// cleared — the creative LUT's (no LUT), Contrast's pivot (no Contrast or
+/// Brightness) — or not in a render at all (the clipping warning). Everything
+/// else the photo saves is part of the key, so a setting added later
+/// invalidates the sample until it is listed here.
+const NOT_SAMPLED: &[&str] = &[
+    "v3",
+    "masks",
+    "lutPath",
+    "lutData",
+    "lutName",
+    "lutSize",
+    "lutIntensity",
+    "lutSimExposure",
+    "lutInputSpace",
+    "contrastPivot",
+    "showClipping",
+    "aiPatches",
+    "crop",
+    "rotation",
+    "flipHorizontal",
+    "flipVertical",
+    "orientationSteps",
+];
+
+/// The edits a range mask samples the picture with: before grading, and
+/// before the crop, rotation, flips and quarter turns — the warped source
+/// the editor's overlay samples too, in whose frame the mask maps its points
+/// and pixels with the photo's orientation.
+fn sampling_edits(edits: &Value) -> Value {
+    let mut neutral = ungraded(edits);
+    neutral["crop"] = Value::Null;
+    neutral["rotation"] = serde_json::json!(0);
+    neutral["flipHorizontal"] = serde_json::json!(false);
+    neutral["flipVertical"] = serde_json::json!(false);
+    neutral["orientationSteps"] = serde_json::json!(0);
+    neutral
+}
+
+/// What a colour, luminance or clipped range mask samples: the picture as it
+/// stands before grading, in the warped source's frame, at full resolution.
 #[allow(clippy::too_many_arguments)]
 fn sampling_image(
     context: &GpuContext,
@@ -1627,17 +1671,23 @@ fn sampling_image(
     quality: Quality,
     path: &str,
     edits: &Value,
-    transform: u64,
     patches: u64,
 ) -> Result<(u64, Arc<DynamicImage>)> {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     path.hash(&mut hasher);
-    transform.hash(&mut hasher);
     patches.hash(&mut hasher);
     let (real_path, _) = crate::file_management::parse_virtual_path(path);
-    let neutral = ungraded(edits);
-    neutral.to_string().hash(&mut hasher);
+    // Keyed without building the neutral edits: on a photo with fills those
+    // are tens of megabytes to copy and print on every render.
+    if let Some(settings) = edits.as_object() {
+        for (key, value) in settings {
+            if !NOT_SAMPLED.contains(&key.as_str()) && !SHARED_CONTROLS.contains(&key.as_str()) {
+                key.hash(&mut hasher);
+                value.to_string().hash(&mut hasher);
+            }
+        }
+    }
     let pair = super::identity::resolve(state, edits)?;
     // The picture sampled is the one the render develops, identified the
     // same way: for a photo only in the cloud, its smart preview. Hashing
@@ -1646,6 +1696,8 @@ fn sampling_image(
     source.length.hash(&mut hasher);
     source.modified.hash(&mut hasher);
     source.source_digest.hash(&mut hasher);
+    source.input_digest.hash(&mut hasher);
+    format!("{:?} {:?}", source.recovery, source.quality).hash(&mut hasher);
     for transform in [pair.input, pair.input_p3, pair.output] {
         transform
             .map(|p| super::cube::CubeLut::load(&p).map(|c| c.digest.clone()))
@@ -1669,6 +1721,7 @@ fn sampling_image(
         .ok()
         .map(|mut c| std::mem::take(&mut *c));
     // Masks sample colours in sRGB, whatever the output space.
+    let neutral = sampling_edits(edits);
     let frame = render(
         context,
         state,
@@ -2003,10 +2056,21 @@ fn render(
     let masks: Vec<crate::mask_generation::MaskDefinition> =
         serde_json::from_value(edits.get("masks").cloned().unwrap_or(serde_json::json!([])))
             .context("Invalid mask definitions")?;
-    let active: Vec<_> = masks
-        .iter()
-        .filter(|m| m.visible && m.opacity > 0. && !m.sub_masks.is_empty())
-        .collect();
+    // A mask whose adjustments change nothing is left out here, not only
+    // skipped in the mask loop: kept, it would send the render down the
+    // two-pass path, and a range mask would have the photo sampled, for an
+    // identical picture. (Frame effects in a mask stay in, so the loop still
+    // refuses them.)
+    let mut active = Vec::new();
+    for m in &masks {
+        if !m.visible || m.opacity <= 0. || m.sub_masks.is_empty() {
+            continue;
+        }
+        let local = controls_for(&m.adjustments, true)?;
+        if !(local.is_neutral() && local.detail.is_neutral() && local.effects.is_neutral()) {
+            active.push(m);
+        }
+    }
     // Part of the picture (a zoomed-in editor's view): only that part, with
     // the margin its filters need, when that gives exactly what the whole
     // would; otherwise the whole, cut down at the end.
@@ -2083,13 +2147,15 @@ fn render(
     // measures is what the picture is before grading — not a second opinion
     // about colour from a different set of transforms.
     //
-    // Full resolution, because the mask generator maps its coordinates
-    // against the warped image's own dimensions. It is cached against
-    // everything that changes the picture before grading, so it is built once
-    // per geometry or patch change rather than per render.
+    // Full resolution and before the crop and orientation — the same warped
+    // source the overlay samples — because the mask generator maps the
+    // clicked points and every pixel into it with the photo's orientation.
+    // It is cached against everything that changes the picture before
+    // grading, so it is built once per lens, transform or patch change, not
+    // per render (nor per crop or turn).
     let sampled = if active.iter().any(|m| m.requires_warped_image()) {
         Some(sampling_image(
-            context, state, caches, quality, path, edits, transform, patches,
+            context, state, caches, quality, path, edits, patches,
         )?)
     } else {
         None
@@ -2233,6 +2299,7 @@ fn render(
                 patches,
                 sampled.as_ref().map(|(key, _)| *key),
             ),
+            crate::mask_generation::Orientation::of_photo(edits),
         )?;
         let bitmap = match &window {
             Some(w) => Arc::new(

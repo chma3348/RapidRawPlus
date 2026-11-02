@@ -823,10 +823,8 @@ export default function MasksPanel() {
         clean: 0,
         grow: 0,
         feather: 10,
-        rotation: adjustments?.rotation || 0,
-        flipHorizontal: adjustments?.flipHorizontal || false,
-        flipVertical: adjustments?.flipVertical || false,
-        orientationSteps: adjustments?.orientationSteps || 0,
+        // No orientation recorded: the backend places a clipped mask with the
+        // photo's current orientation, so it follows later turns and flips.
       });
     }
     return subMask;

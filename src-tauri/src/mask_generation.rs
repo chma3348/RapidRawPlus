@@ -408,11 +408,24 @@ fn apply_solidify(mask: &mut GrayImage, solidify: f32, scale: f32) {
     }
 }
 
+/// The long edge, in pixels, at which the matte filters' pixel radii were
+/// tuned: the editor's default preview size.
+const MATTE_TUNED_AT: f32 = 1920.0;
+
+/// How much larger a matte filter's radius is for a mask of this size than
+/// at the size it was tuned at, so it does the same to the picture in a
+/// preview of any size, a zoomed-in view and the full-size export. Relative
+/// to the cropped frame, as grow and feather are.
+fn matte_reach(width: u32, height: u32) -> f32 {
+    (width.max(height) as f32 / MATTE_TUNED_AT).max(f32::EPSILON)
+}
+
 fn apply_matte_clean(mask: &mut GrayImage, clean: f32) {
     if clean <= 0.5 {
         return;
     }
-    let radius = 1.0 + (clean / 100.0) * 5.0;
+    let (width, height) = mask.dimensions();
+    let radius = (1.0 + (clean / 100.0) * 5.0) * matte_reach(width, height);
     let blurred = image::imageops::blur(mask, radius);
     let lo = 0.20 + (clean / 100.0) * 0.15;
     let hi = 1.0 - lo;
@@ -898,15 +911,147 @@ fn generate_flow_bitmap(
     final_mask
 }
 
+/// How the photo's geometry turns the warped source into the frame the
+/// editor shows and takes clicks in: quarter turns, then flips, then the
+/// fine rotation about the centre, in `apply_all_transformations`' order.
+/// That frame is before the crop, so the crop is not part of this.
+///
+/// Masks drawn from the source (AI mattes) and masks that sample it
+/// (colour, luminance, clipped) are mapped with the photo's orientation as
+/// it is now, so they follow it when it is straightened, turned or flipped
+/// after they were made. The orientation a mask carries in its parameters is
+/// the photo's when it was made — when its points were clicked — and is now
+/// used only to find what those points are in the source.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Orientation {
+    pub rotation: f32,
+    pub flip_horizontal: bool,
+    pub flip_vertical: bool,
+    pub orientation_steps: u8,
+}
+
+impl Orientation {
+    /// The photo's orientation, from its adjustments.
+    pub fn of_photo(adjustments: &Value) -> Self {
+        Self::read(adjustments)
+    }
+
+    /// The photo's orientation when a mask was made, from its parameters.
+    fn recorded(parameters: &Value) -> Self {
+        Self::read(parameters)
+    }
+
+    fn read(v: &Value) -> Self {
+        Self {
+            rotation: v["rotation"].as_f64().unwrap_or(0.0) as f32,
+            flip_horizontal: v["flipHorizontal"].as_bool().unwrap_or(false),
+            flip_vertical: v["flipVertical"].as_bool().unwrap_or(false),
+            // apply_coarse_rotation turns nothing for any other value.
+            orientation_steps: v["orientationSteps"]
+                .as_u64()
+                .filter(|s| *s <= 3)
+                .unwrap_or(0) as u8,
+        }
+    }
+
+    /// For cache keys.
+    pub fn key(&self) -> (u32, bool, bool, u8) {
+        (
+            self.rotation.to_bits(),
+            self.flip_horizontal,
+            self.flip_vertical,
+            self.orientation_steps,
+        )
+    }
+
+    /// Maps points of the uncropped full-resolution frame back to a source
+    /// of `source` size.
+    fn to_source(self, source: (u32, u32)) -> SourceMap {
+        let (w, h) = if self.orientation_steps % 2 == 1 {
+            (source.1, source.0)
+        } else {
+            source
+        };
+        let angle = self.rotation * PI / 180.0;
+        SourceMap {
+            cos: angle.cos(),
+            sin: angle.sin(),
+            width: w as f32,
+            height: h as f32,
+            orientation: self,
+        }
+    }
+}
+
+struct SourceMap {
+    cos: f32,
+    sin: f32,
+    /// The source's size after its quarter turns.
+    width: f32,
+    height: f32,
+    orientation: Orientation,
+}
+
+impl SourceMap {
+    #[inline]
+    fn map(&self, x: f32, y: f32) -> (f32, f32) {
+        let (w, h) = (self.width, self.height);
+        let (cx, cy) = (w / 2.0, h / 2.0);
+        let (xc, yc) = (x - cx, y - cy);
+        let xr = xc * self.cos + yc * self.sin + cx;
+        let yr = -xc * self.sin + yc * self.cos + cy;
+        let xf = if self.orientation.flip_horizontal {
+            w - xr
+        } else {
+            xr
+        };
+        let yf = if self.orientation.flip_vertical {
+            h - yr
+        } else {
+            yr
+        };
+        match self.orientation.orientation_steps {
+            1 => (yf, w - xf),
+            2 => (w - xf, h - yf),
+            3 => (h - yf, xf),
+            _ => (xf, yf),
+        }
+    }
+
+    /// The source pixel under a clicked point, if it is on the photo.
+    fn pixel(&self, x: f64, y: f64, source: (u32, u32)) -> Option<(u32, u32)> {
+        let (sx, sy) = self.map(x as f32, y as f32);
+        let (sx, sy) = (sx.round(), sy.round());
+        (sx >= 0.0 && sy >= 0.0 && sx < source.0 as f32 && sy < source.1 as f32)
+            .then_some((sx as u32, sy as u32))
+    }
+}
+
 struct TransformParams {
-    rotation: f32,
-    flip_horizontal: bool,
-    flip_vertical: bool,
-    orientation_steps: u8,
+    orientation: Orientation,
     width: u32,
     height: u32,
     scale: f32,
     crop_offset: (f32, f32),
+}
+
+impl TransformParams {
+    fn new(
+        params: &Value,
+        photo: Option<Orientation>,
+        width: u32,
+        height: u32,
+        scale: f32,
+        crop_offset: (f32, f32),
+    ) -> Self {
+        Self {
+            orientation: photo.unwrap_or_else(|| Orientation::recorded(params)),
+            width,
+            height,
+            scale,
+            crop_offset,
+        }
+    }
 }
 
 fn generate_ai_bitmap_from_full_mask(
@@ -915,57 +1060,15 @@ fn generate_ai_bitmap_from_full_mask(
 ) -> GrayImage {
     let (full_mask_w, full_mask_h) = full_mask_image.dimensions();
     let mut final_mask = GrayImage::new(tf.width, tf.height);
-
-    let angle_rad = tf.rotation.to_radians();
-    let cos_a = angle_rad.cos();
-    let sin_a = angle_rad.sin();
-
-    let (coarse_rotated_w, coarse_rotated_h) = if tf.orientation_steps % 2 == 1 {
-        (full_mask_h, full_mask_w)
-    } else {
-        (full_mask_w, full_mask_h)
-    };
-
-    let scaled_coarse_rotated_w = coarse_rotated_w as f32 * tf.scale;
-    let scaled_coarse_rotated_h = coarse_rotated_h as f32 * tf.scale;
-    let center_x = scaled_coarse_rotated_w / 2.0;
-    let center_y = scaled_coarse_rotated_h / 2.0;
+    let map = tf.orientation.to_source((full_mask_w, full_mask_h));
+    let inv_scale = 1.0 / tf.scale;
 
     for y_out in 0..tf.height {
         for x_out in 0..tf.width {
-            let x_uncrop = x_out as f32 + tf.crop_offset.0;
-            let y_uncrop = y_out as f32 + tf.crop_offset.1;
-
-            let x_centered = x_uncrop - center_x;
-            let y_centered = y_uncrop - center_y;
-
-            let x_unrotated = x_centered * cos_a + y_centered * sin_a + center_x;
-            let y_unrotated = -x_centered * sin_a + y_centered * cos_a + center_y;
-
-            let x_unflipped = if tf.flip_horizontal {
-                scaled_coarse_rotated_w - x_unrotated
-            } else {
-                x_unrotated
-            };
-            let y_unflipped = if tf.flip_vertical {
-                scaled_coarse_rotated_h - y_unrotated
-            } else {
-                y_unrotated
-            };
-
-            let (x_unrotated_coarse, y_unrotated_coarse) = match tf.orientation_steps {
-                0 => (x_unflipped, y_unflipped),
-                1 => (y_unflipped, scaled_coarse_rotated_w - x_unflipped),
-                2 => (
-                    scaled_coarse_rotated_w - x_unflipped,
-                    scaled_coarse_rotated_h - y_unflipped,
-                ),
-                3 => (scaled_coarse_rotated_h - y_unflipped, x_unflipped),
-                _ => (x_unflipped, y_unflipped),
-            };
-
-            let x_src = x_unrotated_coarse / tf.scale;
-            let y_src = y_unrotated_coarse / tf.scale;
+            let (x_src, y_src) = map.map(
+                (x_out as f32 + tf.crop_offset.0) * inv_scale,
+                (y_out as f32 + tf.crop_offset.1) * inv_scale,
+            );
 
             if x_src >= 0.0
                 && x_src < full_mask_w as f32
@@ -1016,22 +1119,14 @@ fn generate_ai_sky_bitmap(
     height: u32,
     scale: f32,
     crop_offset: (f32, f32),
+    photo: Option<Orientation>,
 ) -> Option<GrayImage> {
     let params: AiSkyMaskParameters = serde_json::from_value(params_value.clone()).ok()?;
     let grow_feather: GrowFeatherParameters =
         serde_json::from_value(params_value.clone()).unwrap_or_default();
     let data_url = params.mask_data_base64?;
 
-    let tf = TransformParams {
-        rotation: params.rotation.unwrap_or(0.0),
-        flip_horizontal: params.flip_horizontal.unwrap_or(false),
-        flip_vertical: params.flip_vertical.unwrap_or(false),
-        orientation_steps: params.orientation_steps.unwrap_or(0),
-        width,
-        height,
-        scale,
-        crop_offset,
-    };
+    let tf = TransformParams::new(params_value, photo, width, height, scale, crop_offset);
     let mut mask = generate_ai_bitmap_from_base64(&data_url, &tf)?;
 
     apply_grow_and_feather(
@@ -1051,22 +1146,14 @@ fn generate_ai_depth_bitmap(
     height: u32,
     scale: f32,
     crop_offset: (f32, f32),
+    photo: Option<Orientation>,
 ) -> Option<GrayImage> {
     let params: AiDepthMaskParameters = serde_json::from_value(params_value.clone()).ok()?;
     let grow_feather: GrowFeatherParameters =
         serde_json::from_value(params_value.clone()).unwrap_or_default();
     let data_url = params.mask_data_base64?;
 
-    let tf = TransformParams {
-        rotation: params.rotation.unwrap_or(0.0),
-        flip_horizontal: params.flip_horizontal.unwrap_or(false),
-        flip_vertical: params.flip_vertical.unwrap_or(false),
-        orientation_steps: params.orientation_steps.unwrap_or(0),
-        width,
-        height,
-        scale,
-        crop_offset,
-    };
+    let tf = TransformParams::new(params_value, photo, width, height, scale, crop_offset);
 
     let depth_map = generate_ai_bitmap_from_base64(&data_url, &tf)?;
 
@@ -1095,7 +1182,7 @@ fn generate_ai_depth_bitmap(
     }
 
     if params.feather > 0.0 {
-        mask = image::imageops::blur(&mask, params.feather * 0.1);
+        mask = image::imageops::blur(&mask, params.feather * 0.1 * matte_reach(width, height));
     }
 
     apply_grow_and_feather(
@@ -1115,22 +1202,14 @@ fn generate_ai_foreground_bitmap(
     height: u32,
     scale: f32,
     crop_offset: (f32, f32),
+    photo: Option<Orientation>,
 ) -> Option<GrayImage> {
     let params: AiForegroundMaskParameters = serde_json::from_value(params_value.clone()).ok()?;
     let grow_feather: GrowFeatherParameters =
         serde_json::from_value(params_value.clone()).unwrap_or_default();
     let data_url = params.mask_data_base64?;
 
-    let tf = TransformParams {
-        rotation: params.rotation.unwrap_or(0.0),
-        flip_horizontal: params.flip_horizontal.unwrap_or(false),
-        flip_vertical: params.flip_vertical.unwrap_or(false),
-        orientation_steps: params.orientation_steps.unwrap_or(0),
-        width,
-        height,
-        scale,
-        crop_offset,
-    };
+    let tf = TransformParams::new(params_value, photo, width, height, scale, crop_offset);
     let mut mask = generate_ai_bitmap_from_base64(&data_url, &tf)?;
 
     apply_grow_and_feather(
@@ -1150,22 +1229,14 @@ fn generate_ai_subject_bitmap(
     height: u32,
     scale: f32,
     crop_offset: (f32, f32),
+    photo: Option<Orientation>,
 ) -> Option<GrayImage> {
     let params: AiSubjectMaskParameters = serde_json::from_value(params_value.clone()).ok()?;
     let grow_feather: GrowFeatherParameters =
         serde_json::from_value(params_value.clone()).unwrap_or_default();
     let data_url = params.mask_data_base64?;
 
-    let tf = TransformParams {
-        rotation: params.rotation.unwrap_or(0.0),
-        flip_horizontal: params.flip_horizontal.unwrap_or(false),
-        flip_vertical: params.flip_vertical.unwrap_or(false),
-        orientation_steps: params.orientation_steps.unwrap_or(0),
-        width,
-        height,
-        scale,
-        crop_offset,
-    };
+    let tf = TransformParams::new(params_value, photo, width, height, scale, crop_offset);
     let mut mask = generate_ai_bitmap_from_base64(&data_url, &tf)?;
 
     // Shift uncertain coverage without moving confident foreground/background.
@@ -1234,6 +1305,33 @@ fn color_key_distance(px: (f32, f32, f32), r: (f32, f32, f32)) -> f32 {
     (dh * dh + ds * ds + dv * dv).sqrt()
 }
 
+/// Visits each output pixel whose point of the photo lies on the source,
+/// with that source pixel: `visit(x_out, y_out, x_src, y_src)`.
+fn for_each_source_pixel(
+    width: u32,
+    height: u32,
+    scale: f32,
+    crop_offset: (f32, f32),
+    map: &SourceMap,
+    source: (u32, u32),
+    mut visit: impl FnMut(u32, u32, u32, u32),
+) {
+    let inv_scale = 1.0 / scale;
+    for y_out in 0..height {
+        let y = (y_out as f32 + crop_offset.1) * inv_scale;
+        for x_out in 0..width {
+            let (sx, sy) = map.map((x_out as f32 + crop_offset.0) * inv_scale, y);
+            if sx >= 0.0 && sy >= 0.0 {
+                let (x_src, y_src) = (sx as u32, sy as u32);
+                if x_src < source.0 && y_src < source.1 {
+                    visit(x_out, y_out, x_src, y_src);
+                }
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn generate_color_bitmap(
     params_value: &Value,
     width: u32,
@@ -1241,13 +1339,13 @@ fn generate_color_bitmap(
     scale: f32,
     crop_offset: (f32, f32),
     warped_image: Option<&image::DynamicImage>,
+    photo: Option<Orientation>,
 ) -> Option<GrayImage> {
     let params: ParametricMaskParameters = serde_json::from_value(params_value.clone()).ok()?;
     let warped = warped_image?;
-    let (full_w, full_h) = warped.dimensions();
-
-    let target_x = params.target_x.round() as i32;
-    let target_y = params.target_y.round() as i32;
+    let source = warped.dimensions();
+    // The points were clicked on the photo as it was oriented then.
+    let clicked = Orientation::recorded(params_value).to_source(source);
 
     let extras: ParametricExtras = serde_json::from_value(params_value.clone()).unwrap_or_default();
 
@@ -1258,25 +1356,14 @@ fn generate_color_bitmap(
         .map(|h| (h, extras.swatch_width.unwrap_or(45.0)));
     let mut refs: Vec<(f32, f32, f32)> = Vec::new();
     if swatch.is_none() {
-        let mut pts: Vec<(i64, i64)> = extras
-            .samples
-            .iter()
-            .map(|p| (p.x.round() as i64, p.y.round() as i64))
-            .collect();
+        let mut pts: Vec<(f64, f64)> = extras.samples.iter().map(|p| (p.x, p.y)).collect();
         if pts.is_empty() {
             // Classic single-click mode requires a valid click point.
-            if target_x < 0
-                || target_y < 0
-                || target_x >= full_w as i32
-                || target_y >= full_h as i32
-            {
-                return None;
-            }
-            pts.push((target_x as i64, target_y as i64));
+            pts.push((params.target_x, params.target_y));
         }
-        for (sx, sy) in pts {
-            if sx >= 0 && sy >= 0 && (sx as u32) < full_w && (sy as u32) < full_h {
-                let p = warped.get_pixel(sx as u32, sy as u32);
+        for (x, y) in pts {
+            if let Some((sx, sy)) = clicked.pixel(x, y, source) {
+                let p = warped.get_pixel(sx, sy);
                 refs.push(rgb_to_hsv_f(
                     p[0] as f32 / 255.0,
                     p[1] as f32 / 255.0,
@@ -1290,95 +1377,46 @@ fn generate_color_bitmap(
     }
 
     let mut mask = GrayImage::new(width, height);
-
-    let angle_rad = params.rotation * PI / 180.0;
-    let cos_a = angle_rad.cos();
-    let sin_a = angle_rad.sin();
-
-    let (coarse_rotated_w, coarse_rotated_h) = if params.orientation_steps % 2 == 1 {
-        (full_h, full_w)
-    } else {
-        (full_w, full_h)
-    };
-
-    let scaled_coarse_rotated_w = coarse_rotated_w as f32 * scale;
-    let scaled_coarse_rotated_h = coarse_rotated_h as f32 * scale;
-    let center_x = scaled_coarse_rotated_w / 2.0;
-    let center_y = scaled_coarse_rotated_h / 2.0;
-
-    let inv_scale = 1.0 / scale;
-
-    for y_out in 0..height {
-        let y_uncrop = y_out as f32 + crop_offset.1;
-        let y_centered = y_uncrop - center_y;
-        let y_sin = y_centered * sin_a;
-        let y_cos = y_centered * cos_a;
-
-        for x_out in 0..width {
-            let x_uncrop = x_out as f32 + crop_offset.0;
-            let x_centered = x_uncrop - center_x;
-
-            let x_unrotated = x_centered * cos_a + y_sin + center_x;
-            let y_unrotated = -x_centered * sin_a + y_cos + center_y;
-
-            let x_unflipped = if params.flip_horizontal {
-                scaled_coarse_rotated_w - x_unrotated
+    let map = photo
+        .unwrap_or_else(|| Orientation::recorded(params_value))
+        .to_source(source);
+    for_each_source_pixel(
+        width,
+        height,
+        scale,
+        crop_offset,
+        &map,
+        source,
+        |x_out, y_out, x_src, y_src| {
+            let pixel = warped.get_pixel(x_src, y_src);
+            let px = rgb_to_hsv_f(
+                pixel[0] as f32 / 255.0,
+                pixel[1] as f32 / 255.0,
+                pixel[2] as f32 / 255.0,
+            );
+            let alpha = if let Some((hue, width_deg)) = swatch {
+                // Generic hue-band selection: membership by hue
+                // distance, gated so near-neutrals and near-black
+                // stay out.
+                let band = width_deg * (0.5 + params.tolerance / 60.0);
+                let norm = hue_dist_deg(px.0, hue) / band.max(1.0);
+                let hue_w = 1.0 - ((norm - 0.7) / 0.3).clamp(0.0, 1.0);
+                let sat_w = ((px.1 - 0.10) / 0.20).clamp(0.0, 1.0);
+                let val_w = ((px.2 - 0.04) / 0.06).clamp(0.0, 1.0);
+                hue_w * sat_w * val_w
             } else {
-                x_unrotated
+                let d = refs
+                    .iter()
+                    .map(|r| color_key_distance(px, *r))
+                    .fold(f32::MAX, f32::min);
+                let t = 0.05 + (params.tolerance / 100.0) * 0.85;
+                1.0 - ((d - t * 0.5) / (t * 0.5)).clamp(0.0, 1.0)
             };
-            let y_unflipped = if params.flip_vertical {
-                scaled_coarse_rotated_h - y_unrotated
-            } else {
-                y_unrotated
-            };
-
-            let (x_unrotated_coarse, y_unrotated_coarse) = match params.orientation_steps {
-                0 => (x_unflipped, y_unflipped),
-                1 => (y_unflipped, scaled_coarse_rotated_w - x_unflipped),
-                2 => (
-                    scaled_coarse_rotated_w - x_unflipped,
-                    scaled_coarse_rotated_h - y_unflipped,
-                ),
-                3 => (scaled_coarse_rotated_h - y_unflipped, x_unflipped),
-                _ => (x_unflipped, y_unflipped),
-            };
-
-            if x_unrotated_coarse >= 0.0 && y_unrotated_coarse >= 0.0 {
-                let x_src = (x_unrotated_coarse * inv_scale) as u32;
-                let y_src = (y_unrotated_coarse * inv_scale) as u32;
-
-                if x_src < full_w && y_src < full_h {
-                    let pixel = warped.get_pixel(x_src, y_src);
-                    let px = rgb_to_hsv_f(
-                        pixel[0] as f32 / 255.0,
-                        pixel[1] as f32 / 255.0,
-                        pixel[2] as f32 / 255.0,
-                    );
-                    let alpha = if let Some((hue, width_deg)) = swatch {
-                        // Generic hue-band selection: membership by hue
-                        // distance, gated so near-neutrals and near-black
-                        // stay out.
-                        let band = width_deg * (0.5 + params.tolerance / 60.0);
-                        let norm = hue_dist_deg(px.0, hue) / band.max(1.0);
-                        let hue_w = 1.0 - ((norm - 0.7) / 0.3).clamp(0.0, 1.0);
-                        let sat_w = ((px.1 - 0.10) / 0.20).clamp(0.0, 1.0);
-                        let val_w = ((px.2 - 0.04) / 0.06).clamp(0.0, 1.0);
-                        hue_w * sat_w * val_w
-                    } else {
-                        let d = refs
-                            .iter()
-                            .map(|r| color_key_distance(px, *r))
-                            .fold(f32::MAX, f32::min);
-                        let t = 0.05 + (params.tolerance / 100.0) * 0.85;
-                        1.0 - ((d - t * 0.5) / (t * 0.5)).clamp(0.0, 1.0)
-                    };
-                    if alpha > 0.003 {
-                        mask.put_pixel(x_out, y_out, Luma([(alpha * 255.0) as u8]));
-                    }
-                }
+            if alpha > 0.003 {
+                mask.put_pixel(x_out, y_out, Luma([(alpha * 255.0) as u8]));
             }
-        }
-    }
+        },
+    );
 
     apply_solidify(&mut mask, params.solidify, scale);
     apply_matte_clean(&mut mask, params.clean);
@@ -1390,6 +1428,7 @@ fn generate_color_bitmap(
 /// threshold) and/or crushed blacks (all channels below the black
 /// threshold), with soft 3%-wide edges. Made for AI reconstruction of
 /// blown/crushed regions — correctly exposed pixels stay unselected.
+#[allow(clippy::too_many_arguments)]
 fn generate_clipped_bitmap(
     params_value: &Value,
     width: u32,
@@ -1397,11 +1436,12 @@ fn generate_clipped_bitmap(
     scale: f32,
     crop_offset: (f32, f32),
     warped_image: Option<&image::DynamicImage>,
+    photo: Option<Orientation>,
 ) -> Option<GrayImage> {
     let params: ParametricMaskParameters = serde_json::from_value(params_value.clone()).ok()?;
     let extras: ClippedExtras = serde_json::from_value(params_value.clone()).unwrap_or_default();
     let warped = warped_image?;
-    let (full_w, full_h) = warped.dimensions();
+    let source = warped.dimensions();
 
     // Slider extremes disable a side: white at 100 = whites off,
     // black at 0 = blacks off — giving white-only / black-only / both.
@@ -1420,72 +1460,35 @@ fn generate_clipped_bitmap(
     }
 
     let mut mask = GrayImage::new(width, height);
-
-    let angle_rad = params.rotation * PI / 180.0;
-    let cos_a = angle_rad.cos();
-    let sin_a = angle_rad.sin();
-    let (coarse_rotated_w, coarse_rotated_h) = if params.orientation_steps % 2 == 1 {
-        (full_h, full_w)
-    } else {
-        (full_w, full_h)
-    };
-    let scaled_w = coarse_rotated_w as f32 * scale;
-    let scaled_h = coarse_rotated_h as f32 * scale;
-    let center_x = scaled_w / 2.0;
-    let center_y = scaled_h / 2.0;
-    let inv_scale = 1.0 / scale;
-
-    for y_out in 0..height {
-        let y_uncrop = y_out as f32 + crop_offset.1;
-        let y_centered = y_uncrop - center_y;
-        let y_sin = y_centered * sin_a;
-        let y_cos = y_centered * cos_a;
-        for x_out in 0..width {
-            let x_uncrop = x_out as f32 + crop_offset.0;
-            let x_centered = x_uncrop - center_x;
-            let x_unrotated = x_centered * cos_a + y_sin + center_x;
-            let y_unrotated = -x_centered * sin_a + y_cos + center_y;
-            let x_unflipped = if params.flip_horizontal {
-                scaled_w - x_unrotated
-            } else {
-                x_unrotated
-            };
-            let y_unflipped = if params.flip_vertical {
-                scaled_h - y_unrotated
-            } else {
-                y_unflipped_src(y_unrotated)
-            };
-            let (xc, yc) = match params.orientation_steps {
-                0 => (x_unflipped, y_unflipped),
-                1 => (y_unflipped, scaled_w - x_unflipped),
-                2 => (scaled_w - x_unflipped, scaled_h - y_unflipped),
-                3 => (scaled_h - y_unflipped, x_unflipped),
-                _ => (x_unflipped, y_unflipped),
-            };
-            if xc >= 0.0 && yc >= 0.0 {
-                let x_src = (xc * inv_scale) as u32;
-                let y_src = (yc * inv_scale) as u32;
-                if x_src < full_w && y_src < full_h {
-                    let p = warped.get_pixel(x_src, y_src);
-                    let r = p[0] as f32 / 255.0;
-                    let g = p[1] as f32 / 255.0;
-                    let b = p[2] as f32 / 255.0;
-                    let min_c = r.min(g).min(b);
-                    let max_c = r.max(g).max(b);
-                    let mut alpha = 0.0f32;
-                    if let Some(t) = white_t {
-                        alpha = alpha.max(((min_c - (t - 0.03)) / 0.03).clamp(0.0, 1.0));
-                    }
-                    if let Some(t) = black_t {
-                        alpha = alpha.max((((t + 0.03) - max_c) / 0.03).clamp(0.0, 1.0));
-                    }
-                    if alpha > 0.003 {
-                        mask.put_pixel(x_out, y_out, Luma([(alpha * 255.0) as u8]));
-                    }
-                }
+    let map = photo
+        .unwrap_or_else(|| Orientation::recorded(params_value))
+        .to_source(source);
+    for_each_source_pixel(
+        width,
+        height,
+        scale,
+        crop_offset,
+        &map,
+        source,
+        |x_out, y_out, x_src, y_src| {
+            let p = warped.get_pixel(x_src, y_src);
+            let r = p[0] as f32 / 255.0;
+            let g = p[1] as f32 / 255.0;
+            let b = p[2] as f32 / 255.0;
+            let min_c = r.min(g).min(b);
+            let max_c = r.max(g).max(b);
+            let mut alpha = 0.0f32;
+            if let Some(t) = white_t {
+                alpha = alpha.max(((min_c - (t - 0.03)) / 0.03).clamp(0.0, 1.0));
             }
-        }
-    }
+            if let Some(t) = black_t {
+                alpha = alpha.max((((t + 0.03) - max_c) / 0.03).clamp(0.0, 1.0));
+            }
+            if alpha > 0.003 {
+                mask.put_pixel(x_out, y_out, Luma([(alpha * 255.0) as u8]));
+            }
+        },
+    );
 
     apply_solidify(&mut mask, params.solidify, scale);
     apply_matte_clean(&mut mask, params.clean);
@@ -1501,10 +1504,7 @@ fn generate_clipped_bitmap(
     Some(mask)
 }
 
-fn y_unflipped_src(y: f32) -> f32 {
-    y
-}
-
+#[allow(clippy::too_many_arguments)]
 fn generate_luminance_bitmap(
     params_value: &Value,
     width: u32,
@@ -1512,94 +1512,43 @@ fn generate_luminance_bitmap(
     scale: f32,
     crop_offset: (f32, f32),
     warped_image: Option<&image::DynamicImage>,
+    photo: Option<Orientation>,
 ) -> Option<GrayImage> {
     let params: ParametricMaskParameters = serde_json::from_value(params_value.clone()).ok()?;
     let warped = warped_image?;
-    let (full_w, full_h) = warped.dimensions();
+    let source = warped.dimensions();
 
-    let target_x = params.target_x.round() as i32;
-    let target_y = params.target_y.round() as i32;
-    if target_x < 0 || target_y < 0 || target_x >= full_w as i32 || target_y >= full_h as i32 {
-        return None;
-    }
-
-    let ref_pixel = warped.get_pixel(target_x as u32, target_y as u32);
+    // The point was clicked on the photo as it was oriented then.
+    let (target_x, target_y) = Orientation::recorded(params_value)
+        .to_source(source)
+        .pixel(params.target_x, params.target_y, source)?;
+    let ref_pixel = warped.get_pixel(target_x, target_y);
     let ref_luma =
         0.299 * ref_pixel[0] as f32 + 0.587 * ref_pixel[1] as f32 + 0.114 * ref_pixel[2] as f32;
 
     let mut mask = GrayImage::new(width, height);
-
-    let angle_rad = params.rotation * PI / 180.0;
-    let cos_a = angle_rad.cos();
-    let sin_a = angle_rad.sin();
-
-    let (coarse_rotated_w, coarse_rotated_h) = if params.orientation_steps % 2 == 1 {
-        (full_h, full_w)
-    } else {
-        (full_w, full_h)
-    };
-
-    let scaled_coarse_rotated_w = coarse_rotated_w as f32 * scale;
-    let scaled_coarse_rotated_h = coarse_rotated_h as f32 * scale;
-    let center_x = scaled_coarse_rotated_w / 2.0;
-    let center_y = scaled_coarse_rotated_h / 2.0;
-
     let tolerance_val = (params.tolerance * 2.55).max(1.0);
-    let inv_scale = 1.0 / scale;
+    let map = photo
+        .unwrap_or_else(|| Orientation::recorded(params_value))
+        .to_source(source);
+    for_each_source_pixel(
+        width,
+        height,
+        scale,
+        crop_offset,
+        &map,
+        source,
+        |x_out, y_out, x_src, y_src| {
+            let pixel = warped.get_pixel(x_src, y_src);
+            let luma = 0.299 * pixel[0] as f32 + 0.587 * pixel[1] as f32 + 0.114 * pixel[2] as f32;
+            let dist = (luma - ref_luma).abs();
 
-    for y_out in 0..height {
-        let y_uncrop = y_out as f32 + crop_offset.1;
-        let y_centered = y_uncrop - center_y;
-        let y_sin = y_centered * sin_a;
-        let y_cos = y_centered * cos_a;
-
-        for x_out in 0..width {
-            let x_uncrop = x_out as f32 + crop_offset.0;
-            let x_centered = x_uncrop - center_x;
-
-            let x_unrotated = x_centered * cos_a + y_sin + center_x;
-            let y_unrotated = -x_centered * sin_a + y_cos + center_y;
-
-            let x_unflipped = if params.flip_horizontal {
-                scaled_coarse_rotated_w - x_unrotated
-            } else {
-                x_unrotated
-            };
-            let y_unflipped = if params.flip_vertical {
-                scaled_coarse_rotated_h - y_unrotated
-            } else {
-                y_unrotated
-            };
-
-            let (x_unrotated_coarse, y_unrotated_coarse) = match params.orientation_steps {
-                0 => (x_unflipped, y_unflipped),
-                1 => (y_unflipped, scaled_coarse_rotated_w - x_unflipped),
-                2 => (
-                    scaled_coarse_rotated_w - x_unflipped,
-                    scaled_coarse_rotated_h - y_unflipped,
-                ),
-                3 => (scaled_coarse_rotated_h - y_unflipped, x_unflipped),
-                _ => (x_unflipped, y_unflipped),
-            };
-
-            if x_unrotated_coarse >= 0.0 && y_unrotated_coarse >= 0.0 {
-                let x_src = (x_unrotated_coarse * inv_scale) as u32;
-                let y_src = (y_unrotated_coarse * inv_scale) as u32;
-
-                if x_src < full_w && y_src < full_h {
-                    let pixel = warped.get_pixel(x_src, y_src);
-                    let luma =
-                        0.299 * pixel[0] as f32 + 0.587 * pixel[1] as f32 + 0.114 * pixel[2] as f32;
-                    let dist = (luma - ref_luma).abs();
-
-                    if dist <= tolerance_val {
-                        let intensity = 1.0 - (dist / tolerance_val);
-                        mask.put_pixel(x_out, y_out, Luma([(intensity * 255.0) as u8]));
-                    }
-                }
+            if dist <= tolerance_val {
+                let intensity = 1.0 - (dist / tolerance_val);
+                mask.put_pixel(x_out, y_out, Luma([(intensity * 255.0) as u8]));
             }
-        }
-    }
+        },
+    );
 
     apply_solidify(&mut mask, params.solidify, scale);
     apply_matte_clean(&mut mask, params.clean);
@@ -1611,6 +1560,7 @@ fn generate_all_bitmap(width: u32, height: u32) -> GrayImage {
     GrayImage::from_pixel(width, height, Luma([255]))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn generate_sub_mask_bitmap(
     sub_mask: &SubMask,
     width: u32,
@@ -1618,6 +1568,7 @@ fn generate_sub_mask_bitmap(
     scale: f32,
     crop_offset: (f32, f32),
     warped_image: Option<&DynamicImage>,
+    photo: Option<Orientation>,
 ) -> Option<GrayImage> {
     if !sub_mask.visible {
         return None;
@@ -1659,6 +1610,7 @@ fn generate_sub_mask_bitmap(
             scale,
             crop_offset,
             warped_image,
+            photo,
         ),
         "color" => generate_color_bitmap(
             &sub_mask.parameters,
@@ -1667,6 +1619,7 @@ fn generate_sub_mask_bitmap(
             scale,
             crop_offset,
             warped_image,
+            photo,
         ),
         "luminance" => generate_luminance_bitmap(
             &sub_mask.parameters,
@@ -1675,10 +1628,16 @@ fn generate_sub_mask_bitmap(
             scale,
             crop_offset,
             warped_image,
+            photo,
         ),
-        "ai-subject" => {
-            generate_ai_subject_bitmap(&sub_mask.parameters, width, height, scale, crop_offset)
-        }
+        "ai-subject" => generate_ai_subject_bitmap(
+            &sub_mask.parameters,
+            width,
+            height,
+            scale,
+            crop_offset,
+            photo,
+        ),
         // AI Paint: before SAM returns (or if it fails) the raw strokes
         // render as a brush mask, so painting has live visual feedback.
         "ai-paint" => {
@@ -1689,7 +1648,14 @@ fn generate_sub_mask_bitmap(
                 .map(|s| !s.is_empty())
                 .unwrap_or(false);
             if has_result {
-                generate_ai_subject_bitmap(&sub_mask.parameters, width, height, scale, crop_offset)
+                generate_ai_subject_bitmap(
+                    &sub_mask.parameters,
+                    width,
+                    height,
+                    scale,
+                    crop_offset,
+                    photo,
+                )
             } else {
                 Some(generate_brush_bitmap(
                     &sub_mask.parameters,
@@ -1700,21 +1666,46 @@ fn generate_sub_mask_bitmap(
                 ))
             }
         }
-        "ai-foreground" => {
-            generate_ai_foreground_bitmap(&sub_mask.parameters, width, height, scale, crop_offset)
-        }
-        "ai-sky" => generate_ai_sky_bitmap(&sub_mask.parameters, width, height, scale, crop_offset),
-        "ai-depth" => {
-            generate_ai_depth_bitmap(&sub_mask.parameters, width, height, scale, crop_offset)
-        }
-        "quick-eraser" => {
-            generate_ai_subject_bitmap(&sub_mask.parameters, width, height, scale, crop_offset)
-        }
+        "ai-foreground" => generate_ai_foreground_bitmap(
+            &sub_mask.parameters,
+            width,
+            height,
+            scale,
+            crop_offset,
+            photo,
+        ),
+        "ai-sky" => generate_ai_sky_bitmap(
+            &sub_mask.parameters,
+            width,
+            height,
+            scale,
+            crop_offset,
+            photo,
+        ),
+        "ai-depth" => generate_ai_depth_bitmap(
+            &sub_mask.parameters,
+            width,
+            height,
+            scale,
+            crop_offset,
+            photo,
+        ),
+        "quick-eraser" => generate_ai_subject_bitmap(
+            &sub_mask.parameters,
+            width,
+            height,
+            scale,
+            crop_offset,
+            photo,
+        ),
         "all" => Some(generate_all_bitmap(width, height)),
         _ => None,
     }
 }
 
+/// A mask's bitmap, each component placed with the orientation it carries:
+/// for pictures in the source's own frame (fills, patches), where callers
+/// set that orientation themselves.
 pub fn generate_mask_bitmap(
     mask_def: &MaskDefinition,
     width: u32,
@@ -1723,6 +1714,49 @@ pub fn generate_mask_bitmap(
     crop_offset: (f32, f32),
     warped_image: Option<&DynamicImage>,
 ) -> Option<GrayImage> {
+    compose_mask_bitmap(
+        mask_def,
+        width,
+        height,
+        scale,
+        crop_offset,
+        warped_image,
+        None,
+    )
+}
+
+/// A mask's bitmap on the photo as it is shown — cropped, and oriented as
+/// `photo`, the photo's current orientation — whatever orientation the mask
+/// was made under. What the editor's overlay and every render use.
+pub fn generate_photo_mask_bitmap(
+    mask_def: &MaskDefinition,
+    width: u32,
+    height: u32,
+    scale: f32,
+    crop_offset: (f32, f32),
+    warped_image: Option<&DynamicImage>,
+    photo: Orientation,
+) -> Option<GrayImage> {
+    compose_mask_bitmap(
+        mask_def,
+        width,
+        height,
+        scale,
+        crop_offset,
+        warped_image,
+        Some(photo),
+    )
+}
+
+fn compose_mask_bitmap(
+    mask_def: &MaskDefinition,
+    width: u32,
+    height: u32,
+    scale: f32,
+    crop_offset: (f32, f32),
+    warped_image: Option<&DynamicImage>,
+    photo: Option<Orientation>,
+) -> Option<GrayImage> {
     if !mask_def.visible || mask_def.sub_masks.is_empty() {
         return None;
     }
@@ -1730,9 +1764,15 @@ pub fn generate_mask_bitmap(
     let mut final_mask = GrayImage::new(width, height);
 
     for sub_mask in &mask_def.sub_masks {
-        if let Some(mut sub_bitmap) =
-            generate_sub_mask_bitmap(sub_mask, width, height, scale, crop_offset, warped_image)
-        {
+        if let Some(mut sub_bitmap) = generate_sub_mask_bitmap(
+            sub_mask,
+            width,
+            height,
+            scale,
+            crop_offset,
+            warped_image,
+            photo,
+        ) {
             if sub_mask.invert {
                 for p in sub_bitmap.pixels_mut() {
                     p[0] = 255 - p[0];
@@ -1827,13 +1867,17 @@ pub fn generate_mask_overlay(
         resolve_warped_image_for_masks(&state, adj, std::slice::from_ref(&parsed_mask_def))
     });
 
-    if let Some(gray_mask) = generate_mask_bitmap(
+    // Placed on the photo as it is oriented now; without the photo's
+    // adjustments, as the mask itself recorded.
+    let photo = js_adjustments.as_ref().map(Orientation::of_photo);
+    if let Some(gray_mask) = compose_mask_bitmap(
         &parsed_mask_def,
         width,
         height,
         scale,
         scaled_crop_offset,
         warped_image.as_deref(),
+        photo,
     ) {
         let mut rgba_mask = RgbaImage::new(width, height);
         if matte.unwrap_or(false) {
@@ -1999,7 +2043,7 @@ mod color_select_tests {
             "lines": [ line("eraser", 10.0), line("brush", 50.0) ],
         });
 
-        let mask = generate_clipped_bitmap(&params, 64, 64, 1.0, (0.0, 0.0), Some(&warped))
+        let mask = generate_clipped_bitmap(&params, 64, 64, 1.0, (0.0, 0.0), Some(&warped), None)
             .expect("mask should generate");
 
         assert!(mask.get_pixel(10, 16)[0] < 10, "erased white must clear");
@@ -2012,5 +2056,238 @@ mod color_select_tests {
             mask.get_pixel(50, 55)[0] < 10,
             "untouched gray stays unselected"
         );
+    }
+}
+
+#[cfg(test)]
+mod geometry_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn geometry(steps: u8, flip_h: bool, flip_v: bool, rotation: f32) -> Value {
+        json!({"orientationSteps": steps, "flipHorizontal": flip_h,
+            "flipVertical": flip_v, "rotation": rotation})
+    }
+
+    fn all_geometries() -> Vec<Value> {
+        let mut out = Vec::new();
+        for steps in 0..4 {
+            for (h, v) in [(false, false), (true, false), (false, true), (true, true)] {
+                for rotation in [0.0, 7.0, -12.5] {
+                    out.push(geometry(steps, h, v, rotation));
+                }
+            }
+        }
+        out
+    }
+
+    /// Centre of the bright pixels.
+    fn centroid(image: &GrayImage) -> (f32, f32) {
+        let (mut sx, mut sy, mut sw) = (0f64, 0f64, 0f64);
+        for (x, y, p) in image.enumerate_pixels() {
+            let w = p[0] as f64;
+            sx += x as f64 * w;
+            sy += y as f64 * w;
+            sw += w;
+        }
+        ((sx / sw) as f32, (sy / sw) as f32)
+    }
+
+    fn carry(map: &GrayImage, adjustments: &Value) -> GrayImage {
+        crate::apply_all_transformations(DynamicImage::ImageLuma8(map.clone()), adjustments)
+            .0
+            .to_luma8()
+    }
+
+    fn iou(a: &GrayImage, b: &GrayImage) -> f64 {
+        let (mut both, mut either) = (0u32, 0u32);
+        for (p, q) in a.pixels().zip(b.pixels()) {
+            both += (p[0] > 127 && q[0] > 127) as u32;
+            either += (p[0] > 127 || q[0] > 127) as u32;
+        }
+        both as f64 / either.max(1) as f64
+    }
+
+    /// The mapping is the inverse of what the pipeline does to the picture:
+    /// a point of the source carried through every orientation lands where
+    /// the map sends it back from.
+    #[test]
+    fn source_map_inverts_the_pipeline() {
+        let size = (90u32, 60u32);
+        for adjustments in all_geometries() {
+            for dot in [(20u32, 15u32), (70, 44), (45, 30)] {
+                let mut marker = GrayImage::new(size.0, size.1);
+                for dy in 0..3 {
+                    for dx in 0..3 {
+                        marker.put_pixel(dot.0 + dx - 1, dot.1 + dy - 1, Luma([255]));
+                    }
+                }
+                let (ux, uy) = centroid(&carry(&marker, &adjustments));
+                let (sx, sy) = Orientation::of_photo(&adjustments)
+                    .to_source(size)
+                    .map(ux, uy);
+                assert!(
+                    (sx - dot.0 as f32).abs() <= 1.5 && (sy - dot.1 as f32).abs() <= 1.5,
+                    "{adjustments}: {dot:?} came back as ({sx:.1}, {sy:.1})"
+                );
+            }
+        }
+    }
+
+    /// A red square on grey, in the source's frame.
+    fn picture() -> (DynamicImage, GrayImage) {
+        let (w, h) = (120u32, 80u32);
+        let mut image = RgbaImage::from_pixel(w, h, Rgba([110, 120, 115, 255]));
+        let mut square = GrayImage::new(w, h);
+        for y in 15..40 {
+            for x in 70..105 {
+                image.put_pixel(x, y, Rgba([220, 30, 25, 255]));
+                square.put_pixel(x, y, Luma([255]));
+            }
+        }
+        (DynamicImage::ImageRgba8(image), square)
+    }
+
+    fn mask_of(sub: Value) -> MaskDefinition {
+        serde_json::from_value(json!({
+            "id": "m", "name": "m", "visible": true, "invert": false, "opacity": 100,
+            "adjustments": {}, "subMasks": [sub],
+        }))
+        .unwrap()
+    }
+
+    /// Clicked under one orientation, shown under another, cropped and at a
+    /// smaller size: the colour and luminance masks select the square, where
+    /// the photo now shows it.
+    #[test]
+    fn clicked_masks_follow_the_photo() {
+        let (warped, square) = picture();
+        let size = warped.dimensions();
+        let made_under = geometry(1, false, true, 5.0);
+        // The square's centre, in the frame the click was taken in.
+        let clicked = centroid(&carry(&square, &made_under));
+        for now in all_geometries() {
+            let mut shown = now.clone();
+            let (uw, uh) = if now["orientationSteps"].as_u64().unwrap() % 2 == 1 {
+                (size.1, size.0)
+            } else {
+                size
+            };
+            shown["crop"] =
+                json!({"x": 6, "y": 4, "width": uw - 16, "height": uh - 10, "unit": "px"});
+            let expected = carry(&square, &shown);
+            let (fw, fh) = expected.dimensions();
+            for (kind, extra) in [
+                (
+                    "color",
+                    json!({"samples": [{"x": clicked.0, "y": clicked.1}], "tolerance": 20}),
+                ),
+                ("luminance", json!({"tolerance": 5})),
+            ] {
+                let mut params = made_under.clone();
+                params["targetX"] = json!(clicked.0);
+                params["targetY"] = json!(clicked.1);
+                for (k, v) in extra.as_object().unwrap() {
+                    params[k] = v.clone();
+                }
+                let def = mask_of(json!({"id": "s", "type": kind, "visible": true,
+                    "mode": "additive", "parameters": params}));
+                for scale in [1.0f32, 0.5] {
+                    let (w, h) = ((fw as f32 * scale) as u32, (fh as f32 * scale) as u32);
+                    let mask = generate_photo_mask_bitmap(
+                        &def,
+                        w,
+                        h,
+                        scale,
+                        (6.0 * scale, 4.0 * scale),
+                        Some(&warped),
+                        Orientation::of_photo(&now),
+                    )
+                    .expect("a mask");
+                    let want = image::imageops::resize(
+                        &expected,
+                        w,
+                        h,
+                        image::imageops::FilterType::Triangle,
+                    );
+                    let overlap = iou(&mask, &want);
+                    assert!(overlap > 0.8, "{kind} {now} at {scale}: IoU {overlap:.2}");
+                }
+            }
+        }
+    }
+
+    /// An AI matte made under one orientation is placed with the photo's
+    /// current one; without it, as the mask recorded.
+    #[test]
+    fn ai_masks_follow_the_photo() {
+        let (_, square) = picture();
+        let mut png = Vec::new();
+        DynamicImage::ImageLuma8(square.clone())
+            .write_to(&mut Cursor::new(&mut png), ImageFormat::Png)
+            .unwrap();
+        let url = format!(
+            "data:image/png;base64,{}",
+            general_purpose::STANDARD.encode(&png)
+        );
+        let mut params = geometry(0, false, false, 0.0);
+        params["startX"] = json!(0);
+        params["startY"] = json!(0);
+        params["endX"] = json!(1);
+        params["endY"] = json!(1);
+        params["maskDataBase64"] = json!(url);
+        let def = mask_of(json!({"id": "s", "type": "ai-subject", "visible": true,
+            "mode": "additive", "parameters": params}));
+        for now in all_geometries() {
+            let expected = carry(&square, &now);
+            let (w, h) = expected.dimensions();
+            let mask = generate_photo_mask_bitmap(
+                &def,
+                w,
+                h,
+                1.0,
+                (0.0, 0.0),
+                None,
+                Orientation::of_photo(&now),
+            )
+            .unwrap();
+            assert!(iou(&mask, &expected) > 0.9, "{now}");
+        }
+        let recorded = generate_mask_bitmap(&def, 120, 80, 1.0, (0.0, 0.0), None).unwrap();
+        assert!(iou(&recorded, &square) > 0.9, "{}", iou(&recorded, &square));
+    }
+
+    /// Clean removes the same speckle and keeps the same solid areas at any
+    /// size, and at the default preview size exactly as it always has.
+    #[test]
+    fn matte_clean_scales_with_the_picture() {
+        let at = |scale: u32, clean: f32| {
+            let (w, h) = (960 * scale, 540 * scale);
+            let mut mask = GrayImage::new(w, h);
+            let mut fill = |x0: u32, y0: u32, side: u32| {
+                for y in y0 * scale..(y0 + side) * scale {
+                    for x in x0 * scale..(x0 + side) * scale {
+                        mask.put_pixel(x, y, Luma([255]));
+                    }
+                }
+            };
+            fill(100, 100, 2);
+            fill(300, 200, 40);
+            apply_matte_clean(&mut mask, clean);
+            (
+                mask.get_pixel(101 * scale, 101 * scale)[0],
+                mask.get_pixel(320 * scale, 220 * scale)[0],
+            )
+        };
+        assert_eq!(matte_reach(1920, 1080), 1.0);
+        for clean in [30.0, 100.0] {
+            let (speck, solid) = at(2, clean);
+            assert!(speck < 40 && solid > 230, "{clean}: {speck} {solid}");
+            let (speck_large, solid_large) = at(6, clean);
+            assert!(
+                speck_large.abs_diff(speck) < 25 && solid_large > 230,
+                "{clean}: {speck} vs {speck_large}"
+            );
+        }
     }
 }
