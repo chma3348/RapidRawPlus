@@ -644,6 +644,34 @@ pub fn get_settings_path(app_handle: &AppHandle) -> Result<PathBuf, String> {
 /// over each other's changes.
 static SETTINGS_FILE: Mutex<()> = Mutex::new(());
 
+/// The settings as last read, with the file as it stood then. Settings are
+/// loaded for every preview job and every thumbnail; they are read and
+/// parsed again only when the file has changed (by a save here, or by
+/// anything else) since.
+static LOADED: Mutex<Option<(FileStamp, AppSettings)>> = Mutex::new(None);
+
+/// What changes when a file is written: its size, its modification time and
+/// (as saves replace the file) its inode.
+#[derive(Clone, Copy, PartialEq)]
+struct FileStamp {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    inode: u64,
+}
+
+fn file_stamp(path: &Path) -> Option<FileStamp> {
+    let meta = fs::metadata(path).ok()?;
+    #[cfg(unix)]
+    let inode = std::os::unix::fs::MetadataExt::ino(&meta);
+    #[cfg(not(unix))]
+    let inode = 0;
+    Some(FileStamp {
+        len: meta.len(),
+        modified: meta.modified().ok(),
+        inode,
+    })
+}
+
 /// The settings file's text, parsed. A file that cannot be understood
 /// (`None`) is copied aside once as `settings.json.bad-<time>`, so
 /// whatever it held can be recovered, and is never overwritten here.
@@ -676,6 +704,16 @@ fn parse_settings_file(path: &Path, content: &str) -> Option<AppSettings> {
 pub fn load_settings(app_handle: AppHandle) -> Result<AppSettings, String> {
     let path = get_settings_path(&app_handle)?;
     let _file = SETTINGS_FILE.lock().unwrap_or_else(|e| e.into_inner());
+
+    // Taken before reading: a change made after this is seen next time.
+    let stamp = file_stamp(&path);
+    if let Some(stamp) = stamp
+        && let Some((loaded, settings)) = LOADED.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
+        && *loaded == stamp
+    {
+        crate::smart_preview::set_modes(settings);
+        return Ok(settings.clone());
+    }
 
     // Defaults stand in for a file that cannot be understood, but are not
     // written over it: only a save the person makes replaces it.
@@ -737,14 +775,20 @@ pub fn load_settings(app_handle: AppHandle) -> Result<AppSettings, String> {
         }
     }
 
-    if settings_modified
-        && may_write
+    let writes = settings_modified && may_write;
+    if writes
         && let Ok(json_string) = serde_json::to_string_pretty(&settings)
         && let Err(e) =
             crate::exif_processing::write_atomically(&path, json_string.as_bytes(), true)
     {
         log::warn!("Could not save upgraded settings: {e}");
     }
+    // Kept unless the file was just written (the next load reads that back
+    // and keeps it then).
+    *LOADED.lock().unwrap_or_else(|e| e.into_inner()) = match stamp {
+        Some(stamp) if !writes => Some((stamp, settings.clone())),
+        _ => None,
+    };
 
     crate::smart_preview::set_modes(&settings);
     Ok(settings)
@@ -765,6 +809,7 @@ pub fn save_settings(settings: AppSettings, app_handle: AppHandle) -> Result<(),
     let json_string = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
     {
         let _file = SETTINGS_FILE.lock().unwrap_or_else(|e| e.into_inner());
+        *LOADED.lock().unwrap_or_else(|e| e.into_inner()) = None;
         crate::exif_processing::write_atomically(&path, json_string.as_bytes(), true)
             .map_err(|e| e.to_string())?;
     }

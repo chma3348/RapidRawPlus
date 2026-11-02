@@ -3258,17 +3258,6 @@ pub fn calculate_waveform_from_image(
     let do_parade = active_channel.is_none() || active_channel == Some("parade");
     let do_vectorscope = active_channel.is_none() || active_channel == Some("vectorscope");
 
-    let mut red_bins = if do_rgb { vec![0u32; W * H] } else { vec![] };
-    let mut green_bins = if do_rgb { vec![0u32; W * H] } else { vec![] };
-    let mut blue_bins = if do_rgb { vec![0u32; W * H] } else { vec![] };
-    let mut luma_bins = if do_luma { vec![0u32; W * H] } else { vec![] };
-    let mut parade_bins = if do_parade { vec![0u32; W * H] } else { vec![] };
-    let mut vector_bins = if do_vectorscope {
-        vec![0u32; W * H]
-    } else {
-        vec![]
-    };
-
     let x_scale = W as f32 / orig_w as f32;
     let mut x_buckets = vec![0usize; orig_w as usize];
 
@@ -3286,20 +3275,50 @@ pub fn calculate_waveform_from_image(
         }
     }
 
-    let mut process_pixel = |r: u8, g: u8, b: u8, out_x: usize, orig_x: usize| {
+    // Past 2048 pixels, every other row (or every third...) is read, each
+    // counted for the rows it stands for: a 3584-pixel preview took 60 ms a
+    // frame. Every column is still read, since the trace's fine vertical
+    // detail comes from neighbouring columns (sampling them as well, down to
+    // 512 pixels, left the trace visibly speckled). Up to 2048 pixels the
+    // scopes are exactly what they were.
+    let step = orig_w.max(orig_h).div_ceil(2048).max(1) as usize;
+    let rows: Vec<usize> = (step / 2..orig_h as usize).step_by(step).collect();
+    let weight = step as u32;
+
+    struct Bins {
+        red: Vec<u32>,
+        green: Vec<u32>,
+        blue: Vec<u32>,
+        luma: Vec<u32>,
+        parade: Vec<u32>,
+        vector: Vec<u32>,
+    }
+    let empty = || {
+        let bins = |on: bool| if on { vec![0u32; W * H] } else { vec![] };
+        Bins {
+            red: bins(do_rgb),
+            green: bins(do_rgb),
+            blue: bins(do_rgb),
+            luma: bins(do_luma),
+            parade: bins(do_parade),
+            vector: bins(do_vectorscope),
+        }
+    };
+
+    let process_pixel = |bins: &mut Bins, r: u8, g: u8, b: u8, out_x: usize, orig_x: usize| {
         if do_rgb {
-            red_bins[(255 - r as usize) * W + out_x] += 1;
-            green_bins[(255 - g as usize) * W + out_x] += 1;
-            blue_bins[(255 - b as usize) * W + out_x] += 1;
+            bins.red[(255 - r as usize) * W + out_x] += weight;
+            bins.green[(255 - g as usize) * W + out_x] += weight;
+            bins.blue[(255 - b as usize) * W + out_x] += weight;
         }
         if do_luma {
             let l = ((r as u32 * 218 + g as u32 * 732 + b as u32 * 74) >> 10).min(255) as usize;
-            luma_bins[(255 - l) * W + out_x] += 1;
+            bins.luma[(255 - l) * W + out_x] += weight;
         }
         if do_parade {
-            parade_bins[(255 - r as usize) * W + x_buckets_parade_r[orig_x]] += 1;
-            parade_bins[(255 - g as usize) * W + x_buckets_parade_g[orig_x]] += 1;
-            parade_bins[(255 - b as usize) * W + x_buckets_parade_b[orig_x]] += 1;
+            bins.parade[(255 - r as usize) * W + x_buckets_parade_r[orig_x]] += weight;
+            bins.parade[(255 - g as usize) * W + x_buckets_parade_g[orig_x]] += weight;
+            bins.parade[(255 - b as usize) * W + x_buckets_parade_b[orig_x]] += weight;
         }
         if do_vectorscope {
             let r_f = r as f32;
@@ -3318,41 +3337,76 @@ pub fn calculate_waveform_from_image(
 
             let vx = (cb + 128.0).clamp(0.0, 255.0) as usize;
             let vy = (128.0 - cr).clamp(0.0, 255.0) as usize;
-            vector_bins[vy * W + vx] += 1;
+            bins.vector[vy * W + vx] += weight;
         }
     };
 
-    match image {
-        DynamicImage::ImageRgb32F(f32_img) => {
-            let raw = f32_img.as_raw();
-            let stride = orig_w as usize * 3;
-            for y in 0..(orig_h as usize) {
-                let row = y * stride;
-                for (x, &x_bucket) in x_buckets.iter().enumerate() {
-                    let i = row + x * 3;
+    // Rows in bands across the cores, each counted into its own bins, which
+    // are then added up: the same counts as one row after another.
+    let converted;
+    let (raw, channels): (&[u8], usize) = match image {
+        // What the editor sends: read in place, not converted whole first.
+        DynamicImage::ImageRgba8(rgba) => (rgba.as_raw(), 4),
+        DynamicImage::ImageRgb32F(_) => (&[], 3),
+        _ => {
+            converted = image.to_rgb8();
+            (converted.as_raw(), 3)
+        }
+    };
+    let bin_rows = |band: &[usize]| {
+        let mut bins = empty();
+        let width = orig_w as usize;
+        for &y in band {
+            if let DynamicImage::ImageRgb32F(f32_img) = image {
+                let row = &f32_img.as_raw()[y * width * 3..(y + 1) * width * 3];
+                for (x, (&x_bucket, p)) in x_buckets.iter().zip(row.chunks_exact(3)).enumerate() {
                     process_pixel(
-                        (raw[i].clamp(0.0, 1.0) * 255.0) as u8,
-                        (raw[i + 1].clamp(0.0, 1.0) * 255.0) as u8,
-                        (raw[i + 2].clamp(0.0, 1.0) * 255.0) as u8,
+                        &mut bins,
+                        (p[0].clamp(0.0, 1.0) * 255.0) as u8,
+                        (p[1].clamp(0.0, 1.0) * 255.0) as u8,
+                        (p[2].clamp(0.0, 1.0) * 255.0) as u8,
                         x_bucket,
                         x,
                     );
                 }
-            }
-        }
-        _ => {
-            let rgb = image.to_rgb8();
-            let raw = rgb.as_raw();
-            let stride = orig_w as usize * 3;
-            for y in 0..(orig_h as usize) {
-                let row = y * stride;
-                for (x, &x_bucket) in x_buckets.iter().enumerate() {
-                    let i = row + x * 3;
-                    process_pixel(raw[i], raw[i + 1], raw[i + 2], x_bucket, x);
+            } else {
+                let row = &raw[y * width * channels..(y + 1) * width * channels];
+                for (x, (&x_bucket, p)) in
+                    x_buckets.iter().zip(row.chunks_exact(channels)).enumerate()
+                {
+                    process_pixel(&mut bins, p[0], p[1], p[2], x_bucket, x);
                 }
             }
         }
-    }
+        bins
+    };
+    let add = |mut a: Bins, b: Bins| {
+        for (into, from) in [
+            (&mut a.red, &b.red),
+            (&mut a.green, &b.green),
+            (&mut a.blue, &b.blue),
+            (&mut a.luma, &b.luma),
+            (&mut a.parade, &b.parade),
+            (&mut a.vector, &b.vector),
+        ] {
+            for (x, y) in into.iter_mut().zip(from) {
+                *x += y;
+            }
+        }
+        a
+    };
+    let band = rows
+        .len()
+        .div_ceil(rayon::current_num_threads().max(1))
+        .max(64);
+    let Bins {
+        red: red_bins,
+        green: green_bins,
+        blue: blue_bins,
+        luma: luma_bins,
+        parade: parade_bins,
+        vector: vector_bins,
+    } = rows.par_chunks(band).map(bin_rows).reduce(empty, add);
 
     let build_lut = |bins: &[u32], do_calc: bool| -> (Vec<u8>, u32) {
         if !do_calc {

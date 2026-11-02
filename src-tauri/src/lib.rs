@@ -376,6 +376,12 @@ fn release_memory(state: &AppState, critical: bool) -> usize {
     let open = state.original_image.lock().unwrap().clone();
     let open_path = open.as_ref().map(|l| l.path.as_str());
     let mut freed = state.v3.trim(open_path, critical);
+    // The renderer keeps its GPU buffers (and the open photo's neighbourhood)
+    // between passes; under pressure they go with the engine, which the
+    // next render rebuilds in a few milliseconds.
+    if let Ok(mut engine) = state.v3_engine.lock() {
+        *engine = None;
+    }
     if let Ok(mut cache) = state.decoded_image_cache.lock() {
         let keep = open_path
             .filter(|_| !critical)
@@ -604,77 +610,155 @@ fn generate_uncropped_preview(
         .clone()
         .ok_or("No original image loaded")?;
 
+    // The crop view draws the whole picture and turns it by the fine
+    // rotation itself, so this render must have neither the crop nor the
+    // rotation. With the rotation baked in, every tilt was applied twice and
+    // the picture jumped as each render arrived.
+    let mut edits = adjustments_clone;
+    edits["crop"] = Value::Null;
+    edits["rotation"] = serde_json::json!(0.0);
+
     // Each request supersedes the last: renders finish out of order, and an
     // older one arriving after a newer one would put a stale picture back.
     static LATEST_UNCROPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let request = LATEST_UNCROPPED.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-
+    // One render at a time: the newest request waits here, and any it
+    // replaces before a render is free is never made. Before, every request
+    // started a thread of its own, and a drag of the crop handles could have
+    // a dozen full renders running at once.
+    struct UncroppedJob {
+        request: u64,
+        context: crate::image_processing::GpuContext,
+        path: String,
+        edits: Value,
+    }
+    static NEXT_UNCROPPED: Mutex<(Option<UncroppedJob>, bool)> = Mutex::new((None, false));
+    let job = UncroppedJob {
+        request,
+        context,
+        path: loaded_image.path.clone(),
+        edits,
+    };
+    {
+        let mut next = NEXT_UNCROPPED.lock().unwrap_or_else(|e| e.into_inner());
+        if next
+            .0
+            .as_ref()
+            .is_none_or(|waiting| waiting.request < request)
+        {
+            next.0 = Some(job);
+        }
+        if next.1 {
+            // The running worker picks it up when it finishes.
+            return Ok(());
+        }
+        next.1 = true;
+    }
     thread::spawn(move || {
-        let state = app_handle.state::<AppState>();
-        let path = loaded_image.path.clone();
-
-        // The crop view draws the whole picture and turns it by the fine
-        // rotation itself, so this render must have neither the crop nor
-        // the rotation. With the rotation baked in, every tilt was applied
-        // twice and the picture jumped as each render arrived.
-        let mut edits = adjustments_clone.clone();
-        edits["crop"] = Value::Null;
-        edits["rotation"] = serde_json::json!(0.0);
-        if request != LATEST_UNCROPPED.load(std::sync::atomic::Ordering::SeqCst) {
-            return;
-        }
-        let rendered =
-            color_engine::application::preview_bytes(&context, &state, &path, &edits, 1920);
-        if request != LATEST_UNCROPPED.load(std::sync::atomic::Ordering::SeqCst) {
-            return;
-        }
-        match rendered {
-            Ok(bytes) => {
-                let _ = app_handle.emit(
-                    "preview-update-uncropped",
-                    format!(
-                        "data:image/png;base64,{}",
-                        general_purpose::STANDARD.encode(bytes)
-                    ),
-                );
+        // A render that panics must not leave the next request waiting for
+        // a worker that is gone.
+        struct Running;
+        impl Drop for Running {
+            fn drop(&mut self) {
+                if std::thread::panicking() {
+                    NEXT_UNCROPPED.lock().unwrap_or_else(|e| e.into_inner()).1 = false;
+                }
             }
-            Err(e) => log::error!("V3 uncropped preview: {e}"),
+        }
+        let _running = Running;
+        loop {
+            let job = {
+                let mut next = NEXT_UNCROPPED.lock().unwrap_or_else(|e| e.into_inner());
+                match next.0.take() {
+                    Some(job) => job,
+                    None => {
+                        next.1 = false;
+                        return;
+                    }
+                }
+            };
+            if job.request != LATEST_UNCROPPED.load(std::sync::atomic::Ordering::SeqCst) {
+                continue;
+            }
+            let state = app_handle.state::<AppState>();
+            let rendered = color_engine::application::preview_bytes(
+                &job.context,
+                &state,
+                &job.path,
+                &job.edits,
+                1920,
+            );
+            if job.request != LATEST_UNCROPPED.load(std::sync::atomic::Ordering::SeqCst) {
+                continue;
+            }
+            match rendered {
+                Ok(bytes) => {
+                    let _ = app_handle.emit(
+                        "preview-update-uncropped",
+                        format!(
+                            "data:image/png;base64,{}",
+                            general_purpose::STANDARD.encode(bytes)
+                        ),
+                    );
+                }
+                Err(e) => log::error!("V3 uncropped preview: {e}"),
+            }
         }
     });
     Ok(())
 }
 
+/// Run a render command's work on the blocking pool. A plain (sync)
+/// command runs on the main thread, which froze the whole window for the
+/// length of the render: 0.2-0.7 s for before/after, once per preset for
+/// the preset grid. Still one at a time, as on the main thread: the collage
+/// asks for all its photos at once, and each may decode a whole RAW.
+async fn off_main_thread<T: Send + 'static>(
+    app_handle: tauri::AppHandle,
+    work: impl FnOnce(tauri::State<AppState>, &tauri::AppHandle) -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+    tokio::task::spawn_blocking(move || {
+        let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        work(app_handle.state::<AppState>(), &app_handle)
+    })
+    .await
+    .map_err(|e| format!("Task panicked: {e}"))?
+}
+
 #[tauri::command]
-fn generate_original_transformed_preview(
+async fn generate_original_transformed_preview(
     js_adjustments: serde_json::Value,
     target_resolution: Option<u32>,
-    state: tauri::State<AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<String, String> {
-    let loaded_image = state
-        .original_image
-        .lock()
-        .unwrap()
-        .clone()
-        .ok_or("No original image loaded")?;
+    off_main_thread(app_handle, move |state, app_handle| {
+        let loaded_image = state
+            .original_image
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or("No original image loaded")?;
 
-    let mut adjustments_clone = js_adjustments.clone();
-    hydrate_adjustments(&state, &mut adjustments_clone);
+        let mut adjustments_clone = js_adjustments;
+        hydrate_adjustments(&state, &mut adjustments_clone);
 
-    let context = get_or_init_gpu_context(&state, &app_handle)?;
-    adjustments_clone = color_engine::application::ungraded(&adjustments_clone);
-    adjustments_clone["aiPatches"] = serde_json::json!([]);
-    let bytes = color_engine::application::preview_bytes(
-        &context,
-        &state,
-        &loaded_image.path,
-        &adjustments_clone,
-        target_resolution.unwrap_or(1920),
-    )?;
-    Ok(format!(
-        "data:image/png;base64,{}",
-        general_purpose::STANDARD.encode(bytes)
-    ))
+        let context = get_or_init_gpu_context(&state, app_handle)?;
+        adjustments_clone = color_engine::application::ungraded(&adjustments_clone);
+        adjustments_clone["aiPatches"] = serde_json::json!([]);
+        let bytes = color_engine::application::preview_bytes(
+            &context,
+            &state,
+            &loaded_image.path,
+            &adjustments_clone,
+            target_resolution.unwrap_or(1920),
+        )?;
+        Ok(format!(
+            "data:image/png;base64,{}",
+            general_purpose::STANDARD.encode(bytes)
+        ))
+    })
+    .await
 }
 
 #[tauri::command]
@@ -896,30 +980,32 @@ pub fn get_full_image_for_processing(
 }
 
 #[tauri::command]
-fn generate_preset_preview(
+async fn generate_preset_preview(
     js_adjustments: serde_json::Value,
-    state: tauri::State<AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<Response, String> {
-    let context = get_or_init_gpu_context(&state, &app_handle)?;
-    let render_adjustments_cow = render_adjustments_for_empty(&js_adjustments);
-    let render_adjustments = render_adjustments_cow.as_ref();
+    off_main_thread(app_handle, move |state, app_handle| {
+        let context = get_or_init_gpu_context(&state, app_handle)?;
+        let render_adjustments_cow = render_adjustments_for_empty(&js_adjustments);
+        let render_adjustments = render_adjustments_cow.as_ref();
 
-    let loaded_image = state
-        .original_image
-        .lock()
-        .unwrap()
-        .clone()
-        .ok_or("No original image loaded for preset preview")?;
+        let loaded_image = state
+            .original_image
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or("No original image loaded for preset preview")?;
 
-    color_engine::application::preview_bytes(
-        &context,
-        &state,
-        &loaded_image.path,
-        render_adjustments,
-        400,
-    )
-    .map(Response::new)
+        color_engine::application::preview_bytes(
+            &context,
+            &state,
+            &loaded_image.path,
+            render_adjustments,
+            400,
+        )
+        .map(Response::new)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1293,31 +1379,33 @@ async fn save_collage(base64_data: String, first_path_str: String) -> Result<Str
 }
 
 #[tauri::command]
-fn generate_preview_for_path(
+async fn generate_preview_for_path(
     path: String,
     js_adjustments: Value,
     max_dimension: Option<u32>,
-    state: tauri::State<AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<Response, String> {
-    let context = get_or_init_gpu_context(&state, &app_handle)?;
-    let render_adjustments_cow = render_adjustments_for_empty(&js_adjustments);
-    let render_adjustments = render_adjustments_cow.as_ref();
-    // 1920 by default; Cull asks for the full picture (0) to check focus
-    // at 100%.
-    let dimension = match max_dimension {
-        None => Some(1920),
-        Some(0) => None,
-        Some(d) => Some(d),
-    };
-    color_engine::application::preview_bytes_sized(
-        &context,
-        &state,
-        &path,
-        render_adjustments,
-        dimension,
-    )
-    .map(Response::new)
+    off_main_thread(app_handle, move |state, app_handle| {
+        let context = get_or_init_gpu_context(&state, app_handle)?;
+        let render_adjustments_cow = render_adjustments_for_empty(&js_adjustments);
+        let render_adjustments = render_adjustments_cow.as_ref();
+        // 1920 by default; Cull asks for the full picture (0) to check focus
+        // at 100%.
+        let dimension = match max_dimension {
+            None => Some(1920),
+            Some(0) => None,
+            Some(d) => Some(d),
+        };
+        color_engine::application::preview_bytes_sized(
+            &context,
+            &state,
+            &path,
+            render_adjustments,
+            dimension,
+        )
+        .map(Response::new)
+    })
+    .await
 }
 
 fn setup_logging(app_handle: &tauri::AppHandle) {
@@ -1612,10 +1700,6 @@ pub fn run() {
                 let _ = std::fs::remove_file(&crash_flag_path);
             }
 
-            let lens_db = lens_correction::load_lensfun_db(&app_handle);
-            let state = app.state::<AppState>();
-            *state.lens_db.lock().unwrap() = Some(Arc::new(lens_db));
-
             unsafe {
                 if let Some(backend) = &settings.processing_backend
                     && backend != "auto" {
@@ -1655,6 +1739,31 @@ pub fn run() {
             }
 
             setup_logging(&app_handle);
+
+            // The Lensfun database parses in the background, after logging is
+            // up so its lines reach the log. It used to hold up the window.
+            // The loader takes the database's lock before setup goes on and
+            // keeps it until the database is in, so anything that asks for
+            // it meanwhile waits rather than finding it missing.
+            {
+                let (locked_tx, locked_rx) = mpsc::channel::<()>();
+                let app = app_handle.clone();
+                thread::spawn(move || {
+                    let state = app.state::<AppState>();
+                    let mut slot = state.lens_db.lock().unwrap_or_else(|e| e.into_inner());
+                    let _ = locked_tx.send(());
+                    // Caught here, so a panic cannot poison the lock for
+                    // every later caller.
+                    let lens_db = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+                        lens_correction::load_lensfun_db(&app)
+                    }));
+                    match lens_db {
+                        Ok(db) => *slot = Some(Arc::new(db)),
+                        Err(_) => log::error!("Loading the Lensfun database failed"),
+                    }
+                });
+                let _ = locked_rx.recv();
+            }
 
             if let Some(backend) = &settings.processing_backend
                 && backend != "auto" {
