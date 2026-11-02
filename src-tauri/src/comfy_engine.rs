@@ -258,6 +258,107 @@ async fn is_running() -> bool {
         .unwrap_or(false)
 }
 
+/// The engine log's size at which it is set aside (as `engine.log.1`,
+/// replacing the last one) when the engine next starts.
+const ENGINE_LOG_LIMIT: u64 = 8 << 20;
+
+/// Where the engine's stdout and stderr go: `engine.log` in the app's log
+/// folder, appended to; set aside first once it has grown past the limit.
+fn engine_log(app_handle: &tauri::AppHandle) -> Option<(Stdio, Stdio)> {
+    let dir = app_handle.path().app_log_dir().ok()?;
+    fs::create_dir_all(&dir).ok()?;
+    let path = dir.join("engine.log");
+    if fs::metadata(&path).is_ok_and(|m| m.len() > ENGINE_LOG_LIMIT) {
+        let _ = fs::rename(&path, dir.join("engine.log.1"));
+    }
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .ok()?;
+    let err = file.try_clone().ok()?;
+    use std::io::Write;
+    let _ = writeln!(
+        &file,
+        "\n---- engine starting {:?} ----",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    );
+    Some((Stdio::from(file), Stdio::from(err)))
+}
+
+/// How old a file the app left in the engine's input or output folder must
+/// be before it is removed: well past any job still using it.
+const ENGINE_FILE_AGE: Duration = Duration::from_secs(60 * 60);
+
+/// Files this app hands the engine (inputs) and, before results went to the
+/// engine's temp folder, the results it saved: by name, under this app's
+/// current and former names. Nothing else in the engine's folders is ours.
+fn is_our_engine_file(folder: &str, name: &str) -> bool {
+    const PREFIXES: [&str; 2] = ["darkroom_index_", "rapidraw_"];
+    let Some(rest) = PREFIXES.iter().find_map(|p| name.strip_prefix(p)) else {
+        return false;
+    };
+    match folder {
+        "input" => matches!(
+            rest,
+            "fill_image.png"
+                | "fill_mask.png"
+                | "gen_canvas.png"
+                | "gen_openmask.png"
+                | "seedvr2_input.png"
+        ),
+        "output" => ["fill_", "gen_", "seedvr2_"].iter().any(|kind| {
+            rest.strip_prefix(kind)
+                .and_then(|n| n.strip_suffix("_.png"))
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        }),
+        _ => false,
+    }
+}
+
+/// Remove this app's own files older than `age` from the engine's input and
+/// output folders. Results are fetched as soon as a job ends, and a job's
+/// inputs are only read while it runs, so nothing older is still in use.
+fn tidy_engine_files(comfy: &Path, age: Duration) {
+    let now = std::time::SystemTime::now();
+    let (mut removed, mut bytes) = (0usize, 0u64);
+    for folder in ["input", "output"] {
+        let Ok(entries) = fs::read_dir(comfy.join(folder)) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if !is_our_engine_file(folder, name) {
+                continue;
+            }
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            let old = meta
+                .modified()
+                .ok()
+                .and_then(|m| now.duration_since(m).ok())
+                .is_some_and(|d| d >= age);
+            if meta.is_file() && old && fs::remove_file(entry.path()).is_ok() {
+                removed += 1;
+                bytes += meta.len();
+            }
+        }
+    }
+    if removed > 0 {
+        log::info!(
+            "[engine] tidied {removed} old file(s) of ours from the engine folders ({} MB)",
+            bytes >> 20
+        );
+    }
+}
+
 /// Starts the engine if it isn't already running; waits until the API
 /// responds. The child handle lives in AppState so the engine dies with
 /// the app (or via `stop_engine`).
@@ -265,6 +366,9 @@ pub async fn ensure_running(
     app_handle: &tauri::AppHandle,
     engine_process: &Mutex<Option<std::process::Child>>,
 ) -> Result<()> {
+    if let Ok(dir) = engine_dir(app_handle) {
+        tidy_engine_files(&dir.join("ComfyUI"), ENGINE_FILE_AGE);
+    }
     if is_running().await {
         return Ok(());
     }
@@ -286,9 +390,17 @@ pub async fn ensure_running(
         .arg("--port")
         .arg(ENGINE_PORT.to_string())
         .env("PYTORCH_ENABLE_MPS_FALLBACK", "1")
-        .current_dir(dir.join("ComfyUI"))
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .current_dir(dir.join("ComfyUI"));
+    // The engine's own account (per-step speed, a silent fall back to the
+    // CPU, its errors) goes to a log beside the app's.
+    match engine_log(app_handle) {
+        Some((out, err)) => {
+            cmd.stdout(out).stderr(err);
+        }
+        None => {
+            cmd.stdout(Stdio::null()).stderr(Stdio::null());
+        }
+    }
     if force_cpu {
         cmd.arg("--cpu");
     }
@@ -334,9 +446,67 @@ async fn upload_image(client: &reqwest::Client, name: &str, png_bytes: Vec<u8>) 
     Ok(())
 }
 
+/// Longest a job may run before it is given up on (and stopped in the
+/// engine). A Flux fill takes a few minutes; this is far beyond any that
+/// works, short of forever.
+const JOB_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
+/// Stops a job in the engine if the wait for it ends early — timed out, or
+/// the fill that asked for it was dropped — so it does not go on using the
+/// GPU and memory for a result nobody will read.
+struct StopJobUnlessDone {
+    prompt_id: String,
+    done: bool,
+}
+
+impl Drop for StopJobUnlessDone {
+    fn drop(&mut self) {
+        if self.done {
+            return;
+        }
+        let prompt_id = std::mem::take(&mut self.prompt_id);
+        tauri::async_runtime::spawn(async move { stop_job(&prompt_id).await });
+    }
+}
+
+/// Take a job out of the engine's queue, and interrupt it if it is running.
+async fn stop_job(prompt_id: &str) {
+    let client = reqwest::Client::new();
+    let _ = client
+        .post(format!("{}/queue", base_url()))
+        .json(&json!({ "delete": [prompt_id] }))
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await;
+    let _ = client
+        .post(format!("{}/interrupt", base_url()))
+        .json(&json!({ "prompt_id": prompt_id }))
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await;
+    log::warn!("[engine] stopped job {prompt_id}");
+}
+
 /// Submits a workflow and returns the first output image's PNG bytes.
 /// `on_progress` receives coarse status strings.
 pub async fn run_workflow(prompt: Value, mut on_progress: impl FnMut(String)) -> Result<Vec<u8>> {
+    let started = std::time::Instant::now();
+    let result = run_workflow_inner(prompt, &mut on_progress).await;
+    match &result {
+        Ok(bytes) => log::info!(
+            "[engine] job finished in {:.1}s ({} KB)",
+            started.elapsed().as_secs_f32(),
+            bytes.len() >> 10
+        ),
+        Err(e) => log::warn!(
+            "[engine] job failed after {:.1}s: {e}",
+            started.elapsed().as_secs_f32()
+        ),
+    }
+    result
+}
+
+async fn run_workflow_inner(prompt: Value, mut on_progress: impl FnMut(String)) -> Result<Vec<u8>> {
     let client = reqwest::Client::new();
     let resp: Value = client
         .post(format!("{}/prompt", base_url()))
@@ -357,9 +527,20 @@ pub async fn run_workflow(prompt: Value, mut on_progress: impl FnMut(String)) ->
         .ok_or_else(|| anyhow!("Engine did not accept the job: {}", resp))?
         .to_string();
 
+    let mut guard = StopJobUnlessDone {
+        prompt_id: prompt_id.clone(),
+        done: false,
+    };
     let started = std::time::Instant::now();
     loop {
         tokio::time::sleep(Duration::from_secs(2)).await;
+        if started.elapsed() > JOB_TIMEOUT {
+            // The guard stops the job in the engine as it drops.
+            return Err(anyhow!(
+                "The generative engine took longer than {} minutes and was stopped.",
+                JOB_TIMEOUT.as_secs() / 60
+            ));
+        }
         on_progress(format!(
             "Generating... ({}s elapsed)",
             started.elapsed().as_secs()
@@ -375,6 +556,7 @@ pub async fn run_workflow(prompt: Value, mut on_progress: impl FnMut(String)) ->
         };
         let status = entry.pointer("/status/status_str").and_then(|v| v.as_str());
         if status == Some("error") {
+            guard.done = true;
             // Surface just the exception message, not the whole traceback.
             let detail = entry
                 .pointer("/status/messages")
@@ -397,6 +579,7 @@ pub async fn run_workflow(prompt: Value, mut on_progress: impl FnMut(String)) ->
         if !completed {
             continue;
         }
+        guard.done = true;
         // Find the first output image.
         if let Some(outputs) = entry.get("outputs").and_then(|v| v.as_object()) {
             for node_out in outputs.values() {
@@ -407,15 +590,23 @@ pub async fn run_workflow(prompt: Value, mut on_progress: impl FnMut(String)) ->
                 {
                     let filename = img.get("filename").and_then(|v| v.as_str()).unwrap_or("");
                     let subfolder = img.get("subfolder").and_then(|v| v.as_str()).unwrap_or("");
+                    // A preview image lands in the engine's temp folder,
+                    // which the engine empties itself; the graphs used to
+                    // save into its output folder, which nothing emptied.
+                    let kind = img.get("type").and_then(|v| v.as_str()).unwrap_or("output");
+                    let url = reqwest::Url::parse_with_params(
+                        &format!("{}/view", base_url()),
+                        &[
+                            ("filename", filename),
+                            ("subfolder", subfolder),
+                            ("type", kind),
+                        ],
+                    )?;
                     let bytes = client
-                        .get(format!(
-                            "{}/view?filename={}&subfolder={}&type=output",
-                            base_url(),
-                            filename,
-                            subfolder
-                        ))
+                        .get(url)
                         .send()
                         .await?
+                        .error_for_status()?
                         .bytes()
                         .await?;
                     return Ok(bytes.to_vec());
@@ -694,8 +885,8 @@ pub async fn run_generative_fill(
                               "latent_image": ["6b", 0], "seed": seed, "steps": 28, "cfg": 6.0,
                               "sampler_name": "dpmpp_2m", "scheduler": "karras", "denoise": 0.85}},
             "8": {"class_type": "VAEDecode", "inputs": {"samples": ["7", 0], "vae": ["3", 2]}},
-            "9": {"class_type": "SaveImage",
-                  "inputs": {"images": ["8", 0], "filename_prefix": "darkroom_index_fill"}}
+            "9": {"class_type": "PreviewImage",
+                  "inputs": {"images": ["8", 0]}}
         }),
         // Fooocus patch turns base SDXL into a proper inpainting model.
         FillKind::SdxlFooocus => json!({
@@ -723,8 +914,8 @@ pub async fn run_generative_fill(
                               "latent_image": ["7", 3], "seed": seed, "steps": 28, "cfg": 6.0,
                               "sampler_name": "dpmpp_2m", "scheduler": "karras", "denoise": 1.0}},
             "10": {"class_type": "VAEDecode", "inputs": {"samples": ["9", 0], "vae": ["3", 2]}},
-            "11": {"class_type": "SaveImage",
-                   "inputs": {"images": ["10", 0], "filename_prefix": "darkroom_index_fill"}}
+            "11": {"class_type": "PreviewImage",
+                   "inputs": {"images": ["10", 0]}}
         }),
         // Flux Fill: purpose-trained inpainting DiT (quantized), cfg 1 +
         // FluxGuidance, InpaintModelConditioning supplies image+mask.
@@ -754,8 +945,8 @@ pub async fn run_generative_fill(
                               "latent_image": ["6", 2], "seed": seed, "steps": 28, "cfg": 1.0,
                               "sampler_name": "euler", "scheduler": "normal", "denoise": 1.0}},
             "8": {"class_type": "VAEDecode", "inputs": {"samples": ["7", 0], "vae": ["3v", 0]}},
-            "9": {"class_type": "SaveImage",
-                  "inputs": {"images": ["8", 0], "filename_prefix": "darkroom_index_fill"}}
+            "9": {"class_type": "PreviewImage",
+                  "inputs": {"images": ["8", 0]}}
         }),
     };
 
@@ -865,8 +1056,8 @@ pub async fn run_free_generation(
                                   "latent_image": ["6", 2], "seed": seed, "steps": 28, "cfg": 1.0,
                                   "sampler_name": "euler", "scheduler": "normal", "denoise": 1.0}},
                 "8": {"class_type": "VAEDecode", "inputs": {"samples": ["7", 0], "vae": ["3v", 0]}},
-                "9": {"class_type": "SaveImage",
-                      "inputs": {"images": ["8", 0], "filename_prefix": "darkroom_index_gen"}}
+                "9": {"class_type": "PreviewImage",
+                      "inputs": {"images": ["8", 0]}}
             })
         }
         // Both SDXL tiers generate the same way; the Fooocus patch is an
@@ -883,8 +1074,8 @@ pub async fn run_free_generation(
                               "latent_image": ["6", 0], "seed": seed, "steps": 28, "cfg": 7.0,
                               "sampler_name": "dpmpp_2m", "scheduler": "karras", "denoise": 1.0}},
             "8": {"class_type": "VAEDecode", "inputs": {"samples": ["7", 0], "vae": ["3", 2]}},
-            "9": {"class_type": "SaveImage",
-                  "inputs": {"images": ["8", 0], "filename_prefix": "darkroom_index_gen"}}
+            "9": {"class_type": "PreviewImage",
+                  "inputs": {"images": ["8", 0]}}
         }),
     };
 
@@ -936,8 +1127,8 @@ pub async fn run_seedvr2(
                           "seed": seed, "resolution": target_short_edge,
                           "max_resolution": 0, "batch_size": 1,
                           "uniform_batch_size": false, "color_correction": "lab"}},
-        "5": {"class_type": "SaveImage",
-              "inputs": {"images": ["4", 0], "filename_prefix": "darkroom_index_seedvr2"}}
+        "5": {"class_type": "PreviewImage",
+              "inputs": {"images": ["4", 0]}}
     });
     run_workflow(prompt, &mut on_progress).await
 }
@@ -1102,5 +1293,69 @@ mod lora_tests {
             "a zero-strength LoRA should not be loaded"
         );
         assert_eq!(g["3d"]["inputs"]["model"], json!(["3", 0]));
+    }
+}
+
+#[cfg(test)]
+mod engine_file_tests {
+    use super::*;
+
+    #[test]
+    fn only_our_own_engine_files_are_ours() {
+        for name in [
+            "darkroom_index_fill_00012_.png",
+            "darkroom_index_gen_00001_.png",
+            "darkroom_index_seedvr2_00003_.png",
+            "rapidraw_fill_00244_.png",
+            "rapidraw_seedvr2_00106_.png",
+        ] {
+            assert!(is_our_engine_file("output", name), "{name}");
+        }
+        for name in [
+            "rapidraw_ab_00001_.png",
+            "rapidraw_testbase_00001_.png",
+            "ab_normal_00001_.png",
+            "tile_out_0_00001_.png",
+            "darkroom_index_fill_.png",
+            "darkroom_index_fill_00012_.png.bak",
+            "_output_images_will_be_put_here",
+        ] {
+            assert!(!is_our_engine_file("output", name), "{name}");
+        }
+        assert!(is_our_engine_file("input", "darkroom_index_fill_image.png"));
+        assert!(is_our_engine_file("input", "rapidraw_gen_openmask.png"));
+        assert!(!is_our_engine_file(
+            "input",
+            "rapidraw_ab_20260825-214332_image.png"
+        ));
+        assert!(!is_our_engine_file("input", "fill_img.png"));
+        assert!(!is_our_engine_file(
+            "models",
+            "darkroom_index_fill_image.png"
+        ));
+    }
+
+    #[test]
+    fn tidying_removes_only_our_old_files() {
+        let comfy = std::env::temp_dir().join(format!("di_engine_tidy_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&comfy);
+        for folder in ["input", "output", "temp"] {
+            fs::create_dir_all(comfy.join(folder)).unwrap();
+        }
+        let ours = comfy.join("output/darkroom_index_fill_00001_.png");
+        let theirs = comfy.join("output/ab_normal_00001_.png");
+        let input = comfy.join("input/darkroom_index_fill_mask.png");
+        let elsewhere = comfy.join("temp/darkroom_index_fill_00001_.png");
+        for p in [&ours, &theirs, &input, &elsewhere] {
+            fs::write(p, b"png").unwrap();
+        }
+        // Too new: nothing goes.
+        tidy_engine_files(&comfy, Duration::from_secs(3600));
+        assert!(ours.exists() && input.exists());
+        // Old enough: ours go, nothing else does.
+        tidy_engine_files(&comfy, Duration::ZERO);
+        assert!(!ours.exists() && !input.exists());
+        assert!(theirs.exists() && elsewhere.exists());
+        let _ = fs::remove_dir_all(&comfy);
     }
 }

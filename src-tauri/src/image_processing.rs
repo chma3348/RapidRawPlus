@@ -231,14 +231,31 @@ pub fn get_geometry_params_from_json(adjustments: &serde_json::Value) -> Geometr
 /// across the finer bands (box 75-98%); dark ringing at the sun's edge,
 /// worst 1%, 9.1 L* without the clamp, 4.9 with it.
 pub fn resample_f32_image(image: &DynamicImage, max_w: u32, max_h: u32) -> DynamicImage {
-    let (width, height) = image.dimensions();
+    // Float RGBA (what every caller hands over) is read where it is, not
+    // copied first: a 24-megapixel frame is 384 MB.
+    let rgba = match image.as_rgba32f() {
+        Some(pixels) => Cow::Borrowed(pixels),
+        None => Cow::Owned(image.to_rgba32f()),
+    };
+    match resample_rgba32f(&rgba, max_w, max_h) {
+        Some(out) => DynamicImage::ImageRgba32F(out),
+        None => image.clone(),
+    }
+}
+
+/// `resample_f32_image` on float RGBA pixels: `None` when they already fit.
+pub fn resample_rgba32f(
+    rgba: &image::Rgba32FImage,
+    max_w: u32,
+    max_h: u32,
+) -> Option<image::Rgba32FImage> {
+    let (width, height) = rgba.dimensions();
     if max_w == 0 || max_h == 0 || (max_w >= width && max_h >= height) {
-        return image.clone();
+        return None;
     }
     let ratio = (max_w as f32 / width as f32).min(max_h as f32 / height as f32);
     let new_w = ((width as f32 * ratio).round() as u32).max(1);
     let new_h = ((height as f32 * ratio).round() as u32).max(1);
-    let rgba = image.to_rgba32f();
     let horizontal = resample_pass(
         rgba.as_raw(),
         width as usize,
@@ -253,7 +270,7 @@ pub fn resample_f32_image(image: &DynamicImage, max_w: u32, max_h: u32) -> Dynam
         new_h as usize,
         false,
     );
-    DynamicImage::ImageRgba32F(image::Rgba32FImage::from_raw(new_w, new_h, out).unwrap())
+    image::Rgba32FImage::from_raw(new_w, new_h, out)
 }
 
 /// Weights and the clamp footprint for shrinking `n_in` samples to `n_out`.

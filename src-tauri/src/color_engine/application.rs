@@ -419,6 +419,7 @@ impl V3Caches {
             freed += c.values().map(|m| m.as_raw().len()).sum::<usize>();
             c.clear();
         }
+        freed += super::patches::clear_layers();
         freed
     }
 
@@ -426,6 +427,7 @@ impl V3Caches {
     /// last one's picture, but keep the decoded pictures themselves (within
     /// their budget), so going back to it does not decode it again.
     pub fn open(&self) {
+        super::patches::clear_layers();
         if let Ok(mut c) = self.noise.lock() {
             *c = None;
         }
@@ -2164,6 +2166,137 @@ pub fn render_file_with_capture(
     )
 }
 
+/// A prepared picture, the crop's offset, and the size after geometry.
+type Prepared = (DynamicImage, (f32, f32), (u32, u32));
+
+/// x, y, width, height.
+type Rect = (u32, u32, u32, u32);
+
+/// The prepared picture made from a copy of the decoded one: patches
+/// composited in, flat-field divided out, then geometry and the preview's
+/// downscale. Returns the picture, the crop's offset and the size after
+/// geometry.
+fn prepare_copy(
+    source: &DecodedFrame,
+    pair: &super::identity::Resolved,
+    path: &str,
+    edits: &Value,
+    max_dimension: Option<u32>,
+) -> Result<Prepared> {
+    // Patches join at the decoded-source stage, before geometry, because
+    // the mask stored with a patch is in those coordinates.
+    let mut patched = source.pixels.clone();
+    if !super::patches::visible(edits).is_empty() {
+        // Only rendered sources went through this transform. Native RAW
+        // is scene-linear sRGB, not transformed DWG: do not reinterpret
+        // a display-encoded patch as DWG and blend it into sRGB there.
+        let captured = if source.rendered_origin {
+            captured_input(pair)?
+        } else {
+            None
+        };
+        let raw_scale = if crate::formats::is_raw_file(path) {
+            super::patches::raw_patch_scale(&source.pixels)
+        } else {
+            1.0
+        };
+        super::patches::composite(
+            &mut patched,
+            edits,
+            &source.color,
+            source.source_profile.as_deref(),
+            captured.as_ref().zip(source.input_domain),
+            raw_scale,
+        )?;
+    }
+    // Flat-field correction divides linear light in the unwarped frame,
+    // before geometry, as the previous engine's does — but on linear
+    // values, so the shared geometry step is handed edits without it.
+    let to_srgb = spaces::conversion(source.color.primaries, Primaries::Srgb);
+    let rows = |m: glam::DMat3| {
+        m.transpose()
+            .to_cols_array_2d()
+            .map(|r| r.map(|v| v as f32))
+    };
+    let flattened = crate::flat_field::apply_flat_field_linear(
+        &mut patched,
+        edits,
+        rows(to_srgb),
+        rows(to_srgb.inverse()),
+    )?;
+    let geometry_edits;
+    let geometry_edits = if flattened || !edits["flatFieldProfile"].is_null() {
+        // Geometry reads neither patches nor masks: leave their pictures
+        // out of the copy.
+        let mut e = match edits.as_object() {
+            Some(map) => Value::Object(
+                map.iter()
+                    .filter(|(k, _)| !matches!(k.as_str(), "aiPatches" | "masks"))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            ),
+            None => edits.clone(),
+        };
+        e["flatFieldProfile"] = Value::Null;
+        geometry_edits = e;
+        &geometry_edits
+    } else {
+        edits
+    };
+    // Handed over whole, so a frame with no geometry is not copied again.
+    let (transformed, offset) =
+        crate::apply_all_transformations(DynamicImage::ImageRgba32F(patched), geometry_edits);
+    let full = transformed.dimensions();
+    let resampled = max_dimension.and_then(|dim| {
+        crate::image_processing::resample_rgba32f(transformed.as_rgba32f()?, dim, dim)
+    });
+    let image = match resampled {
+        Some(small) => DynamicImage::ImageRgba32F(small),
+        None => match max_dimension {
+            // Not float RGBA (never, in practice), or already small enough.
+            Some(dim) if transformed.as_rgba32f().is_none() => {
+                crate::image_processing::resample_f32_image(&transformed, dim, dim)
+            }
+            _ => transformed.into_owned(),
+        },
+    };
+    Ok((image, offset, full))
+}
+
+/// Where the prepared picture lies in the decoded one when geometry would
+/// do nothing to it but (perhaps) crop it, exactly as `apply_crop` would:
+/// the rectangle and the crop's offset. `None` when anything else applies.
+fn crop_in_place(pixels: &image::Rgba32FImage, edits: &Value) -> Option<(Rect, (f32, f32))> {
+    use crate::image_processing::{Crop, get_geometry_params_from_json, is_geometry_identity};
+    if !is_geometry_identity(&get_geometry_params_from_json(edits)) {
+        return None;
+    }
+    let steps = edits["orientationSteps"].as_u64().unwrap_or(0) as u8;
+    let rotation = edits["rotation"].as_f64().unwrap_or(0.0) as f32;
+    if matches!(steps, 1..=3)
+        || edits["flipHorizontal"].as_bool().unwrap_or(false)
+        || edits["flipVertical"].as_bool().unwrap_or(false)
+        || rotation % 360.0 != 0.0
+    {
+        return None;
+    }
+    let (img_w, img_h) = pixels.dimensions();
+    let crop: Option<Crop> = serde_json::from_value(edits["crop"].clone()).ok();
+    let offset = crop.map_or((0.0, 0.0), |c| (c.x as f32, c.y as f32));
+    let mut rect = (0, 0, img_w, img_h);
+    if let Some(c) = crop {
+        let (x, y) = (c.x.round() as u32, c.y.round() as u32);
+        let (width, height) = (c.width.round() as u32, c.height.round() as u32);
+        if width > 0 && height > 0 && x < img_w && y < img_h {
+            let (w, h) = ((img_w - x).min(width), (img_h - y).min(height));
+            if w > 0 && h > 0 {
+                rect = (x, y, w, h);
+            }
+        }
+    }
+    Some((rect, offset))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render(
     context: &GpuContext,
@@ -2196,7 +2329,7 @@ fn render(
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         for patch in super::patches::visible(edits) {
-            patch.to_string().hash(&mut hasher);
+            super::patches::content_identity(patch).hash(&mut hasher);
         }
         hasher.finish()
     };
@@ -2218,71 +2351,33 @@ fn render(
     let (stored, offset, scale, full) = if let Some(found) = found {
         found
     } else {
-        // Patches join at the decoded-source stage, before geometry, because
-        // the mask stored with a patch is in those coordinates.
-        let patched = if super::patches::visible(edits).is_empty() {
-            source.pixels.clone()
-        } else {
-            // Only rendered sources went through this transform. Native RAW
-            // is scene-linear sRGB, not transformed DWG: do not reinterpret
-            // a display-encoded patch as DWG and blend it into sRGB there.
-            let captured = if source.rendered_origin {
-                captured_input(&pair)?
-            } else {
-                None
-            };
-            let mut pixels = source.pixels.clone();
-            let raw_scale = if crate::formats::is_raw_file(path) {
-                super::patches::raw_patch_scale(&source.pixels)
-            } else {
-                1.0
-            };
-            super::patches::composite(
-                &mut pixels,
-                edits,
-                &source.color,
-                source.source_profile.as_deref(),
-                captured.as_ref().zip(source.input_domain),
-                raw_scale,
-            )?;
-            pixels
-        };
-        // Flat-field correction divides linear light in the unwarped frame,
-        // before geometry, as the previous engine's does — but on linear
-        // values, so the shared geometry step is handed edits without it.
-        let mut patched = patched;
-        let to_srgb = spaces::conversion(source.color.primaries, Primaries::Srgb);
-        let rows = |m: glam::DMat3| {
-            m.transpose()
-                .to_cols_array_2d()
-                .map(|r| r.map(|v| v as f32))
-        };
-        let flattened = crate::flat_field::apply_flat_field_linear(
-            &mut patched,
-            edits,
-            rows(to_srgb),
-            rows(to_srgb.inverse()),
-        )?;
-        let geometry_edits;
-        let geometry_edits = if flattened || !edits["flatFieldProfile"].is_null() {
-            let mut e = edits.clone();
-            e["flatFieldProfile"] = Value::Null;
-            geometry_edits = e;
-            &geometry_edits
-        } else {
-            edits
-        };
-        // Handed over whole, so a frame with no geometry is not copied again.
-        let (transformed, offset) =
-            crate::apply_all_transformations(DynamicImage::ImageRgba32F(patched), geometry_edits);
-        let full = transformed.dimensions();
-        let full_width = full.0;
-        let image = if let Some(dim) = max_dimension {
+        if let Some(dim) = max_dimension {
             ensure!((16..=16384).contains(&dim), "Invalid v3 preview dimensions");
-            crate::image_processing::resample_f32_image(&transformed, dim, dim)
+        }
+        // Nothing to paint into the decoded picture and nothing but a crop
+        // to do to it: read it where it is. Copying it first cost 384 MB
+        // and tens of milliseconds for a 24-megapixel frame.
+        let in_place = (super::patches::visible(edits).is_empty()
+            && edits["flatFieldProfile"].is_null())
+        .then(|| crop_in_place(&source.pixels, edits))
+        .flatten();
+        let (image, offset, full) = if let Some(((x, y, w, h), offset)) = in_place {
+            let whole = (x, y, w, h) == (0, 0, source.pixels.width(), source.pixels.height());
+            let cropped =
+                (!whole).then(|| image::imageops::crop_imm(&source.pixels, x, y, w, h).to_image());
+            let pixels = cropped.as_ref().unwrap_or(&source.pixels);
+            let resampled = max_dimension
+                .and_then(|dim| crate::image_processing::resample_rgba32f(pixels, dim, dim));
+            let image = match (resampled, cropped) {
+                (Some(small), _) => small,
+                (None, Some(cropped)) => cropped,
+                (None, None) => source.pixels.clone(),
+            };
+            (DynamicImage::ImageRgba32F(image), offset, (w, h))
         } else {
-            transformed.into_owned()
+            prepare_copy(&source, &pair, path, edits, max_dimension)?
         };
+        let full_width = full.0;
         let scale = image.width() as f32 / full_width as f32;
         let stored = Arc::new(HalfImage::new(&image));
         drop(image);

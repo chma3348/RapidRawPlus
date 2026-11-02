@@ -125,10 +125,30 @@ fn settings(app: &tauri::AppHandle) -> Option<crate::app_settings::AppSettings> 
     serde_json::from_str(&fs::read_to_string(path).ok()?).ok()
 }
 
-fn diagnostics(app: &tauri::AppHandle) -> bool {
-    settings(app)
+/// Whether fill diagnostics are switched on. Asked for every file a fill
+/// saves, so the settings file is read again only once it has changed.
+pub fn diagnostics(app: &tauri::AppHandle) -> bool {
+    type Seen = Option<(Option<SystemTime>, u64, bool)>;
+    static SEEN: Mutex<Seen> = Mutex::new(None);
+    let stamp = crate::app_settings::get_settings_path(app)
+        .ok()
+        .and_then(|p| fs::metadata(p).ok())
+        .map(|m| (m.modified().ok(), m.len()));
+    if let Some((modified, len)) = stamp
+        && let Ok(seen) = SEEN.lock()
+        && let Some((m, l, on)) = *seen
+        && m == modified
+        && l == len
+    {
+        return on;
+    }
+    let on = settings(app)
         .and_then(|s| s.keep_fill_diagnostics)
-        .unwrap_or(false)
+        .unwrap_or(false);
+    if let (Some((modified, len)), Ok(mut seen)) = (stamp, SEEN.lock()) {
+        *seen = Some((modified, len, on));
+    }
+    on
 }
 
 fn read_index(root: &Path) -> Index {
