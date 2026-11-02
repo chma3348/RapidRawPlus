@@ -245,18 +245,50 @@ mod precision_tests {
         image::RgbaImage::from_pixel(2, 2, Rgba([255, 0, 0, 0]))
             .save(&path)
             .unwrap();
-        apply_watermark(
-            &mut image,
-            &WatermarkSettings {
-                path: path.to_string_lossy().into_owned(),
-                anchor: WatermarkAnchor::Center,
-                scale: 100.0,
-                spacing: 0.0,
-                opacity: 100.0,
-            },
-        )
-        .unwrap();
+        let settings = WatermarkSettings {
+            path: path.to_string_lossy().into_owned(),
+            anchor: WatermarkAnchor::Center,
+            scale: 100.0,
+            spacing: 0.0,
+            opacity: 100.0,
+        };
+        apply_watermark(&mut image, &settings, &load_watermark(&settings).unwrap()).unwrap();
         assert_eq!(image, before);
+    }
+
+    #[test]
+    fn a_batch_decodes_its_watermark_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mark.png");
+        image::RgbaImage::from_pixel(4, 4, Rgba([255, 0, 0, 255]))
+            .save(&path)
+            .unwrap();
+        let settings: ExportSettings = serde_json::from_value(serde_json::json!({
+            "jpegQuality": 90,
+            "keepMetadata": false,
+            "stripGps": false,
+            "watermark": {
+                "path": path.to_string_lossy(),
+                "anchor": "center",
+                "scale": 50.0,
+                "spacing": 0.0,
+                "opacity": 100.0
+            }
+        }))
+        .unwrap();
+        let photo =
+            || DynamicImage::ImageRgba16(ImageBuffer::from_pixel(16, 16, Rgba([0, 0, 0, 65535])));
+        let batch = BatchWatermark::new();
+        let first = apply_export_resize_and_watermark(photo(), &settings, &batch).unwrap();
+        // Gone from disk: the second export still has it, so it was not read again.
+        std::fs::remove_file(&path).unwrap();
+        let second = apply_export_resize_and_watermark(photo(), &settings, &batch).unwrap();
+        assert_eq!(first, second);
+        assert_ne!(first, photo());
+        // A fresh batch reads it, and reports it missing.
+        assert!(
+            apply_export_resize_and_watermark(photo(), &settings, &BatchWatermark::new()).is_err()
+        );
     }
 }
 
@@ -322,13 +354,20 @@ pub struct WatermarkSettings {
     pub opacity: f32,
 }
 
+/// A batch's watermark image, decoded by the first export that needs it and
+/// shared by the rest (or the error it gave, which each export reports).
+type BatchWatermark = std::sync::OnceLock<Result<DynamicImage, String>>;
+
+fn load_watermark(watermark_settings: &WatermarkSettings) -> Result<DynamicImage, String> {
+    image::open(&watermark_settings.path)
+        .map_err(|e| format!("Failed to open watermark image: {}", e))
+}
+
 fn apply_watermark(
     base_image: &mut DynamicImage,
     watermark_settings: &WatermarkSettings,
+    watermark_img: &DynamicImage,
 ) -> Result<(), String> {
-    let watermark_img = image::open(&watermark_settings.path)
-        .map_err(|e| format!("Failed to open watermark image: {}", e))?;
-
     let (base_w, base_h) = base_image.dimensions();
     let base_min_dim = base_w.min(base_h) as f32;
 
@@ -426,6 +465,7 @@ fn calculate_resize_target(
 fn apply_export_resize_and_watermark(
     mut image: DynamicImage,
     export_settings: &ExportSettings,
+    watermark: &BatchWatermark,
 ) -> Result<DynamicImage, String> {
     if let Some(resize_opts) = &export_settings.resize {
         let (current_w, current_h) = image.dimensions();
@@ -442,7 +482,11 @@ fn apply_export_resize_and_watermark(
     }
 
     if let Some(watermark_settings) = &export_settings.watermark {
-        apply_watermark(&mut image, watermark_settings)?;
+        let watermark_img = watermark
+            .get_or_init(|| load_watermark(watermark_settings))
+            .as_ref()
+            .map_err(Clone::clone)?;
+        apply_watermark(&mut image, watermark_settings, watermark_img)?;
     }
     Ok(image)
 }
@@ -456,9 +500,15 @@ pub(crate) fn process_image_for_export_pipeline(
     let render_adjustments_cow = render_adjustments_for_empty(js_adjustments);
     let render_adjustments = render_adjustments_cow.as_ref();
 
-    crate::color_engine::application::render_file(context, state, path, render_adjustments, None)
-        .map(|f| f.export_rgba16())
-        .map_err(|e| e.to_string())
+    crate::color_engine::application::render_for_export(
+        context,
+        state,
+        path,
+        render_adjustments,
+        OutputSpace::Srgb,
+    )
+    .map(|f| f.export_rgba16())
+    .map_err(|e| e.to_string())
 }
 
 fn set_timestamps_from_exif(src: &Path, dst: &Path) {
@@ -912,6 +962,7 @@ pub async fn export_images(
 
         let semaphore = Arc::new(tokio::sync::Semaphore::new(num_threads));
         let mut join_handles = Vec::new();
+        let watermark = Arc::new(BatchWatermark::new());
 
         for (image_path_str, output_path) in planned {
             let permit = semaphore.clone().acquire_owned().await.unwrap();
@@ -923,6 +974,7 @@ pub async fn export_images(
             let output_format = output_format.clone();
             let current_edit_path = current_edit_path.clone();
             let current_edit_adjustments = current_edit_adjustments.clone();
+            let watermark = Arc::clone(&watermark);
 
             let handle = tokio::task::spawn_blocking(move || {
                 if app_handle_clone
@@ -976,28 +1028,23 @@ pub async fn export_images(
                     // which every viewer assumes for an untagged image.
                     let carries_profile =
                         matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "tif" | "tiff");
-                    let frame = if carries_profile {
-                        crate::color_engine::application::render_for_output(
-                            &context_clone,
-                            &state,
-                            &image_path_str,
-                            &js_adjustments,
-                            None,
-                        )
+                    let space = if carries_profile {
+                        crate::color_engine::application::output_space(&state)
                     } else {
-                        crate::color_engine::application::render_file(
-                            &context_clone,
-                            &state,
-                            &image_path_str,
-                            &js_adjustments,
-                            None,
-                        )
-                    }
+                        OutputSpace::Srgb
+                    };
+                    let frame = crate::color_engine::application::render_for_export(
+                        &context_clone,
+                        &state,
+                        &image_path_str,
+                        &js_adjustments,
+                        space,
+                    )
                     .map_err(|e| e.to_string())?;
                     let space = frame.space;
                     let rendered = frame.export_rgba16();
                     let final_image =
-                        apply_export_resize_and_watermark(rendered, &export_settings)?;
+                        apply_export_resize_and_watermark(rendered, &export_settings, &watermark)?;
                     save_image_with_metadata(
                         &final_image,
                         &output_path,
