@@ -455,34 +455,78 @@ fn stem_xmp_rank(ext: &str) -> u8 {
 /// Photo's video), and between two of a kind the extension first in the
 /// alphabet (`IMG.jpg` over `IMG.tif`). The others have none of their own.
 fn owns_stem_xmp(image: &Path) -> bool {
-    if crate::formats::is_raw_file(image) {
-        return true;
-    }
-    let (Some(parent), Some(stem)) = (image.parent(), image.file_stem()) else {
+    let Some(parent) = image.parent() else {
         return true;
     };
-    let stem = stem.to_string_lossy();
+    !stronger_twins(image).any(|(stem, ext)| {
+        parent.join(format!("{stem}.{ext}")).exists()
+            || parent
+                .join(format!("{stem}.{}", ext.to_ascii_uppercase()))
+                .exists()
+    })
+}
+
+/// The names (stem, extension) of the twins that would own `image`'s stem
+/// XMP over it, were they beside it (see `owns_stem_xmp`).
+fn stronger_twins(image: &Path) -> impl Iterator<Item = (String, &'static str)> {
+    let stem = image
+        .file_stem()
+        .filter(|_| !crate::formats::is_raw_file(image) && image.parent().is_some())
+        .map(|s| s.to_string_lossy().into_owned());
     let own_ext = image
         .extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase())
         .unwrap_or_default();
-    let own = (stem_xmp_rank(&own_ext), own_ext.as_str());
-    let stronger = crate::formats::RAW_EXTENSIONS
+    let own_rank = stem_xmp_rank(&own_ext);
+    crate::formats::RAW_EXTENSIONS
         .iter()
         .map(|(e, _)| *e)
         .chain(crate::formats::NON_RAW_EXTENSIONS.iter().copied())
         .chain(crate::formats::VIDEO_EXTENSIONS.iter().copied())
-        .filter(|e| (stem_xmp_rank(e), *e) < own);
-    for ext in stronger {
-        if parent.join(format!("{stem}.{ext}")).exists()
-            || parent
-                .join(format!("{stem}.{}", ext.to_ascii_uppercase()))
-                .exists()
-        {
-            return false;
-        }
+        .filter(move |e| (stem_xmp_rank(e), *e) < (own_rank, own_ext.as_str()))
+        .filter_map(move |e| stem.clone().map(|s| (s, e)))
+}
+
+/// A folder's file names, read once for a listing, so that each photo's
+/// XMP and twins are looked up instead of asked of the disk: that is about
+/// a hundred names per JPEG or HEIC (`owns_stem_xmp`), and on a cloud or
+/// network volume each one can go to the server. Case is ignored, as the
+/// Mac's own disks ignore it.
+#[derive(Default)]
+pub struct FolderNames(HashMap<String, String>);
+
+impl FolderNames {
+    pub fn insert(&mut self, name: &str) {
+        self.0.insert(name.to_lowercase(), name.to_string());
     }
-    true
+
+    /// The name as it is on disk, for `name` in any case.
+    fn find(&self, name: &str) -> Option<&str> {
+        self.0.get(&name.to_lowercase()).map(String::as_str)
+    }
+}
+
+/// `sidecar_for` for a photo listed with its folder's `names`: the same
+/// answer, without touching the disk. An XMP found is named as on disk.
+fn sidecar_among(image: &Path, names: &FolderNames) -> Option<(PathBuf, bool)> {
+    let name = image.file_name()?.to_string_lossy().into_owned();
+    let stem_xmp = image.with_extension("xmp");
+    let owns =
+        || !stronger_twins(image).any(|(stem, ext)| names.find(&format!("{stem}.{ext}")).is_some());
+    let found = |p: &Path| {
+        let n = p.file_name()?.to_string_lossy().into_owned();
+        names.find(&n).map(|n| image.with_file_name(n))
+    };
+
+    if let Some(path) = found(&stem_xmp)
+        && owns()
+    {
+        return Some((path, true));
+    }
+    if let Some(path) = found(&image.with_file_name(format!("{name}.xmp"))) {
+        return Some((path, true));
+    }
+    owns().then_some((stem_xmp, false))
 }
 
 /// The XMP sidecar for `image` (a real path, not a virtual copy's), and
@@ -643,11 +687,20 @@ fn is_virtual(path: &str) -> bool {
 /// Take in another program's changes to `path`'s XMP. Returns whether
 /// `metadata` changed (the caller saves the sidecar).
 pub fn pull(path: &str, metadata: &mut ImageMetadata) -> bool {
+    pull_listed(path, metadata, None)
+}
+
+/// `pull`, for a photo listed with its folder's `names` (when given).
+pub fn pull_listed(path: &str, metadata: &mut ImageMetadata, names: Option<&FolderNames>) -> bool {
     if is_virtual(path) {
         return false;
     }
     let image = Path::new(path);
-    let Some((xmp, true)) = sidecar_for(image) else {
+    let found = match names {
+        Some(names) => sidecar_among(image, names),
+        None => sidecar_for(image),
+    };
+    let Some((xmp, true)) = found else {
         return false;
     };
     let Some(mtime) = modified_ms(&xmp) else {
@@ -914,6 +967,45 @@ mod tests {
         // On its own, a video owns the stem XMP as before.
         std::fs::write(p("C.mp4"), b"x").unwrap();
         assert_eq!(sidecar_for(&p("C.mp4")), Some((p("C.xmp"), false)));
+    }
+
+    /// Looking names up in the folder's listing finds the same sidecar as
+    /// asking the disk, whatever the case of the names.
+    #[test]
+    fn listed_names_find_what_the_disk_finds() {
+        let folders: &[&[&str]] = &[
+            &["IMG.HEIC", "IMG.MOV", "IMG.xmp"],
+            &["B.jpg", "B.tif", "B.XMP"],
+            &["c.JPG", "C.arw", "c.xmp"],
+            &["D.Jpg", "d.CR3"],
+            &["E.jpeg", "E.jpeg.xmp", "E.PNG"],
+            &["F.png", "f.Heic", "F.Xmp"],
+            &["G.mp4", "G.MP4.XMP"],
+            &["H.tif", "H.tiff", "h.dng", "H.DNG.xmp"],
+            &["solo.jpg"],
+            &["K.jpg", "K.xmp", "K.JPG.xmp"],
+        ];
+        for files in folders {
+            let dir = tempfile::tempdir().unwrap();
+            let mut names = FolderNames::default();
+            for n in *files {
+                std::fs::write(dir.path().join(n), b"x").unwrap();
+            }
+            for entry in std::fs::read_dir(dir.path()).unwrap() {
+                names.insert(&entry.unwrap().file_name().to_string_lossy());
+            }
+            for n in *files {
+                let image = dir.path().join(n);
+                let lower = |r: Option<(PathBuf, bool)>| {
+                    r.map(|(p, e)| (p.to_string_lossy().to_lowercase(), e))
+                };
+                assert_eq!(
+                    lower(sidecar_among(&image, &names)),
+                    lower(sidecar_for(&image)),
+                    "{n} among {files:?}"
+                );
+            }
+        }
     }
 
     #[test]

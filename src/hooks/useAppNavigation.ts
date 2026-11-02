@@ -415,13 +415,33 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
         });
         setLibrary({ imageRatings: initialRatings });
 
+        // A refresh of the open folder keeps the thumbnails shown, except
+        // those of photos changed on disk (or gone): those are made again.
+        if (preserveEditor) {
+          const before = new Map(useLibraryStore.getState().imageList.map((f) => [f.path, f.modified]));
+          const listed = new Map(files.map((f) => [f.path, f.modified]));
+          const { thumbnails } = useProcessStore.getState();
+          const stale = Object.keys(thumbnails).filter((p) => before.has(p) && before.get(p) !== listed.get(p));
+          if (stale.length > 0) {
+            setProcess((state) => {
+              const kept = { ...state.thumbnails };
+              stale.forEach((p) => delete kept[p]);
+              return { thumbnails: kept };
+            });
+            clearThumbnailQueue();
+          }
+        }
+
         const exifSortKeys = ['date_taken', 'iso', 'shutter_speed', 'aperture', 'focal_length'];
         const isExifSortActive = exifSortKeys.includes(sortCriteria.key);
 
         if (files.length > 0) {
-          const paths = files.map((f: ImageFile) => f.path);
+          // The listing brings the EXIF sidecars hold; only the rest is read.
+          const paths = files.filter((f: ImageFile) => !f.exif).map((f: ImageFile) => f.path);
 
-          if (isExifSortActive) {
+          if (paths.length === 0) {
+            setLibrary({ imageList: files });
+          } else if (isExifSortActive) {
             const exifDataMap: Record<string, any> = await invoke(Invokes.ReadExifForPaths, { paths });
             const finalImageList = files.map((image) => ({
               ...image,
@@ -432,11 +452,11 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
             setLibrary({ imageList: files });
             invoke(Invokes.ReadExifForPaths, { paths })
               .then((exifDataMap: any) => {
+                if (Object.keys(exifDataMap).length === 0) return;
                 setLibrary((state) => ({
-                  imageList: state.imageList.map((image) => ({
-                    ...image,
-                    exif: exifDataMap[image.path] || image.exif || null,
-                  })),
+                  imageList: state.imageList.map((image) =>
+                    exifDataMap[image.path] ? { ...image, exif: exifDataMap[image.path] } : image,
+                  ),
                 }));
               })
               .catch((err) => {

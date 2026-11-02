@@ -52,23 +52,265 @@ fn emit_thumbnail_cache_setup_error(app_handle: &AppHandle, path: &str, reason: 
     );
 }
 
-fn compute_thumbnail_cache_hash(path_str: &str, adjustments_bytes: &[u8]) -> Option<String> {
-    let (source_path, _) = parse_virtual_path(path_str);
+/// Changed by hand to make every cached thumbnail stale.
+const THUMBNAIL_CACHE_SALT: &[u8] = b"thumbnails-2026-11-01-keyed-by-renderer\0";
 
-    let img_mod_time = fs::metadata(&source_path)
-        .ok()?
-        .modified()
-        .ok()?
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_secs();
+/// The renderer's version, as far as thumbnails go: the v3 engine's own
+/// digest and the other sources that change how a thumbnail looks. A
+/// thumbnail made by an older build is not served by a newer one.
+fn thumbnail_renderer_digest() -> &'static [u8; 32] {
+    static DIGEST: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+    DIGEST.get_or_init(|| {
+        let mut hash = blake3::Hasher::new();
+        hash.update(crate::color_engine::contract::implementation_digest().as_bytes());
+        hash.update(crate::color_engine::contract::REVISION.as_bytes());
+        for source in [
+            include_str!("color_engine/raw_look.rs"),
+            include_str!("color_engine/raw_look_table.rs"),
+            include_str!("color_engine/rcd.rs"),
+            include_str!("color_engine/config.rs"),
+            include_str!("color_engine/selection.rs"),
+            include_str!("color_engine/dehaze_table.rs"),
+            include_str!("color_engine/detail_table.rs"),
+            include_str!("color_engine/sharpen_table.rs"),
+            include_str!("color_engine/tone_zones_table.rs"),
+            include_str!("adjustment_utils.rs"),
+            include_str!("flat_field.rs"),
+            include_str!("heal_blend.rs"),
+            include_str!("lens_correction.rs"),
+            include_str!("mask_generation.rs"),
+            include_str!("smart_preview.rs"),
+        ] {
+            hash.update(&(source.len() as u64).to_le_bytes());
+            hash.update(source.as_bytes());
+        }
+        *hash.finalize().as_bytes()
+    })
+}
 
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"v3-only-thumbnails-2026-10-01-raw-look\0");
-    hasher.update(path_str.as_bytes());
-    hasher.update(&img_mod_time.to_le_bytes());
-    hasher.update(adjustments_bytes);
-    Some(hasher.finalize().to_hex().to_string())
+/// What decides how every thumbnail looks besides its photo and its edit:
+/// the renderer, the colour transforms installed, the size thumbnails are
+/// made at and the tonemapper override.
+#[derive(Clone)]
+pub(crate) struct ThumbnailKeys {
+    base: [u8; 32],
+    tonemapper_raw: Option<u32>,
+    tonemapper_other: Option<u32>,
+}
+
+impl ThumbnailKeys {
+    pub(crate) fn new(state: &AppState, settings: &AppSettings) -> Self {
+        let mut hash = blake3::Hasher::new();
+        hash.update(THUMBNAIL_CACHE_SALT);
+        hash.update(thumbnail_renderer_digest());
+        hash.update(&thumbnail_width(settings).to_le_bytes());
+        let transforms = [
+            &state.input_transform,
+            &state.input_transform_p3,
+            &state.output_transform,
+            &state.output_transform_p3,
+        ];
+        for (slot, transform) in transforms.into_iter().enumerate() {
+            hash.update(&[slot as u8]);
+            let path = transform.lock().ok().and_then(|p| p.clone());
+            if let Some(path) = path {
+                // A replaced cube is a new file, or at least a new size or
+                // time: cheaper than hashing it for every thumbnail.
+                hash.update(path.to_string_lossy().as_bytes());
+                hash.update(&file_identity(&path).unwrap_or_default());
+            }
+        }
+        Self {
+            base: *hash.finalize().as_bytes(),
+            tonemapper_raw: crate::image_processing::resolve_tonemapper_override(settings, true),
+            tonemapper_other: crate::image_processing::resolve_tonemapper_override(settings, false),
+        }
+    }
+
+    /// For callers without the settings at hand: read again at most every
+    /// couple of seconds, as a screenful of cache lookups would otherwise
+    /// each read the settings file.
+    pub(crate) fn current(app_handle: &AppHandle) -> Self {
+        use std::sync::Mutex;
+        use std::time::{Duration, Instant};
+        static LAST: Mutex<Option<(Instant, ThumbnailKeys)>> = Mutex::new(None);
+        let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, keys)) = last.as_ref()
+            && at.elapsed() < Duration::from_secs(2)
+        {
+            return keys.clone();
+        }
+        let settings = load_settings(app_handle.clone()).unwrap_or_default();
+        let keys = Self::new(&app_handle.state::<AppState>(), &settings);
+        *last = Some((Instant::now(), keys.clone()));
+        keys
+    }
+
+    /// The cache key of `path_str`'s thumbnail with these edits (the
+    /// sidecar's adjustments as bytes). None when the photo is not there.
+    fn key(&self, path_str: &str, adjustments_bytes: &[u8]) -> Option<String> {
+        let (source_path, _) = parse_virtual_path(path_str);
+        let copy_id = path_str.rsplit_once("?vc=").map(|(_, id)| id);
+        let tonemapper = if crate::formats::is_raw_file(path_str) {
+            self.tonemapper_raw
+        } else {
+            self.tonemapper_other
+        };
+        let mut hash = blake3::Hasher::new();
+        hash.update(&self.base);
+        hash.update(&file_identity(&source_path)?);
+        hash.update(copy_id.unwrap_or("").as_bytes());
+        hash.update(&[0, tonemapper.map_or(0xff, |t| t as u8)]);
+        hash.update(adjustments_bytes);
+        Some(hash.finalize().to_hex().to_string())
+    }
+}
+
+/// A file's identity for the thumbnail cache, without reading it: its
+/// size, modification and creation times and (on the Mac) its file number.
+/// These survive renaming or moving it (on one disk), so its thumbnail is
+/// kept; a file rewritten in any way changes them. Its path and disk are
+/// left out on purpose: a renamed folder, or a drive mounted again, is not
+/// a different photo.
+fn file_identity(path: &Path) -> Option<Vec<u8>> {
+    let meta = fs::metadata(path).ok()?;
+    let nanos = |t: std::io::Result<std::time::SystemTime>| {
+        t.ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_nanos())
+    };
+    let mut id = Vec::with_capacity(48);
+    id.extend_from_slice(&meta.len().to_le_bytes());
+    id.extend_from_slice(&nanos(meta.modified()).to_le_bytes());
+    id.extend_from_slice(&nanos(meta.created()).to_le_bytes());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        id.extend_from_slice(&meta.ino().to_le_bytes());
+    }
+    #[cfg(not(unix))]
+    id.extend_from_slice(path.to_string_lossy().as_bytes());
+    Some(id)
+}
+
+fn thumbnail_width(settings: &AppSettings) -> u32 {
+    settings.thumbnail_resolution.unwrap_or(720)
+}
+
+/// The thumbnail cache's limits: least recently shown thumbnails go first
+/// once it holds more than this, and any not shown for this long.
+const THUMBNAIL_CACHE_BYTES: u64 = 2 << 30;
+const THUMBNAIL_CACHE_MAX_AGE: std::time::Duration =
+    std::time::Duration::from_secs(90 * 24 * 60 * 60);
+
+/// A cached thumbnail being shown: its time is the cache's "last used",
+/// brought forward at most once a day, so showing it writes nothing more.
+fn touch_cached_thumbnail(path: &Path) {
+    let now = std::time::SystemTime::now();
+    let stale = fs::metadata(path)
+        .and_then(|m| m.modified())
+        .is_ok_and(|t| now.duration_since(t).unwrap_or_default().as_secs() > 24 * 60 * 60);
+    if stale && let Ok(file) = fs::File::options().write(true).open(path) {
+        let _ = file.set_modified(now);
+    }
+}
+
+/// Remove the least recently used thumbnails until the cache is well under
+/// `limit` bytes, and any not used within `max_age`. Returns what it
+/// removed (files, bytes).
+fn prune_thumbnail_cache(
+    dir: &Path,
+    limit: u64,
+    max_age: std::time::Duration,
+    now: std::time::SystemTime,
+) -> (usize, u64) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return (0, 0);
+    };
+    let mut files: Vec<(std::time::SystemTime, u64, PathBuf)> = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_file() {
+            continue;
+        }
+        let used = meta.modified().unwrap_or(now);
+        let age = now.duration_since(used).unwrap_or_default();
+        // A write that never finished (see write_atomically).
+        if name.starts_with('.') {
+            if name.ends_with(".tmp") && age.as_secs() > 60 * 60 {
+                let _ = fs::remove_file(entry.path());
+            }
+            continue;
+        }
+        if name.ends_with(".jpg") {
+            files.push((used, meta.len(), entry.path()));
+        }
+    }
+    let mut total: u64 = files.iter().map(|(_, len, _)| len).sum();
+    files.sort_by_key(|(used, _, _)| *used);
+    // Once over, well under, so it is not pruned again a few thumbnails
+    // later.
+    let over = total > limit;
+    let target = limit / 10 * 8;
+    let (mut removed, mut freed) = (0, 0);
+    for (used, len, path) in files {
+        let too_old = now.duration_since(used).unwrap_or_default() > max_age;
+        if !(too_old || (over && total > target)) {
+            break;
+        }
+        if fs::remove_file(&path).is_ok() {
+            total -= len;
+            removed += 1;
+            freed += len;
+        }
+    }
+    (removed, freed)
+}
+
+static THUMBNAIL_CACHE_PRUNING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static THUMBNAIL_CACHE_WRITES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Prune the thumbnail cache in the background, unless that is already
+/// happening.
+fn prune_thumbnail_cache_soon(dir: PathBuf) {
+    use std::sync::atomic::Ordering;
+    if THUMBNAIL_CACHE_PRUNING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    thread::spawn(move || {
+        let (removed, freed) = prune_thumbnail_cache(
+            &dir,
+            THUMBNAIL_CACHE_BYTES,
+            THUMBNAIL_CACHE_MAX_AGE,
+            std::time::SystemTime::now(),
+        );
+        if removed > 0 {
+            log::info!(
+                "Thumbnail cache: removed {removed} unused thumbnails ({} MB)",
+                freed >> 20
+            );
+        }
+        THUMBNAIL_CACHE_PRUNING.store(false, Ordering::SeqCst);
+    });
+}
+
+/// Save a thumbnail to the cache: whole or not at all, so a worker reading
+/// it meanwhile never gets half of one. Every few hundred, the cache is
+/// pruned.
+fn write_cached_thumbnail(cache_path: &Path, data: &[u8]) {
+    if let Err(e) = crate::exif_processing::write_atomically(cache_path, data, false) {
+        log::warn!("Could not cache thumbnail {}: {e}", cache_path.display());
+        return;
+    }
+    let writes = THUMBNAIL_CACHE_WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if writes % 500 == 499
+        && let Some(dir) = cache_path.parent()
+    {
+        prune_thumbnail_cache_soon(dir.to_path_buf());
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -282,13 +524,17 @@ pub async fn read_exif_for_paths(
                 let (source_path, _) = parse_virtual_path(virtual_path);
                 let source_path_str = source_path.to_string_lossy().to_string();
 
-                let map = if let Some(sidecar_exif) =
-                    crate::exif_processing::read_exif_sidecar(&source_path)
-                {
-                    sidecar_exif
+                let map = if let Some(known) = crate::exif_processing::known_exif(&source_path) {
+                    known
                 } else if crate::cloud_files::is_cloud_only(&source_path) {
-                    // Reading it would download the whole photo.
-                    HashMap::new()
+                    // Reading it would download the whole photo; its smart
+                    // preview, when one is here, carries its EXIF.
+                    let preview = crate::smart_preview::path_for(&source_path);
+                    if preview.exists() && !crate::cloud_files::is_dataless(&preview) {
+                        crate::smart_preview::exif(&source_path).unwrap_or_default()
+                    } else {
+                        HashMap::new()
+                    }
                 } else if let Ok(mmap) = read_file_mapped(&source_path) {
                     crate::exif_processing::read_exif_data(&source_path_str, &mmap)
                 } else if let Ok(bytes) = fs::read(&source_path) {
@@ -384,12 +630,19 @@ fn sidecar_failures(failures: Vec<String>) -> Result<(), String> {
 /// A photo's sidecar for a listing, with another program's XMP changes
 /// taken in (and saved) when `pull_xmp`. One that cannot be read shows as
 /// unedited and is left alone on disk.
-fn listed_sidecar(path_str: &str, sidecar_path: &Path, pull_xmp: bool) -> ImageMetadata {
+/// `names`: the photo's folder's file names, when the whole folder is
+/// being listed (see `xmp::FolderNames`).
+fn listed_sidecar(
+    path_str: &str,
+    sidecar_path: &Path,
+    pull_xmp: bool,
+    names: Option<&crate::xmp::FolderNames>,
+) -> ImageMetadata {
     if !pull_xmp {
         return crate::exif_processing::load_sidecar(sidecar_path);
     }
     crate::exif_processing::modify_sidecar(sidecar_path, |metadata| {
-        crate::xmp::pull(path_str, metadata)
+        crate::xmp::pull_listed(path_str, metadata, names)
     })
     .unwrap_or_else(|e| {
         log::warn!("{e}");
@@ -416,6 +669,74 @@ fn split_sidecar_name(file_name: &str) -> Option<(&str, Option<&str>)> {
     Some((base, None))
 }
 
+/// Names a listing leaves out: dot files and folders (the Mac's own, and
+/// the `._IMG.ARW` AppleDouble files a card or network share gets), as the
+/// folder watcher does.
+fn is_hidden_name(name: &str) -> bool {
+    name.starts_with('.')
+}
+
+/// The listing's entries for one photo: the photo itself and each of its
+/// virtual copies (`sidecars`, as gathered by the listing).
+fn list_photo(
+    path_buf: &Path,
+    file_name: &str,
+    sidecars: Vec<Option<String>>,
+    settings: &AppSettings,
+    names: Option<&crate::xmp::FolderNames>,
+) -> Vec<ImageFile> {
+    let enable_xmp_sync = settings.enable_xmp_sync.unwrap_or(true);
+    let path_str = path_buf.to_string_lossy().into_owned();
+    let modified = fs::metadata(path_buf)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let is_raw = crate::formats::is_raw_file(&path_str);
+    let tm_override = crate::image_processing::resolve_tonemapper_override(settings, is_raw);
+
+    let mut file_results = Vec::with_capacity(sidecars.len());
+    for copy_id_opt in sidecars {
+        let (virtual_path, is_virtual_copy, sidecar_filename) = match copy_id_opt {
+            Some(id) => (
+                format!("{}?vc={}", path_str, id),
+                true,
+                format!("{}.{}.dri", file_name, id),
+            ),
+            None => (path_str.clone(), false, format!("{}.dri", file_name)),
+        };
+
+        let sidecar_path = path_buf.with_file_name(sidecar_filename);
+        let metadata = listed_sidecar(
+            &path_str,
+            &sidecar_path,
+            enable_xmp_sync && !is_virtual_copy,
+            names,
+        );
+        let is_edited =
+            crate::image_processing::is_image_edited(&metadata.adjustments, is_raw, tm_override);
+
+        file_results.push(ImageFile {
+            cloud_only: crate::cloud_files::is_cloud_only_str(&virtual_path),
+            has_preview: cloud_preview_exists(&virtual_path),
+            path: virtual_path,
+            modified,
+            is_edited,
+            tags: metadata.tags,
+            // The EXIF the sidecar holds, read here anyway: the app then
+            // asks only for the photos without (read_exif_for_paths).
+            exif: metadata.exif,
+            is_virtual_copy,
+            rating: metadata.rating,
+            derived_from: metadata.derived_from,
+            derived_kind: metadata.derived_kind,
+            flag: metadata.flag,
+        });
+    }
+    file_results
+}
+
 // Off the main thread: reading a folder kept by a cloud service can wait on
 // the server, and the window must not freeze meanwhile.
 #[tauri::command(async)]
@@ -425,114 +746,7 @@ pub fn list_images_in_dir(
     build_cloud: Option<bool>,
 ) -> Result<Vec<ImageFile>, String> {
     let settings = load_settings(app_handle.clone()).unwrap_or_default();
-    let enable_xmp_sync = settings.enable_xmp_sync.unwrap_or(true);
-
-    let entries = fs::read_dir(&path).map_err(|e| e.to_string())?;
-    let mut images = Vec::new();
-    let mut sidecars_by_filename: HashMap<String, Vec<Option<String>>> = HashMap::new();
-
-    for entry in entries.filter_map(Result::ok) {
-        let entry_path = entry.path();
-        let file_name = entry
-            .file_name()
-            .into_string()
-            .unwrap_or_else(|os| os.to_string_lossy().into_owned());
-
-        if file_name.ends_with(".dri") {
-            // The photo itself is always listed (`None`), with or without a
-            // sidecar of its own; each copy's sidecar adds one entry.
-            if let Some((source_filename, Some(copy_id))) = split_sidecar_name(&file_name) {
-                sidecars_by_filename
-                    .entry(source_filename.to_string())
-                    .or_insert_with(|| vec![None])
-                    .push(Some(copy_id.to_string()));
-            }
-        } else if is_supported_media_file(&file_name) {
-            images.push((file_name, entry_path));
-        }
-    }
-
-    let tasks: Vec<_> = images
-        .into_iter()
-        .map(|(file_name, path_buf)| {
-            let sidecars = sidecars_by_filename
-                .remove(&file_name)
-                .unwrap_or_else(|| vec![None]);
-            let path_str = path_buf.to_string_lossy().into_owned();
-            (path_str, file_name, path_buf, sidecars)
-        })
-        .collect();
-
-    let result_list: Vec<ImageFile> = tasks
-        .into_par_iter()
-        .flat_map(|(path_str, file_name, path_buf, sidecars)| {
-            let modified = fs::metadata(&path_buf)
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-
-            let mut file_results = Vec::with_capacity(sidecars.len());
-
-            for copy_id_opt in sidecars {
-                let (virtual_path, is_virtual_copy, sidecar_filename) = match copy_id_opt {
-                    Some(id) => (
-                        format!("{}?vc={}", path_str, id),
-                        true,
-                        format!("{}.{}.dri", file_name, id),
-                    ),
-                    None => (path_str.clone(), false, format!("{}.dri", file_name)),
-                };
-
-                let sidecar_path = path_buf.with_file_name(sidecar_filename);
-
-                let (is_edited, tags, rating, derived_from, derived_kind, flag) = {
-                    let metadata = listed_sidecar(
-                        &path_str,
-                        &sidecar_path,
-                        enable_xmp_sync && !is_virtual_copy,
-                    );
-
-                    let is_raw = crate::formats::is_raw_file(&path_str);
-                    let tm_override =
-                        crate::image_processing::resolve_tonemapper_override(&settings, is_raw);
-                    let edited = crate::image_processing::is_image_edited(
-                        &metadata.adjustments,
-                        is_raw,
-                        tm_override,
-                    );
-                    (
-                        edited,
-                        metadata.tags,
-                        metadata.rating,
-                        metadata.derived_from,
-                        metadata.derived_kind,
-                        metadata.flag,
-                    )
-                };
-
-                file_results.push(ImageFile {
-                    cloud_only: crate::cloud_files::is_cloud_only_str(&virtual_path),
-                    has_preview: cloud_preview_exists(&virtual_path),
-                    path: virtual_path,
-                    modified,
-                    is_edited,
-                    tags,
-                    exif: None,
-                    is_virtual_copy,
-                    rating,
-                    derived_from,
-                    derived_kind,
-                    flag,
-                });
-            }
-
-            file_results
-        })
-        .collect();
-
-    let mut result_list = result_list;
+    let mut result_list = list_folder(Path::new(&path), &settings)?;
     link_versions(&mut result_list);
     // Photos here that are only in the cloud get their previews (or
     // thumbnails) built in the background, this folder first — when the
@@ -553,26 +767,91 @@ pub fn list_images_in_dir(
     Ok(result_list)
 }
 
+/// One folder's photos and their copies, unlinked (see `link_versions`).
+fn list_folder(path: &Path, settings: &AppSettings) -> Result<Vec<ImageFile>, String> {
+    let entries = fs::read_dir(path).map_err(|e| e.to_string())?;
+    let mut images = Vec::new();
+    let mut sidecars_by_filename: HashMap<String, Vec<Option<String>>> = HashMap::new();
+    let mut names = crate::xmp::FolderNames::default();
+
+    for entry in entries.filter_map(Result::ok) {
+        let entry_path = entry.path();
+        let file_name = entry
+            .file_name()
+            .into_string()
+            .unwrap_or_else(|os| os.to_string_lossy().into_owned());
+        names.insert(&file_name);
+
+        if is_hidden_name(&file_name) {
+            continue;
+        }
+        if file_name.ends_with(".dri") {
+            // The photo itself is always listed (`None`), with or without a
+            // sidecar of its own; each copy's sidecar adds one entry.
+            if let Some((source_filename, Some(copy_id))) = split_sidecar_name(&file_name) {
+                sidecars_by_filename
+                    .entry(source_filename.to_string())
+                    .or_insert_with(|| vec![None])
+                    .push(Some(copy_id.to_string()));
+            }
+        } else if is_supported_media_file(&file_name) {
+            images.push((file_name, entry_path));
+        }
+    }
+
+    let tasks: Vec<_> = images
+        .into_iter()
+        .map(|(file_name, path_buf)| {
+            let sidecars = sidecars_by_filename
+                .remove(&file_name)
+                .unwrap_or_else(|| vec![None]);
+            (file_name, path_buf, sidecars)
+        })
+        .collect();
+
+    Ok(tasks
+        .into_par_iter()
+        .flat_map(|(file_name, path_buf, sidecars)| {
+            list_photo(&path_buf, &file_name, sidecars, settings, Some(&names))
+        })
+        .collect())
+}
+
 #[tauri::command(async)]
 pub fn list_images_recursive(
     path: String,
     app_handle: AppHandle,
 ) -> Result<Vec<ImageFile>, String> {
     let settings = load_settings(app_handle).unwrap_or_default();
-    let enable_xmp_sync = settings.enable_xmp_sync.unwrap_or(true);
+    Ok(list_tree(Path::new(&path), &settings))
+}
 
-    let root_path = Path::new(&path);
+/// The photos (and their copies) in a folder and all those below it.
+fn list_tree(root_path: &Path, settings: &AppSettings) -> Vec<ImageFile> {
     let mut images = Vec::new();
 
     let mut sidecars_by_path: HashMap<PathBuf, Vec<Option<String>>> = HashMap::new();
+    let mut names_by_folder: HashMap<PathBuf, crate::xmp::FolderNames> = HashMap::new();
 
-    for entry in WalkDir::new(root_path).into_iter().filter_map(Result::ok) {
+    // Hidden folders (a library's own, a sync client's) are not walked.
+    let walk = WalkDir::new(root_path)
+        .into_iter()
+        .filter_entry(|e| e.depth() == 0 || !is_hidden_name(&e.file_name().to_string_lossy()));
+    for entry in walk.filter_map(Result::ok) {
         let entry_path = entry.path();
-        if !entry_path.is_file() {
+        let file_name = entry_path.file_name().unwrap_or_default().to_string_lossy();
+        if let Some(parent) = entry_path.parent()
+            && entry.depth() > 0
+        {
+            names_by_folder
+                .entry(parent.to_path_buf())
+                .or_default()
+                .insert(&file_name);
+        }
+        if !entry_path.is_file() || is_hidden_name(&file_name) {
             continue;
         }
 
-        let file_name = entry_path.file_name().unwrap_or_default().to_string_lossy();
         if file_name.ends_with(".dri") {
             // As in list_images_in_dir: the photo itself, then its copies.
             if let Some((source_filename, Some(copy_id))) = split_sidecar_name(&file_name)
@@ -594,88 +873,25 @@ pub fn list_images_recursive(
             let sidecars = sidecars_by_path
                 .remove(&path_buf)
                 .unwrap_or_else(|| vec![None]);
-            let path_str = path_buf.to_string_lossy().into_owned();
             let file_name = path_buf
                 .file_name()
                 .unwrap_or_default()
                 .to_string_lossy()
                 .into_owned();
-            (path_str, file_name, path_buf, sidecars)
+            (file_name, path_buf, sidecars)
         })
         .collect();
 
-    let result_list: Vec<ImageFile> = tasks
+    let mut result_list: Vec<ImageFile> = tasks
         .into_par_iter()
-        .flat_map(|(path_str, file_name, path_buf, sidecars)| {
-            let modified = fs::metadata(&path_buf)
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-
-            let mut file_results = Vec::with_capacity(sidecars.len());
-
-            for copy_id_opt in sidecars {
-                let (virtual_path, is_virtual_copy, sidecar_filename) = match copy_id_opt {
-                    Some(id) => (
-                        format!("{}?vc={}", path_str, id),
-                        true,
-                        format!("{}.{}.dri", file_name, id),
-                    ),
-                    None => (path_str.clone(), false, format!("{}.dri", file_name)),
-                };
-
-                let sidecar_path = path_buf.with_file_name(sidecar_filename);
-
-                let (is_edited, tags, rating, derived_from, derived_kind, flag) = {
-                    let metadata = listed_sidecar(
-                        &path_str,
-                        &sidecar_path,
-                        enable_xmp_sync && !is_virtual_copy,
-                    );
-
-                    let is_raw = crate::formats::is_raw_file(&path_str);
-                    let tm_override =
-                        crate::image_processing::resolve_tonemapper_override(&settings, is_raw);
-                    let edited = crate::image_processing::is_image_edited(
-                        &metadata.adjustments,
-                        is_raw,
-                        tm_override,
-                    );
-                    (
-                        edited,
-                        metadata.tags,
-                        metadata.rating,
-                        metadata.derived_from,
-                        metadata.derived_kind,
-                        metadata.flag,
-                    )
-                };
-
-                file_results.push(ImageFile {
-                    cloud_only: crate::cloud_files::is_cloud_only_str(&virtual_path),
-                    has_preview: cloud_preview_exists(&virtual_path),
-                    path: virtual_path,
-                    modified,
-                    is_edited,
-                    tags,
-                    exif: None,
-                    is_virtual_copy,
-                    rating,
-                    derived_from,
-                    derived_kind,
-                    flag,
-                });
-            }
-
-            file_results
+        .flat_map(|(file_name, path_buf, sidecars)| {
+            let names = path_buf.parent().and_then(|p| names_by_folder.get(p));
+            list_photo(&path_buf, &file_name, sidecars, settings, names)
         })
         .collect();
 
-    let mut result_list = result_list;
     link_versions(&mut result_list);
-    Ok(result_list)
+    result_list
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -904,7 +1120,7 @@ pub fn get_album_images(
             let is_virtual_copy = virtual_path.contains("?vc=");
 
             let (is_edited, tags, rating, derived_from, derived_kind, flag) = {
-                let metadata = listed_sidecar(&virtual_path, &sidecar_path, enable_xmp_sync);
+                let metadata = listed_sidecar(&virtual_path, &sidecar_path, enable_xmp_sync, None);
 
                 let is_raw = crate::formats::is_raw_file(&source_path);
                 let tm_override =
@@ -975,16 +1191,101 @@ fn has_subdirs(path: &Path) -> bool {
     false
 }
 
+/// How long one folder tree may spend counting the photos in folders it
+/// does not show open, and how deep it looks. A tree is refreshed often
+/// (each change on disk), and its root may be a whole cloud drive.
+const FOLDER_COUNT_BUDGET: std::time::Duration = std::time::Duration::from_millis(1500);
+const FOLDER_COUNT_DEPTH: usize = 12;
+
+/// What a folder held when last listed for the counts: its own photos and
+/// its subfolders, with the folder's modification time then. Adding,
+/// removing or renaming anything in a folder changes that time, so a
+/// recount lists only folders that changed; the others cost one look at
+/// their time. Remembered a few minutes at most, for disks (some cloud
+/// services) that do not keep folder times.
+struct FolderCount {
+    modified: Option<std::time::SystemTime>,
+    listed: std::time::Instant,
+    own: usize,
+    subfolders: Vec<PathBuf>,
+}
+
+static FOLDER_COUNTS: std::sync::LazyLock<std::sync::Mutex<HashMap<PathBuf, FolderCount>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// The photos in `dir` and the folders below it (hidden ones left out, as
+/// the tree leaves them out), for a folder the tree does not scan. Stops
+/// looking deeper at `FOLDER_COUNT_DEPTH`, and listing folders at
+/// `until`: what is not known by then is not counted.
+fn unscanned_image_count(dir: &Path, depth: usize, until: std::time::Instant) -> usize {
+    let modified = fs::metadata(dir).and_then(|m| m.modified()).ok();
+    let remembered = FOLDER_COUNTS.lock().ok().and_then(|counts| {
+        counts.get(dir).and_then(|c| {
+            (c.modified == modified
+                && modified.is_some()
+                && c.listed.elapsed() < std::time::Duration::from_secs(300))
+            .then(|| (c.own, c.subfolders.clone()))
+        })
+    });
+    let (own, subfolders) = match remembered {
+        Some(known) => known,
+        None => {
+            if std::time::Instant::now() >= until {
+                return 0;
+            }
+            let mut own = 0;
+            let mut subfolders = Vec::new();
+            for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+                let name = entry.file_name();
+                if is_hidden_name(&name.to_string_lossy()) {
+                    continue;
+                }
+                match entry.file_type() {
+                    Ok(t) if t.is_dir() => subfolders.push(entry.path()),
+                    Ok(t) if t.is_file() && crate::formats::is_supported_image_file(&name) => {
+                        own += 1
+                    }
+                    _ => {}
+                }
+            }
+            if let Ok(mut counts) = FOLDER_COUNTS.lock() {
+                if counts.len() > 50_000 {
+                    counts.clear();
+                }
+                counts.insert(
+                    dir.to_path_buf(),
+                    FolderCount {
+                        modified,
+                        listed: std::time::Instant::now(),
+                        own,
+                        subfolders: subfolders.clone(),
+                    },
+                );
+            }
+            (own, subfolders)
+        }
+    };
+    if depth >= FOLDER_COUNT_DEPTH {
+        return own;
+    }
+    own + subfolders
+        .iter()
+        .map(|sub| unscanned_image_count(sub, depth + 1, until))
+        .sum::<usize>()
+}
+
 /// `check_unscanned`: whether folders not scanned are each looked into to
 /// say whether they have subfolders. Home leaves it off: it does not show
 /// that, and in a cloud service each look makes it list the folder from
-/// the server.
+/// the server. `counts_until`: when counting the photos in folders not
+/// scanned stops for this tree (see `unscanned_image_count`).
 fn scan_dir_lazy(
     path: &Path,
     expanded_folders: &HashSet<&str>,
     show_image_counts: bool,
     prefetch_one_level: bool,
     check_unscanned: bool,
+    counts_until: std::time::Instant,
 ) -> Result<(Vec<FolderNode>, usize), std::io::Error> {
     let mut children_folders = Vec::new();
     let mut current_dir_image_count = 0;
@@ -1041,17 +1342,11 @@ fn scan_dir_lazy(
                     show_image_counts,
                     next_prefetch,
                     check_unscanned,
+                    counts_until,
                 )?
             } else {
                 let count = if show_image_counts {
-                    WalkDir::new(&current_path)
-                        .into_iter()
-                        .filter_map(Result::ok)
-                        .filter(|e| {
-                            e.file_type().is_file()
-                                && crate::formats::is_supported_image_file(e.path())
-                        })
-                        .count()
+                    unscanned_image_count(&current_path, 0, counts_until)
                 } else {
                     0
                 };
@@ -1127,6 +1422,7 @@ fn get_folder_tree_sync(
         show_image_counts,
         true,
         check_unscanned,
+        std::time::Instant::now() + FOLDER_COUNT_BUDGET,
     )
     .map_err(|e| e.to_string())?;
 
@@ -1168,8 +1464,10 @@ pub async fn get_folder_children(
             return Err(format!("Directory does not exist: {}", path));
         }
         let empty_set = HashSet::new();
-        let (children, _) = scan_dir_lazy(root_path, &empty_set, show_image_counts, false, true)
-            .map_err(|e| e.to_string())?;
+        let until = std::time::Instant::now() + FOLDER_COUNT_BUDGET;
+        let (children, _) =
+            scan_dir_lazy(root_path, &empty_set, show_image_counts, false, true, until)
+                .map_err(|e| e.to_string())?;
 
         Ok(children)
     })
@@ -1259,42 +1557,104 @@ pub fn read_file_mapped(path: &Path) -> Result<Mmap, ReadFileError> {
     Ok(mmap)
 }
 
+/// `path_str`'s thumbnail with `adjustments` (its edit, as the cache key
+/// was made from), `dimension` pixels on its longer side.
 pub fn generate_thumbnail_data(
     path_str: &str,
+    adjustments: &Value,
     gpu_context: Option<&GpuContext>,
     app_handle: &AppHandle,
+    dimension: u32,
 ) -> anyhow::Result<DynamicImage> {
-    let (source_path, sidecar_path) = parse_virtual_path(path_str);
+    let (source_path, _) = parse_virtual_path(path_str);
     // A video stands in the grid as a frame from itself. None of the
     // editing pipeline below applies to it.
     if is_video_file(&source_path) {
         return crate::video::poster_frame(&source_path);
     }
-    let metadata: Option<ImageMetadata> = fs::read_to_string(sidecar_path)
-        .ok()
-        .and_then(|content| serde_json::from_str(&content).ok());
-
-    let adjustments = metadata
-        .as_ref()
-        .map_or(serde_json::Value::Null, |m| m.adjustments.clone());
-
     let state = app_handle.state::<AppState>();
     let context = gpu_context
         .ok_or_else(|| anyhow::anyhow!("Thumbnails need the GPU, which failed to initialize"))?;
-    let dimension = load_settings(app_handle.clone())
-        .unwrap_or_default()
-        .thumbnail_resolution
-        .unwrap_or(720);
     // Its own caches and a speed demosaic: a thumbnail is small and must
     // never evict the photo the editor is working on.
     crate::color_engine::application::render_thumbnail(
         context,
         &state,
         path_str,
-        &adjustments,
+        adjustments,
         dimension,
     )
     .map(|f| DynamicImage::ImageRgba8(f.preview_rgba8()))
+}
+
+/// A photo's edit as its thumbnail is made and cached from: the sidecar's
+/// adjustments (as stored, not migrated), with its rating and whether it
+/// counts as edited. A missing or unreadable sidecar is no edit.
+struct ThumbnailEdit {
+    adjustments: Value,
+    bytes: Vec<u8>,
+    rating: u8,
+    is_edited: bool,
+}
+
+impl ThumbnailEdit {
+    fn read(path_str: &str, keys: &ThumbnailKeys) -> Self {
+        let (_, sidecar_path) = parse_virtual_path(path_str);
+        let meta = fs::read_to_string(&sidecar_path)
+            .ok()
+            .and_then(|content| serde_json::from_str::<ImageMetadata>(&content).ok());
+        let Some(meta) = meta else {
+            return Self {
+                adjustments: Value::Null,
+                bytes: Vec::new(),
+                rating: 0,
+                is_edited: false,
+            };
+        };
+        let is_raw = crate::formats::is_raw_file(path_str);
+        let tm = if is_raw {
+            keys.tonemapper_raw
+        } else {
+            keys.tonemapper_other
+        };
+        Self {
+            bytes: serde_json::to_vec(&meta.adjustments).unwrap_or_default(),
+            is_edited: crate::image_processing::is_image_edited(&meta.adjustments, is_raw, tm),
+            rating: meta.rating,
+            adjustments: meta.adjustments,
+        }
+    }
+}
+
+/// `path_str`'s cached thumbnail for its current edit, as the data URL the
+/// grid shows, when there is one. Reads only its sidecar and the cache.
+fn cached_thumbnail(
+    path_str: &str,
+    thumb_cache_dir: &Path,
+    keys: &ThumbnailKeys,
+) -> Option<(String, u8, bool)> {
+    let edit = ThumbnailEdit::read(path_str, keys);
+    let cache_path = thumb_cache_dir.join(format!("{}.jpg", keys.key(path_str, &edit.bytes)?));
+    let data = fs::read(&cache_path).ok()?;
+    touch_cached_thumbnail(&cache_path);
+    Some((thumbnail_data_url(&data), edit.rating, edit.is_edited))
+}
+
+fn thumbnail_data_url(jpeg: &[u8]) -> String {
+    format!(
+        "data:image/jpeg;base64,{}",
+        general_purpose::STANDARD.encode(jpeg)
+    )
+}
+
+/// Tell the grid a photo's thumbnail is ready. Its rating is not sent: it
+/// was read before a render that can take seconds, and a rating given
+/// meanwhile must not be undone by it.
+fn emit_thumbnail(app_handle: &AppHandle, path: &str, data: &str, is_edited: bool) {
+    let _ = app_handle.emit(
+        "thumbnail-generated",
+        serde_json::json!({ "path": path, "data": data, "is_edited": is_edited }),
+    );
 }
 
 fn encode_thumbnail(image: &DynamicImage, target_width: u32) -> Result<Vec<u8>> {
@@ -1307,14 +1667,13 @@ fn encode_thumbnail(image: &DynamicImage, target_width: u32) -> Result<Vec<u8>> 
 
 /// Whether `path` already has a thumbnail cached for its current edit (reads
 /// only its edit file and the cache, never the photo).
-pub(crate) fn has_cached_thumbnail(path_str: &str, thumb_cache_dir: &Path) -> bool {
-    let (_, sidecar_path) = parse_virtual_path(path_str);
-    let adjustments_bytes = fs::read_to_string(&sidecar_path)
-        .ok()
-        .and_then(|c| serde_json::from_str::<ImageMetadata>(&c).ok())
-        .map(|m| serde_json::to_vec(&m.adjustments).unwrap_or_default())
-        .unwrap_or_default();
-    compute_thumbnail_cache_hash(path_str, &adjustments_bytes)
+pub(crate) fn has_cached_thumbnail(
+    path_str: &str,
+    thumb_cache_dir: &Path,
+    keys: &ThumbnailKeys,
+) -> bool {
+    let edit = ThumbnailEdit::read(path_str, keys);
+    keys.key(path_str, &edit.bytes)
         .is_some_and(|h| thumb_cache_dir.join(format!("{h}.jpg")).exists())
 }
 
@@ -1326,41 +1685,17 @@ pub(crate) fn generate_single_thumbnail_and_cache(
     app_handle: &AppHandle,
     settings: &AppSettings,
 ) -> Option<(String, u8, bool)> {
-    let (_, sidecar_path) = parse_virtual_path(path_str);
-
-    let (rating, is_edited, adjustments_bytes) =
-        if let Ok(content) = fs::read_to_string(&sidecar_path) {
-            if let Ok(meta) = serde_json::from_str::<ImageMetadata>(&content) {
-                let is_raw = crate::formats::is_raw_file(path_str);
-                let tm = crate::image_processing::resolve_tonemapper_override(settings, is_raw);
-
-                (
-                    meta.rating,
-                    crate::image_processing::is_image_edited(&meta.adjustments, is_raw, tm),
-                    serde_json::to_vec(&meta.adjustments).unwrap_or_default(),
-                )
-            } else {
-                (0, false, Vec::new())
-            }
-        } else {
-            (0, false, Vec::new())
-        };
-
-    let cache_hash = compute_thumbnail_cache_hash(path_str, &adjustments_bytes)?;
+    let keys = ThumbnailKeys::new(&app_handle.state::<AppState>(), settings);
+    let edit = ThumbnailEdit::read(path_str, &keys);
+    let (rating, is_edited) = (edit.rating, edit.is_edited);
+    let cache_hash = keys.key(path_str, &edit.bytes)?;
 
     let cache_filename = format!("{}.jpg", cache_hash);
     let cache_path = thumb_cache_dir.join(cache_filename);
 
-    if !force_regenerate
-        && cache_path.exists()
-        && let Ok(data) = fs::read(&cache_path)
-    {
-        let base64_str = general_purpose::STANDARD.encode(&data);
-        return Some((
-            format!("data:image/jpeg;base64,{}", base64_str),
-            rating,
-            is_edited,
-        ));
+    if !force_regenerate && let Ok(data) = fs::read(&cache_path) {
+        touch_cached_thumbnail(&cache_path);
+        return Some((thumbnail_data_url(&data), rating, is_edited));
     }
 
     // A photo only in the cloud would download in full to be read: it is
@@ -1376,32 +1711,82 @@ pub(crate) fn generate_single_thumbnail_and_cache(
         }
     }
 
-    let target_width = settings.thumbnail_resolution.unwrap_or(720);
+    let target_width = thumbnail_width(settings);
 
-    if let Ok(thumb_image) = generate_thumbnail_data(path_str, gpu_context, app_handle)
-        && let Ok(thumb_data) = encode_thumbnail(&thumb_image, target_width)
+    if let Ok(thumb_image) = generate_thumbnail_data(
+        path_str,
+        &edit.adjustments,
+        gpu_context,
+        app_handle,
+        target_width,
+    ) && let Ok(thumb_data) = encode_thumbnail(&thumb_image, target_width)
     {
-        let _ = fs::write(&cache_path, &thumb_data);
-        let base64_str = general_purpose::STANDARD.encode(&thumb_data);
-        return Some((
-            format!("data:image/jpeg;base64,{}", base64_str),
-            rating,
-            is_edited,
-        ));
+        write_cached_thumbnail(&cache_path, &thumb_data);
+        return Some((thumbnail_data_url(&thumb_data), rating, is_edited));
     }
     None
+}
+
+/// Thumbnail requests made before the latest cancel (a folder left, the
+/// queue cleared) belong to an earlier generation: a render of one still
+/// under way when it finishes is neither shown nor counted.
+static THUMBNAIL_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The current generation, starting a new one when a cancel was asked for
+/// (`cancel_thumbnail_generation` raises the token).
+fn thumbnail_generation(state: &AppState) -> u64 {
+    use std::sync::atomic::Ordering;
+    if state
+        .thumbnail_cancellation_token
+        .swap(false, Ordering::SeqCst)
+    {
+        THUMBNAIL_GENERATION.fetch_add(1, Ordering::SeqCst);
+    }
+    THUMBNAIL_GENERATION.load(Ordering::SeqCst)
+}
+
+/// How many photos are thumbnailed (or batch-rendered) at once: the
+/// setting, as the thumbnail workers read it.
+fn thumbnail_worker_count(settings: &AppSettings) -> usize {
+    settings.thumbnail_worker_threads.unwrap_or(4).clamp(1, 16) as usize
+}
+
+/// Run a batch's per-photo work (`par_iter`s inside `work`) on at most as
+/// many threads as thumbnails are made with, instead of every core: each
+/// photo is a full render, and a dozen at once would hold gigabytes and
+/// starve the folder listing.
+fn in_batch_pool<R: Send>(settings: &AppSettings, work: impl FnOnce() -> R + Send) -> R {
+    match rayon::ThreadPoolBuilder::new()
+        .num_threads(thumbnail_worker_count(settings))
+        .thread_name(|i| format!("batch-render-{i}"))
+        .build()
+    {
+        Ok(pool) => pool.install(work),
+        Err(e) => {
+            log::warn!("Batch pool unavailable ({e}); using the shared one");
+            work()
+        }
+    }
 }
 
 pub fn start_thumbnail_workers(app_handle: tauri::AppHandle) {
     let state = app_handle.state::<crate::AppState>();
     let manager = state.thumbnail_manager.clone();
     let settings = load_settings(app_handle.clone()).unwrap_or_default();
-    let thread_count = settings.thumbnail_worker_threads.unwrap_or(4).clamp(1, 16);
+    let thread_count = thumbnail_worker_count(&settings);
+
+    // Once the app has settled: thumbnails unused for months, and the
+    // least recently used beyond the cache's size, go.
+    if let Ok(dir) = get_thumb_cache_dir(&app_handle) {
+        thread::spawn(move || {
+            thread::sleep(std::time::Duration::from_secs(30));
+            prune_thumbnail_cache_soon(dir);
+        });
+    }
 
     for _ in 0..thread_count {
         let app_clone = app_handle.clone();
         let manager_clone = manager.clone();
-        let worker_settings = settings.clone();
 
         std::thread::spawn(move || {
             loop {
@@ -1423,8 +1808,12 @@ pub fn start_thumbnail_workers(app_handle: tauri::AppHandle) {
                 };
 
                 let state = app_clone.state::<crate::AppState>();
+                let generation = thumbnail_generation(&state);
                 let gpu_context =
                     crate::gpu_processing::get_or_init_gpu_context(&state, &app_clone).ok();
+                // Read for each photo: a thumbnail size changed meanwhile is
+                // the size it is made and encoded at.
+                let settings = load_settings(app_clone.clone()).unwrap_or_default();
 
                 if let Ok(cache_dir) = get_thumb_cache_dir(&app_clone) {
                     let result = generate_single_thumbnail_and_cache(
@@ -1433,21 +1822,20 @@ pub fn start_thumbnail_workers(app_handle: tauri::AppHandle) {
                         gpu_context.as_ref(),
                         false,
                         &app_clone,
-                        &worker_settings,
+                        &settings,
                     );
 
-                    if let Some((thumbnail_data, rating, is_edited)) = result {
-                        let _ = app_clone.emit(
-                            "thumbnail-generated",
-                            serde_json::json!({
-                                "path": path_to_process,
-                                "data": thumbnail_data,
-                                "rating": rating,
-                                "is_edited": is_edited
-                            }),
-                        );
+                    if thumbnail_generation(&state) == generation {
+                        if let Some((thumbnail_data, _, is_edited)) = result {
+                            emit_thumbnail(
+                                &app_clone,
+                                &path_to_process,
+                                &thumbnail_data,
+                                is_edited,
+                            );
+                        }
+                        increment_thumbnail_progress(&state, &app_clone);
                     }
-                    increment_thumbnail_progress(&state, &app_clone);
                 }
                 manager_clone
                     .processing_now
@@ -1466,10 +1854,12 @@ pub fn update_thumbnail_queue(
 ) -> Result<(), String> {
     let state = app_handle.state::<crate::AppState>();
 
-    let mut queue = state.thumbnail_manager.queue.lock().unwrap();
-
     if paths.is_empty() {
+        let mut queue = state.thumbnail_manager.queue.lock().unwrap();
         queue.clear();
+        // Clearing is a cancel: what is still being made is for photos no
+        // longer shown.
+        THUMBNAIL_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let mut tracker = state.thumbnail_progress.lock().unwrap();
         tracker.total = 0;
         tracker.completed = 0;
@@ -1484,20 +1874,62 @@ pub fn update_thumbnail_queue(
     }
 
     let mut unique_paths = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = HashSet::new();
     for path in paths {
         if seen.insert(path.clone()) {
             unique_paths.push(path);
         }
     }
-    let requested = unique_paths.clone();
+    let generation = thumbnail_generation(&state);
 
-    queue.retain(|p| !seen.contains(p));
+    // Off the main thread: thumbnails already cached are sent straight
+    // away, rather than waiting in the queue behind RAWs being decoded;
+    // only the rest are queued.
+    let app = app_handle.clone();
+    thread::spawn(move || {
+        let state = app.state::<crate::AppState>();
+        let keys = ThumbnailKeys::current(&app);
+        let cache_dir = get_thumb_cache_dir(&app).ok();
+        let mut misses = Vec::new();
+        for path in &unique_paths {
+            if thumbnail_generation(&state) != generation {
+                return;
+            }
+            match cache_dir
+                .as_deref()
+                .and_then(|dir| cached_thumbnail(path, dir, &keys))
+            {
+                Some((data, _, is_edited)) => emit_thumbnail(&app, path, &data, is_edited),
+                None => misses.push(path.clone()),
+            }
+        }
+        queue_thumbnails(&app, generation, &seen, misses);
+        // Cloud photos asked for here are on screen: their previews come
+        // first (outside the queue's lock: this reads each one's flags).
+        crate::cloud_builder::request(&app, &unique_paths);
+    });
+    Ok(())
+}
+
+/// Queue `misses` (of the photos `requested`) for the thumbnail workers,
+/// unless a cancel came since `generation`.
+fn queue_thumbnails(
+    app_handle: &AppHandle,
+    generation: u64,
+    requested: &HashSet<String>,
+    misses: Vec<String>,
+) {
+    let state = app_handle.state::<crate::AppState>();
+    let mut queue = state.thumbnail_manager.queue.lock().unwrap();
+    if thumbnail_generation(&state) != generation {
+        return;
+    }
+    queue.retain(|p| !requested.contains(p));
 
     // The oldest requests make way; the app is told, so it asks again for
     // any it still shows.
     let mut dropped = Vec::new();
-    while queue.len() + unique_paths.len() > 500 {
+    while queue.len() + misses.len() > 500 {
         match queue.pop_front() {
             Some(path) => dropped.push(path),
             None => break,
@@ -1507,15 +1939,12 @@ pub fn update_thumbnail_queue(
         let _ = app_handle.emit("thumbnails-dropped", &dropped);
     }
 
-    for path in unique_paths {
+    for path in misses {
         queue.push_back(path);
     }
 
     let queue_len = queue.len();
     drop(queue);
-    // Cloud photos asked for here are on screen: their previews come first
-    // (outside the queue's lock: this reads each one's file flags).
-    crate::cloud_builder::request(&app_handle, &requested);
 
     let mut tracker = state.thumbnail_progress.lock().unwrap();
     tracker.total = tracker.completed + queue_len;
@@ -1530,7 +1959,6 @@ pub fn update_thumbnail_queue(
     );
 
     state.thumbnail_manager.cvar.notify_all();
-    Ok(())
 }
 
 pub fn add_to_thumbnail_queue(state: &AppState, count: usize, app_handle: &AppHandle) {
@@ -2353,104 +2781,298 @@ fn merge_pasted_v3(target: &mut Value, pasted: &Value) {
     }
 }
 
-#[tauri::command]
-pub async fn apply_adjustments_to_paths(
-    paths: Vec<String>,
-    adjustments: Value,
-    app_handle: AppHandle,
-) -> Result<(), String> {
+/// Make the thumbnails of a batch just changed (pasted, reset, auto)
+/// again, at most as many at once as thumbnails are made with.
+fn rerender_batch_thumbnails(app_handle: &AppHandle, settings: &AppSettings, paths: &[String]) {
     let state = app_handle.state::<AppState>();
-    add_to_thumbnail_queue(&state, paths.len(), &app_handle);
-
-    tauri::async_runtime::spawn_blocking(move || {
-        let settings = load_settings(app_handle.clone()).unwrap_or_default();
-        let enable_xmp_sync = settings.enable_xmp_sync.unwrap_or(true);
-        let create_xmp_if_missing = settings.create_xmp_if_missing.unwrap_or(false);
-
-        let lens_db = app_handle
-            .state::<AppState>()
-            .lens_db
-            .lock()
-            .unwrap()
-            .clone();
-
-        paths.par_iter().for_each(|path| {
-            let (_, sidecar_path) = parse_virtual_path(path);
-
-            let pasted = crate::exif_processing::modify_sidecar(&sidecar_path, |existing| {
-                let mut new_adjustments = std::mem::take(&mut existing.adjustments);
-                if new_adjustments.is_null() {
-                    new_adjustments = serde_json::json!({});
-                }
-
-                if let (Some(new_map), Some(pasted_map)) =
-                    (new_adjustments.as_object_mut(), adjustments.as_object())
-                {
-                    for (k, v) in pasted_map {
-                        if k == "v3" {
-                            merge_pasted_v3(new_map.entry("v3").or_insert(Value::Null), v);
-                        } else {
-                            new_map.insert(k.clone(), v.clone());
-                        }
-                    }
-                }
-
-                resolve_lens_params_in_adjustments(
-                    &mut new_adjustments,
-                    &existing.exif,
-                    lens_db.as_deref(),
-                );
-
-                existing.adjustments = new_adjustments;
-
-                if enable_xmp_sync {
-                    crate::xmp::push(path, existing, create_xmp_if_missing);
-                }
-                true
-            });
-            if let Err(e) = pasted {
-                log::warn!("Not pasting onto {path}: {e}");
+    let thumb_cache_dir = match resolve_thumbnail_cache_dir(app_handle) {
+        Ok(dir) => dir,
+        Err(e) => {
+            log::warn!("Unable to initialize thumbnail cache directory: {}", e);
+            for path in paths {
+                emit_thumbnail_cache_setup_error(app_handle, path, &e);
             }
-        });
-
-        let state = app_handle.state::<AppState>();
-        let thumb_cache_dir = match resolve_thumbnail_cache_dir(&app_handle) {
-            Ok(dir) => dir,
-            Err(e) => {
-                log::warn!("Unable to initialize thumbnail cache directory: {}", e);
-                for path in &paths {
-                    emit_thumbnail_cache_setup_error(&app_handle, path, &e);
-                }
-                for _ in 0..paths.len() {
-                    increment_thumbnail_progress(&state, &app_handle);
-                }
-                return;
+            for _ in 0..paths.len() {
+                increment_thumbnail_progress(&state, app_handle);
             }
-        };
+            return;
+        }
+    };
 
-        let gpu_context = gpu_processing::get_or_init_gpu_context(&state, &app_handle).ok();
+    let gpu_context = gpu_processing::get_or_init_gpu_context(&state, app_handle).ok();
 
+    in_batch_pool(settings, || {
         paths.par_iter().for_each(|path_str| {
             let result = generate_single_thumbnail_and_cache(
                 path_str,
                 &thumb_cache_dir,
                 gpu_context.as_ref(),
-                                true,
-                &app_handle,
-                &settings,
+                true,
+                app_handle,
+                settings,
             );
-
-            if let Some((thumbnail_data, rating, is_edited)) = result {
-                let _ = app_handle.emit(
-                    "thumbnail-generated",
-                    serde_json::json!({ "path": path_str, "data": thumbnail_data, "rating": rating, "is_edited": is_edited  }),
-                );
+            if let Some((thumbnail_data, _, is_edited)) = result {
+                emit_thumbnail(app_handle, path_str, &thumbnail_data, is_edited);
             }
-
-            increment_thumbnail_progress(&state, &app_handle);
+            increment_thumbnail_progress(&state, app_handle);
         });
     });
+}
 
+/// A photo's frame as its crop and mask shapes measure it, in pixels: its
+/// decoded size, turned by its quarter turns (`pasted`'s, when the paste
+/// sets them). None when it cannot be known.
+fn pasted_frame(
+    state: &AppState,
+    path: &str,
+    own: &Value,
+    pasted: &serde_json::Map<String, Value>,
+) -> Option<(f64, f64)> {
+    let report = crate::color_engine::application::input_snapshot(state, path, own)
+        .map_err(|e| log::warn!("Pasting onto {path} without fitting its crop and masks: {e:#}"))
+        .ok()?;
+    let (w, h) = (report["width"].as_f64()?, report["height"].as_f64()?);
+    if w < 1.0 || h < 1.0 {
+        return None;
+    }
+    let steps = pasted
+        .get("orientationSteps")
+        .or_else(|| own.get("orientationSteps"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    Some(if steps % 2 == 1 { (h, w) } else { (w, h) })
+}
+
+/// Whether a paste carries shapes measured in its source photo's pixels.
+fn pastes_shapes(pasted: &serde_json::Map<String, Value>) -> bool {
+    pasted.get("crop").is_some_and(|c| !c.is_null())
+        || pasted
+            .get("masks")
+            .and_then(Value::as_array)
+            .is_some_and(|m| !m.is_empty())
+}
+
+/// Crops and mask shapes are kept in pixels of the photo they were drawn
+/// on. Pasted onto a photo of another size or shape (`from` → `to`, each a
+/// frame's width and height) they are moved to the same place in its
+/// frame: positions as a share of the frame, sizes (radii, brush widths,
+/// a gradient's range) by the change in scale. A crop locked to an aspect
+/// ratio keeps that ratio, as large as fits where the share puts it; a
+/// free crop takes the same share of each side.
+fn fit_pasted_shapes(
+    pasted: &mut serde_json::Map<String, Value>,
+    from: (f64, f64),
+    to: (f64, f64),
+) {
+    let (sx, sy) = (to.0 / from.0, to.1 / from.1);
+    let scale = (sx * sy).sqrt();
+    let aspect_locked = pasted
+        .get("aspectRatio")
+        .and_then(Value::as_f64)
+        .is_some_and(|a| a > 0.0);
+
+    if let Some(crop) = pasted.get_mut("crop").and_then(Value::as_object_mut)
+        && crop.get("unit").and_then(Value::as_str) != Some("%")
+    {
+        let num = |k: &str| crop.get(k).and_then(Value::as_f64);
+        if let (Some(x), Some(y), Some(w), Some(h)) =
+            (num("x"), num("y"), num("width"), num("height"))
+            && w > 0.0
+            && h > 0.0
+        {
+            let (mut tw, mut th) = (w * sx, h * sy);
+            if aspect_locked {
+                let aspect = w / h;
+                if tw / th > aspect {
+                    tw = th * aspect;
+                } else {
+                    th = tw / aspect;
+                }
+            }
+            let (tw, th) = (tw.min(to.0), th.min(to.1));
+            let cx = (x + w / 2.0) * sx;
+            let cy = (y + h / 2.0) * sy;
+            let tx = (cx - tw / 2.0).clamp(0.0, to.0 - tw);
+            let ty = (cy - th / 2.0).clamp(0.0, to.1 - th);
+            for (k, v) in [("x", tx), ("y", ty), ("width", tw), ("height", th)] {
+                crop.insert(k.to_string(), serde_json::json!(v));
+            }
+        }
+    }
+
+    let Some(masks) = pasted.get_mut("masks").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let scale_by = |v: &mut Value, k: &str, by: f64| {
+        if let Some(n) = v.get(k).and_then(Value::as_f64) {
+            v[k] = serde_json::json!(n * by);
+        }
+    };
+    for container in masks.iter_mut() {
+        let Some(sub_masks) = container.get_mut("subMasks").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for sub_mask in sub_masks.iter_mut() {
+            let Some(params) = sub_mask.get_mut("parameters").filter(|p| p.is_object()) else {
+                continue;
+            };
+            for k in ["centerX", "startX", "endX", "targetX"] {
+                scale_by(params, k, sx);
+            }
+            for k in ["centerY", "startY", "endY", "targetY"] {
+                scale_by(params, k, sy);
+            }
+            for k in ["radiusX", "radiusY", "range"] {
+                scale_by(params, k, scale);
+            }
+            if let Some(samples) = params.get_mut("samples").and_then(Value::as_array_mut) {
+                for point in samples.iter_mut() {
+                    scale_by(point, "x", sx);
+                    scale_by(point, "y", sy);
+                }
+            }
+            if let Some(lines) = params.get_mut("lines").and_then(Value::as_array_mut) {
+                for line in lines.iter_mut() {
+                    scale_by(line, "brushSize", scale);
+                    if let Some(points) = line.get_mut("points").and_then(Value::as_array_mut) {
+                        for point in points.iter_mut() {
+                            scale_by(point, "x", sx);
+                            scale_by(point, "y", sy);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Leave out of pasted masks the AI selections made of the source photo
+/// (a subject, the sky, a depth map): their mattes are of its picture, not
+/// another's. A mask left with no shapes goes too. Returns how many were
+/// left out.
+fn drop_pasted_mattes(pasted: &mut serde_json::Map<String, Value>) -> usize {
+    let Some(masks) = pasted.get_mut("masks").and_then(Value::as_array_mut) else {
+        return 0;
+    };
+    let mut dropped = 0;
+    masks.retain_mut(|container| {
+        let Some(sub_masks) = container.get_mut("subMasks").and_then(Value::as_array_mut) else {
+            return true;
+        };
+        let before = sub_masks.len();
+        sub_masks.retain(|sub_mask| {
+            sub_mask["parameters"]["maskDataBase64"]
+                .as_str()
+                .is_none_or(str::is_empty)
+        });
+        dropped += before - sub_masks.len();
+        before == 0 || !sub_masks.is_empty()
+    });
+    dropped
+}
+
+#[tauri::command]
+pub async fn apply_adjustments_to_paths(
+    paths: Vec<String>,
+    adjustments: Value,
+    source_path: Option<String>,
+    app_handle: AppHandle,
+) -> Result<(), String> {
+    let state = app_handle.state::<AppState>();
+    add_to_thumbnail_queue(&state, paths.len(), &app_handle);
+
+    let settings = load_settings(app_handle.clone()).unwrap_or_default();
+    let enable_xmp_sync = settings.enable_xmp_sync.unwrap_or(true);
+    let create_xmp_if_missing = settings.create_xmp_if_missing.unwrap_or(false);
+
+    // The edits are saved before this returns (the editor reads back what
+    // the paste made of its own photo); the thumbnails follow.
+    let app = app_handle.clone();
+    let batch_settings = settings.clone();
+    let targets = paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let lens_db = state.lens_db.lock().unwrap().clone();
+        let empty = serde_json::Map::new();
+        let pasted_map = adjustments.as_object().unwrap_or(&empty);
+        // Shapes are fitted to each photo's frame when the photo they come
+        // from is known.
+        let source = source_path
+            .filter(|_| pastes_shapes(pasted_map))
+            .map(|source| {
+                let (real, sidecar) = parse_virtual_path(&source);
+                let own = crate::exif_processing::load_sidecar(&sidecar).adjustments;
+                (real, pasted_frame(&state, &source, &own, pasted_map))
+            });
+
+        in_batch_pool(&batch_settings, || {
+            targets.par_iter().for_each(|path| {
+                let (real_path, sidecar_path) = parse_virtual_path(path);
+                let mut pasted = pasted_map.clone();
+                if let Some((source_real, source_frame)) = &source
+                    && *source_real != real_path
+                {
+                    let dropped = drop_pasted_mattes(&mut pasted);
+                    if dropped > 0 {
+                        log::info!(
+                            "Pasting onto {path}: {dropped} AI selections of another photo left out"
+                        );
+                    }
+                    let own = crate::exif_processing::load_sidecar(&sidecar_path).adjustments;
+                    if let Some(from) = source_frame
+                        && let Some(to) = pasted_frame(&state, path, &own, &pasted)
+                    {
+                        fit_pasted_shapes(&mut pasted, *from, to);
+                    }
+                }
+                // The photo's EXIF, for the lens profile its edit may name,
+                // while its sidecar is being saved anyway.
+                let exif = crate::exif_processing::exif_for_saving(&real_path);
+
+                let saved = crate::exif_processing::modify_sidecar(&sidecar_path, |existing| {
+                    let mut new_adjustments = std::mem::take(&mut existing.adjustments);
+                    if new_adjustments.is_null() {
+                        new_adjustments = serde_json::json!({});
+                    }
+
+                    if let Some(new_map) = new_adjustments.as_object_mut() {
+                        for (k, v) in &pasted {
+                            if k == "v3" {
+                                merge_pasted_v3(new_map.entry("v3").or_insert(Value::Null), v);
+                            } else {
+                                new_map.insert(k.clone(), v.clone());
+                            }
+                        }
+                    }
+
+                    if existing.exif.is_none() {
+                        existing.exif = exif;
+                    }
+                    resolve_lens_params_in_adjustments(
+                        &mut new_adjustments,
+                        &existing.exif,
+                        lens_db.as_deref(),
+                    );
+
+                    existing.adjustments = new_adjustments;
+
+                    if enable_xmp_sync {
+                        crate::xmp::push(path, existing, create_xmp_if_missing);
+                    }
+                    true
+                });
+                if let Err(e) = saved {
+                    log::warn!("Not pasting onto {path}: {e}");
+                }
+            });
+        });
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        rerender_batch_thumbnails(&app_handle, &settings, &paths);
+    });
     Ok(())
 }
 
@@ -2482,42 +3104,7 @@ pub async fn reset_adjustments_for_paths(
             }
         });
 
-        let state = app_handle.state::<AppState>();
-        let thumb_cache_dir = match resolve_thumbnail_cache_dir(&app_handle) {
-            Ok(dir) => dir,
-            Err(e) => {
-                log::warn!("Unable to initialize thumbnail cache directory: {}", e);
-                for path in &paths {
-                    emit_thumbnail_cache_setup_error(&app_handle, path, &e);
-                }
-                for _ in 0..paths.len() {
-                    increment_thumbnail_progress(&state, &app_handle);
-                }
-                return;
-            }
-        };
-
-        let gpu_context = gpu_processing::get_or_init_gpu_context(&state, &app_handle).ok();
-
-        paths.par_iter().for_each(|path_str| {
-            let result = generate_single_thumbnail_and_cache(
-                path_str,
-                &thumb_cache_dir,
-                gpu_context.as_ref(),
-                                true,
-                &app_handle,
-                &settings,
-            );
-
-            if let Some((thumbnail_data, rating, is_edited)) = result {
-                let _ = app_handle.emit(
-                    "thumbnail-generated",
-                    serde_json::json!({ "path": path_str, "data": thumbnail_data, "rating": rating, "is_edited": is_edited }),
-                );
-            }
-
-            increment_thumbnail_progress(&state, &app_handle);
-        });
+        rerender_batch_thumbnails(&app_handle, &settings, &paths);
     });
 
     Ok(())
@@ -2553,81 +3140,82 @@ pub async fn apply_auto_adjustments_to_paths(
 
         let gpu_context = gpu_processing::get_or_init_gpu_context(&state, &app_handle).ok();
 
-        paths.par_iter().for_each(|path| {
-            // Writes the auto adjustments into the sidecar; the picture it
-            // decoded on the way is not needed again.
-            let _: Option<DynamicImage> = (|| -> Result<DynamicImage, String> {
-                let (source_path, sidecar_path) = parse_virtual_path(path);
-                let source_path_str = source_path.to_string_lossy().to_string();
+        // Each photo is decoded, analysed and rendered: at most as many at
+        // once as thumbnails are made with.
+        in_batch_pool(&settings, || {
+            paths.par_iter().for_each(|path| {
+                // Writes the auto adjustments into the sidecar; the picture it
+                // decoded on the way is not needed again.
+                let _: Option<DynamicImage> = (|| -> Result<DynamicImage, String> {
+                    let (source_path, sidecar_path) = parse_virtual_path(path);
+                    let source_path_str = source_path.to_string_lossy().to_string();
 
-                let file_bytes = fs::read(&source_path).map_err(|e| e.to_string())?;
-                let image = image_loader::load_base_image_from_bytes(
-                    &file_bytes,
-                    &source_path_str,
-                    true,
-                    &settings,
-                    None,
-                )
-                .map_err(|e| e.to_string())?;
+                    let file_bytes = fs::read(&source_path).map_err(|e| e.to_string())?;
+                    let image = image_loader::load_base_image_from_bytes(
+                        &file_bytes,
+                        &source_path_str,
+                        true,
+                        &settings,
+                        None,
+                    )
+                    .map_err(|e| e.to_string())?;
 
-                let auto_results = perform_auto_analysis(&image);
-                let auto_adjustments_json = auto_results_to_json(&auto_results);
+                    let auto_results = perform_auto_analysis(&image);
+                    let auto_adjustments_json = auto_results_to_json(&auto_results);
 
-                crate::exif_processing::modify_sidecar(&sidecar_path, |existing_metadata| {
-                    if existing_metadata.adjustments.is_null() {
-                        existing_metadata.adjustments = serde_json::json!({});
-                    }
+                    crate::exif_processing::modify_sidecar(&sidecar_path, |existing_metadata| {
+                        if existing_metadata.adjustments.is_null() {
+                            existing_metadata.adjustments = serde_json::json!({});
+                        }
 
-                    if let (Some(existing_map), Some(auto_map)) = (
-                        existing_metadata.adjustments.as_object_mut(),
-                        auto_adjustments_json.as_object(),
-                    ) {
-                        for (k, v) in auto_map {
-                            if k == "sectionVisibility" {
-                                if let Some(existing_vis_val) = existing_map.get_mut(k) {
-                                    if let (Some(existing_vis), Some(auto_vis)) =
-                                        (existing_vis_val.as_object_mut(), v.as_object())
-                                    {
-                                        for (vis_k, vis_v) in auto_vis {
-                                            existing_vis.insert(vis_k.clone(), vis_v.clone());
+                        if let (Some(existing_map), Some(auto_map)) = (
+                            existing_metadata.adjustments.as_object_mut(),
+                            auto_adjustments_json.as_object(),
+                        ) {
+                            for (k, v) in auto_map {
+                                if k == "sectionVisibility" {
+                                    if let Some(existing_vis_val) = existing_map.get_mut(k) {
+                                        if let (Some(existing_vis), Some(auto_vis)) =
+                                            (existing_vis_val.as_object_mut(), v.as_object())
+                                        {
+                                            for (vis_k, vis_v) in auto_vis {
+                                                existing_vis.insert(vis_k.clone(), vis_v.clone());
+                                            }
                                         }
+                                    } else {
+                                        existing_map.insert(k.clone(), v.clone());
                                     }
                                 } else {
                                     existing_map.insert(k.clone(), v.clone());
                                 }
-                            } else {
-                                existing_map.insert(k.clone(), v.clone());
                             }
                         }
-                    }
 
-                    if enable_xmp_sync {
-                        crate::xmp::push(path, existing_metadata, create_xmp_if_missing);
-                    }
-                    true
-                })?;
-                Ok(image)
-            })()
-            .map_err(|e| eprintln!("Failed to apply auto adjustments to {}: {}", path, e))
-            .ok();
+                        if enable_xmp_sync {
+                            crate::xmp::push(path, existing_metadata, create_xmp_if_missing);
+                        }
+                        true
+                    })?;
+                    Ok(image)
+                })()
+                .map_err(|e| eprintln!("Failed to apply auto adjustments to {}: {}", path, e))
+                .ok();
 
-            let result = generate_single_thumbnail_and_cache(
-                path,
-                &thumb_cache_dir,
-                gpu_context.as_ref(),
-                                true,
-                &app_handle,
-                &settings,
-            );
-
-            if let Some((thumbnail_data, rating, is_edited)) = result {
-                let _ = app_handle.emit(
-                    "thumbnail-generated",
-                    serde_json::json!({ "path": path, "data": thumbnail_data, "rating": rating, "is_edited": is_edited  }),
+                let result = generate_single_thumbnail_and_cache(
+                    path,
+                    &thumb_cache_dir,
+                    gpu_context.as_ref(),
+                    true,
+                    &app_handle,
+                    &settings,
                 );
-            }
 
-            increment_thumbnail_progress(&state, &app_handle);
+                if let Some((thumbnail_data, _, is_edited)) = result {
+                    emit_thumbnail(&app_handle, path, &thumbnail_data, is_edited);
+                }
+
+                increment_thumbnail_progress(&state, &app_handle);
+            });
         });
     });
 
@@ -2635,6 +3223,7 @@ pub async fn apply_auto_adjustments_to_paths(
 }
 
 #[tauri::command]
+
 pub fn set_color_label_for_paths(
     paths: Vec<String>,
     color: Option<String>,
@@ -2746,7 +3335,7 @@ pub fn load_metadata(path: String, app_handle: AppHandle) -> Result<ImageMetadat
 
     let (_, sidecar_path) = parse_virtual_path(&path);
     // An unreadable sidecar opens as unedited; saving over it is refused.
-    Ok(listed_sidecar(&path, &sidecar_path, enable_xmp_sync))
+    Ok(listed_sidecar(&path, &sidecar_path, enable_xmp_sync, None))
 }
 
 fn get_presets_path(app_handle: &AppHandle) -> Result<std::path::PathBuf, String> {
@@ -2776,8 +3365,32 @@ pub fn load_presets(app_handle: AppHandle) -> Result<Vec<PresetItem>, String> {
 #[tauri::command]
 pub fn save_presets(presets: Vec<PresetItem>, app_handle: AppHandle) -> Result<(), String> {
     let path = get_presets_path(&app_handle)?;
-    let json_string = serde_json::to_string_pretty(&presets).map_err(|e| e.to_string())?;
-    fs::write(path, json_string).map_err(|e| e.to_string())
+    write_presets_file(&path, &presets)
+}
+
+/// Save the presets whole or not at all (a crash mid-save must not leave
+/// half a file, and every preset lost). A presets file that cannot be read
+/// is kept aside first: the app then shows no presets, and the next save
+/// would otherwise replace them all with what is left.
+fn write_presets_file(path: &Path, presets: &[PresetItem]) -> Result<(), String> {
+    let unreadable = fs::read_to_string(path)
+        .ok()
+        .filter(|c| !c.trim().is_empty())
+        .is_some_and(|c| serde_json::from_str::<Vec<PresetItem>>(&c).is_err());
+    if unreadable {
+        let stamp = Utc::now().format("%Y%m%d-%H%M%S");
+        let aside = path.with_file_name(format!("presets.unreadable-{stamp}.json"));
+        fs::copy(path, &aside).map_err(|e| {
+            format!("The presets file could not be read, nor kept aside before saving: {e}")
+        })?;
+        log::warn!(
+            "The presets file could not be read; kept as {} before saving",
+            aside.display()
+        );
+    }
+    let json_string = serde_json::to_string_pretty(presets).map_err(|e| e.to_string())?;
+    crate::exif_processing::write_atomically(path, json_string.as_bytes(), true)
+        .map_err(|e| e.to_string())
 }
 
 fn get_internal_library_root_path(app_handle: &AppHandle) -> Result<std::path::PathBuf, String> {
@@ -3027,6 +3640,8 @@ pub fn clear_thumbnail_cache(app_handle: AppHandle) -> Result<(), String> {
     fs::create_dir_all(&thumb_cache_dir)
         .map_err(|e| format!("Failed to recreate thumbnail cache directory: {}", e))?;
 
+    // The grid drops the thumbnails it shows, and asks for them again.
+    let _ = app_handle.emit("thumbnail-cache-cleared", ());
     Ok(())
 }
 
@@ -3230,22 +3845,6 @@ pub fn get_thumb_cache_dir(app_handle: &AppHandle) -> Result<PathBuf, String> {
     Ok(thumb_cache_dir)
 }
 
-pub fn get_cache_key_hash(path_str: &str) -> Option<String> {
-    let (_, sidecar_path) = parse_virtual_path(path_str);
-
-    let adjustments_bytes = if let Ok(content) = fs::read_to_string(&sidecar_path) {
-        if let Ok(meta) = serde_json::from_str::<ImageMetadata>(&content) {
-            serde_json::to_vec(&meta.adjustments).unwrap_or_default()
-        } else {
-            Vec::new()
-        }
-    } else {
-        Vec::new()
-    };
-
-    compute_thumbnail_cache_hash(path_str, &adjustments_bytes)
-}
-
 pub fn get_cached_or_generate_thumbnail_image(
     path_str: &str,
     app_handle: &AppHandle,
@@ -3253,14 +3852,26 @@ pub fn get_cached_or_generate_thumbnail_image(
 ) -> Result<DynamicImage> {
     let thumb_cache_dir = get_thumb_cache_dir(app_handle).map_err(|e| anyhow::anyhow!(e))?;
     let settings = load_settings(app_handle.clone()).unwrap_or_default();
-    let target_width = settings.thumbnail_resolution.unwrap_or(720);
+    let target_width = thumbnail_width(&settings);
+    let keys = ThumbnailKeys::new(&app_handle.state::<AppState>(), &settings);
+    let edit = ThumbnailEdit::read(path_str, &keys);
+    let render = || {
+        generate_thumbnail_data(
+            path_str,
+            &edit.adjustments,
+            gpu_context,
+            app_handle,
+            target_width,
+        )
+    };
 
-    if let Some(cache_hash) = get_cache_key_hash(path_str) {
+    if let Some(cache_hash) = keys.key(path_str, &edit.bytes) {
         let cache_filename = format!("{}.jpg", cache_hash);
         let cache_path = thumb_cache_dir.join(cache_filename);
 
         if cache_path.exists() {
             if let Ok(image) = image::open(&cache_path) {
+                touch_cached_thumbnail(&cache_path);
                 return Ok(image);
             }
             eprintln!(
@@ -3269,13 +3880,13 @@ pub fn get_cached_or_generate_thumbnail_image(
             );
         }
 
-        let thumb_image = generate_thumbnail_data(path_str, gpu_context, app_handle)?;
+        let thumb_image = render()?;
         let thumb_data = encode_thumbnail(&thumb_image, target_width)?;
-        fs::write(&cache_path, &thumb_data)?;
+        write_cached_thumbnail(&cache_path, &thumb_data);
 
         Ok(thumb_image)
     } else {
-        generate_thumbnail_data(path_str, gpu_context, app_handle)
+        render()
     }
 }
 
@@ -4000,5 +4611,356 @@ mod library_safety_tests {
         assert!(check_move_targets(&[(p("A.ARW"), p("B.ARW"))]).is_err());
         assert!(check_move_targets(&[(p("A.xmp"), p("NEW.xmp"))]).is_err());
         assert!(check_move_targets(&[(p("A.ARW"), p("C.ARW")), (p("B.ARW"), p("c.arw"))]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod library_grid_tests {
+    use super::*;
+
+    fn keys() -> ThumbnailKeys {
+        ThumbnailKeys::new(&AppState::default(), &AppSettings::default())
+    }
+
+    /// A thumbnail's key follows the photo through a rename or a move, and
+    /// changes with its edit, its contents and the size thumbnails are
+    /// made at; two photos never share one.
+    #[test]
+    fn thumbnail_keys_follow_the_photo_not_its_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("A.JPG");
+        let b = dir.path().join("B.JPG");
+        fs::write(&a, b"one photo").unwrap();
+        fs::write(&b, b"one photo").unwrap();
+        let k = keys();
+        let key = |p: &Path, edit: &[u8]| k.key(&p.to_string_lossy(), edit).unwrap();
+
+        let before = key(&a, b"{}");
+        assert_eq!(before, key(&a, b"{}"));
+        assert_ne!(
+            before,
+            key(&b, b"{}"),
+            "two files, even alike, have two keys"
+        );
+        assert_ne!(
+            before,
+            key(&a, br#"{"exposure":1}"#),
+            "an edit is a new key"
+        );
+        let copy = format!("{}?vc=a1b2c3", a.to_string_lossy());
+        assert_ne!(
+            before,
+            k.key(&copy, b"{}").unwrap(),
+            "a virtual copy has its own"
+        );
+
+        // Renamed and moved into another folder: the same photo.
+        let moved_dir = dir.path().join("Renamed folder");
+        fs::create_dir(&moved_dir).unwrap();
+        let moved = moved_dir.join("A2.JPG");
+        fs::rename(&a, &moved).unwrap();
+        assert_eq!(before, key(&moved, b"{}"));
+
+        // Rewritten (even to the same length): a new key.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        fs::write(&moved, b"two photo").unwrap();
+        assert_ne!(before, key(&moved, b"{}"));
+
+        // Thumbnails made at another size are not served.
+        let bigger = ThumbnailKeys::new(
+            &AppState::default(),
+            &AppSettings {
+                thumbnail_resolution: Some(1440),
+                ..AppSettings::default()
+            },
+        );
+        assert_ne!(
+            key(&b, b"{}"),
+            bigger.key(&b.to_string_lossy(), b"{}").unwrap()
+        );
+        assert!(k.key(&a.to_string_lossy(), b"{}").is_none(), "gone");
+    }
+
+    /// Another rendering transform installed is a new key for every photo.
+    #[test]
+    fn thumbnail_keys_follow_the_installed_transform() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo = dir.path().join("P.JPG");
+        let cube = dir.path().join("output.cube");
+        fs::write(&photo, b"p").unwrap();
+        fs::write(&cube, b"LUT_3D_SIZE 2").unwrap();
+        let state = AppState::default();
+        let settings = AppSettings::default();
+        let path = photo.to_string_lossy();
+        let without = ThumbnailKeys::new(&state, &settings)
+            .key(&path, b"")
+            .unwrap();
+        *state.output_transform.lock().unwrap() = Some(cube.clone());
+        let with = ThumbnailKeys::new(&state, &settings)
+            .key(&path, b"")
+            .unwrap();
+        assert_ne!(without, with);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        fs::write(&cube, b"LUT_3D_SIZE 3").unwrap();
+        let replaced = ThumbnailKeys::new(&state, &settings)
+            .key(&path, b"")
+            .unwrap();
+        assert_ne!(with, replaced);
+    }
+
+    #[test]
+    fn the_cache_keeps_what_was_used_lately_within_its_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = std::time::SystemTime::now();
+        let day = std::time::Duration::from_secs(24 * 60 * 60);
+        let put = |name: &str, days_ago: u32| {
+            let p = dir.path().join(name);
+            fs::write(&p, vec![0u8; 100]).unwrap();
+            fs::File::options()
+                .write(true)
+                .open(&p)
+                .unwrap()
+                .set_modified(now - day * days_ago)
+                .unwrap();
+            p
+        };
+        let ancient = put("ancient.jpg", 200);
+        let old = put("old.jpg", 30);
+        let older = put("older.jpg", 40);
+        let recent = put("recent.jpg", 1);
+        let today = put("today.jpg", 0);
+        let other = put("notes.txt", 300);
+
+        // Under the size: only the one unused for months goes.
+        let (removed, _) = prune_thumbnail_cache(dir.path(), 10_000, THUMBNAIL_CACHE_MAX_AGE, now);
+        assert_eq!(removed, 1);
+        assert!(!ancient.exists() && old.exists() && other.exists());
+
+        // Over it: the least recently used go until well under.
+        let (removed, freed) = prune_thumbnail_cache(dir.path(), 350, THUMBNAIL_CACHE_MAX_AGE, now);
+        assert_eq!((removed, freed), (2, 200));
+        assert!(!older.exists() && !old.exists());
+        assert!(recent.exists() && today.exists());
+    }
+
+    /// A listing leaves out dot files (`._DSC1.ARW` from a card) and, when
+    /// recursive, hidden folders.
+    #[test]
+    fn listings_leave_out_hidden_files_and_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for n in ["DSC1.ARW", "._DSC1.ARW", ".hidden.jpg", "IMG.jpg"] {
+            fs::write(root.join(n), b"x").unwrap();
+        }
+        fs::create_dir_all(root.join("Sub")).unwrap();
+        fs::create_dir_all(root.join(".Trashes")).unwrap();
+        fs::write(root.join("Sub/._IMG2.JPG"), b"x").unwrap();
+        fs::write(root.join("Sub/IMG2.JPG"), b"x").unwrap();
+        fs::write(root.join(".Trashes/DSC9.ARW"), b"x").unwrap();
+        let settings = AppSettings {
+            enable_xmp_sync: Some(false),
+            ..AppSettings::default()
+        };
+        let root_str = root.to_string_lossy().into_owned();
+        let names = |list: Vec<ImageFile>| {
+            let mut n: Vec<String> = list
+                .iter()
+                .map(|f| f.path.strip_prefix(root_str.as_str()).unwrap().to_string())
+                .collect();
+            n.sort();
+            n
+        };
+        assert_eq!(
+            names(list_folder(root, &settings).unwrap()),
+            ["/DSC1.ARW", "/IMG.jpg"]
+        );
+        assert_eq!(
+            names(list_tree(root, &settings)),
+            ["/DSC1.ARW", "/IMG.jpg", "/Sub/IMG2.JPG"]
+        );
+        let until = std::time::Instant::now() + FOLDER_COUNT_BUDGET;
+        assert_eq!(unscanned_image_count(root, 0, until), 3);
+        // A listing writes nothing into the folder.
+        assert!(!root.join("IMG.jpg.dri").exists());
+    }
+
+    /// A listing returns the EXIF a sidecar already holds.
+    #[test]
+    fn listings_carry_the_sidecars_exif() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo = dir.path().join("IMG.jpg");
+        fs::write(&photo, b"x").unwrap();
+        let meta = ImageMetadata {
+            exif: Some(HashMap::from([("Model".to_string(), "A7".to_string())])),
+            ..ImageMetadata::default()
+        };
+        crate::exif_processing::write_sidecar(&dir.path().join("IMG.jpg.dri"), &meta).unwrap();
+        let listed = list_folder(dir.path(), &AppSettings::default()).unwrap();
+        assert_eq!(listed[0].exif.as_ref().unwrap()["Model"], "A7");
+    }
+
+    fn crop(x: f64, y: f64, w: f64, h: f64) -> Value {
+        serde_json::json!({ "x": x, "y": y, "width": w, "height": h, "unit": "px" })
+    }
+
+    fn fitted(pasted: Value, from: (f64, f64), to: (f64, f64)) -> serde_json::Map<String, Value> {
+        let mut pasted = pasted.as_object().unwrap().clone();
+        fit_pasted_shapes(&mut pasted, from, to);
+        pasted
+    }
+
+    #[test]
+    fn a_pasted_crop_takes_the_same_place_in_another_frame() {
+        // Twice the resolution, same shape: everything doubles.
+        let p = fitted(
+            serde_json::json!({ "crop": crop(100.0, 50.0, 300.0, 200.0), "aspectRatio": 1.5 }),
+            (600.0, 400.0),
+            (1200.0, 800.0),
+        );
+        assert_eq!(p["crop"], crop(200.0, 100.0, 600.0, 400.0));
+
+        // A 3:2 crop of a landscape pasted onto a portrait keeps its 3:2,
+        // as wide as the frame's share allows, centred where it was.
+        let p = fitted(
+            serde_json::json!({ "crop": crop(0.0, 0.0, 600.0, 400.0), "aspectRatio": 1.5 }),
+            (600.0, 400.0),
+            (400.0, 600.0),
+        );
+        let c = &p["crop"];
+        let (w, h) = (c["width"].as_f64().unwrap(), c["height"].as_f64().unwrap());
+        assert!((w / h - 1.5).abs() < 1e-9 && (w - 400.0).abs() < 1e-9);
+        assert!((c["y"].as_f64().unwrap() - (600.0 - h) / 2.0).abs() < 1e-9);
+
+        // A free crop takes the same share of each side.
+        let p = fitted(
+            serde_json::json!({ "crop": crop(60.0, 40.0, 300.0, 200.0), "aspectRatio": null }),
+            (600.0, 400.0),
+            (400.0, 600.0),
+        );
+        for (k, v) in [
+            ("x", 40.0),
+            ("y", 60.0),
+            ("width", 200.0),
+            ("height", 300.0),
+        ] {
+            assert!((p["crop"][k].as_f64().unwrap() - v).abs() < 1e-9, "{k}");
+        }
+
+        // The same frame: unchanged. A crop in percent: unchanged.
+        let same = serde_json::json!({ "crop": crop(10.0, 20.0, 30.0, 40.0), "aspectRatio": 1.0 });
+        assert_eq!(
+            fitted(same.clone(), (600.0, 400.0), (600.0, 400.0)),
+            *same.as_object().unwrap()
+        );
+        let percent = serde_json::json!({
+            "crop": { "x": 10, "y": 10, "width": 50, "height": 50, "unit": "%" }
+        });
+        assert_eq!(
+            fitted(percent.clone(), (600.0, 400.0), (300.0, 900.0)),
+            *percent.as_object().unwrap()
+        );
+    }
+
+    #[test]
+    fn pasted_masks_are_scaled_and_other_photos_mattes_left_out() {
+        let masks = serde_json::json!({ "masks": [
+            { "id": "m1", "subMasks": [
+                { "type": "radial", "parameters": {
+                    "centerX": 300.0, "centerY": 200.0, "radiusX": 100.0, "radiusY": 50.0,
+                    "rotation": 10.0 } },
+                { "type": "linear", "parameters": {
+                    "startX": 0.0, "startY": 0.0, "endX": 600.0, "endY": 400.0, "range": 50.0 } },
+                { "type": "brush", "parameters": { "lines": [
+                    { "brushSize": 20.0, "points": [ { "x": 60.0, "y": 40.0 } ] } ] } },
+                { "type": "ai-subject", "parameters": { "startX": 1.0, "maskDataBase64": "AAAA" } }
+            ] },
+            { "id": "m2", "subMasks": [
+                { "type": "ai-sky", "parameters": { "maskDataBase64": "BBBB" } } ] },
+            { "id": "m3", "subMasks": [] }
+        ] });
+        let mut p = fitted(masks, (600.0, 400.0), (1200.0, 800.0));
+        let subs = &p["masks"][0]["subMasks"];
+        assert_eq!(subs[0]["parameters"]["centerX"], 600.0);
+        assert_eq!(subs[0]["parameters"]["radiusY"], 100.0);
+        assert_eq!(subs[0]["parameters"]["rotation"], 10.0);
+        assert_eq!(subs[1]["parameters"]["endY"], 800.0);
+        assert_eq!(subs[1]["parameters"]["range"], 100.0);
+        assert_eq!(subs[2]["parameters"]["lines"][0]["points"][0]["x"], 120.0);
+        assert_eq!(subs[2]["parameters"]["lines"][0]["brushSize"], 40.0);
+
+        assert_eq!(drop_pasted_mattes(&mut p), 2);
+        let masks = p["masks"].as_array().unwrap();
+        // The sky-only mask is gone; an empty one stays as it was.
+        assert_eq!(masks.len(), 2);
+        assert_eq!(masks[0]["subMasks"].as_array().unwrap().len(), 3);
+        assert_eq!(masks[1]["id"], "m3");
+    }
+
+    /// A presets file that cannot be read is kept before a save replaces it.
+    #[test]
+    fn an_unreadable_presets_file_is_kept_aside() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("presets.json");
+        fs::write(&path, b"[{ not json").unwrap();
+        write_presets_file(&path, &[]).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap().trim(), "[]");
+        let kept: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("presets.unreadable-")
+            })
+            .collect();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(fs::read(kept[0].path()).unwrap(), b"[{ not json");
+        // A readable one is simply replaced.
+        write_presets_file(&path, &[]).unwrap();
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+}
+
+#[cfg(test)]
+mod listing_bench {
+    use super::*;
+
+    /// Times a folder's listing as it is and as it was (each photo's XMP
+    /// twins asked of the disk). `DRI_BENCH_DIR`: a folder of JPEGs.
+    /// `cargo test --lib listing_bench -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn listing_a_big_folder() {
+        let Ok(dir) = std::env::var("DRI_BENCH_DIR") else {
+            return;
+        };
+        let dir = Path::new(&dir);
+        let settings = AppSettings::default();
+        for round in 0..3 {
+            let t = std::time::Instant::now();
+            let now = list_folder(dir, &settings).unwrap();
+            let new = t.elapsed();
+
+            let t = std::time::Instant::now();
+            let files: Vec<_> = fs::read_dir(dir)
+                .unwrap()
+                .flatten()
+                .map(|e| (e.file_name().to_string_lossy().into_owned(), e.path()))
+                .filter(|(n, _)| is_supported_media_file(n))
+                .collect();
+            let before: Vec<ImageFile> = files
+                .into_par_iter()
+                .flat_map(|(name, path)| {
+                    // As before: no folder names, so XMP twins are asked of the disk.
+                    list_photo(&path, &name, vec![None], &settings, None)
+                })
+                .collect();
+            let old = t.elapsed();
+            assert_eq!(now.len(), before.len());
+            println!(
+                "round {round}: {} photos: listing {new:?} now, {old:?} with per-photo disk checks",
+                now.len()
+            );
+        }
     }
 }

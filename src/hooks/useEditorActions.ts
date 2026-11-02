@@ -35,6 +35,10 @@ export const debouncedSave = debounce((path: string, adjustmentsToSave: Adjustme
   );
 }, 300);
 
+// The photo the copied settings came from: a pasted crop and masks are
+// fitted from its frame to each photo's (see apply_adjustments_to_paths).
+let copiedFromPath: string | null = null;
+
 export function useEditorActions() {
   const setEditor = useEditorStore((s) => s.setEditor);
 
@@ -170,8 +174,10 @@ export function useEditorActions() {
 
     if (selectedImage) {
       sourceAdjustments = adjustments;
+      copiedFromPath = selectedImage.path;
     } else {
       const pathToCopyFrom = pathOverride || libraryActivePath || multiSelectedPaths[0];
+      copiedFromPath = pathToCopyFrom || null;
       if (pathToCopyFrom) {
         try {
           const meta: any = await invoke(Invokes.LoadMetadata, { path: pathToCopyFrom });
@@ -252,15 +258,28 @@ export function useEditorActions() {
 
       pathsToUpdate.forEach((p) => globalImageCache.delete(p));
 
+      // A crop and masks from another photo are fitted to this one's frame
+      // by the backend: the open photo takes them from what it saved.
+      const realPath = (p: string | null) => p?.split('?vc=')[0] ?? null;
+      const fitted =
+        selectedImage && realPath(selectedImage.path) !== realPath(copiedFromPath)
+          ? (['crop', 'masks'] as const).filter((k) => k in adjustmentsToApply)
+          : [];
       if (selectedImage && pathsToUpdate.includes(selectedImage.path)) {
+        const appliedHere: Partial<Adjustments> = { ...adjustmentsToApply };
+        fitted.forEach((k) => delete appliedHere[k]);
         setAdjustments({
           ...adjustments,
-          ...adjustmentsToApply,
+          ...appliedHere,
           ...(v3 ? { v3: mergePastedV3(adjustments.v3, v3) } : {}),
         });
       }
 
-      invoke(Invokes.ApplyAdjustmentsToPaths, { paths: pathsToUpdate, adjustments: adjustmentsToApply })
+      invoke(Invokes.ApplyAdjustmentsToPaths, {
+        paths: pathsToUpdate,
+        adjustments: adjustmentsToApply,
+        sourcePath: copiedFromPath,
+      })
         .then(() => {
           if (selectedImage && pathsToUpdate.includes(selectedImage.path)) {
             invoke('load_metadata', { path: selectedImage.path }).then((meta: any) => {
@@ -270,6 +289,7 @@ export function useEditorActions() {
                   lensMaker: meta.adjustments.lensMaker,
                   lensModel: meta.adjustments.lensModel,
                   lensDistortionParams: meta.adjustments.lensDistortionParams,
+                  ...Object.fromEntries(fitted.map((k) => [k, meta.adjustments[k] ?? INITIAL_ADJUSTMENTS[k]])),
                 }));
               }
             });

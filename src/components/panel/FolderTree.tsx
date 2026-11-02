@@ -31,6 +31,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { useState, useMemo, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { invoke } from '@tauri-apps/api/core';
+import { useShallow } from 'zustand/react/shallow';
 import Text from '../ui/Text';
 import { TEXT_COLOR_KEYS, TextColors, TextVariants, TextWeights } from '../../types/typography';
 import { useLibraryStore } from '../../store/useLibraryStore';
@@ -673,7 +674,11 @@ export default function FolderTree({
   onMouseLeave,
 }: FolderTreeProps) {
   const { t } = useTranslation();
-  const { appSettings, handleSettingsChange } = useSettingsStore();
+  const { appSettings, handleSettingsChange } = useSettingsStore(
+    useShallow((s) => ({ appSettings: s.appSettings, handleSettingsChange: s.handleSettingsChange })),
+  );
+  // Only what the tree shows: the library's photo list and ratings change
+  // as thumbnails arrive, and the tree need not render for those.
   const {
     folderTrees,
     pinnedFolderTrees,
@@ -683,7 +688,18 @@ export default function FolderTree({
     albumTree,
     activeAlbumId,
     expandedAlbumGroups,
-  } = useLibraryStore();
+  } = useLibraryStore(
+    useShallow((s) => ({
+      folderTrees: s.folderTrees,
+      pinnedFolderTrees: s.pinnedFolderTrees,
+      currentFolderPath: s.currentFolderPath,
+      expandedFolders: s.expandedFolders,
+      isTreeLoading: s.isTreeLoading,
+      albumTree: s.albumTree,
+      activeAlbumId: s.activeAlbumId,
+      expandedAlbumGroups: s.expandedAlbumGroups,
+    })),
+  );
 
   const [searchQuery, setSearchQuery] = useState('');
   const [isHovering, setIsHovering] = useState(false);
