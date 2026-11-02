@@ -2128,6 +2128,11 @@ function SettingsPanel({
   const selectionChanged = !!container && madeFrom !== undefined && madeFrom !== selectionSignature(container.subMasks);
   const [prompt, setPrompt] = useState(displayContainer.prompt || '');
   const [useFastInpaint, setUseFastInpaint] = useState(!isGenerativeAvailable);
+  // With Generative AI off (Lightroom's Remove default): content-aware, which
+  // copies real texture from the photo, or the fast LaMa fill.
+  const [offMethod, setOffMethod] = useState<'content-aware' | 'fast'>(
+    displayContainer.fillMethod === 'fast' || isQuickErasePatch ? 'fast' : 'content-aware',
+  );
   const [generateMode, setGenerateMode] = useState(false);
   const [contentScale, setContentScale] = useState(1.0);
   const [matchPhoto, setMatchPhoto] = useState(0.8);
@@ -2293,26 +2298,34 @@ function SettingsPanel({
     }
   }, [container?.id]);
 
+  // Generative AI is on by default whenever a generative model can run, as
+  // in Lightroom; the switch is the user's word, and a selection remembers
+  // what it was last filled with. Re-decided when the selection changes or
+  // a model becomes available (the model list loads after the panel), so the
+  // choice is never left stranded off once a model appears.
+  const generativePossible = !!(isGenerativeAvailable || isEngineFill);
+  const prevGenerativePossible = useRef(generativePossible);
   useEffect(() => {
-    if (container) {
-      if (isEngineFill) {
-        // A selected ENGINE fill model (Flux/Fooocus/SDXL via the managed
-        // engine) is the generative path — the hidden Fast toggle must
-        // not stay stranded on true, which silently downgraded every fill
-        // to LaMa once the toggle was honored. Quick-erase patches still
-        // prefer the fast LaMa path.
-        setUseFastInpaint(isQuickErasePatch);
-        prevContainerId.current = container.id;
-      } else if (!isGenerativeAvailable) {
-        setUseFastInpaint(true);
-      } else if (container.id !== prevContainerId.current) {
-        setUseFastInpaint(isQuickErasePatch);
-        prevContainerId.current = container.id;
-      }
-    } else {
+    if (!container) {
       prevContainerId.current = null;
+      return;
     }
-  }, [isGenerativeAvailable, isEngineFill, container, isQuickErasePatch]);
+    const changed = container.id !== prevContainerId.current || generativePossible !== prevGenerativePossible.current;
+    prevContainerId.current = container.id;
+    prevGenerativePossible.current = generativePossible;
+    if (!changed) return;
+    const stored = container.fillMethod;
+    if (stored === 'content-aware' || stored === 'fast') {
+      setUseFastInpaint(true);
+      setOffMethod(stored);
+    } else if (!generativePossible) {
+      setUseFastInpaint(true);
+    } else {
+      // Quick-erase patches prefer the fast LaMa path.
+      setUseFastInpaint(isQuickErasePatch && stored !== 'generative');
+      setOffMethod(isQuickErasePatch ? 'fast' : 'content-aware');
+    }
+  }, [generativePossible, container, isQuickErasePatch]);
 
   const subMaskConfig = activeSubMask ? SUB_MASK_CONFIG[activeSubMask.type] || {} : {};
   const isAiMask =
@@ -2331,6 +2344,9 @@ function SettingsPanel({
       console.error('[ai] generate blocked: selection not ready', container.id);
       return;
     }
+    // A prompt or Replace always needs the generative model.
+    const fillMethod: 'generative' | 'content-aware' | 'fast' =
+      generateMode || prompt.trim() || !useFastInpaint ? 'generative' : offMethod;
     updateContainer(container.id, {
       prompt,
       reconstructSinglePath,
@@ -2338,11 +2354,13 @@ function SettingsPanel({
       contentScale,
       matchPhoto,
       loras,
+      fillMethod,
     });
-    onGenerativeReplace(container.id, prompt, useFastInpaint, reconstructSinglePath, generateMode, {
+    onGenerativeReplace(container.id, prompt, fillMethod === 'fast', reconstructSinglePath, generateMode, {
       contentScale,
       matchPhoto,
       loras,
+      fillEngine: fillMethod === 'content-aware' ? 'content-aware' : undefined,
     });
   };
 
@@ -2365,7 +2383,7 @@ function SettingsPanel({
   const isSky = (container as any)?.patchType === 'sky';
   // A fill: Remove's, or any older retouch made from a selection.
   const isFill = !isRepair && !isSky && tool !== 'enhance';
-  const generative = isEngineFill || generateMode || !useFastInpaint;
+  const generative = generateMode || !useFastInpaint;
   return (
     <div className="space-y-3" onClick={(e) => e.stopPropagation()}>
       <div className="flex items-center gap-2">
@@ -2416,28 +2434,70 @@ function SettingsPanel({
           )}
           <Switch
             checked={generative}
-            disabled={!isGenerativeAvailable || isEngineFill || generateMode}
+            disabled={!generativePossible || generateMode}
             label={t('editor.ai.settings.useGenerativeAi', { defaultValue: 'Use Generative AI' })}
             onChange={(on: boolean) => setUseFastInpaint(!on)}
             tooltip={
-              !isGenerativeAvailable
+              !generativePossible
                 ? t('editor.ai.settings.basicInpaintTooltipDisabled')
-                : isEngineFill || generateMode
+                : generateMode
                   ? t('editor.ai.settings.generativeChosen', {
-                      defaultValue: 'The chosen model (or Replace selected content) always generates.',
+                      defaultValue: 'Replace selected content always generates.',
                     })
                   : t('editor.ai.settings.generativeTooltip', {
                       defaultValue:
-                        'On: the AI model invents what belongs there, and can follow a prompt (Replace with…). Off: a quick fill from the surrounding pixels.',
+                        'On: the AI model invents what belongs there, and can follow a prompt (Replace with…). Off: the fill is built from the photo itself.',
                     })
             }
           />
+          {!generative && (
+            <div className="flex gap-1.5">
+              {(
+                [
+                  [
+                    'content-aware',
+                    t('editor.ai.settings.contentAware', { defaultValue: 'Content-Aware' }),
+                    t('editor.ai.settings.contentAwareTooltip', {
+                      defaultValue:
+                        'Copies real texture from elsewhere in the photo, at full detail. Fast; Try Again gives another arrangement.',
+                    }),
+                  ],
+                  [
+                    'fast',
+                    t('editor.ai.settings.fastFill', { defaultValue: 'Fast AI fill' }),
+                    t('editor.ai.settings.fastFillTooltip', {
+                      defaultValue: 'LaMa: a quick, smooth fill from the surrounding pixels.',
+                    }),
+                  ],
+                ] as const
+              ).map(([method, label, tip]) => (
+                <button
+                  key={method}
+                  type="button"
+                  disabled={isGeneratingAi || displayContainer.isLoading}
+                  onClick={() => setOffMethod(method)}
+                  data-tooltip={tip}
+                  className={`flex-1 rounded-md px-2 py-1 text-xs font-medium transition-colors ${
+                    offMethod === method
+                      ? 'bg-accent text-button-text'
+                      : 'bg-surface text-text-secondary hover:bg-card-active hover:text-text-primary'
+                  } disabled:opacity-50`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
           <Text variant={TextVariants.small}>
-            {isQuickErasePatch
+            {isQuickErasePatch && (generative || offMethod === 'fast')
               ? t('editor.ai.settings.quickEraseDesc')
-              : useFastInpaint
-                ? t('editor.ai.settings.fastInpaintDesc')
-                : t('editor.ai.settings.generativeDesc')}
+              : !generative && offMethod === 'content-aware'
+                ? t('editor.ai.settings.contentAwareDesc', {
+                    defaultValue: 'Fill the selection with texture copied from the rest of the photo.',
+                  })
+                : useFastInpaint
+                  ? t('editor.ai.settings.fastInpaintDesc')
+                  : t('editor.ai.settings.generativeDesc')}
           </Text>
           <Button
             className="w-full"

@@ -1,0 +1,33 @@
+# Fill test set (examples/fill_testset.rs). One case per line:
+#   id | photo (under the photo root) | kind | parameters | methods
+#
+# holdout: a blob-shaped hole is cut into real detail and filled; the photo's
+#   own pixels are the truth. cx,cy = centre (fractions of the upright frame),
+#   frac = hole area as a share of the frame, aspect = width/height, seed =
+#   the blob's outline.
+# clipped: the app's Clipped selection (white threshold `white`, blacks off)
+#   intersected with a region `roi` = x0,y0,x1,y1 (fractions), as the Refine
+#   brush would confine it. No truth: scored against the nearest unclipped
+#   surroundings.
+# methods: lama (fast LaMa), ca (content-aware), flux (promptless repair on
+#   Flux Fill through the engine; slow, so only on some cases).
+
+sky-s     | DSC08265.JPG           | holdout | cx=0.74 cy=0.075 frac=0.015 aspect=1.8 seed=1 | lama,ca
+sky-m     | DSC08265.JPG           | holdout | cx=0.42 cy=0.10 frac=0.05 aspect=3.0 seed=2   | lama,ca,flux
+sky-l     | DSC08265.JPG           | holdout | cx=0.55 cy=0.12 frac=0.12 aspect=4.0 seed=3   | lama,ca
+band-s    | DSC08226.JPG           | holdout | cx=0.25 cy=0.20 frac=0.015 aspect=1.5 seed=4  | lama,ca
+band-m    | DSC08226.JPG           | holdout | cx=0.60 cy=0.18 frac=0.05 aspect=2.0 seed=5   | lama,ca,flux
+band-l    | DSC08226.JPG           | holdout | cx=0.45 cy=0.20 frac=0.12 aspect=2.5 seed=6   | lama,ca
+river-s   | DSC08267.JPG           | holdout | cx=0.62 cy=0.66 frac=0.015 aspect=1.3 seed=7  | lama,ca
+river-m   | DSC08267.JPG           | holdout | cx=0.45 cy=0.70 frac=0.05 aspect=1.5 seed=8   | lama,ca,flux
+river-l   | DSC08267.JPG           | holdout | cx=0.50 cy=0.55 frac=0.12 aspect=1.6 seed=9   | lama,ca
+fence-s   | Originals/DSC08030.JPG | holdout | cx=0.08 cy=0.55 frac=0.015 aspect=0.5 seed=10 | lama,ca
+fence-m   | Originals/DSC08030.JPG | holdout | cx=0.50 cy=0.14 frac=0.05 aspect=2.2 seed=11  | lama,ca,flux
+fence-l   | Originals/DSC08030.JPG | holdout | cx=0.50 cy=0.13 frac=0.12 aspect=3.5 seed=12  | lama,ca
+stone-s   | Originals/DSC08016.JPG | holdout | cx=0.15 cy=0.52 frac=0.015 aspect=1.2 seed=13 | lama,ca
+stone-m   | Originals/DSC08016.JPG | holdout | cx=0.12 cy=0.80 frac=0.05 aspect=0.8 seed=14  | lama,ca,flux
+stone-l   | Originals/DSC08016.JPG | holdout | cx=0.13 cy=0.70 frac=0.12 aspect=0.36 seed=15 | lama,ca
+blown-08212 | DSC08212.JPG           | clipped | white=98 roi=0.22,0.48,0.80,0.84 | lama,ca,flux
+blown-08210 | DSC08210.JPG           | clipped | white=95 roi=0.20,0.55,0.80,0.86 | lama,ca,flux
+sun-08197   | Originals/DSC08197.JPG | clipped | white=98 roi=0.42,0.08,0.62,0.26 | lama,ca,flux
+band-08222  | DSC08222.JPG           | clipped | white=98 roi=0.20,0.00,1.00,0.45 | lama,ca,flux

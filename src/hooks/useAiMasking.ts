@@ -166,11 +166,14 @@ export function useAiMasking() {
         contentScale?: number;
         matchPhoto?: number;
         loras?: Array<{ name: string; strength: number }>;
+        /** 'content-aware': fill from texture copied out of the photo. */
+        fillEngine?: 'content-aware';
       },
     ) => {
       // Text and Replace mode always require a generative model, even if a
       // previous quick-repair selection left the fast preference enabled.
       useFastInpaint = useFastInpaint && !generateMode && !prompt.trim();
+      const contentAware = generateOptions?.fillEngine === 'content-aware' && !generateMode && !prompt.trim();
       const { selectedImage, adjustments, isGeneratingAi, patchesSentToBackend } = useEditorStore.getState();
       // Every early exit must be LOUD: silent returns here read as "the
       // button does nothing" (console.error reaches app.log).
@@ -246,6 +249,7 @@ export function useAiMasking() {
           path: selectedImage.path,
           useFastInpaint: useFastInpaint,
           token: token || null,
+          fillEngine: contentAware ? 'content-aware' : null,
         });
 
         const newPatchData = JSON.parse(newPatchDataJson);
@@ -257,7 +261,13 @@ export function useAiMasking() {
           reconstructSinglePath,
           needsPromptReason: undefined,
           prompt,
-          name: useFastInpaint ? 'Inpaint' : prompt && prompt.trim() ? prompt.trim() : p.name,
+          name: contentAware
+            ? 'Content-Aware'
+            : useFastInpaint
+              ? 'Inpaint'
+              : prompt && prompt.trim()
+                ? prompt.trim()
+                : p.name,
           // A fill made on an Enhance retouch makes it a Remove one.
           patchType: p.patchType === 'enhance' ? undefined : p.patchType,
         });

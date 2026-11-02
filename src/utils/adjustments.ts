@@ -276,6 +276,10 @@ export interface AiPatch {
   matchPhoto?: number;
   /// LoRAs to apply, in order. Flux only.
   loras?: Array<{ name: string; strength: number }>;
+  /// How Remove last filled this selection: the generative model, or with
+  /// Generative AI off, content-aware (texture copied from the photo) or the
+  /// fast LaMa fill. Absent on older patches.
+  fillMethod?: 'generative' | 'content-aware' | 'fast';
   /// Set when a promptless repair found too little surrounding detail to
   /// rebuild from; the value is the percentage it did find.
   needsPromptReason?: number;

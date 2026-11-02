@@ -14,8 +14,18 @@ use crate::app_state::AppState;
 /// default (8188) to avoid colliding with a user's own installation.
 const ENGINE_PORT: u16 = 8399;
 
+/// The engine's port: `ENGINE_PORT`, unless DARKROOM_ENGINE_PORT names
+/// another (the fill test set runs a private engine there, beside the
+/// app's own).
+fn engine_port() -> u16 {
+    std::env::var("DARKROOM_ENGINE_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(ENGINE_PORT)
+}
+
 fn base_url() -> String {
-    format!("http://127.0.0.1:{}", ENGINE_PORT)
+    format!("http://127.0.0.1:{}", engine_port())
 }
 
 pub fn engine_dir(app_handle: &tauri::AppHandle) -> Result<PathBuf> {
@@ -388,7 +398,7 @@ pub async fn ensure_running(
         .arg("--listen")
         .arg("127.0.0.1")
         .arg("--port")
-        .arg(ENGINE_PORT.to_string())
+        .arg(engine_port().to_string())
         .env("PYTORCH_ENABLE_MPS_FALLBACK", "1")
         .current_dir(dir.join("ComfyUI"));
     // The engine's own account (per-step speed, a silent fall back to the

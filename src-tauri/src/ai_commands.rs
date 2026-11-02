@@ -4122,11 +4122,17 @@ async fn run_engine_inpaint_patch(
             prompt,
             // Random seed per run: retries produce genuine variants (a
             // fixed seed made every re-roll identical, so users could
-            // never sample for a better result).
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.subsec_nanos() as u64 ^ (d.as_secs() << 20))
-                .unwrap_or(42),
+            // never sample for a better result). DARKROOM_FILL_SEED pins
+            // it for the fill test set (examples/fill_testset.rs).
+            std::env::var("DARKROOM_FILL_SEED")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or_else(|| {
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.subsec_nanos() as u64 ^ (d.as_secs() << 20))
+                        .unwrap_or(42)
+                }),
             loras,
             false,
             |_| {},
@@ -4968,12 +4974,16 @@ pub async fn apply_clone_patch(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn invoke_generative_replace_with_mask_def(
     path: String,
     patch_definition: AiPatchDefinition,
     current_adjustments: Value,
     use_fast_inpaint: bool,
     token: Option<String>,
+    // "content-aware": rebuild from texture copied out of the photo (no
+    // model). Absent for every other fill, so older callers are unchanged.
+    fill_engine: Option<String>,
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
@@ -4990,14 +5000,19 @@ pub async fn invoke_generative_replace_with_mask_def(
     let semantic_replace =
         patch_definition.generate_mode || !patch_definition.prompt.trim().is_empty();
     let reconstruct_fill = patch_uses_clipped_reconstruct(&patch_definition);
-    let reconstruct_single_path = reconstruct_fill && patch_definition.reconstruct_single_path;
+    // Content-aware is removal only: a prompt or Replace asks for new
+    // content, which only a generative model can make.
+    let content_aware = fill_engine.as_deref() == Some("content-aware") && !semantic_replace;
+    let reconstruct_single_path =
+        reconstruct_fill && patch_definition.reconstruct_single_path && !content_aware;
     let preserve_negative_refinements = patch_has_negative_refinement(&patch_definition);
     let (orientation_steps, flip_horizontal, flip_vertical) =
         ai_fill_orientation_from_adjustments(&current_adjustments);
-    let force_engine_for_reconstruct =
-        reconstruct_fill && (reconstruct_single_path || !patch_definition.prompt.trim().is_empty());
+    let force_engine_for_reconstruct = !content_aware
+        && reconstruct_fill
+        && (reconstruct_single_path || !patch_definition.prompt.trim().is_empty());
     let effective_use_fast_inpaint =
-        use_fast_inpaint && !force_engine_for_reconstruct && !semantic_replace;
+        use_fast_inpaint && !force_engine_for_reconstruct && !semantic_replace && !content_aware;
     if force_engine_for_reconstruct && use_fast_inpaint {
         log::info!(
             "[fill] Reconstruct requested fast mode; using prompt-conditioned engine instead"
@@ -5237,7 +5252,9 @@ pub async fn invoke_generative_replace_with_mask_def(
     // Repair can only continue what it can see. With no prompt to fall back
     // on, check there is real scene around the selection before spending
     // minutes producing a wash — and say so in a form the UI can act on.
-    if user_prompt.is_empty() && !semantic_replace {
+    // Content-aware copies from anywhere in its context, not only the ring,
+    // and costs seconds: it is not gated.
+    if user_prompt.is_empty() && !semantic_replace && !content_aware {
         let usable = {
             let (mw, mh) = mask_bitmap.dimensions();
             let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
@@ -5287,7 +5304,7 @@ pub async fn invoke_generative_replace_with_mask_def(
     // The Fast toggle is the user's word: honor it even when an engine
     // model is selected (previously the engine silently overrode it and
     // 'fast' runs took six diffusion round-trips).
-    let engine_model = if effective_use_fast_inpaint {
+    let engine_model = if effective_use_fast_inpaint || content_aware {
         None
     } else {
         let resolved = resolve_and_prepare(
@@ -5328,7 +5345,26 @@ pub async fn invoke_generative_replace_with_mask_def(
     }]});
     drop(current_adjustments);
 
-    let patch_result = if let Some((_, model)) = engine_model {
+    let patch_result = if content_aware {
+        let is_linear = state
+            .original_image
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|l| l.is_raw)
+            && matches!(
+                &source_image,
+                DynamicImage::ImageRgb32F(_) | DynamicImage::ImageRgba32F(_)
+            );
+        run_content_aware_patch(
+            source_image,
+            mask_bitmap.clone(),
+            is_linear,
+            reconstruct_fill,
+            content_aware_seed(&previous_attempts, &patch_definition.id),
+        )
+        .await?
+    } else if let Some((_, model)) = engine_model {
         let kind = crate::comfy_engine::FillKind::from_params(&model.manifest.params);
         log::info!(
             "[fill] selected engine model {} ({})",
@@ -5471,7 +5507,9 @@ pub async fn invoke_generative_replace_with_mask_def(
         payload["replacementRunId"] = serde_json::json!(debug_run_id);
     }
 
-    if reconstruct_fill {
+    // Content-aware keeps its attempts too: Try Again runs the next seed and
+    // every result stays selectable.
+    if reconstruct_fill || content_aware {
         payload = attach_reconstruct_response_metadata(
             payload,
             ReconstructResponseInputs {
@@ -5689,6 +5727,73 @@ pub async fn reblend_replacement(
 /// frontend stores in the sidecar (PNG, not JPEG: deep-shadow fills live at
 /// pixel values 0-5 where JPEG block noise becomes banding under exposure
 /// boosts; the patch is mostly black, so PNG stays small).
+/// The seed for a content-aware attempt: its attempt number, so the first
+/// fill of a selection is always the same and Try Again gives the next one.
+fn content_aware_seed(previous_attempts: &Value, patch_id: &str) -> u64 {
+    let Some(previous) = current_patch_data_value(previous_attempts, patch_id) else {
+        return 1;
+    };
+    let attempts = previous
+        .get("reconstructVariants")
+        .and_then(Value::as_array)
+        .map(|v| v.len())
+        .filter(|n| *n > 0)
+        .unwrap_or_else(|| {
+            usize::from(
+                previous
+                    .get("color")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.is_empty()),
+            )
+        });
+    attempts as u64 + 1
+}
+
+/// Content-aware fill (content_aware.rs) through the same contract as the
+/// other fills: display-encoded pixels in, the whole frame back with the
+/// gamma flag set exactly as the LaMa and engine paths set it.
+async fn run_content_aware_patch(
+    source_image: DynamicImage,
+    mask: GrayImage,
+    is_linear: bool,
+    exclude_clipped: bool,
+    seed: u64,
+) -> Result<EngineInpaintResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let started = std::time::Instant::now();
+        let encoded = if is_linear {
+            ai_processing::gamma_encode_rgba8(&source_image)
+        } else {
+            source_image.to_rgba8()
+        };
+        drop(source_image);
+        let filled = crate::content_aware::fill(
+            &encoded,
+            &mask,
+            &crate::content_aware::Options {
+                seed,
+                exclude_clipped,
+            },
+        );
+        log::info!(
+            "[fill] content-aware: seed {seed}, clipped sources {}, {:.2}s",
+            if exclude_clipped {
+                "excluded"
+            } else {
+                "allowed"
+            },
+            started.elapsed().as_secs_f32()
+        );
+        EngineInpaintResult {
+            image: filled,
+            is_linear,
+            active_kind: Some("content-aware"),
+        }
+    })
+    .await
+    .map_err(|e| format!("Content-aware fill failed: {e}"))
+}
+
 fn encode_patch_result_value(
     patch_rgba: &RgbaImage,
     patch_is_gamma: bool,

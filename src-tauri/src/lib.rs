@@ -19,6 +19,7 @@ pub mod cloud_builder;
 pub mod cloud_files;
 pub mod color_engine;
 pub mod comfy_engine;
+pub mod content_aware;
 pub mod convert;
 pub mod cull_preview;
 mod culling;
@@ -29,6 +30,8 @@ mod exif_processing;
 pub mod expansion;
 mod export_processing;
 mod file_management;
+#[doc(hidden)]
+pub mod fill_harness;
 pub mod fill_store;
 pub mod finder_tags;
 pub mod flat_field;
@@ -1610,6 +1613,14 @@ fn frontend_ready(
     Ok(())
 }
 
+/// The app's Tauri context. Generated in one place: it embeds Info.plist,
+/// which may exist only once in a binary, and the fill test set
+/// (examples/fill_testset.rs) builds a windowless app from it too.
+#[doc(hidden)]
+pub fn tauri_context() -> tauri::Context<tauri::Wry> {
+    tauri::generate_context!()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let mut builder = tauri::Builder::default();
@@ -2222,7 +2233,7 @@ pub fn run() {
             negative_conversion::preview_negative_conversion,
             negative_conversion::convert_negatives,
         ])
-        .build(tauri::generate_context!())
+        .build(tauri_context())
         .expect("error while building tauri application")
         .run(#[allow(unused_variables)] |app_handle, event| {
             match event {
