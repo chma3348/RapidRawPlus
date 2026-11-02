@@ -5721,9 +5721,10 @@ fn encode_patch_result_value(
     }
 
     // Full frame, black outside the mask (which the blend never reads), and
-    // compressed properly: the default PNG settings stored a real fill's
-    // colour at 1.5 MB and its mask at 280 KB; these store the same pixels
-    // in 1.06 MB and 122 KB, for a quarter of a second once per fill.
+    // compressed properly. The fast PNG settings stored two real fills'
+    // colour at 1.5 and 2.97 MB and their masks at 280 and 188 KB; these
+    // store the same pixels in 1.06 and 2.74 MB, 122 and 83 KB, for a
+    // quarter to half a second once per fill or re-blend.
     let compact_png = |raw: &[u8], color: image::ExtendedColorType| -> Result<Vec<u8>, String> {
         use image::ImageEncoder;
         let mut out = Vec::new();
