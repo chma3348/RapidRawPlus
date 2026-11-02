@@ -57,6 +57,29 @@ export interface MaskType {
   type: Mask;
 }
 
+/** A clicked colour sample, in the uncropped photo as oriented when clicked. */
+export interface ColorSample {
+  x: number;
+  y: number;
+  /** Option-click: takes this colour (or, contiguous, this region) away. */
+  subtract?: boolean;
+}
+
+/** The colour select's own parameters (alongside tolerance, solidify, clean, grow, feather). */
+export interface ColorSelectParameters {
+  samples?: Array<ColorSample>;
+  swatchHue?: number;
+  swatchWidth?: number;
+  /**
+   * Magic Wand: only pixels connected to a sample. Missing (older sidecars)
+   * is the global colour range.
+   */
+  contiguous?: boolean;
+}
+
+/** Most colour samples kept; the oldest goes first. */
+export const MAX_COLOR_SAMPLES = 8;
+
 export interface SubMask {
   id: string;
   invert: boolean;

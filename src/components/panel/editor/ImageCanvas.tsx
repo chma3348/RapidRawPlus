@@ -5,7 +5,7 @@ import { Stage, Layer, Ellipse, Line, Transformer, Group, Circle, Rect } from 'r
 import { PercentCrop, Crop } from 'react-image-crop';
 import PickerLoupe from './PickerLoupe';
 import { Adjustments, AiPatch, Coord, MaskContainer } from '../../../utils/adjustments';
-import { Mask, SubMask, SubMaskMode, ToolType } from '../right/Masks';
+import { ColorSample, MAX_COLOR_SAMPLES, Mask, SubMask, SubMaskMode, ToolType } from '../right/Masks';
 import { AppSettings, BrushSettings, SelectedImage } from '../../ui/AppProperties';
 import { RenderSize } from '../../../hooks/useImageRenderSize';
 import type { OverlayMode } from '../right/CropPanel';
@@ -1013,13 +1013,15 @@ const MaskOverlay = memo(
     if (subMask.type === Mask.Color && Array.isArray(p.samples) && p.samples.length > 0) {
       return (
         <>
-          {p.samples.map((sp: any, i: number) => (
+          {p.samples.map((sp: ColorSample, i: number) => (
             <Circle
               key={i}
               x={(sp.x - cropX) * scale}
               y={(sp.y - cropY) * scale}
               radius={5}
-              stroke={isSelected ? '#0ea5e9' : 'white'}
+              // A subtract (Option-click) sample is drawn dashed in red.
+              stroke={sp.subtract ? '#f87171' : isSelected ? '#0ea5e9' : 'white'}
+              dash={sp.subtract ? [3, 2] : undefined}
               strokeWidth={2}
               listening={false}
               shadowColor="black"
@@ -1849,17 +1851,26 @@ const ImageCanvas = memo(
 
           let newParams = { ...activeSubMask.parameters };
           if (activeSubMask.type === Mask.Color) {
-            const prior = Array.isArray(newParams.samples) ? newParams.samples : [];
+            const prior: Array<ColorSample> = Array.isArray(newParams.samples) ? newParams.samples : [];
             const shift = !!(e.evt && (e.evt as MouseEvent).shiftKey);
-            // Shift-click appends (max 5) — Lightroom-style multi-sample;
-            // plain click starts a fresh selection. Sampling a color also
-            // leaves swatch mode.
-            newParams.samples = shift ? [...prior, { x, y }].slice(-5) : [{ x, y }];
+            const option = !!(e.evt && (e.evt as MouseEvent).altKey);
+            // Photoshop's clicks: Shift-click adds a sample (an area, when
+            // contiguous), Option-click takes one away, a plain click starts
+            // a fresh selection. Sampling a color also leaves swatch mode.
+            newParams.samples =
+              shift || (option && prior.length > 0)
+                ? [...prior, option ? { x, y, subtract: true } : { x, y }].slice(-MAX_COLOR_SAMPLES)
+                : [{ x, y }];
             delete newParams.swatchHue;
             delete newParams.swatchWidth;
           }
-          newParams.targetX = x;
-          newParams.targetY = y;
+          // The point a selection falls back to with no samples left: never
+          // one that was clicked to take a colour away.
+          const subtracting = activeSubMask.type === Mask.Color && newParams.samples.at(-1)?.subtract;
+          if (!subtracting) {
+            newParams.targetX = x;
+            newParams.targetY = y;
+          }
           // The orientation these points were clicked under, which the backend
           // needs to find them on the photo. The mask itself is placed with the
           // photo's current orientation, so it follows later turns and flips.

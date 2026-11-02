@@ -49,6 +49,7 @@ import ReplacementBlendControls from './ReplacementBlendControls';
 import Switch from '../../ui/Switch';
 import Slider from '../../ui/Slider';
 import SubjectSelectionControls from './SubjectSelectionControls';
+import ColorSampleControls from './ColorSampleControls';
 import Input from '../../ui/Input';
 import Button from '../../ui/Button';
 
@@ -729,6 +730,9 @@ export default function AIPanel() {
         solidify: 40,
         clean: 15,
         feather: 25,
+        // Remove and Replace work on a thing in the photo, so a new colour
+        // selection here is the Magic Wand: the connected area clicked.
+        contiguous: true,
       });
     }
     if (type === Mask.Clipped) {
@@ -2878,6 +2882,17 @@ function SettingsPanel({
                       parameters={activeSubMask.parameters}
                       paint={activeSubMask.type === Mask.AiPaint}
                       onChange={(parameters) => updateSubMask(activeSubMask.id, { parameters })}
+                    />
+                  )}
+                  {activeSubMask.type === Mask.Color && (
+                    <ColorSampleControls
+                      parameters={activeSubMask.parameters}
+                      onChange={(changes) =>
+                        updateSubMask(activeSubMask.id, {
+                          parameters: { ...activeSubMask.parameters, ...changes },
+                        })
+                      }
+                      showSwatches
                     />
                   )}
                   {isAiMask && aiModelDownloadStatus && (

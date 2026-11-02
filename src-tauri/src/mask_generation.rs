@@ -218,6 +218,10 @@ struct FlowMaskParameters {
 struct ColorSamplePoint {
     x: f64,
     y: f64,
+    /// Option-clicked: takes this colour (or, contiguous, this region) away
+    /// from the selection. Missing in sidecars older than the Magic Wand.
+    #[serde(default)]
+    subtract: bool,
 }
 
 #[derive(serde::Deserialize, Clone, Debug, Default)]
@@ -229,6 +233,11 @@ struct ParametricExtras {
     swatch_hue: Option<f32>,
     #[serde(default)]
     swatch_width: Option<f32>,
+    /// Magic Wand: only pixels connected to a clicked sample through
+    /// pixels within tolerance. Missing (older sidecars) is the global
+    /// colour range, as before.
+    #[serde(default)]
+    contiguous: bool,
 }
 
 #[derive(serde::Deserialize, Clone, Debug, Default)]
@@ -1027,6 +1036,49 @@ impl SourceMap {
     }
 }
 
+/// For masks made in the source's own frame (fills, spot fixes): moves a
+/// colour or luminance mask's clicked points from the frame they were clicked
+/// in to the source's, and records no orientation, so the mask selects the
+/// same pixels there that it selects on the photo as shown. `source` is the
+/// size of the picture the mask will sample.
+pub fn clicks_to_source(params: &mut Value, source: (u32, u32)) {
+    let map = Orientation::recorded(params).to_source(source);
+    let move_point = |x: &mut Value, y: &mut Value| {
+        let (Some(px), Some(py)) = (x.as_f64(), y.as_f64()) else {
+            return;
+        };
+        // The off-screen placeholder of a selection not clicked yet.
+        if px <= -1000.0 || py <= -1000.0 {
+            return;
+        }
+        let (sx, sy) = map.map(px as f32, py as f32);
+        *x = serde_json::json!(sx as f64);
+        *y = serde_json::json!(sy as f64);
+    };
+    if let Some(obj) = params.as_object_mut() {
+        if let (Some(mut x), Some(mut y)) = (obj.remove("targetX"), obj.remove("targetY")) {
+            move_point(&mut x, &mut y);
+            obj.insert("targetX".into(), x);
+            obj.insert("targetY".into(), y);
+        }
+        if let Some(samples) = obj.get_mut("samples").and_then(|v| v.as_array_mut()) {
+            for sample in samples.iter_mut() {
+                if let Some(s) = sample.as_object_mut()
+                    && let (Some(mut x), Some(mut y)) = (s.remove("x"), s.remove("y"))
+                {
+                    move_point(&mut x, &mut y);
+                    s.insert("x".into(), x);
+                    s.insert("y".into(), y);
+                }
+            }
+        }
+        obj.insert("rotation".into(), serde_json::json!(0.0));
+        obj.insert("flipHorizontal".into(), serde_json::json!(false));
+        obj.insert("flipVertical".into(), serde_json::json!(false));
+        obj.insert("orientationSteps".into(), serde_json::json!(0));
+    }
+}
+
 struct TransformParams {
     orientation: Orientation,
     width: u32,
@@ -1052,6 +1104,20 @@ impl TransformParams {
             crop_offset,
         }
     }
+}
+
+/// A mask made in the source's own frame (a fill's), placed on the photo as
+/// shown — the way the editor places AI mattes, which are made there too.
+pub fn place_source_mask(
+    source_mask: &GrayImage,
+    width: u32,
+    height: u32,
+    scale: f32,
+    crop_offset: (f32, f32),
+    photo: Orientation,
+) -> GrayImage {
+    let tf = TransformParams::new(&Value::Null, Some(photo), width, height, scale, crop_offset);
+    generate_ai_bitmap_from_full_mask(source_mask, &tf)
 }
 
 fn generate_ai_bitmap_from_full_mask(
@@ -1331,6 +1397,31 @@ fn for_each_source_pixel(
     }
 }
 
+/// How strongly a pixel `d` away (`color_key_distance`) from a sample is
+/// selected at `tolerance`: fully up to half the reach, fading to none at it.
+#[inline]
+fn key_alpha(d: f32, tolerance: f32) -> f32 {
+    let t = 0.05 + (tolerance / 100.0) * 0.85;
+    1.0 - ((d - t * 0.5) / (t * 0.5)).clamp(0.0, 1.0)
+}
+
+#[inline]
+fn hsv_of(p: [u8; 3]) -> (f32, f32, f32) {
+    rgb_to_hsv_f(
+        p[0] as f32 / 255.0,
+        p[1] as f32 / 255.0,
+        p[2] as f32 / 255.0,
+    )
+}
+
+/// A clicked sample: its colour, and where it is on the source.
+#[derive(Clone, Copy, Debug)]
+struct ColorRef {
+    hsv: (f32, f32, f32),
+    at: (u32, u32),
+    subtract: bool,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn generate_color_bitmap(
     params_value: &Value,
@@ -1354,74 +1445,598 @@ fn generate_color_bitmap(
     let swatch = extras
         .swatch_hue
         .map(|h| (h, extras.swatch_width.unwrap_or(45.0)));
-    let mut refs: Vec<(f32, f32, f32)> = Vec::new();
+    let mut refs: Vec<ColorRef> = Vec::new();
     if swatch.is_none() {
-        let mut pts: Vec<(f64, f64)> = extras.samples.iter().map(|p| (p.x, p.y)).collect();
+        let mut pts: Vec<(f64, f64, bool)> = extras
+            .samples
+            .iter()
+            .map(|p| (p.x, p.y, p.subtract))
+            .collect();
         if pts.is_empty() {
             // Classic single-click mode requires a valid click point.
-            pts.push((params.target_x, params.target_y));
+            pts.push((params.target_x, params.target_y, false));
         }
-        for (x, y) in pts {
+        for (x, y, subtract) in pts {
             if let Some((sx, sy)) = clicked.pixel(x, y, source) {
                 let p = warped.get_pixel(sx, sy);
-                refs.push(rgb_to_hsv_f(
-                    p[0] as f32 / 255.0,
-                    p[1] as f32 / 255.0,
-                    p[2] as f32 / 255.0,
-                ));
+                refs.push(ColorRef {
+                    hsv: hsv_of([p[0], p[1], p[2]]),
+                    at: (sx, sy),
+                    subtract,
+                });
             }
         }
-        if refs.is_empty() {
+        // Subtracting from nothing selects nothing.
+        if !refs.iter().any(|r| !r.subtract) {
             return None;
         }
     }
 
-    let mut mask = GrayImage::new(width, height);
     let map = photo
         .unwrap_or_else(|| Orientation::recorded(params_value))
         .to_source(source);
-    for_each_source_pixel(
-        width,
-        height,
-        scale,
-        crop_offset,
-        &map,
-        source,
-        |x_out, y_out, x_src, y_src| {
-            let pixel = warped.get_pixel(x_src, y_src);
-            let px = rgb_to_hsv_f(
-                pixel[0] as f32 / 255.0,
-                pixel[1] as f32 / 255.0,
-                pixel[2] as f32 / 255.0,
-            );
-            let alpha = if let Some((hue, width_deg)) = swatch {
-                // Generic hue-band selection: membership by hue
-                // distance, gated so near-neutrals and near-black
-                // stay out.
-                let band = width_deg * (0.5 + params.tolerance / 60.0);
-                let norm = hue_dist_deg(px.0, hue) / band.max(1.0);
-                let hue_w = 1.0 - ((norm - 0.7) / 0.3).clamp(0.0, 1.0);
-                let sat_w = ((px.1 - 0.10) / 0.20).clamp(0.0, 1.0);
-                let val_w = ((px.2 - 0.04) / 0.06).clamp(0.0, 1.0);
-                hue_w * sat_w * val_w
-            } else {
-                let d = refs
-                    .iter()
-                    .map(|r| color_key_distance(px, *r))
-                    .fold(f32::MAX, f32::min);
-                let t = 0.05 + (params.tolerance / 100.0) * 0.85;
-                1.0 - ((d - t * 0.5) / (t * 0.5)).clamp(0.0, 1.0)
-            };
-            if alpha > 0.003 {
-                mask.put_pixel(x_out, y_out, Luma([(alpha * 255.0) as u8]));
-            }
-        },
-    );
+    let mut mask = if extras.contiguous && swatch.is_none() {
+        wand_bitmap(
+            &refs,
+            params.tolerance,
+            (width, height),
+            scale,
+            crop_offset,
+            &map,
+            warped,
+            wand_options(),
+        )
+    } else {
+        let adds: Vec<(f32, f32, f32)> =
+            refs.iter().filter(|r| !r.subtract).map(|r| r.hsv).collect();
+        let subs: Vec<(f32, f32, f32)> =
+            refs.iter().filter(|r| r.subtract).map(|r| r.hsv).collect();
+        let mut mask = GrayImage::new(width, height);
+        for_each_source_pixel(
+            width,
+            height,
+            scale,
+            crop_offset,
+            &map,
+            source,
+            |x_out, y_out, x_src, y_src| {
+                let pixel = warped.get_pixel(x_src, y_src);
+                let px = hsv_of([pixel[0], pixel[1], pixel[2]]);
+                let alpha = if let Some((hue, width_deg)) = swatch {
+                    // Generic hue-band selection: membership by hue
+                    // distance, gated so near-neutrals and near-black
+                    // stay out.
+                    let band = width_deg * (0.5 + params.tolerance / 60.0);
+                    let norm = hue_dist_deg(px.0, hue) / band.max(1.0);
+                    let hue_w = 1.0 - ((norm - 0.7) / 0.3).clamp(0.0, 1.0);
+                    let sat_w = ((px.1 - 0.10) / 0.20).clamp(0.0, 1.0);
+                    let val_w = ((px.2 - 0.04) / 0.06).clamp(0.0, 1.0);
+                    hue_w * sat_w * val_w
+                } else {
+                    let d = adds
+                        .iter()
+                        .map(|r| color_key_distance(px, *r))
+                        .fold(f32::MAX, f32::min);
+                    let mut alpha = key_alpha(d, params.tolerance);
+                    if alpha > 0.0 && !subs.is_empty() {
+                        let d_sub = subs
+                            .iter()
+                            .map(|r| color_key_distance(px, *r))
+                            .fold(f32::MAX, f32::min);
+                        // A subtracted colour takes the pixels at least as
+                        // near to it as to any added one, so it does not
+                        // also thin the colours the selection was made of.
+                        let t = 0.05 + (params.tolerance / 100.0) * 0.85;
+                        let nearer = (1.0 + (d - d_sub) / (0.5 * t)).clamp(0.0, 1.0);
+                        alpha *= 1.0 - key_alpha(d_sub, params.tolerance) * nearer;
+                    }
+                    alpha
+                };
+                if alpha > 0.003 {
+                    mask.put_pixel(x_out, y_out, Luma([(alpha * 255.0) as u8]));
+                }
+            },
+        );
+        mask
+    };
 
     apply_solidify(&mut mask, params.solidify, scale);
     apply_matte_clean(&mut mask, params.clean);
     apply_grow_and_feather(&mut mask, params.grow, params.feather, width, height);
+    // Hand refinement, as for the clipped selection, has the final say.
+    let refine: BrushMaskParameters =
+        serde_json::from_value(params_value.clone()).unwrap_or_default();
+    if !refine.lines.is_empty() {
+        apply_brush_lines(&mut mask, &refine.lines, scale, crop_offset);
+    }
     Some(mask)
+}
+
+// ---------------------------------------------------------------------------
+// Magic Wand: the colour selection kept to what is connected to the clicks.
+//
+// The flood runs on the warped source — the frame the clicks are mapped into
+// and every pixel is sampled from — not on the picture being made, so the
+// region is the same in a preview of any size, a zoomed-in view, the export
+// and a fill (which makes its mask in the source's own frame), and it follows
+// the photo through later crops, turns and flips. For speed it runs on a grid
+// of small cells of the source (a few source pixels each; cached per picture,
+// so moving the tolerance only re-floods). The cells only decide what is
+// connected: how much each pixel is selected, and so where the edge falls,
+// is the colour key at full resolution, as the colour range draws it.
+// ---------------------------------------------------------------------------
+
+/// How the wand floods. The defaults are what the app uses; the harness
+/// changes them to measure against a full-resolution flood.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WandOptions {
+    /// The flood grid's long edge, in cells (the source's, if smaller).
+    pub grid_long: u32,
+    /// Channels up to about twice this many cells wide are closed before
+    /// flooding, so the wand does not leak through pinholes in an edge.
+    pub gap_close: u32,
+    /// Antialias the edge with 2x2 samples per pixel when the picture is
+    /// smaller than the source.
+    pub supersample: bool,
+    /// How selected (0..1, by the colour key) a cell must be for the flood
+    /// to cross it.
+    pub core: f32,
+    /// How many cells the selection may then spread into the key's fading
+    /// edge.
+    pub rim: u32,
+    /// The edge stop: cells across which the picture steps by more than
+    /// this times (8 + tolerance) levels are not crossed. 0 is off.
+    pub edge_k: f32,
+}
+
+impl Default for WandOptions {
+    fn default() -> Self {
+        Self {
+            grid_long: 2048,
+            gap_close: 1,
+            supersample: true,
+            core: 0.5,
+            rim: 3,
+            edge_k: 1.5,
+        }
+    }
+}
+
+static WAND_OVERRIDE: std::sync::Mutex<Option<WandOptions>> = std::sync::Mutex::new(None);
+
+/// For the measuring harness only: flood with other options than the app's.
+#[doc(hidden)]
+pub fn override_wand_options(options: Option<WandOptions>) {
+    *WAND_OVERRIDE.lock().unwrap() = options;
+}
+
+fn wand_options() -> WandOptions {
+    WAND_OVERRIDE.lock().unwrap().unwrap_or_default()
+}
+
+/// The source reduced to cells: each cell's mean colour and its darkest and
+/// brightest pixel. The extremes let a hairline that is out of tolerance
+/// (a wire, a roof edge) stop the flood although it barely moves the mean.
+struct WandGrid {
+    w: usize,
+    h: usize,
+    cell: u32,
+    mean: Vec<[u8; 3]>,
+    lo: Vec<[u8; 3]>,
+    hi: Vec<[u8; 3]>,
+    /// How sharply the picture changes across the cell: the largest
+    /// channel difference between the means of opposite neighbours.
+    edge: Vec<u8>,
+}
+
+type GridRow = (Vec<[u8; 3]>, Vec<[u8; 3]>, Vec<[u8; 3]>);
+
+impl WandGrid {
+    fn build(image: &DynamicImage, grid_long: u32) -> Self {
+        let (sw, sh) = image.dimensions();
+        let cell = sw.max(sh).div_ceil(grid_long.max(1)).max(1);
+        let (w, h) = (sw.div_ceil(cell) as usize, sh.div_ceil(cell) as usize);
+        let rows: Vec<GridRow> = (0..h)
+            .into_par_iter()
+            .map(|gy| {
+                let mut mean = Vec::with_capacity(w);
+                let mut lo = Vec::with_capacity(w);
+                let mut hi = Vec::with_capacity(w);
+                let y0 = gy as u32 * cell;
+                let y1 = (y0 + cell).min(sh);
+                for gx in 0..w {
+                    let x0 = gx as u32 * cell;
+                    let x1 = (x0 + cell).min(sw);
+                    let mut sum = [0u32; 3];
+                    let (mut lo_l, mut hi_l) = (u32::MAX, 0u32);
+                    let (mut lo_p, mut hi_p) = ([0u8; 3], [0u8; 3]);
+                    for y in y0..y1 {
+                        for x in x0..x1 {
+                            let p = image.get_pixel(x, y);
+                            let rgb = [p[0], p[1], p[2]];
+                            sum[0] += rgb[0] as u32;
+                            sum[1] += rgb[1] as u32;
+                            sum[2] += rgb[2] as u32;
+                            let l = 299 * rgb[0] as u32 + 587 * rgb[1] as u32 + 114 * rgb[2] as u32;
+                            if l < lo_l {
+                                lo_l = l;
+                                lo_p = rgb;
+                            }
+                            if l >= hi_l {
+                                hi_l = l;
+                                hi_p = rgb;
+                            }
+                        }
+                    }
+                    let n = ((x1 - x0) * (y1 - y0)).max(1);
+                    mean.push([
+                        ((sum[0] + n / 2) / n) as u8,
+                        ((sum[1] + n / 2) / n) as u8,
+                        ((sum[2] + n / 2) / n) as u8,
+                    ]);
+                    lo.push(lo_p);
+                    hi.push(hi_p);
+                }
+                (mean, lo, hi)
+            })
+            .collect();
+        let mut grid = Self {
+            w,
+            h,
+            cell,
+            mean: Vec::with_capacity(w * h),
+            lo: Vec::with_capacity(w * h),
+            hi: Vec::with_capacity(w * h),
+            edge: Vec::new(),
+        };
+        for (mean, lo, hi) in rows {
+            grid.mean.extend(mean);
+            grid.lo.extend(lo);
+            grid.hi.extend(hi);
+        }
+        let mut edge = vec![0u8; w * h];
+        edge.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+            for (x, out) in row.iter_mut().enumerate() {
+                let at = |dx: isize, dy: isize| {
+                    let xx = (x as isize + dx).clamp(0, w as isize - 1) as usize;
+                    let yy = (y as isize + dy).clamp(0, h as isize - 1) as usize;
+                    grid.mean[yy * w + xx]
+                };
+                let mut most = 0u8;
+                for (dx, dy) in [(1, 0), (0, 1), (1, 1), (1, -1)] {
+                    let (a, b) = (at(dx, dy), at(-dx, -dy));
+                    for c in 0..3 {
+                        most = most.max(a[c].abs_diff(b[c]));
+                    }
+                }
+                *out = most;
+            }
+        });
+        grid.edge = edge;
+        grid
+    }
+
+    /// The cell a source pixel is in.
+    fn cell_of(&self, at: (u32, u32)) -> (usize, usize) {
+        (
+            ((at.0 / self.cell) as usize).min(self.w - 1),
+            ((at.1 / self.cell) as usize).min(self.h - 1),
+        )
+    }
+
+    /// Cells the flood may cross for this sample (first): the mean selected
+    /// at least `core`, and no pixel of the cell beyond the tolerance;
+    /// (second) the cells the key selects at all, off edges, which the rim
+    /// may spread into; and (third) the cells whose mean is selected as
+    /// much as the flood needs, edge or not.
+    fn passable(
+        &self,
+        r: (f32, f32, f32),
+        tolerance: f32,
+        options: &WandOptions,
+    ) -> (Vec<bool>, Vec<bool>, Vec<bool>) {
+        let n = self.w * self.h;
+        // The edge stop: a step this sharp is an edge, not shading, however
+        // close the colours either side are. Looser as the tolerance is.
+        let stop = if options.edge_k > 0.0 {
+            (options.edge_k * (8.0 + tolerance)).min(255.0) as u8
+        } else {
+            255
+        };
+        let mut pass = vec![false; n];
+        let mut soft = vec![false; n];
+        let mut keyed = vec![false; n];
+        pass.par_chunks_mut(self.w)
+            .zip(soft.par_chunks_mut(self.w))
+            .zip(keyed.par_chunks_mut(self.w))
+            .enumerate()
+            .for_each(|(gy, ((row, soft_row), keyed_row))| {
+                for (gx, ((out, soft_out), keyed_out)) in row
+                    .iter_mut()
+                    .zip(soft_row.iter_mut())
+                    .zip(keyed_row.iter_mut())
+                    .enumerate()
+                {
+                    let i = gy * self.w + gx;
+                    let a = |p: [u8; 3]| key_alpha(color_key_distance(hsv_of(p), r), tolerance);
+                    let mean = a(self.mean[i]);
+                    let smooth = self.edge[i] <= stop;
+                    *soft_out = smooth && mean > 0.0;
+                    *keyed_out = mean >= options.core;
+                    *out = smooth && *keyed_out && a(self.lo[i]) > 0.0 && a(self.hi[i]) > 0.0;
+                }
+            });
+        (pass, soft, keyed)
+    }
+}
+
+/// Erosion (`grow` false) or dilation (true) of a cell set, `steps` times,
+/// alternating the 3x3 square with the 4-neighbour cross so repeated steps
+/// grow round, not square; with `within`, a dilation adds only cells of it.
+fn morph_cells(
+    set: &[bool],
+    (w, h): (usize, usize),
+    grow: bool,
+    steps: u32,
+    within: Option<&[bool]>,
+) -> Vec<bool> {
+    let mut cur = set.to_vec();
+    for step in 0..steps {
+        let prev = cur;
+        let cross = step % 2 == 1;
+        let mut next = vec![false; w * h];
+        next.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+            for (x, out) in row.iter_mut().enumerate() {
+                let mut v = !grow;
+                'n: for yy in y.saturating_sub(1)..=(y + 1).min(h - 1) {
+                    for xx in x.saturating_sub(1)..=(x + 1).min(w - 1) {
+                        if cross && yy != y && xx != x {
+                            continue;
+                        }
+                        if prev[yy * w + xx] == grow {
+                            v = grow;
+                            break 'n;
+                        }
+                    }
+                }
+                if let Some(within) = within {
+                    v = v && (within[y * w + x] || prev[y * w + x]);
+                }
+                *out = v;
+            }
+        });
+        cur = next;
+    }
+    cur
+}
+
+/// 8-connected flood of `pass` from `seed`, into `region`.
+fn flood_cells(pass: &[bool], (w, h): (usize, usize), seed: (usize, usize), region: &mut [bool]) {
+    let start = seed.1 * w + seed.0;
+    if !pass[start] || region[start] {
+        return;
+    }
+    let mut stack = vec![start];
+    region[start] = true;
+    while let Some(i) = stack.pop() {
+        let (x, y) = (i % w, i / w);
+        for yy in y.saturating_sub(1)..=(y + 1).min(h - 1) {
+            for xx in x.saturating_sub(1)..=(x + 1).min(w - 1) {
+                let j = yy * w + xx;
+                if pass[j] && !region[j] {
+                    region[j] = true;
+                    stack.push(j);
+                }
+            }
+        }
+    }
+}
+
+/// The nearest cell of `set` to `at`, within a few cells.
+fn nearest_cell(
+    set: &[bool],
+    (w, h): (usize, usize),
+    at: (usize, usize),
+) -> Option<(usize, usize)> {
+    const REACH: isize = 3;
+    let mut best: Option<((usize, usize), isize)> = None;
+    for dy in -REACH..=REACH {
+        for dx in -REACH..=REACH {
+            let (x, y) = (at.0 as isize + dx, at.1 as isize + dy);
+            if x < 0 || y < 0 || x >= w as isize || y >= h as isize {
+                continue;
+            }
+            let d = dx * dx + dy * dy;
+            if set[y as usize * w + x as usize] && best.is_none_or(|(_, bd)| d < bd) {
+                best = Some(((x as usize, y as usize), d));
+            }
+        }
+    }
+    best.map(|(c, _)| c)
+}
+
+/// The cells connected to each sample in `refs`, each flooded with its own
+/// colour, widened by a cell so the full-resolution key, not the grid, draws
+/// the edge. 0 or 255 per cell.
+fn wand_region(
+    grid: &WandGrid,
+    refs: &[&ColorRef],
+    tolerance: f32,
+    options: WandOptions,
+) -> Vec<u8> {
+    let size = (grid.w, grid.h);
+    let mut region = vec![false; grid.w * grid.h];
+    for r in refs {
+        let (pass, soft, keyed) = grid.passable(r.hsv, tolerance, &options);
+        let seed = grid.cell_of(r.at);
+        let mut own = vec![false; grid.w * grid.h];
+        if options.gap_close > 0 {
+            // Opening by reconstruction: flood what is left once channels
+            // narrower than the gap closing are closed, then win back the rim
+            // the closing took, but no further.
+            let core = morph_cells(&pass, size, false, options.gap_close, None);
+            if let Some(start) = nearest_cell(&core, size, seed) {
+                flood_cells(&core, size, start, &mut own);
+                own = morph_cells(&own, size, true, options.gap_close + 1, Some(&pass));
+            }
+        }
+        if !own.iter().any(|v| *v) {
+            // A click on a thin feature: flood without closing gaps, or
+            // failing that, keep the clicked cell.
+            if let Some(start) = nearest_cell(&pass, size, seed) {
+                flood_cells(&pass, size, start, &mut own);
+            } else {
+                own[seed.1 * grid.w + seed.0] = true;
+            }
+        }
+        // The fading rim of the key around the flooded core, a few cells
+        // at most, so a soft gradient is not cut off while a trail of
+        // half-matching pixels cannot carry the selection on.
+        if options.rim > 0 {
+            own = morph_cells(&own, size, true, options.rim, Some(&soft));
+        }
+        // The cells on the edge that stopped the flood belong to the region
+        // as far as their colour does: the key, per pixel, finds the edge.
+        own = morph_cells(&own, size, true, 1, Some(&keyed));
+        for (dst, src) in region.iter_mut().zip(own) {
+            *dst |= src;
+        }
+    }
+    // Softened over a cell or two, so where connectivity rather than
+    // colour ends the selection (across a matching area) it fades instead
+    // of stepping along the grid.
+    let widened = morph_cells(&region, size, true, 1, None);
+    let mut soft: Vec<f32> = widened.iter().map(|v| if *v { 1.0 } else { 0.0 }).collect();
+    for _ in 0..2 {
+        soft = box_blur_cells(&soft, size);
+    }
+    // Inside the region itself, fully connected.
+    soft.into_iter()
+        .zip(region)
+        .map(|(v, inside)| {
+            if inside {
+                255
+            } else {
+                (v * 255.0).round().clamp(0.0, 255.0) as u8
+            }
+        })
+        .collect()
+}
+
+/// 3x3 box blur of a cell map.
+fn box_blur_cells(map: &[f32], (w, h): (usize, usize)) -> Vec<f32> {
+    let mut across = vec![0.0f32; w * h];
+    across.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        for (x, out) in row.iter_mut().enumerate() {
+            let l = map[y * w + x.saturating_sub(1)];
+            let r = map[y * w + (x + 1).min(w - 1)];
+            *out = (l + map[y * w + x] + r) / 3.0;
+        }
+    });
+    let mut down = vec![0.0f32; w * h];
+    down.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        for (x, out) in row.iter_mut().enumerate() {
+            let u = across[y.saturating_sub(1) * w + x];
+            let d = across[(y + 1).min(h - 1) * w + x];
+            *out = (u + across[y * w + x] + d) / 3.0;
+        }
+    });
+    down
+}
+
+/// Bilinear read of a cell map at a source position, 0..1.
+#[inline]
+fn sample_cells(cells: &[u8], grid: &WandGrid, sx: f32, sy: f32) -> f32 {
+    let gx = (sx / grid.cell as f32 - 0.5).clamp(0.0, (grid.w - 1) as f32);
+    let gy = (sy / grid.cell as f32 - 0.5).clamp(0.0, (grid.h - 1) as f32);
+    let (x0, y0) = (gx as usize, gy as usize);
+    let (x1, y1) = ((x0 + 1).min(grid.w - 1), (y0 + 1).min(grid.h - 1));
+    let (fx, fy) = (gx - x0 as f32, gy - y0 as f32);
+    let at = |x: usize, y: usize| cells[y * grid.w + x] as f32;
+    let top = at(x0, y0) * (1.0 - fx) + at(x1, y0) * fx;
+    let bottom = at(x0, y1) * (1.0 - fx) + at(x1, y1) * fx;
+    (top * (1.0 - fy) + bottom * fy) / 255.0
+}
+
+/// The Magic Wand selection, before the matte filters.
+#[allow(clippy::too_many_arguments)]
+fn wand_bitmap(
+    refs: &[ColorRef],
+    tolerance: f32,
+    (width, height): (u32, u32),
+    scale: f32,
+    crop_offset: (f32, f32),
+    map: &SourceMap,
+    warped: &DynamicImage,
+    options: WandOptions,
+) -> GrayImage {
+    let source = warped.dimensions();
+    // Built each time (it takes a small part of the flood's time): a cache
+    // keyed on the picture could not tell a picture apart from the same one
+    // with a fill composited in, so would flood the old pixels.
+    let grid = WandGrid::build(warped, options.grid_long);
+    let adds: Vec<&ColorRef> = refs.iter().filter(|r| !r.subtract).collect();
+    let subs: Vec<&ColorRef> = refs.iter().filter(|r| r.subtract).collect();
+    let add_cells = wand_region(&grid, &adds, tolerance, options);
+    let sub_cells = (!subs.is_empty()).then(|| wand_region(&grid, &subs, tolerance, options));
+
+    let inv_scale = 1.0 / scale;
+    // Several samples per pixel when a pixel covers several of the source's,
+    // centred where the colour range samples, so the edge is antialiased.
+    let offsets: &[(f32, f32)] = if options.supersample && scale < 0.75 {
+        &[(-0.25, -0.25), (0.25, -0.25), (-0.25, 0.25), (0.25, 0.25)]
+    } else {
+        &[(0.0, 0.0)]
+    };
+    let mut mask = GrayImage::new(width, height);
+    if width == 0 || height == 0 {
+        return mask;
+    }
+    mask.par_chunks_mut(width as usize)
+        .enumerate()
+        .for_each(|(y_out, row)| {
+            for (x_out, out) in row.iter_mut().enumerate() {
+                let mut sum = 0.0f32;
+                for (dx, dy) in offsets {
+                    let (sx, sy) = map.map(
+                        (x_out as f32 + dx + crop_offset.0) * inv_scale,
+                        (y_out as f32 + dy + crop_offset.1) * inv_scale,
+                    );
+                    if sx < 0.0 || sy < 0.0 || sx >= source.0 as f32 || sy >= source.1 as f32 {
+                        continue;
+                    }
+                    let connected = sample_cells(&add_cells, &grid, sx, sy);
+                    if connected <= 0.0 {
+                        continue;
+                    }
+                    let p = warped.get_pixel(sx as u32, sy as u32);
+                    let px = hsv_of([p[0], p[1], p[2]]);
+                    let mut a = adds
+                        .iter()
+                        .map(|r| key_alpha(color_key_distance(px, r.hsv), tolerance))
+                        .fold(0.0f32, f32::max)
+                        * connected;
+                    if a > 0.0
+                        && let Some(sub_cells) = &sub_cells
+                    {
+                        let taken = sample_cells(sub_cells, &grid, sx, sy);
+                        if taken > 0.0 {
+                            let s = subs
+                                .iter()
+                                .map(|r| key_alpha(color_key_distance(px, r.hsv), tolerance))
+                                .fold(0.0f32, f32::max);
+                            a *= 1.0 - s * taken;
+                        }
+                    }
+                    sum += a;
+                }
+                let alpha = sum / offsets.len() as f32;
+                if alpha > 0.003 {
+                    *out = (alpha * 255.0) as u8;
+                }
+            }
+        });
+    mask
 }
 
 /// Selects clipped pixels: fully blown whites (all channels above the white
@@ -2289,5 +2904,472 @@ mod geometry_tests {
                 "{clean}: {speck} vs {speck_large}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod wand_tests {
+    use super::*;
+    use serde_json::json;
+
+    const RED: Rgba<u8> = Rgba([220, 30, 25, 255]);
+
+    /// Two red squares of exactly the same colour on grey: the one clicked
+    /// and a decoy.
+    fn two_squares() -> (DynamicImage, GrayImage, GrayImage) {
+        let (w, h) = (120u32, 80u32);
+        let mut image = RgbaImage::from_pixel(w, h, Rgba([110, 120, 115, 255]));
+        let mut clicked = GrayImage::new(w, h);
+        let mut decoy = GrayImage::new(w, h);
+        for y in 15..40 {
+            for x in 70..105 {
+                image.put_pixel(x, y, RED);
+                clicked.put_pixel(x, y, Luma([255]));
+            }
+        }
+        for y in 45..72 {
+            for x in 10..42 {
+                image.put_pixel(x, y, RED);
+                decoy.put_pixel(x, y, Luma([255]));
+            }
+        }
+        (DynamicImage::ImageRgba8(image), clicked, decoy)
+    }
+
+    fn def(params: Value) -> MaskDefinition {
+        serde_json::from_value(json!({
+            "id": "m", "name": "m", "visible": true, "invert": false, "opacity": 100,
+            "adjustments": {}, "subMasks": [{"id": "s", "type": "color", "visible": true,
+                "mode": "additive", "parameters": params}],
+        }))
+        .unwrap()
+    }
+
+    fn render(params: Value, picture: &DynamicImage) -> GrayImage {
+        let (w, h) = picture.dimensions();
+        generate_photo_mask_bitmap(
+            &def(params),
+            w,
+            h,
+            1.0,
+            (0.0, 0.0),
+            Some(picture),
+            Orientation::default(),
+        )
+        .unwrap_or_else(|| GrayImage::new(w, h))
+    }
+
+    /// Mean selection inside `region`, 0..1.
+    fn inside(mask: &GrayImage, region: &GrayImage) -> f64 {
+        let (mut sum, mut n) = (0f64, 0f64);
+        for (m, r) in mask.pixels().zip(region.pixels()) {
+            if r[0] > 127 {
+                sum += m[0] as f64 / 255.0;
+                n += 1.0;
+            }
+        }
+        sum / n.max(1.0)
+    }
+
+    fn iou(a: &GrayImage, b: &GrayImage) -> f64 {
+        let (mut both, mut either) = (0u32, 0u32);
+        for (p, q) in a.pixels().zip(b.pixels()) {
+            both += (p[0] > 127 && q[0] > 127) as u32;
+            either += (p[0] > 127 || q[0] > 127) as u32;
+        }
+        both as f64 / either.max(1) as f64
+    }
+
+    fn sample(x: f64, y: f64, subtract: bool) -> Value {
+        json!({"x": x, "y": y, "subtract": subtract})
+    }
+
+    /// Contiguous keeps the square that was clicked; the colour range takes
+    /// every pixel of that colour.
+    #[test]
+    fn contiguous_selects_only_the_connected_region() {
+        let (picture, clicked, decoy) = two_squares();
+        let params = |contiguous: bool| {
+            json!({"samples": [sample(85.0, 25.0, false)], "tolerance": 20,
+                "feather": 0, "contiguous": contiguous})
+        };
+        let wand = render(params(true), &picture);
+        assert!(
+            inside(&wand, &clicked) > 0.95,
+            "{}",
+            inside(&wand, &clicked)
+        );
+        assert!(inside(&wand, &decoy) < 0.02, "{}", inside(&wand, &decoy));
+        assert!(iou(&wand, &clicked) > 0.9, "{}", iou(&wand, &clicked));
+        let range = render(params(false), &picture);
+        assert!(inside(&range, &decoy) > 0.95);
+        // Shift-click on the decoy adds it.
+        let both = render(
+            json!({"samples": [sample(85.0, 25.0, false), sample(20.0, 60.0, false)],
+                "tolerance": 20, "feather": 0, "contiguous": true}),
+            &picture,
+        );
+        assert!(inside(&both, &decoy) > 0.95 && inside(&both, &clicked) > 0.95);
+    }
+
+    /// Option-click takes a region (wand) or a colour (range) away.
+    #[test]
+    fn subtract_samples_take_away() {
+        let (picture, clicked, decoy) = two_squares();
+        let wand = render(
+            json!({"samples": [sample(85.0, 25.0, false), sample(20.0, 60.0, false),
+                    sample(25.0, 58.0, true)],
+                "tolerance": 20, "feather": 0, "contiguous": true}),
+            &picture,
+        );
+        assert!(
+            inside(&wand, &clicked) > 0.95,
+            "{}",
+            inside(&wand, &clicked)
+        );
+        assert!(inside(&wand, &decoy) < 0.02, "{}", inside(&wand, &decoy));
+
+        // The range: red and orange both sampled, then orange taken away.
+        let mut image = picture.to_rgba8();
+        let mut orange = GrayImage::new(120, 80);
+        for (x, y, p) in image.enumerate_pixels_mut() {
+            if decoy.get_pixel(x, y)[0] > 0 {
+                *p = Rgba([235, 140, 30, 255]);
+                orange.put_pixel(x, y, Luma([255]));
+            }
+        }
+        let picture = DynamicImage::ImageRgba8(image);
+        let added = json!([sample(85.0, 25.0, false), sample(20.0, 60.0, false)]);
+        let range = render(
+            json!({"samples": added, "tolerance": 30, "feather": 0}),
+            &picture,
+        );
+        assert!(inside(&range, &orange) > 0.95 && inside(&range, &clicked) > 0.95);
+        let mut taken = added.clone();
+        taken.as_array_mut().unwrap().push(sample(25.0, 58.0, true));
+        let range = render(
+            json!({"samples": taken, "tolerance": 30, "feather": 0}),
+            &picture,
+        );
+        assert!(
+            inside(&range, &orange) < 0.02,
+            "{}",
+            inside(&range, &orange)
+        );
+        assert!(
+            inside(&range, &clicked) > 0.95,
+            "{}",
+            inside(&range, &clicked)
+        );
+        // Only subtract samples left: nothing is selected.
+        let none = render(
+            json!({"samples": [sample(25.0, 58.0, true)], "tolerance": 30}),
+            &picture,
+        );
+        assert!(none.pixels().all(|p| p[0] == 0));
+    }
+
+    /// A bright field split by a dark line with one opening: a pinhole of a
+    /// pixel or two must not carry the selection across; a real opening must.
+    #[test]
+    fn wand_does_not_leak_through_pinholes() {
+        for (w, h) in [(600u32, 200u32), (4800, 400)] {
+            for (gap, leaks) in [(1u32, false), (2, false), (w / 10, true)] {
+                let mut image = RgbaImage::from_pixel(w, h, Rgba([246, 246, 244, 255]));
+                let line = w / 2;
+                for y in 0..h {
+                    if y >= h / 2 && y < h / 2 + gap {
+                        continue;
+                    }
+                    for x in line..line + 2 {
+                        image.put_pixel(x, y, Rgba([60, 64, 70, 255]));
+                    }
+                }
+                let picture = DynamicImage::ImageRgba8(image);
+                let mask = render(
+                    json!({"samples": [sample(w as f64 / 4.0, h as f64 / 2.0, false)],
+                        "tolerance": 20, "feather": 0, "contiguous": true}),
+                    &picture,
+                );
+                // Selection beyond the line, past where a soft edge reaches.
+                let mut far = GrayImage::new(w, h);
+                for y in 0..h {
+                    for x in line + 2 + w / 50..w {
+                        far.put_pixel(x, y, Luma([255]));
+                    }
+                }
+                let across = inside(&mask, &far);
+                if leaks {
+                    assert!(across > 0.9, "{w}: a {gap}px opening carried {across:.3}");
+                } else {
+                    assert!(across < 0.01, "{w}: a {gap}px pinhole leaked {across:.3}");
+                }
+            }
+        }
+    }
+
+    /// Clicked under one orientation, shown cropped under every other: the
+    /// wand still takes only the clicked square, where the photo shows it.
+    #[test]
+    fn wand_follows_the_photo() {
+        let (picture, clicked, _) = two_squares();
+        let size = picture.dimensions();
+        let carry = |map: &GrayImage, adjustments: &Value| {
+            crate::apply_all_transformations(DynamicImage::ImageLuma8(map.clone()), adjustments)
+                .0
+                .to_luma8()
+        };
+        let centre = |image: &GrayImage| {
+            let (mut sx, mut sy, mut sw) = (0f64, 0f64, 0f64);
+            for (x, y, p) in image.enumerate_pixels() {
+                sx += x as f64 * p[0] as f64;
+                sy += y as f64 * p[0] as f64;
+                sw += p[0] as f64;
+            }
+            (sx / sw, sy / sw)
+        };
+        let made_under = json!({"orientationSteps": 3, "flipHorizontal": true,
+            "flipVertical": false, "rotation": -4.0});
+        let at = centre(&carry(&clicked, &made_under));
+        for steps in 0..4u64 {
+            for (fh, fv, rotation) in [(false, false, 0.0), (true, false, 6.0), (false, true, -9.0)]
+            {
+                let now = json!({"orientationSteps": steps, "flipHorizontal": fh,
+                    "flipVertical": fv, "rotation": rotation});
+                let (uw, uh) = if steps % 2 == 1 {
+                    (size.1, size.0)
+                } else {
+                    size
+                };
+                let mut shown = now.clone();
+                shown["crop"] =
+                    json!({"x": 6, "y": 4, "width": uw - 16, "height": uh - 10, "unit": "px"});
+                let expected = carry(&clicked, &shown);
+                let (fw, fh_) = expected.dimensions();
+                let mut params = made_under.clone();
+                params["samples"] = json!([sample(at.0, at.1, false)]);
+                params["tolerance"] = json!(20);
+                params["feather"] = json!(0);
+                params["contiguous"] = json!(true);
+                let mask = generate_photo_mask_bitmap(
+                    &def(params),
+                    fw,
+                    fh_,
+                    1.0,
+                    (6.0, 4.0),
+                    Some(&picture),
+                    Orientation::of_photo(&now),
+                )
+                .expect("a mask");
+                let overlap = iou(&mask, &expected);
+                assert!(overlap > 0.85, "{now}: IoU {overlap:.2}");
+            }
+        }
+    }
+
+    /// The colour range as it was before the wand, verbatim: what every
+    /// colour mask saved before it must still draw.
+    fn old_color_bitmap(
+        params_value: &Value,
+        width: u32,
+        height: u32,
+        scale: f32,
+        crop_offset: (f32, f32),
+        warped: &DynamicImage,
+        photo: Orientation,
+    ) -> Option<GrayImage> {
+        let params: ParametricMaskParameters = serde_json::from_value(params_value.clone()).ok()?;
+        let source = warped.dimensions();
+        let clicked = Orientation::recorded(params_value).to_source(source);
+        let extras: ParametricExtras =
+            serde_json::from_value(params_value.clone()).unwrap_or_default();
+        let swatch = extras
+            .swatch_hue
+            .map(|h| (h, extras.swatch_width.unwrap_or(45.0)));
+        let mut refs: Vec<(f32, f32, f32)> = Vec::new();
+        if swatch.is_none() {
+            let mut pts: Vec<(f64, f64)> = extras.samples.iter().map(|p| (p.x, p.y)).collect();
+            if pts.is_empty() {
+                pts.push((params.target_x, params.target_y));
+            }
+            for (x, y) in pts {
+                if let Some((sx, sy)) = clicked.pixel(x, y, source) {
+                    let p = warped.get_pixel(sx, sy);
+                    refs.push(rgb_to_hsv_f(
+                        p[0] as f32 / 255.0,
+                        p[1] as f32 / 255.0,
+                        p[2] as f32 / 255.0,
+                    ));
+                }
+            }
+            if refs.is_empty() {
+                return None;
+            }
+        }
+        let mut mask = GrayImage::new(width, height);
+        let map = photo.to_source(source);
+        for_each_source_pixel(
+            width,
+            height,
+            scale,
+            crop_offset,
+            &map,
+            source,
+            |x_out, y_out, x_src, y_src| {
+                let pixel = warped.get_pixel(x_src, y_src);
+                let px = rgb_to_hsv_f(
+                    pixel[0] as f32 / 255.0,
+                    pixel[1] as f32 / 255.0,
+                    pixel[2] as f32 / 255.0,
+                );
+                let alpha = if let Some((hue, width_deg)) = swatch {
+                    let band = width_deg * (0.5 + params.tolerance / 60.0);
+                    let norm = hue_dist_deg(px.0, hue) / band.max(1.0);
+                    let hue_w = 1.0 - ((norm - 0.7) / 0.3).clamp(0.0, 1.0);
+                    let sat_w = ((px.1 - 0.10) / 0.20).clamp(0.0, 1.0);
+                    let val_w = ((px.2 - 0.04) / 0.06).clamp(0.0, 1.0);
+                    hue_w * sat_w * val_w
+                } else {
+                    let d = refs
+                        .iter()
+                        .map(|r| color_key_distance(px, *r))
+                        .fold(f32::MAX, f32::min);
+                    let t = 0.05 + (params.tolerance / 100.0) * 0.85;
+                    1.0 - ((d - t * 0.5) / (t * 0.5)).clamp(0.0, 1.0)
+                };
+                if alpha > 0.003 {
+                    mask.put_pixel(x_out, y_out, Luma([(alpha * 255.0) as u8]));
+                }
+            },
+        );
+        apply_solidify(&mut mask, params.solidify, scale);
+        apply_matte_clean(&mut mask, params.clean);
+        apply_grow_and_feather(&mut mask, params.grow, params.feather, width, height);
+        Some(mask)
+    }
+
+    /// Colour masks saved before the wand (no `contiguous`, no `subtract`)
+    /// draw exactly as before, pixel for pixel, as does `contiguous: false`.
+    #[test]
+    fn old_colour_masks_render_unchanged() {
+        // A textured picture, so every part of the key is exercised.
+        let (w, h) = (160u32, 110u32);
+        let mut image = RgbaImage::new(w, h);
+        for (x, y, p) in image.enumerate_pixels_mut() {
+            let n = ((x as f32 * 12.9898 + y as f32 * 78.233).sin() * 43758.547)
+                .fract()
+                .abs();
+            *p = Rgba([
+                (x * 255 / w) as u8,
+                (60.0 + 120.0 * n) as u8,
+                (y * 255 / h) as u8,
+                255,
+            ]);
+        }
+        let picture = DynamicImage::ImageRgba8(image);
+        let geometry = json!({"orientationSteps": 1, "flipHorizontal": true,
+            "flipVertical": false, "rotation": 3.0});
+        let cases = [
+            json!({"targetX": 40.0, "targetY": 30.0, "tolerance": 25}),
+            json!({"samples": [{"x": 40.0, "y": 30.0}, {"x": 90.0, "y": 70.0}],
+                "tolerance": 35, "solidify": 40, "clean": 15, "grow": 10, "feather": 25}),
+            json!({"swatchHue": 115, "swatchWidth": 90, "tolerance": 20, "feather": 35}),
+        ];
+        for case in cases {
+            for (params, photo) in [
+                (case.clone(), Orientation::default()),
+                (
+                    {
+                        let mut p = case.clone();
+                        for (k, v) in geometry.as_object().unwrap() {
+                            p[k] = v.clone();
+                        }
+                        p
+                    },
+                    Orientation::of_photo(&geometry),
+                ),
+            ] {
+                for (scale, size) in [(1.0f32, (h, w)), (0.5, (h / 2, w / 2))] {
+                    let crop = (3.0 * scale, 2.0 * scale);
+                    let size = if photo.orientation_steps % 2 == 1 {
+                        size
+                    } else {
+                        (size.1, size.0)
+                    };
+                    let old =
+                        old_color_bitmap(&params, size.0, size.1, scale, crop, &picture, photo)
+                            .unwrap();
+                    for flag in [None, Some(false)] {
+                        let mut p = params.clone();
+                        if let Some(f) = flag {
+                            p["contiguous"] = json!(f);
+                        }
+                        let new = generate_photo_mask_bitmap(
+                            &def(p),
+                            size.0,
+                            size.1,
+                            scale,
+                            crop,
+                            Some(&picture),
+                            photo,
+                        )
+                        .unwrap();
+                        assert!(new == old, "{params} at {scale} ({flag:?}) changed");
+                    }
+                }
+            }
+        }
+    }
+
+    /// The fill path's mask: the clicks moved into the source and the mask
+    /// made there, then placed on the photo, is the render's mask.
+    #[test]
+    fn clicks_to_source_keeps_the_selection() {
+        let (picture, clicked, _) = two_squares();
+        let (w, h) = picture.dimensions();
+        let geometry = json!({"orientationSteps": 1, "flipHorizontal": true,
+            "flipVertical": false, "rotation": 4.0});
+        let shown = Orientation::of_photo(&geometry);
+        // Where the clicked square's centre is on the photo as shown.
+        let placed = place_source_mask(&clicked, h, w, 1.0, (0.0, 0.0), shown);
+        let (mut sx, mut sy, mut sw) = (0f64, 0f64, 0f64);
+        for (x, y, p) in placed.enumerate_pixels() {
+            sx += x as f64 * p[0] as f64;
+            sy += y as f64 * p[0] as f64;
+            sw += p[0] as f64;
+        }
+        for contiguous in [true, false] {
+            let mut params = geometry.clone();
+            params["samples"] = json!([sample(sx / sw, sy / sw, false)]);
+            params["targetX"] = json!(sx / sw);
+            params["targetY"] = json!(sy / sw);
+            params["tolerance"] = json!(20);
+            params["feather"] = json!(0);
+            params["contiguous"] = json!(contiguous);
+            let (dw, dh, crop) = (h - 12, w - 20, (5.0, 7.0));
+            let on_photo = generate_photo_mask_bitmap(
+                &def(params.clone()),
+                dw,
+                dh,
+                1.0,
+                crop,
+                Some(&picture),
+                shown,
+            )
+            .unwrap();
+            let mut baked = params.clone();
+            clicks_to_source(&mut baked, (w, h));
+            assert_eq!(Orientation::recorded(&baked), Orientation::default());
+            let in_source =
+                generate_mask_bitmap(&def(baked), w, h, 1.0, (0.0, 0.0), Some(&picture)).unwrap();
+            let back = place_source_mask(&in_source, dw, dh, 1.0, crop, shown);
+            let overlap = iou(&back, &on_photo);
+            assert!(overlap > 0.95, "contiguous {contiguous}: IoU {overlap:.3}");
+        }
+        // An unclicked selection keeps its placeholder.
+        let mut unclicked = json!({"targetX": -10000.0, "targetY": -10000.0,
+            "orientationSteps": 1});
+        clicks_to_source(&mut unclicked, (w, h));
+        assert_eq!(unclicked["targetX"], json!(-10000.0));
     }
 }

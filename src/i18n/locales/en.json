@@ -732,7 +732,10 @@
         "showMore": "Show More Mask Types"
       },
       "colorSelect": {
-        "hint": "Click the photo to sample a color; Shift-click adds samples. Or pick a color band below.",
+        "contiguous": "Contiguous",
+        "contiguousTooltip": "On: only the area connected to where you click (Magic Wand). Off: that colour anywhere in the photo.",
+        "hint": "Click the photo to sample a color; Shift-click adds samples, Option-click removes a color. Or pick a color band below.",
+        "hintContiguous": "Click the photo to select the connected area of that colour; Shift-click adds an area, Option-click removes one.",
         "sample": "Sample",
         "removeSample": "Remove sample",
         "swatchTooltip": "Select this color band"

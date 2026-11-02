@@ -4763,7 +4763,7 @@ pub async fn apply_clone_patch(
     let (img_w, img_h) = source_image.dimensions();
 
     let mut sub_masks = patch_definition.sub_masks.clone();
-    neutralize_display_orientation(&mut sub_masks);
+    neutralize_display_orientation(&mut sub_masks, (img_w, img_h));
 
     // Brush strokes are recorded in display space; the patch composites in
     // original space. On a flipped or rotated photo those differ.
@@ -5064,7 +5064,7 @@ pub async fn invoke_generative_replace_with_mask_def(
     // original on any flipped or rotated photo — the fill then edited the
     // mirror-image position ("found the highlights, edited the foliage").
     let mut sub_masks = patch_definition.sub_masks;
-    neutralize_display_orientation(&mut sub_masks);
+    neutralize_display_orientation(&mut sub_masks, (img_w, img_h));
     // Brush strokes are the other half of the story: they carry no
     // orientation at all, so generate_mask_bitmap applies none and the
     // display-space points are read as image-space. A stroke painted at
@@ -6190,7 +6190,7 @@ pub async fn invoke_spot_enhance_with_mask_def(
     // unmapped, Enhance on a rotated or flipped photo worked on the mirror
     // image of what was painted.
     let mut sub_masks = patch_definition.sub_masks.clone();
-    neutralize_display_orientation(&mut sub_masks);
+    neutralize_display_orientation(&mut sub_masks, (img_w, img_h));
     if map_strokes_to_image_space(&mut sub_masks, img_w, img_h, &current_adjustments) {
         log::info!("[spot] mapped brush strokes from display space");
     }
@@ -7191,13 +7191,29 @@ fn check_loaded_path(loaded: Option<&str>, path: &str, what: &str) -> Result<(),
     }
 }
 
-pub(crate) fn neutralize_display_orientation(sub_masks: &mut [crate::mask_generation::SubMask]) {
+/// Readies a selection's components for a mask made in the source's own
+/// frame (`source` is its size): what the fill and spot paths build.
+pub(crate) fn neutralize_display_orientation(
+    sub_masks: &mut [crate::mask_generation::SubMask],
+    source: (u32, u32),
+) {
     for sm in sub_masks {
+        // Colour and luminance are computed from the warped image, already
+        // in original space, but their clicked points are in the frame they
+        // were clicked in. Clearing the orientation alone read those points
+        // raw, so on a turned or flipped photo a fill sampled (and the wand
+        // flooded from) somewhere else than the selection shown. Their
+        // points move into the source with the orientation, as renders map
+        // them.
+        if matches!(sm.mask_type.as_str(), "color" | "luminance") {
+            crate::mask_generation::clicks_to_source(&mut sm.parameters, source);
+            continue;
+        }
         if matches!(
             sm.mask_type.as_str(),
             // Value-derived: computed from the warped image, already in
             // original space.
-            "clipped" | "color" | "luminance"
+            "clipped"
                 // Detector-derived: generate_ai_subject_mask unflips the
                 // click, embeds the WARPED image, and stores the resulting
                 // bitmap — so these are already in original space too. The
@@ -7495,7 +7511,7 @@ mod neutralize_orientation_tests {
             "quick-eraser",
         ] {
             let mut masks = [sub(kind)];
-            neutralize_display_orientation(&mut masks);
+            neutralize_display_orientation(&mut masks, (300, 200));
             assert!(is_neutral(&masks[0]), "{kind} kept its orientation");
         }
     }
@@ -7504,7 +7520,7 @@ mod neutralize_orientation_tests {
     fn value_derived_masks_are_still_neutralized() {
         for kind in ["clipped", "color", "luminance"] {
             let mut masks = [sub(kind)];
-            neutralize_display_orientation(&mut masks);
+            neutralize_display_orientation(&mut masks, (300, 200));
             assert!(is_neutral(&masks[0]), "{kind} kept its orientation");
         }
     }
@@ -7515,7 +7531,7 @@ mod neutralize_orientation_tests {
     #[test]
     fn brush_masks_keep_their_orientation() {
         let mut masks = [sub("brush")];
-        neutralize_display_orientation(&mut masks);
+        neutralize_display_orientation(&mut masks, (300, 200));
         assert!(
             !is_neutral(&masks[0]),
             "a brush mask must keep its orientation"
@@ -7570,7 +7586,7 @@ mod fill_mask_orientation_tests {
         }))
         .unwrap();
         let mut sub_masks = vec![sub_mask];
-        super::neutralize_display_orientation(&mut sub_masks);
+        super::neutralize_display_orientation(&mut sub_masks, (w, h));
         let def = MaskDefinition {
             id: "t".into(),
             name: "t".into(),
@@ -7599,6 +7615,119 @@ mod fill_mask_orientation_tests {
             "mask centroid ({cx:.0},{cy:.0}) not on the bright region (30-70, 20-50) — \
              landed at the mirror position"
         );
+    }
+
+    /// A colour selection clicked on a turned, flipped, straightened and
+    /// cropped photo: the mask the fill builds (in the source's frame),
+    /// placed back on the photo, is the selection the editor shows — for the
+    /// Magic Wand and the colour range. Before, the fill path cleared the
+    /// orientation and read the clicked point raw, somewhere else.
+    #[test]
+    fn colour_fill_mask_matches_the_selection_shown() {
+        use crate::mask_generation::{Orientation, generate_photo_mask_bitmap, place_source_mask};
+        let (w, h) = (160u32, 100u32);
+        let mut img = image::RgbaImage::from_pixel(w, h, image::Rgba([110, 120, 115, 255]));
+        let mut clicked = image::GrayImage::new(w, h);
+        for y in 15..45 {
+            for x in 95..140 {
+                img.put_pixel(x, y, image::Rgba([220, 30, 25, 255]));
+                clicked.put_pixel(x, y, image::Luma([255]));
+            }
+        }
+        // A decoy of the same colour.
+        for y in 60..90 {
+            for x in 15..55 {
+                img.put_pixel(x, y, image::Rgba([220, 30, 25, 255]));
+            }
+        }
+        let reference = DynamicImage::ImageRgba8(img);
+        let geometry = serde_json::json!({"orientationSteps": 1, "flipHorizontal": true,
+            "flipVertical": false, "rotation": 4.0});
+        let shown = Orientation::of_photo(&geometry);
+        // The clicked square's centre on the photo as shown.
+        let dot = place_source_mask(&clicked, h, w, 1.0, (0.0, 0.0), shown);
+        let (mut sx, mut sy, mut sw) = (0f64, 0f64, 0f64);
+        for (x, y, p) in dot.enumerate_pixels() {
+            sx += x as f64 * p[0] as f64;
+            sy += y as f64 * p[0] as f64;
+            sw += p[0] as f64;
+        }
+        let (cx, cy) = (sx / sw, sy / sw);
+        let (dw, dh, crop) = (h - 14, w - 24, (6.0f32, 9.0f32));
+        for (kind, contiguous) in [("color", true), ("color", false), ("luminance", false)] {
+            let mut params = geometry.clone();
+            params["targetX"] = serde_json::json!(cx);
+            params["targetY"] = serde_json::json!(cy);
+            params["tolerance"] = serde_json::json!(if kind == "luminance" { 5 } else { 20 });
+            params["feather"] = serde_json::json!(0);
+            if kind == "color" {
+                params["samples"] = serde_json::json!([{"x": cx, "y": cy}]);
+                params["contiguous"] = serde_json::json!(contiguous);
+            }
+            let sub_mask: SubMask = serde_json::from_value(serde_json::json!({
+                "id": "t", "type": kind, "visible": true, "mode": "additive",
+                "parameters": params,
+            }))
+            .unwrap();
+            let def = |sub_masks: Vec<SubMask>| MaskDefinition {
+                id: "t".into(),
+                name: "t".into(),
+                visible: true,
+                invert: false,
+                opacity: 100.0,
+                grow: 0.0,
+                feather: 0.0,
+                adjustments: serde_json::Value::Null,
+                sub_masks,
+            };
+            let on_photo = generate_photo_mask_bitmap(
+                &def(vec![sub_mask.clone()]),
+                dw,
+                dh,
+                1.0,
+                crop,
+                Some(&reference),
+                shown,
+            )
+            .expect("render mask");
+            let fill_on_photo = |sub_masks: Vec<SubMask>| {
+                let source =
+                    generate_mask_bitmap(&def(sub_masks), w, h, 1.0, (0.0, 0.0), Some(&reference))
+                        .unwrap_or_else(|| image::GrayImage::new(w, h));
+                place_source_mask(&source, dw, dh, 1.0, crop, shown)
+            };
+            let iou = |a: &image::GrayImage, b: &image::GrayImage| {
+                let (mut both, mut either) = (0u32, 0u32);
+                for (p, q) in a.pixels().zip(b.pixels()) {
+                    both += (p[0] > 127 && q[0] > 127) as u32;
+                    either += (p[0] > 127 || q[0] > 127) as u32;
+                }
+                both as f64 / either.max(1) as f64
+            };
+            let mut fixed = vec![sub_mask.clone()];
+            super::neutralize_display_orientation(&mut fixed, (w, h));
+            let after = iou(&fill_on_photo(fixed), &on_photo);
+            // What the fill path did before: the orientation cleared, the
+            // point left where it was clicked.
+            let mut old = sub_mask.clone();
+            for (k, v) in [
+                ("rotation", serde_json::json!(0.0)),
+                ("flipHorizontal", serde_json::json!(false)),
+                ("flipVertical", serde_json::json!(false)),
+                ("orientationSteps", serde_json::json!(0)),
+            ] {
+                old.parameters[k] = v;
+            }
+            let before = iou(&fill_on_photo(vec![old]), &on_photo);
+            assert!(
+                after > 0.95,
+                "{kind} contiguous={contiguous}: fill mask overlaps the selection {after:.3}"
+            );
+            assert!(
+                before < 0.5,
+                "{kind} contiguous={contiguous}: the old path already matched ({before:.3})"
+            );
+        }
     }
 }
 

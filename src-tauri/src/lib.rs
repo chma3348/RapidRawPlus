@@ -44,7 +44,7 @@ pub mod image_processing;
 pub mod journal;
 mod lens_correction;
 pub mod lut_processing;
-mod mask_generation;
+pub mod mask_generation;
 pub mod merge_discovery;
 pub mod model_library;
 pub mod model_registry;
