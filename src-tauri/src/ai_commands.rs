@@ -553,48 +553,15 @@ pub async fn generate_ai_subject_mask(
         .get_session(&model.manifest.id, Some("decoder"))
         .map_err(|e| e.to_string())?;
 
-    let path_hash = {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(path.as_bytes());
-        hasher.update(model.manifest.id.as_bytes());
-        let mut geo_hasher = DefaultHasher::new();
-        for key in GEOMETRY_KEYS {
-            if let Some(val) = js_adjustments.get(key) {
-                key.hash(&mut geo_hasher);
-                val.to_string().hash(&mut geo_hasher);
-            }
-        }
-        hasher.update(&geo_hasher.finish().to_le_bytes());
-        hasher.finalize().to_hex().to_string()
-    };
-
-    ensure_ai_state(&state.ai_state);
-    let embeddings = {
-        let mut ai_state_lock = state.ai_state.lock().unwrap();
-        let ai_state = ai_state_lock.as_mut().unwrap();
-
-        if let Some(cached_embeddings) = &ai_state.embeddings {
-            if cached_embeddings.path_hash == path_hash {
-                cached_embeddings.clone()
-            } else {
-                let warped_image = get_cached_full_warped_image(&state, &js_adjustments)?;
-                let mut new_embeddings =
-                    generate_image_embeddings(warped_image.as_ref(), &encoder_session)
-                        .map_err(|e| e.to_string())?;
-                new_embeddings.path_hash = path_hash.clone();
-                ai_state.embeddings = Some(new_embeddings.clone());
-                new_embeddings
-            }
-        } else {
-            let warped_image = get_cached_full_warped_image(&state, &js_adjustments)?;
-            let mut new_embeddings =
-                generate_image_embeddings(warped_image.as_ref(), &encoder_session)
-                    .map_err(|e| e.to_string())?;
-            new_embeddings.path_hash = path_hash.clone();
-            ai_state.embeddings = Some(new_embeddings.clone());
-            new_embeddings
-        }
-    };
+    let embeddings = subject_embeddings(
+        &app_handle,
+        &state,
+        &js_adjustments,
+        &path,
+        &model.manifest.id,
+        encoder_session,
+    )
+    .await?;
 
     let (img_w, img_h) = embeddings.original_size;
 
@@ -767,39 +734,15 @@ pub async fn generate_ai_paint_mask(
         .get_session(&model.manifest.id, Some("decoder"))
         .map_err(|e| e.to_string())?;
 
-    let path_hash = {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(path.as_bytes());
-        hasher.update(model.manifest.id.as_bytes());
-        let mut geo_hasher = DefaultHasher::new();
-        for key in GEOMETRY_KEYS {
-            if let Some(val) = js_adjustments.get(key) {
-                key.hash(&mut geo_hasher);
-                val.to_string().hash(&mut geo_hasher);
-            }
-        }
-        hasher.update(&geo_hasher.finish().to_le_bytes());
-        hasher.finalize().to_hex().to_string()
-    };
-
-    ensure_ai_state(&state.ai_state);
-    let embeddings = {
-        let mut ai_state_lock = state.ai_state.lock().unwrap();
-        let ai_state = ai_state_lock.as_mut().unwrap();
-        if let Some(cached) = &ai_state.embeddings
-            && cached.path_hash == path_hash
-        {
-            cached.clone()
-        } else {
-            let warped_image = get_cached_full_warped_image(&state, &js_adjustments)?;
-            let mut new_embeddings =
-                generate_image_embeddings(warped_image.as_ref(), &encoder_session)
-                    .map_err(|e| e.to_string())?;
-            new_embeddings.path_hash = path_hash.clone();
-            ai_state.embeddings = Some(new_embeddings.clone());
-            new_embeddings
-        }
-    };
+    let embeddings = subject_embeddings(
+        &app_handle,
+        &state,
+        &js_adjustments,
+        &path,
+        &model.manifest.id,
+        encoder_session,
+    )
+    .await?;
 
     let (img_w, img_h) = embeddings.original_size;
     let (coarse_rotated_w, coarse_rotated_h) = if orientation_steps % 2 == 1 {
@@ -925,6 +868,76 @@ pub async fn generate_ai_paint_mask(
     })
 }
 
+/// What the subject model's embeddings of a photo are cached under: the
+/// photo, the model and the geometry it is warped by.
+fn subject_embedding_key(path: &str, model_id: &str, js_adjustments: &Value) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(path.as_bytes());
+    hasher.update(model_id.as_bytes());
+    let mut geo_hasher = DefaultHasher::new();
+    for key in GEOMETRY_KEYS {
+        if let Some(val) = js_adjustments.get(key) {
+            key.hash(&mut geo_hasher);
+            val.to_string().hash(&mut geo_hasher);
+        }
+    }
+    hasher.update(&geo_hasher.finish().to_le_bytes());
+    hasher.finalize().to_hex().to_string()
+}
+
+/// The subject model's embeddings of the open photo as `js_adjustments`
+/// warps it: the cached ones when they are of this photo, geometry and
+/// model; otherwise encoded on a blocking thread. No lock is held while the
+/// encoder runs (seconds, on the CPU), so other AI commands are not kept
+/// waiting and no async worker is tied up.
+async fn subject_embeddings(
+    app_handle: &tauri::AppHandle,
+    state: &tauri::State<'_, AppState>,
+    js_adjustments: &Value,
+    path: &str,
+    model_id: &str,
+    encoder_session: std::sync::Arc<std::sync::Mutex<ort::session::Session>>,
+) -> Result<crate::ai_processing::ImageEmbeddings, String> {
+    let key = subject_embedding_key(path, model_id, js_adjustments);
+    let cached = || {
+        ensure_ai_state(&state.ai_state);
+        let lock = state.ai_state.lock().unwrap();
+        lock.as_ref()
+            .and_then(|s| s.embeddings.as_ref())
+            .filter(|e| e.path_hash == key)
+            .cloned()
+    };
+    if let Some(hit) = cached() {
+        return Ok(hit);
+    }
+    // One encode at a time: a second request for the same picture (the
+    // precompute and the first click) waits for the first, then finds it.
+    static ENCODING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _turn = ENCODING.lock().await;
+    if let Some(hit) = cached() {
+        return Ok(hit);
+    }
+    let app = app_handle.clone();
+    let adjustments = js_adjustments.clone();
+    let mut embeddings = tokio::task::spawn_blocking(move || {
+        let state = tauri::Manager::state::<AppState>(&app);
+        let warped_image = get_cached_full_warped_image(&state, &adjustments)?;
+        generate_image_embeddings(warped_image.as_ref(), &encoder_session)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("Subject selection stopped unexpectedly: {e}"))??;
+    // Another photo may have opened while this one was encoded: its
+    // embeddings must never be kept, or used, under this one's name.
+    ensure_photo_loaded(state, path, "selection")?;
+    embeddings.path_hash = key;
+    ensure_ai_state(&state.ai_state);
+    if let Some(ai_state) = state.ai_state.lock().unwrap().as_mut() {
+        ai_state.embeddings = Some(embeddings.clone());
+    }
+    Ok(embeddings)
+}
+
 #[tauri::command]
 pub async fn precompute_ai_subject_mask(
     js_adjustments: serde_json::Value,
@@ -946,38 +959,15 @@ pub async fn precompute_ai_subject_mask(
         .get_session(&model.manifest.id, None)
         .map_err(|e| e.to_string())?;
 
-    let path_hash = {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(path.as_bytes());
-        hasher.update(model.manifest.id.as_bytes());
-        let mut geo_hasher = DefaultHasher::new();
-        for key in GEOMETRY_KEYS {
-            if let Some(val) = js_adjustments.get(key) {
-                key.hash(&mut geo_hasher);
-                val.to_string().hash(&mut geo_hasher);
-            }
-        }
-        hasher.update(&geo_hasher.finish().to_le_bytes());
-        hasher.finalize().to_hex().to_string()
-    };
-
-    ensure_ai_state(&state.ai_state);
-    let mut ai_state_lock = state.ai_state.lock().unwrap();
-    let ai_state = ai_state_lock.as_mut().unwrap();
-
-    if let Some(cached_embeddings) = &ai_state.embeddings
-        && cached_embeddings.path_hash == path_hash
-    {
-        return Ok(());
-    }
-
-    let warped_image = get_cached_full_warped_image(&state, &js_adjustments)?;
-    let mut new_embeddings = generate_image_embeddings(warped_image.as_ref(), &encoder_session)
-        .map_err(|e| e.to_string())?;
-
-    new_embeddings.path_hash = path_hash.clone();
-    ai_state.embeddings = Some(new_embeddings);
-
+    subject_embeddings(
+        &app_handle,
+        &state,
+        &js_adjustments,
+        &path,
+        &model.manifest.id,
+        encoder_session,
+    )
+    .await?;
     Ok(())
 }
 
@@ -2657,7 +2647,14 @@ fn save_debug_rgba(app_handle: &tauri::AppHandle, debug_run_id: &str, name: &str
         return;
     };
     let path = dir.join(format!("{name}.png"));
-    if let Err(e) = DynamicImage::ImageRgba8(img.clone()).save(&path) {
+    // Opaque (a photo crop, nearly always): saved without its alpha, a
+    // quarter smaller. Readers convert back to RGBA, alpha 255 again.
+    let saved = if img.pixels().all(|p| p[3] == 255) {
+        image::buffer::ConvertBuffer::<RgbImage>::convert(img).save(&path)
+    } else {
+        img.save(&path)
+    };
+    if let Err(e) = saved {
         log::warn!("[fill] failed to save debug artifact {:?}: {}", path, e);
     }
 }
@@ -3003,7 +3000,7 @@ pub(crate) fn match_tone(
 
 #[allow(clippy::too_many_arguments)]
 async fn replace_region_in_context(
-    photo: &RgbaImage,
+    photo: RgbaImage,
     mask: &GrayImage,
     prompt: &str,
     kind: crate::comfy_engine::FillKind,
@@ -3022,11 +3019,13 @@ async fn replace_region_in_context(
     // and a garment must share folds. The original mask remains the final
     // authority for compositing; the model gets a small working margin only.
     let full_photo =
-        orient_rgba_for_engine(photo, orientation_steps, flip_horizontal, flip_vertical);
+        orient_rgba_for_engine(&photo, orientation_steps, flip_horizontal, flip_vertical);
+    drop(photo);
     let full_mask = orient_gray_for_engine(mask, orientation_steps, flip_horizontal, flip_vertical);
     let (x, y, width, height) = replacement_context_bounds(&full_mask);
     let photo = image::imageops::crop_imm(&full_photo, x, y, width, height).to_image();
     let mask = image::imageops::crop_imm(&full_mask, x, y, width, height).to_image();
+    drop(full_mask);
     let hard = GrayImage::from_fn(mask.width(), mask.height(), |x, y| {
         image::Luma([if mask.get_pixel(x, y)[0] > 0 { 255 } else { 0 }])
     });
@@ -3083,8 +3082,9 @@ async fn replace_region_in_context(
     // working canvas, model mask, prompt, seed, or sampling recipe.
     save_debug_rgba(app_handle, debug_run_id, "replace-source-crop", &photo);
     save_debug_gray(app_handle, debug_run_id, "replace-selection-crop", &mask);
+    let canvas_max_side = engine_canvas_long_edge(kind, photo.width(), photo.height(), 1536);
     let (image_png, mask_png, _, _) =
-        crate::expansion::engine_canvas_pngs_sized(&photo, &working_mask, 1536)?;
+        crate::expansion::engine_canvas_pngs_sized(&photo, &working_mask, canvas_max_side)?;
     save_debug_bytes(app_handle, debug_run_id, "replace-context", &image_png);
     save_debug_bytes(app_handle, debug_run_id, "replace-model-mask", &mask_png);
     let seed = std::time::SystemTime::now()
@@ -3100,7 +3100,7 @@ async fn replace_region_in_context(
         "replace-recipe",
         &serde_json::json!({
             "seed": seed, "model": format!("{kind:?}"), "prompt": effective_prompt,
-            "loras": loras, "canvasMaxSide": 1536, "replaceContent": true,
+            "loras": loras, "canvasMaxSide": canvas_max_side, "replaceContent": true,
         }),
     );
     let png = crate::comfy_engine::run_generative_fill(
@@ -3141,6 +3141,34 @@ async fn replace_region_in_context(
     ))
 }
 
+/// The least scene, in photo pixels on the longer side, a replacement's
+/// model canvas is cut from.
+const REPLACEMENT_MIN_CONTEXT: u32 = 512;
+
+/// About a megapixel: what Flux Fill is trained around. Its cost grows with
+/// the canvas (1536x1024 is 6144 image tokens), so a larger canvas is
+/// minutes of waiting for detail that the downscaled crop does not carry.
+const FLUX_CANVAS_PIXELS: f32 = 1_048_576.0;
+
+/// The long edge of the model canvas for a `width` x `height` crop: at most
+/// `long_edge`, and for Flux at most about a megapixel.
+fn engine_canvas_long_edge(
+    kind: crate::comfy_engine::FillKind,
+    width: u32,
+    height: u32,
+    long_edge: u32,
+) -> u32 {
+    if kind != crate::comfy_engine::FillKind::Flux {
+        return long_edge;
+    }
+    let (long, short) = (
+        width.max(height).max(1) as f32,
+        width.min(height).max(1) as f32,
+    );
+    let capped = (FLUX_CANVAS_PIXELS * long / short).sqrt().floor() as u32;
+    long_edge.min(capped.max(64))
+}
+
 fn replacement_context_bounds(mask: &GrayImage) -> (u32, u32, u32, u32) {
     let (w, h) = mask.dimensions();
     let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0, 0);
@@ -3155,8 +3183,13 @@ fn replacement_context_bounds(mask: &GrayImage) -> (u32, u32, u32, u32) {
     if x0 == w {
         return (0, 0, w, h);
     }
-    let pad = ((x1 - x0 + 1).max(y1 - y0 + 1) / 2)
-        .max(w.max(h) / 12)
+    // Context in proportion to the selection — half its span each side —
+    // and never so little that the model sees under about 512 pixels of the
+    // scene. It used to be at least a twelfth of the frame (500 pixels on a
+    // 6000-pixel photo), so a small spot cost as much as a 3-megapixel area.
+    let span = (x1 - x0 + 1).max(y1 - y0 + 1);
+    let pad = (span / 2)
+        .max(REPLACEMENT_MIN_CONTEXT.saturating_sub(span) / 2)
         .max(16);
     x0 = x0.saturating_sub(pad);
     y0 = y0.saturating_sub(pad);
@@ -3227,6 +3260,58 @@ mod context_replacement_tests {
         assert_eq!(
             replacement_context_bounds(&GrayImage::new(800, 600)),
             (0, 0, 800, 600)
+        );
+    }
+
+    /// A small spot on a big photo gets context in proportion to it (but
+    /// not under ~512 px), not a twelfth of the frame; a large area keeps
+    /// half its span each side.
+    #[test]
+    fn replacement_context_scales_with_the_selection() {
+        let spot = GrayImage::from_fn(6000, 4000, |x, y| {
+            image::Luma([if (3000..3050).contains(&x) && (2000..2040).contains(&y) {
+                255
+            } else {
+                0
+            }])
+        });
+        let (_, _, w, h) = replacement_context_bounds(&spot);
+        assert!((512..=520).contains(&w), "spot context {w}x{h}");
+        assert!((500..=520).contains(&h), "spot context {w}x{h}");
+
+        let area = GrayImage::from_fn(6000, 4000, |x, y| {
+            image::Luma([if (2000..3000).contains(&x) && (1500..2000).contains(&y) {
+                255
+            } else {
+                0
+            }])
+        });
+        let (x, y, w, h) = replacement_context_bounds(&area);
+        assert_eq!((x, y, w, h), (1500, 1000, 2000, 1500));
+    }
+
+    #[test]
+    fn the_flux_canvas_stays_near_a_megapixel() {
+        use crate::comfy_engine::FillKind;
+        for (w, h) in [(6000u32, 4000u32), (4000, 6000), (3000, 3000), (5000, 1000)] {
+            let long = engine_canvas_long_edge(FillKind::Flux, w, h, 1536);
+            let short = (long as f32 * w.min(h) as f32 / w.max(h) as f32).round();
+            let pixels = long as f32 * short;
+            assert!(long <= 1536);
+            assert!(
+                (0.9e6..=1.1e6).contains(&pixels) || long == 1536,
+                "{w}x{h}: {long} long edge, {pixels} px"
+            );
+        }
+        // Other models keep the size they were given.
+        assert_eq!(
+            engine_canvas_long_edge(FillKind::SdxlFooocus, 6000, 4000, 1536),
+            1536
+        );
+        // A canvas already under a megapixel is not shrunk.
+        assert_eq!(
+            engine_canvas_long_edge(FillKind::Flux, 6000, 1000, 1216),
+            1216
         );
     }
 
@@ -3337,7 +3422,7 @@ fn replacement_sky_mask(
 
 #[allow(clippy::too_many_arguments)]
 async fn run_engine_inpaint_patch(
-    source_image: &DynamicImage,
+    source_image: DynamicImage,
     mask: &GrayImage,
     prompt: &str,
     kind: crate::comfy_engine::FillKind,
@@ -3368,7 +3453,7 @@ async fn run_engine_inpaint_patch(
         .as_ref()
         .is_some_and(|l| l.is_raw)
         && matches!(
-            source_image,
+            &source_image,
             DynamicImage::ImageRgb32F(_) | DynamicImage::ImageRgba32F(_)
         );
     let (w, h) = source_image.dimensions();
@@ -3377,16 +3462,19 @@ async fn run_engine_inpaint_patch(
     // linear, so encode (and return the composite in the same space with
     // the gamma flag, exactly like the LaMa path).
     let mut encoded_full = if is_linear {
-        ai_processing::gamma_encode_rgba8(source_image)
+        ai_processing::gamma_encode_rgba8(&source_image)
     } else {
         source_image.to_rgba8()
     };
+    // Not held through the minutes the engine takes: a float frame is
+    // hundreds of megabytes, and the engine needs the memory.
+    drop(source_image);
 
     // Replacement uses the entire scene in one pass, before repair's
     // component routing. All disconnected selected regions share a generation.
     if generate_mode {
         let replaced = replace_region_in_context(
-            &encoded_full,
+            encoded_full,
             mask,
             prompt,
             kind,
@@ -3539,8 +3627,11 @@ async fn run_engine_inpaint_patch(
         }
     }
 
-    let mut reconstruct_raw_ai_full = reconstruct_fill.then(|| encoded_full.clone());
-    let mut reconstruct_fallback_full = reconstruct_fill.then(|| encoded_full.clone());
+    // Two more full frames, only ever saved as diagnostics: made only when
+    // diagnostics are kept.
+    let diagnostic_frames = reconstruct_fill && crate::fill_store::diagnostics(app_handle);
+    let mut reconstruct_raw_ai_full = diagnostic_frames.then(|| encoded_full.clone());
+    let mut reconstruct_fallback_full = diagnostic_frames.then(|| encoded_full.clone());
     let mut reconstruct_rejected_any = false;
     let mut blob_reports: Vec<BlobReport> = Vec::new();
 
@@ -3934,9 +4025,14 @@ async fn run_engine_inpaint_patch(
             );
         }
 
-        // Big reconstructions earn a bigger canvas (Flux handles 1536
-        // comfortably on this hardware).
-        let canvas_long_edge = if comp.span() >= 900 { 1536 } else { 1216 };
+        // Big reconstructions earn a bigger canvas — for Flux, within about
+        // a megapixel.
+        let canvas_long_edge = engine_canvas_long_edge(
+            blob_kind,
+            engine_crop_img.width(),
+            engine_crop_img.height(),
+            if comp.span() >= 900 { 1536 } else { 1216 },
+        );
         // Mask coverage of the engine canvas is the prime suspect for
         // "this blob ignored the prompt": an inpainting model with little
         // surrounding context degenerates toward flat low-frequency output.
@@ -4889,6 +4985,14 @@ pub async fn invoke_generative_replace_with_mask_def(
     state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
     ensure_photo_loaded(&state, &path, "fill")?;
+    // How long the whole fill took, however it ends.
+    struct Took(std::time::Instant);
+    impl Drop for Took {
+        fn drop(&mut self) {
+            log::info!("[fill] finished in {:.1}s", self.0.elapsed().as_secs_f32());
+        }
+    }
+    let _took = Took(std::time::Instant::now());
     let settings = load_settings(app_handle.clone()).unwrap_or_default();
     let semantic_replace =
         patch_definition.generate_mode || !patch_definition.prompt.trim().is_empty();
@@ -4953,6 +5057,10 @@ pub async fn invoke_generative_replace_with_mask_def(
     ensure_photo_loaded(&state, &path, "fill")?;
     let source_image = composite_patches_on_image(&base_image, &source_image_adjustments)
         .map_err(|e| format!("Failed to prepare source image: {}", e))?;
+    // A fill waits minutes on the engine; nothing it no longer needs is
+    // kept through that.
+    drop(base_image);
+    drop(source_image_adjustments);
 
     let (img_w, img_h) = source_image.dimensions();
     // Value-derived masks (clipped/color/luminance) threshold the WARPED
@@ -5001,10 +5109,13 @@ pub async fn invoke_generative_replace_with_mask_def(
     )
     .ok_or("Failed to generate mask bitmap for AI replace")?;
 
+    drop(warped_image);
     let mask_dynamic = DynamicImage::ImageLuma8(mask_bitmap);
     let unwarped_dynamic =
         apply_unwarp_geometry(Cow::Borrowed(&mask_dynamic), &current_adjustments).into_owned();
+    drop(mask_dynamic);
     let mut mask_bitmap = unwarped_dynamic.to_luma8();
+    drop(unwarped_dynamic);
 
     // Graded masks (Clipped/Color select) store per-pixel CONFIDENCE, not
     // opacity — a washed-out sky rasterizes at 10-25%. Consumed literally,
@@ -5213,6 +5324,17 @@ pub async fn invoke_generative_replace_with_mask_def(
         }
     };
 
+    // Of the photo's whole edit, only this patch's earlier attempts are read
+    // once the engine is done; the rest (every other fill's pictures among
+    // it) need not be held through the wait.
+    let previous_attempts = serde_json::json!({"aiPatches": [{
+        "id": patch_definition.id,
+        "patchData": current_patch_data_value(&current_adjustments, &patch_definition.id)
+            .cloned()
+            .unwrap_or(Value::Null),
+    }]});
+    drop(current_adjustments);
+
     let patch_result = if let Some((_, model)) = engine_model {
         let kind = crate::comfy_engine::FillKind::from_params(&model.manifest.params);
         log::info!(
@@ -5221,7 +5343,7 @@ pub async fn invoke_generative_replace_with_mask_def(
             model.manifest.display_name
         );
         run_engine_inpaint_patch(
-            &source_image,
+            source_image,
             &mask_bitmap,
             prompt_for_engine.as_ref(),
             kind,
@@ -5247,7 +5369,7 @@ pub async fn invoke_generative_replace_with_mask_def(
         // single LaMa pass is exactly what produced smeary results on
         // scattered selections.
         run_engine_inpaint_patch(
-            &source_image,
+            source_image,
             &mask_bitmap,
             prompt_for_engine.as_ref(),
             crate::comfy_engine::FillKind::SdxlBase,
@@ -5360,7 +5482,7 @@ pub async fn invoke_generative_replace_with_mask_def(
         payload = attach_reconstruct_response_metadata(
             payload,
             ReconstructResponseInputs {
-                current_adjustments: &current_adjustments,
+                current_adjustments: &previous_attempts,
                 patch_id: &patch_definition.id,
                 prompt: &patch_definition.prompt,
                 debug_run_id: &debug_run_id,
@@ -5587,32 +5709,41 @@ fn encode_patch_result_value(
         image::imageops::FilterType::Lanczos3,
     );
     let mut color_image = RgbImage::new(patch_w, patch_h);
-    let mask_image = scaled_mask_bitmap.clone();
-
-    for y in 0..patch_h {
-        for x in 0..patch_w {
-            let mask_value = scaled_mask_bitmap.get_pixel(x, y)[0];
-
-            if mask_value > 0 {
-                let patch_pixel = patch_rgba.get_pixel(x, y);
-                color_image.put_pixel(x, y, Rgb([patch_pixel[0], patch_pixel[1], patch_pixel[2]]));
-            } else {
-                color_image.put_pixel(x, y, Rgb([0, 0, 0]));
-            }
+    let mask_image = scaled_mask_bitmap;
+    for ((out, patch_pixel), m) in color_image
+        .pixels_mut()
+        .zip(patch_rgba.pixels())
+        .zip(mask_image.pixels())
+    {
+        if m[0] > 0 {
+            *out = Rgb([patch_pixel[0], patch_pixel[1], patch_pixel[2]]);
         }
     }
 
-    let mut color_buf = Cursor::new(Vec::new());
-    color_image
-        .write_to(&mut color_buf, ImageFormat::Png)
+    // Full frame, black outside the mask (which the blend never reads), and
+    // compressed properly: the default PNG settings stored a real fill's
+    // colour at 1.5 MB and its mask at 280 KB; these store the same pixels
+    // in 1.06 MB and 122 KB, for a quarter of a second once per fill.
+    let compact_png = |raw: &[u8], color: image::ExtendedColorType| -> Result<Vec<u8>, String> {
+        use image::ImageEncoder;
+        let mut out = Vec::new();
+        image::codecs::png::PngEncoder::new_with_quality(
+            &mut out,
+            image::codecs::png::CompressionType::Default,
+            image::codecs::png::FilterType::Adaptive,
+        )
+        .write_image(raw, patch_w, patch_h, color)
         .map_err(|e| e.to_string())?;
-    let color_base64 = general_purpose::STANDARD.encode(color_buf.get_ref());
-
-    let mut mask_buf = Cursor::new(Vec::new());
-    mask_image
-        .write_to(&mut mask_buf, ImageFormat::Png)
-        .map_err(|e| e.to_string())?;
-    let mask_base64 = general_purpose::STANDARD.encode(mask_buf.get_ref());
+        Ok(out)
+    };
+    let color_base64 = general_purpose::STANDARD.encode(compact_png(
+        color_image.as_raw(),
+        image::ExtendedColorType::Rgb8,
+    )?);
+    let mask_base64 = general_purpose::STANDARD.encode(compact_png(
+        mask_image.as_raw(),
+        image::ExtendedColorType::L8,
+    )?);
 
     Ok(serde_json::json!({
         "color": color_base64,
@@ -7935,5 +8066,114 @@ mod display_space_tests {
         // Display is H-wide by W-tall after the coarse rotation.
         assert!((x - 200.0).abs() < 1e-6, "x was {x}");
         assert!((y - (H - 100.0)).abs() < 1e-6, "y was {y}");
+    }
+}
+
+#[cfg(test)]
+mod stored_patch_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A fill result with texture everywhere and a soft-edged mask.
+    fn result_and_mask(w: u32, h: u32) -> (RgbaImage, GrayImage) {
+        let result = RgbaImage::from_fn(w, h, |x, y| {
+            let v = |k: u32| ((x * 37 + y * 11 + k * 71) % 253) as u8;
+            image::Rgba([v(0), v(1), v(2), 255])
+        });
+        let mask = GrayImage::from_fn(w, h, |x, y| {
+            let d =
+                ((x as f32 - w as f32 * 0.4).powi(2) + (y as f32 - h as f32 * 0.5).powi(2)).sqrt();
+            image::Luma([((w as f32 * 0.25 - d) * 40.0).clamp(0.0, 255.0) as u8])
+        });
+        (result, mask)
+    }
+
+    fn decode(value: &Value, key: &str) -> DynamicImage {
+        let bytes = general_purpose::STANDARD
+            .decode(value[key].as_str().unwrap())
+            .unwrap();
+        image::load_from_memory(&bytes).unwrap()
+    }
+
+    /// The stored colour is black wherever the mask is zero and the result
+    /// itself everywhere else; the mask is stored exactly.
+    #[test]
+    fn a_stored_result_keeps_only_what_the_mask_covers() {
+        let (result, mask) = result_and_mask(120, 80);
+        let stored = encode_patch_result_value(&result, false, &mask).unwrap();
+        let colour = decode(&stored, "color").to_rgb8();
+        assert_eq!(decode(&stored, "mask").to_luma8(), mask);
+        let mut outside = 0;
+        for ((c, r), m) in colour.pixels().zip(result.pixels()).zip(mask.pixels()) {
+            if m[0] == 0 {
+                assert_eq!(c.0, [0, 0, 0]);
+                outside += 1;
+            } else {
+                assert_eq!(c.0, [r[0], r[1], r[2]]);
+            }
+        }
+        assert!(outside > 0 && outside < 120 * 80);
+    }
+
+    /// The pixels left black are ones neither blend reads: the stored patch
+    /// renders exactly as the whole result under the same mask would, in
+    /// both engines, feathered or not.
+    #[test]
+    fn the_black_outside_the_mask_never_shows() {
+        let (w, h) = (120u32, 80u32);
+        let (result, mask) = result_and_mask(w, h);
+        let stored = encode_patch_result_value(&result, true, &mask).unwrap();
+        let mut whole = stored.clone();
+        let mut png = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(result.clone())
+            .to_rgb8()
+            .write_to(&mut png, ImageFormat::Png)
+            .unwrap();
+        whole["color"] = json!(general_purpose::STANDARD.encode(png.get_ref()));
+        let base = image::Rgba32FImage::from_fn(w, h, |x, y| {
+            image::Rgba([x as f32 / w as f32, y as f32 / h as f32, 0.3, 1.0])
+        });
+        let source = crate::color_engine::config::SourceColor {
+            primaries: crate::color_engine::config::Primaries::Srgb,
+            transfer: crate::color_engine::config::Transfer::Linear,
+            reference: crate::color_engine::config::ReferenceDomain::Display,
+        };
+        for feather in [0.0, 35.0] {
+            let edits = |data: &Value, id: &str| {
+                json!({"aiPatches": [{"id": id, "visible": true, "opacity": 90.0,
+                    "feather": feather, "patchData": data}]})
+            };
+            let mut v3_stored = base.clone();
+            let mut v3_whole = base.clone();
+            crate::color_engine::patches::composite(
+                &mut v3_stored,
+                &edits(&stored, "stored"),
+                &source,
+                None,
+                None,
+                1.0,
+            )
+            .unwrap();
+            crate::color_engine::patches::composite(
+                &mut v3_whole,
+                &edits(&whole, "whole"),
+                &source,
+                None,
+                None,
+                1.0,
+            )
+            .unwrap();
+            assert_eq!(v3_stored, v3_whole, "v3, feather {feather}");
+
+            let v2 = |data: &Value| {
+                composite_patches_on_image(
+                    &DynamicImage::ImageRgba32F(base.clone()),
+                    &edits(data, "v2"),
+                )
+                .unwrap()
+                .to_rgba32f()
+            };
+            assert_eq!(v2(&stored), v2(&whole), "v2, feather {feather}");
+        }
     }
 }
