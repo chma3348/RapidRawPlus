@@ -50,7 +50,15 @@ pub struct SkySession {
     orientation: (u8, bool, bool),
     gamma: bool,
     base: Arc<RgbImage>,
+    /// The sky as detected, before any brushing.
+    detected: Arc<GrayImage>,
+    /// The sky as replaced: the detection with the brush strokes on it.
     alpha: Arc<GrayImage>,
+    /// The strokes `alpha` has on it, so the next one paints on top.
+    strokes: Vec<SkyStroke>,
+    /// The newest brushing written to `alpha`: a slower, older one finishing
+    /// late never overwrites it.
+    refine_seq: u64,
     preview_base: Arc<RgbImage>,
     preview_alpha: Arc<GrayImage>,
     canvas_base: Arc<RgbImage>,
@@ -113,8 +121,18 @@ pub struct SkyPreparation {
 }
 
 fn mask_data_url(mask: &GrayImage) -> Result<String, String> {
+    use image::ImageEncoder;
+    use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+    // Fast compression: it is sent again after every brush stroke, and a
+    // mask is mostly flat, so it stays small either way.
     let mut buf = Cursor::new(Vec::new());
-    mask.write_to(&mut buf, ImageFormat::Png)
+    PngEncoder::new_with_quality(&mut buf, CompressionType::Fast, FilterType::Sub)
+        .write_image(
+            mask.as_raw(),
+            mask.width(),
+            mask.height(),
+            image::ExtendedColorType::L8,
+        )
         .map_err(|e| e.to_string())?;
     Ok(format!(
         "data:image/png;base64,{}",
@@ -295,7 +313,10 @@ pub async fn prepare_sky_replacement(
         orientation,
         gamma: is_raw,
         base: Arc::new(base),
+        detected: Arc::new(found.mask.clone()),
         alpha: Arc::new(found.mask),
+        strokes: Vec::new(),
+        refine_seq: 0,
         preview_base: Arc::new(preview_base),
         preview_alpha: Arc::new(preview_alpha),
         canvas_base: Arc::new(canvas_base),
@@ -304,6 +325,202 @@ pub async fn prepare_sky_replacement(
         plate: None,
         look,
     });
+    Ok(Some(result))
+}
+
+/// One stroke of the sky brush.
+#[derive(Deserialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SkyStroke {
+    /// Takes sky away rather than adding it.
+    #[serde(default)]
+    erase: bool,
+    /// Brush diameter, as a share of the photo's long edge.
+    size: f32,
+    /// 0 is a hard edge; 1 is soft all the way to the centre.
+    #[serde(default)]
+    feather: f32,
+    /// Where it went, as fractions of the photo as it is shown — turned,
+    /// flipped and straightened, before the crop — with the way up it was
+    /// painted under, so turning the photo later keeps it in place.
+    points: Vec<StrokePoint>,
+    #[serde(default)]
+    orientation_steps: u32,
+    #[serde(default)]
+    flip_horizontal: bool,
+    #[serde(default)]
+    flip_vertical: bool,
+    #[serde(default)]
+    rotation: f64,
+}
+
+#[derive(Deserialize, Clone, Copy, PartialEq)]
+pub struct StrokePoint {
+    x: f64,
+    y: f64,
+}
+
+/// The detected sky with the brush strokes painted on, in order: adding
+/// covers toward full sky, erasing takes coverage away, each as soft as its
+/// feather. In the photo's stored orientation, as the mask is.
+pub fn paint_strokes(detected: &GrayImage, strokes: &[SkyStroke]) -> GrayImage {
+    let mut alpha = detected.clone();
+    paint_onto(&mut alpha, strokes);
+    alpha
+}
+
+fn paint_onto(alpha: &mut GrayImage, strokes: &[SkyStroke]) {
+    let (w, h) = alpha.dimensions();
+    let long = w.max(h) as f64;
+    for stroke in strokes {
+        let r = (stroke.size as f64 * long / 2.0).max(0.5);
+        let core = r * (1.0 - stroke.feather.clamp(0.0, 1.0) as f64);
+        let steps = stroke.orientation_steps;
+        let (shown_w, shown_h) = if steps % 2 == 1 {
+            (h as f64, w as f64)
+        } else {
+            (w as f64, h as f64)
+        };
+        let points: Vec<(f64, f64)> = stroke
+            .points
+            .iter()
+            .map(|p| {
+                crate::ai_commands::display_to_image_point(
+                    p.x * shown_w,
+                    p.y * shown_h,
+                    w as f64,
+                    h as f64,
+                    steps,
+                    stroke.flip_horizontal,
+                    stroke.flip_vertical,
+                    stroke.rotation,
+                )
+            })
+            .collect();
+        if points.is_empty() {
+            continue;
+        }
+        // Dabs along the path, close enough that the edge stays smooth.
+        let spacing = (r * 0.25).max(0.5);
+        let mut dabs = vec![points[0]];
+        for pair in points.windows(2) {
+            let ((ax, ay), (bx, by)) = (pair[0], pair[1]);
+            let n = ((bx - ax).hypot(by - ay) / spacing).ceil() as usize;
+            for i in 1..=n {
+                let t = i as f64 / n as f64;
+                dabs.push((ax + (bx - ax) * t, ay + (by - ay) * t));
+            }
+        }
+        let (mut lo_x, mut lo_y, mut hi_x, mut hi_y) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+        for &(x, y) in &dabs {
+            (lo_x, lo_y, hi_x, hi_y) = (lo_x.min(x), lo_y.min(y), hi_x.max(x), hi_y.max(y));
+        }
+        let x0 = (lo_x - r).floor().max(0.0) as u32;
+        let y0 = (lo_y - r).floor().max(0.0) as u32;
+        let x1 = ((hi_x + r).ceil() as i64).min(w as i64 - 1);
+        let y1 = ((hi_y + r).ceil() as i64).min(h as i64 - 1);
+        if x1 < x0 as i64 || y1 < y0 as i64 {
+            continue;
+        }
+        let (x1, y1) = (x1 as u32, y1 as u32);
+        let bw = (x1 - x0 + 1) as usize;
+        let mut cover = vec![0f32; bw * (y1 - y0 + 1) as usize];
+        for &(cx, cy) in &dabs {
+            let ya = ((cy - r).floor().max(y0 as f64) as u32).max(y0);
+            let yb = ((cy + r).ceil().min(y1 as f64)) as u32;
+            let xa = ((cx - r).floor().max(x0 as f64) as u32).max(x0);
+            let xb = ((cx + r).ceil().min(x1 as f64)) as u32;
+            for y in ya..=yb {
+                for x in xa..=xb {
+                    let d = (x as f64 + 0.5 - cx).hypot(y as f64 + 0.5 - cy);
+                    if d >= r {
+                        continue;
+                    }
+                    let v = if d <= core {
+                        1.0
+                    } else {
+                        let t = (r - d) / (r - core);
+                        t * t * (3.0 - 2.0 * t)
+                    } as f32;
+                    let c = &mut cover[(y - y0) as usize * bw + (x - x0) as usize];
+                    *c = c.max(v);
+                }
+            }
+        }
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let c = cover[(y - y0) as usize * bw + (x - x0) as usize];
+                if c <= 0.0 {
+                    continue;
+                }
+                let p = alpha.get_pixel_mut(x, y);
+                let a = p[0] as f32 / 255.0;
+                let a = if stroke.erase {
+                    a * (1.0 - c)
+                } else {
+                    a + (1.0 - a) * c
+                };
+                p[0] = (a * 255.0).round() as u8;
+            }
+        }
+    }
+}
+
+/// The detected sky with the brush strokes on it, held as the sky to
+/// replace. A list that only adds strokes paints just the new ones on the
+/// last result; anything else (an undo, a clear) starts again from the
+/// detection. Returns the new mask to show, or nothing
+/// when a newer brushing (or a new detection) came first.
+#[tauri::command]
+pub async fn refine_sky_mask(
+    strokes: Vec<SkyStroke>,
+    seq: u64,
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<SkyPreparation>, String> {
+    let (detected, start, done, preview_size, canvas_size) = {
+        let guard = state.sky_session.lock().unwrap();
+        let s = guard.as_ref().ok_or("Detect the sky first.")?;
+        let on_top = !s.strokes.is_empty() && strokes.starts_with(&s.strokes);
+        let (start, done) = if on_top {
+            (s.alpha.clone(), s.strokes.len())
+        } else {
+            (s.detected.clone(), 0)
+        };
+        (
+            s.detected.clone(),
+            start,
+            done,
+            s.preview_alpha.dimensions(),
+            s.canvas_alpha.dimensions(),
+        )
+    };
+    let (alpha, preview, canvas, mask, strokes) = tauri::async_runtime::spawn_blocking(move || {
+        let mut alpha = (*start).clone();
+        paint_onto(&mut alpha, &strokes[done..]);
+        let small = |(w, h)| imageops::resize(&alpha, w, h, imageops::FilterType::Triangle);
+        let (preview, canvas) = (small(preview_size), small(canvas_size));
+        let mask = mask_data_url(&alpha)?;
+        Ok::<_, String>((alpha, preview, canvas, mask, strokes))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    let mut guard = state.sky_session.lock().unwrap();
+    let Some(s) = guard.as_mut() else {
+        return Ok(None);
+    };
+    if seq < s.refine_seq || !Arc::ptr_eq(&s.detected, &detected) {
+        return Ok(None);
+    }
+    s.refine_seq = seq;
+    let result = SkyPreparation {
+        coverage: coverage(&alpha),
+        raw: s.gamma,
+        mask,
+    };
+    s.alpha = Arc::new(alpha);
+    s.strokes = strokes;
+    s.preview_alpha = Arc::new(preview);
+    s.canvas_alpha = Arc::new(canvas);
     Ok(Some(result))
 }
 
@@ -730,6 +947,64 @@ mod tests {
                 .unwrap(),
         )
         .unwrap()
+    }
+
+    fn stroke(erase: bool, points: &[(f64, f64)]) -> SkyStroke {
+        SkyStroke {
+            erase,
+            size: 0.1,
+            feather: 0.0,
+            points: points.iter().map(|&(x, y)| StrokePoint { x, y }).collect(),
+            orientation_steps: 0,
+            flip_horizontal: false,
+            flip_vertical: false,
+            rotation: 0.0,
+        }
+    }
+
+    #[test]
+    fn brushing_adds_and_takes_away_sky_in_order() {
+        let (_, detected) = sky_photo();
+        // Add a patch of sky in the ground, then take some of the sky away.
+        let add = stroke(false, &[(0.2, 0.8), (0.4, 0.8)]);
+        let erase = stroke(true, &[(0.7, 0.2)]);
+        let painted = paint_strokes(&detected, &[add.clone(), erase.clone()]);
+        assert_eq!(painted.get_pixel(19, 38)[0], 255, "brushed ground is sky");
+        assert_eq!(painted.get_pixel(5, 40)[0], 0, "unbrushed ground is not");
+        assert_eq!(painted.get_pixel(44, 9)[0], 0, "erased sky is gone");
+        assert_eq!(
+            painted.get_pixel(10, 5)[0],
+            255,
+            "the rest of the sky stays"
+        );
+        // Order matters: adding back over an erase restores it.
+        let again = paint_strokes(&detected, &[erase, stroke(false, &[(0.7, 0.2)])]);
+        assert_eq!(again.get_pixel(44, 9)[0], 255);
+    }
+
+    #[test]
+    fn a_feathered_brush_fades_out() {
+        let (_, detected) = sky_photo();
+        let mut soft = stroke(false, &[(0.5, 0.85)]);
+        soft.size = 0.4;
+        soft.feather = 1.0;
+        let painted = paint_strokes(&detected, &[soft]);
+        let centre = painted.get_pixel(32, 41)[0];
+        let rim = painted.get_pixel(32 + 10, 41)[0];
+        assert!(centre > 240, "centre {centre}");
+        assert!(rim > 0 && rim < centre, "rim {rim} should be partial");
+    }
+
+    #[test]
+    fn strokes_follow_the_way_the_photo_is_turned() {
+        let (_, detected) = sky_photo();
+        // Turned a quarter clockwise, the shown top-left is the stored
+        // bottom-left: brushing there adds sky at the stored bottom-left.
+        let mut turned = stroke(false, &[(0.05, 0.05)]);
+        turned.orientation_steps = 1;
+        let painted = paint_strokes(&detected, &[turned]);
+        assert_eq!(painted.get_pixel(2, 46)[0], 255);
+        assert_eq!(painted.get_pixel(61, 46)[0], 0);
     }
 
     #[test]

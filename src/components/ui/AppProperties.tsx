@@ -97,6 +97,7 @@ export enum Invokes {
   PreviewSkyReplacement = 'preview_sky_replacement',
   ApplySkyReplacement = 'apply_sky_replacement',
   PreviewSkyOnPhoto = 'preview_sky_on_photo',
+  RefineSkyMask = 'refine_sky_mask',
   GetFillResultsUsage = 'get_fill_results_usage',
   ClearFillResults = 'clear_fill_results',
   TidyFillResults = 'tidy_fill_results',

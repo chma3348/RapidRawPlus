@@ -2167,6 +2167,7 @@ pub fn run() {
             sky_commands::preview_sky_replacement,
             sky_commands::apply_sky_replacement,
             sky_commands::preview_sky_on_photo,
+            sky_commands::refine_sky_mask,
             fill_store::get_fill_results_usage,
             fill_store::clear_fill_results,
             fill_store::tidy_fill_results,

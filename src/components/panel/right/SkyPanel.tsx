@@ -3,7 +3,19 @@ import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { useTranslation } from 'react-i18next';
 import { v4 as uuidv4 } from 'uuid';
 import { toast } from 'react-toastify';
-import { ChevronLeft, ChevronRight, Cloud, Eye, EyeOff, FlipHorizontal2, Loader2, Trash2 } from 'lucide-react';
+import {
+  Brush,
+  ChevronLeft,
+  ChevronRight,
+  Cloud,
+  Eraser,
+  Eye,
+  EyeOff,
+  FlipHorizontal2,
+  Loader2,
+  Trash2,
+  Undo2,
+} from 'lucide-react';
 import Slider from '../../ui/Slider';
 import { Invokes } from '../../ui/AppProperties';
 import { useEditorStore } from '../../../store/useEditorStore';
@@ -85,6 +97,22 @@ const AUTO: SkyOptions = {
   edgeShift: -0.0008,
 };
 
+/** A stroke of the sky brush; mirrors `SkyStroke` in `sky_commands.rs`. */
+interface SkyStroke {
+  erase: boolean;
+  /** Diameter, as a share of the photo's long edge. */
+  size: number;
+  feather: number;
+  /** Fractions of the photo as shown, under the way up below. */
+  points: Array<{ x: number; y: number }>;
+  orientationSteps: number;
+  flipHorizontal: boolean;
+  flipVertical: boolean;
+  rotation: number;
+}
+/** The Size slider (1-100) to a diameter: up to a quarter of the long edge. */
+const brushDiameter = (size: number) => (size / 100) * 0.25;
+
 /** Thumbnails per page: two across, big enough to judge a sky by. */
 const PAGE = 8;
 const sameOptions = (a: SkyOptions | undefined, b: SkyOptions) => !!a && JSON.stringify(a) === JSON.stringify(b);
@@ -127,6 +155,23 @@ export default function SkyPanel() {
   const [photoTick, setPhotoTick] = useState(0);
   const photoBusy = useRef(false);
   const photoAgain = useRef(false);
+  // The Add / Subtract brush that hones the detected sky by hand. Strokes
+  // go into the sky's patch, so they come back with it.
+  const [brush, setBrush] = useState<'off' | 'add' | 'erase'>('off');
+  const [brushSize, setBrushSize] = useState(20);
+  const [brushFeather, setBrushFeather] = useState(50);
+  const [strokes, setStrokes] = useState<SkyStroke[]>((existing as any)?.sky?.strokes ?? []);
+  const strokesRef = useRef(strokes);
+  strokesRef.current = strokes;
+  const existingRef = useRef(existing);
+  existingRef.current = existing;
+  // Painted, undone or cleared here since the photo was opened: the strokes
+  // saved with the sky are not brought back over that.
+  const strokesTouched = useRef(false);
+  const refineSeq = useRef(0);
+  const [refining, setRefining] = useState(false);
+  // Bumped when the mask changes, so the sky on the photo is made again.
+  const [maskVersion, setMaskVersion] = useState(0);
 
   useEffect(() => {
     if (plateCache) return;
@@ -138,10 +183,44 @@ export default function SkyPanel() {
       .catch((e) => setMessage(String(e)));
   }, []);
 
+  /** The detected sky with these strokes on it becomes the sky to replace. */
+  const refine = (list: SkyStroke[]) => {
+    const seq = ++refineSeq.current;
+    setRefining(true);
+    invoke<{ coverage: number; mask: string } | null>(Invokes.RefineSkyMask, { strokes: list, seq })
+      .then((r) => {
+        if (!r || seq !== refineSeq.current) return;
+        setCoverage(r.coverage);
+        setSkyMask(r.mask);
+        setMaskVersion((n) => n + 1);
+      })
+      .catch((e) => {
+        console.error(`[sky] brushing failed: ${e}`);
+        setMessage(String(e));
+      })
+      .finally(() => {
+        if (seq === refineSeq.current) setRefining(false);
+      });
+  };
+  /** A sky has been found: put the strokes back on it. */
+  const found = (r: { coverage: number; mask: string }) => {
+    setCoverage(r.coverage);
+    setSkyMask(r.mask);
+    setStatus('ready');
+    // Strokes painted here, or else those saved with the sky in the edit.
+    let list = strokesRef.current;
+    if (!list.length && !strokesTouched.current && (existingRef.current as any)?.sky?.strokes?.length) {
+      list = (existingRef.current as any).sky.strokes;
+      setStrokes(list);
+    }
+    if (list.length) refine(list);
+  };
+
   // The sky is found when asked (the Detect sky button), not on opening the
   // panel: it takes a few seconds and a photograph may have none. A new
   // photograph or a new way up starts over.
   const detection = useRef(0);
+  const pathRef = useRef(selectedImage?.path);
   useEffect(() => {
     const id = ++detection.current;
     setStatus('idle');
@@ -149,6 +228,13 @@ export default function SkyPanel() {
     setPreview(null);
     setPhotoPatch(null);
     setSkyMask(null);
+    setBrush('off');
+    if (pathRef.current !== selectedImage?.path) {
+      pathRef.current = selectedImage?.path;
+      setStrokes([]);
+      strokesRef.current = [];
+      strokesTouched.current = false;
+    }
     if (!selectedImage?.path || selectedImage.isVideo) return;
     // Coming back to the panel: a sky already found for this photo is picked
     // up at once (nothing is looked for until Detect sky is pressed).
@@ -161,9 +247,7 @@ export default function SkyPanel() {
     })
       .then((r) => {
         if (id !== detection.current || !r || r.coverage < 0.005) return;
-        setCoverage(r.coverage);
-        setSkyMask(r.mask);
-        setStatus('ready');
+        found(r);
       })
       .catch(() => {});
   }, [selectedImage?.path, adjustments.orientationSteps, adjustments.flipHorizontal, adjustments.flipVertical]);
@@ -191,8 +275,7 @@ export default function SkyPanel() {
           setStatus('none');
           setMessage(t('sky.noSky', { defaultValue: 'There is almost no sky in this photograph to replace.' }));
         } else {
-          setStatus('ready');
-          setSkyMask(r.mask);
+          found(r);
         }
       })
       .catch((e) => {
@@ -205,7 +288,10 @@ export default function SkyPanel() {
 
   // The applied sky, unchanged: the photograph already shows it.
   const unchanged =
-    !!existing && (existing as any).sky?.plate === plate && sameOptions((existing as any).sky?.options, options);
+    !!existing &&
+    (existing as any).sky?.plate === plate &&
+    sameOptions((existing as any).sky?.options, options) &&
+    JSON.stringify((existing as any).sky?.strokes ?? []) === JSON.stringify(strokes);
 
   // The chosen sky on the photograph, debounced; a late answer never
   // overwrites a newer one. While the sky is being dragged, quick small ones
@@ -240,7 +326,7 @@ export default function SkyPanel() {
             opacity: (existing as any)?.opacity ?? 100,
             feather: 0,
             patchType: 'sky',
-            sky: { plate, options },
+            sky: { plate, options, strokes },
             patchData,
           });
         })
@@ -264,7 +350,7 @@ export default function SkyPanel() {
     const timer = window.setTimeout(run, 200);
     return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [plate, options, status, onPhoto, unchanged, dragging, photoTick]);
+  }, [plate, options, status, onPhoto, unchanged, dragging, photoTick, maskVersion]);
 
   // A drag renders as a slider drag does: smaller and quicker until let go.
   useEffect(() => {
@@ -319,17 +405,69 @@ export default function SkyPanel() {
     }
   }, [photoPatch, adjustments]);
 
-  // The detected sky in red, until a sky is chosen to look at on the photo.
+  // The detected sky in red, until a sky is chosen to look at on the photo,
+  // and whenever the brush is on.
+  const brushing = status === 'ready' && brush !== 'off';
   useEffect(() => {
-    setSkyOverlay(status === 'ready' && !(plate && onPhoto) && !existing ? skyMask : null);
+    setSkyOverlay(status === 'ready' && (brushing || (!(plate && onPhoto) && !existing)) ? skyMask : null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status, plate, onPhoto, existing, skyMask]);
+  }, [status, plate, onPhoto, existing, skyMask, brushing]);
+
+  // The brush on the canvas: each finished stroke joins the list, and the
+  // mask is made again from the detection with all of them.
+  const brushSettings = useRef({ size: brushSize, feather: brushFeather, adjustments });
+  brushSettings.current = { size: brushSize, feather: brushFeather, adjustments };
+  useEffect(() => {
+    const { setEditor } = useEditorStore.getState();
+    if (!brushing) {
+      setEditor({ skyBrush: null });
+      return;
+    }
+    setEditor({
+      skyBrush: {
+        erase: brush === 'erase',
+        size: brushDiameter(brushSize),
+        onStroke: (points, erase) => {
+          const { size, feather, adjustments: a } = brushSettings.current;
+          const list = [
+            ...strokesRef.current,
+            {
+              erase,
+              size: brushDiameter(size),
+              feather: feather / 100,
+              points,
+              orientationSteps: a.orientationSteps ?? 0,
+              flipHorizontal: a.flipHorizontal ?? false,
+              flipVertical: a.flipVertical ?? false,
+              rotation: a.rotation ?? 0,
+            },
+          ];
+          strokesTouched.current = true;
+          setStrokes(list);
+          refine(list);
+        },
+      },
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [brushing, brush, brushSize]);
+
+  const undoStroke = () => {
+    const list = strokes.slice(0, -1);
+    strokesTouched.current = true;
+    setStrokes(list);
+    refine(list);
+  };
+  const clearStrokes = () => {
+    strokesTouched.current = true;
+    setStrokes([]);
+    refine([]);
+  };
 
   // Leaving the panel leaves the photograph as the edit has it.
   useEffect(
     () => () => {
       setSkyOverlay(null);
-      useEditorStore.getState().setEditor({ skyDrag: null, isSliderDragging: false });
+      useEditorStore.getState().setEditor({ skyDrag: null, skyBrush: null, isSliderDragging: false });
       if (ownsOverride.current) {
         ownsOverride.current = false;
         useEditorStore.getState().setEditor({ previewOverride: null });
@@ -359,7 +497,7 @@ export default function SkyPanel() {
         });
     }, 120);
     return () => window.clearTimeout(timer);
-  }, [plate, options, status, onPhoto]);
+  }, [plate, options, status, onPhoto, maskVersion]);
 
   const apply = async () => {
     if (!plate) return;
@@ -380,7 +518,7 @@ export default function SkyPanel() {
         opacity: 100,
         feather: 0,
         patchType: 'sky',
-        sky: { plate, options },
+        sky: { plate, options, strokes },
         patchData,
       };
       // The edit itself now has the sky: stop showing the stand-in first, so
@@ -520,10 +658,85 @@ export default function SkyPanel() {
         </p>
       )}
 
+      {status === 'ready' && (
+        // Hone the detected sky by hand: paint sky in, or paint it out.
+        <div className="flex flex-col gap-2 rounded-md bg-surface p-2">
+          <div className="flex items-center gap-1">
+            {(['add', 'erase'] as const).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                onClick={() => setBrush((b) => (b === mode ? 'off' : mode))}
+                aria-pressed={brush === mode}
+                title={
+                  mode === 'add'
+                    ? t('sky.brushAddHint', { defaultValue: 'Paint on the photo to add sky' })
+                    : t('sky.brushEraseHint', { defaultValue: 'Paint on the photo to take sky away' })
+                }
+                className={`flex flex-1 items-center justify-center gap-1.5 rounded-md px-2 py-1 text-xs ${
+                  brush === mode ? 'bg-accent text-button-text' : 'bg-bg-secondary hover:bg-card-active'
+                }`}
+              >
+                {mode === 'add' ? <Brush size={14} /> : <Eraser size={14} />}
+                {mode === 'add'
+                  ? t('sky.brushAdd', { defaultValue: 'Add' })
+                  : t('sky.brushErase', { defaultValue: 'Subtract' })}
+              </button>
+            ))}
+            <button
+              type="button"
+              onClick={undoStroke}
+              disabled={!strokes.length}
+              title={t('sky.brushUndo', { defaultValue: 'Undo the last stroke' })}
+              className="rounded p-1 text-text-secondary hover:bg-card-active hover:text-text-primary disabled:opacity-30"
+            >
+              <Undo2 size={16} />
+            </button>
+            <button
+              type="button"
+              onClick={clearStrokes}
+              disabled={!strokes.length}
+              title={t('sky.brushClear', { defaultValue: 'Clear all strokes (back to the detected sky)' })}
+              className="rounded p-1 text-text-secondary hover:bg-card-active hover:text-red-400 disabled:opacity-30"
+            >
+              <Trash2 size={16} />
+            </button>
+            {refining && <Loader2 size={12} className="animate-spin" />}
+          </div>
+          {brush !== 'off' && (
+            <>
+              <Slider
+                label={t('sky.brushSize', { defaultValue: 'Size' })}
+                min={1}
+                max={100}
+                step={1}
+                value={brushSize}
+                defaultValue={20}
+                onChange={(e: any) => setBrushSize(Number(e.target.value))}
+              />
+              <Slider
+                label={t('sky.brushFeather', { defaultValue: 'Feather' })}
+                min={0}
+                max={100}
+                step={1}
+                value={brushFeather}
+                defaultValue={50}
+                onChange={(e: any) => setBrushFeather(Number(e.target.value))}
+              />
+              <p className="text-xs text-text-secondary">
+                {t('sky.brushHint', {
+                  defaultValue: 'Paint on the photo. Hold Option to switch between adding and subtracting.',
+                })}
+              </p>
+            </>
+          )}
+        </div>
+      )}
+
       <label className="flex items-center gap-2 text-xs text-text-secondary">
         <input type="checkbox" checked={onPhoto} onChange={(e) => setOnPhoto(e.target.checked)} />
         {t('sky.onPhoto', { defaultValue: 'Show on photo' })}
-        {skyShown && (
+        {skyShown && !brushing && (
           <span className="ml-auto">
             {t('sky.dragHint', { defaultValue: 'Drag the sky on the photo to place it' })}
           </span>
@@ -691,7 +904,7 @@ export default function SkyPanel() {
         <button
           type="button"
           onClick={apply}
-          disabled={!plate || status !== 'ready' || applying || unchanged}
+          disabled={!plate || status !== 'ready' || applying || unchanged || refining}
           className="flex flex-1 items-center justify-center gap-2 rounded-md bg-accent px-3 py-2 text-button-text disabled:opacity-50"
         >
           {applying && <Loader2 size={14} className="animate-spin" />}

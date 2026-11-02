@@ -12,6 +12,8 @@ import type { OverlayMode } from '../right/CropPanel';
 import CompositionOverlays from './overlays/CompositionOverlays';
 import { healLines, useHealSelection, type HealLine, type Offset } from '../../../store/useHealSelection';
 import type { KonvaEventObject } from 'konva/lib/Node';
+import SkyBrushLayer from './SkyBrushLayer';
+import type { SkyBrush } from '../../../store/useEditorStore';
 
 /** One heal or clone stroke as the canvas draws it, in display pixels. */
 interface HealSpot {
@@ -66,6 +68,8 @@ interface ImageCanvasProps {
   isSkyEditing?: boolean;
   // Sky Replace: dragging on the photo moves the sky (see useEditorStore).
   skyDrag?: ((dx: number, dy: number, done: boolean) => void) | null;
+  // Sky Replace's brush is on: dragging paints the sky mask instead.
+  skyBrush?: SkyBrush | null;
   maskOverlayUrl: string | null;
   onGenerateAiMask(id: string | null, start: Coord, end: Coord, exclude?: boolean): void;
   onGenerateAiPaintMask?(id: string | null, lines: any[]): void;
@@ -1081,6 +1085,7 @@ const ImageCanvas = memo(
     isRotationActive,
     isSkyEditing = false,
     skyDrag = null,
+    skyBrush = null,
     maskOverlayUrl,
     onGenerateAiMask,
     onGenerateAiPaintMask,
@@ -2867,7 +2872,34 @@ const ImageCanvas = memo(
                   }}
                 />
               )}
-              {skyDrag && !isShowingOriginal && imageRenderSize.width > 0 && (
+              {skyBrush && !isShowingOriginal && imageRenderSize.width > 0 && (
+                <SkyBrushLayer
+                  brush={skyBrush}
+                  left={imageRenderSize.offsetX}
+                  top={imageRenderSize.offsetY}
+                  width={imageRenderSize.width}
+                  height={imageRenderSize.height}
+                  diameter={
+                    skyBrush.size *
+                    Math.max(effectiveImageDimensions.width, effectiveImageDimensions.height) *
+                    (imageRenderSize.scale || 1)
+                  }
+                  toPhoto={(p) => {
+                    // As the Masks brush records it: the picture's pixels,
+                    // plus the crop, as a share of the photo as shown.
+                    const s = imageRenderSize.scale || 1;
+                    const crop = adjustments.crop;
+                    const isPercent = crop?.unit === '%';
+                    const cropX = crop ? (isPercent ? (crop.x / 100) * effectiveImageDimensions.width : crop.x) : 0;
+                    const cropY = crop ? (isPercent ? (crop.y / 100) * effectiveImageDimensions.height : crop.y) : 0;
+                    return {
+                      x: (p.x / s + cropX) / Math.max(1, effectiveImageDimensions.width),
+                      y: (p.y / s + cropY) / Math.max(1, effectiveImageDimensions.height),
+                    };
+                  }}
+                />
+              )}
+              {!skyBrush && skyDrag && !isShowingOriginal && imageRenderSize.width > 0 && (
                 <div
                   title="Drag to place the sky"
                   style={{

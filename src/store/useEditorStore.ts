@@ -8,6 +8,16 @@ import { ToolType } from '../components/panel/right/Masks';
 import { OverlayMode } from '../components/panel/right/CropPanel';
 import { SentPatches, sameJson } from '../utils/backendPayload';
 
+/** Sky Replace's brush, as the canvas needs it. */
+export interface SkyBrush {
+  erase: boolean;
+  /** Diameter, as a share of the photo's long edge. */
+  size: number;
+  /** A finished stroke, as fractions of the photo as shown (turned, flipped
+   *  and straightened, before the crop). */
+  onStroke(points: Array<{ x: number; y: number }>, erase: boolean): void;
+}
+
 export interface InteractivePatch {
   url: string;
   normX: number;
@@ -82,6 +92,9 @@ interface EditorState {
   // Set by Sky Replace while a sky is on the photo: dragging on the canvas
   // moves it. Deltas are fractions of the whole photo's width and height.
   skyDrag: ((dx: number, dy: number, done: boolean) => void) | null;
+  // Set by Sky Replace while its brush is on: dragging on the canvas paints
+  // the sky mask instead (and wins over moving the sky).
+  skyBrush: SkyBrush | null;
   isMaskControlHovered: boolean;
   isGeneratingAiMask: boolean;
   isGeneratingAi: boolean;
@@ -174,6 +187,7 @@ export const useEditorStore = create<EditorState>((set) => ({
   hoveredAiPatchId: null,
   skyMaskOverlay: null,
   skyDrag: null,
+  skyBrush: null,
 
   zoom: 1,
   maskMatteView: false,
