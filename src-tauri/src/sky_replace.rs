@@ -384,12 +384,38 @@ fn old_sky_colour(photo: &RgbImage, alpha: &GrayImage, radius: usize) -> [Vec<f3
     })
 }
 
+/// How a picture held in some other light comes out on screen, both ways,
+/// per pixel: 0…1 values, the shown ones sRGB-encoded.
+///
+/// A RAW is worked on in its own light (`sky_commands::RawLook`), where the
+/// old sky can sit far above the rendering's white point while the new one,
+/// brought into that light, sits below it. Faded into each other there, a
+/// little of the old sky outweighs all of the new one: the fade band shows
+/// the old sky until it nearly ends. Faded as they are shown, the new sky
+/// hands over to the old one evenly, as it does on a JPEG.
+pub trait ShownLight: Sync {
+    fn shown(&self, held: [f32; 3]) -> [f32; 3];
+    fn held(&self, shown: [f32; 3]) -> [f32; 3];
+}
+
 /// Composite `plate` into `photo` wherever `alpha` says sky.
 pub fn replace_sky(
     photo: &DynamicImage,
     alpha: &GrayImage,
     plate: &DynamicImage,
     o: &SkyReplaceOptions,
+) -> anyhow::Result<DynamicImage> {
+    replace_sky_shown(photo, alpha, plate, o, None)
+}
+
+/// `replace_sky` for a photo held in a light other than how it is shown,
+/// so the horizon fade is made as it will be seen.
+pub fn replace_sky_shown(
+    photo: &DynamicImage,
+    alpha: &GrayImage,
+    plate: &DynamicImage,
+    o: &SkyReplaceOptions,
+    light: Option<&dyn ShownLight>,
 ) -> anyhow::Result<DynamicImage> {
     let rgb = photo.to_rgb8();
     let (w, h) = rgb.dimensions();
@@ -556,13 +582,28 @@ pub fn replace_sky(
             for x in 0..w as usize {
                 let i = y * w as usize + x;
                 let a = alpha.as_raw()[i] as f32 / 255.0;
-                for c in 0..3 {
-                    let pixel = rgb.as_raw()[i * 3 + c] as f32 / 255.0;
-                    let mut sky = new_sky.as_raw()[i * 3 + c] as f32 / 255.0;
+                let pixels: [f32; 3] =
+                    std::array::from_fn(|c| rgb.as_raw()[i * 3 + c] as f32 / 255.0);
+                let mut skies: [f32; 3] = std::array::from_fn(|c| {
+                    let sky = new_sky.as_raw()[i * 3 + c] as f32 / 255.0;
                     if grain > 0.0 {
-                        sky = (sky + grain * hash_noise(x as u32, y as u32, c as u32))
-                            .clamp(0.0, 1.0);
+                        (sky + grain * hash_noise(x as u32, y as u32, c as u32)).clamp(0.0, 1.0)
+                    } else {
+                        sky
                     }
+                });
+                // fade < 1 keeps some of the photo's own sky here
+                if fade < 1.0 {
+                    skies = match light {
+                        Some(light) if fade > 0.0 && a > 0.0 => {
+                            let (s, p) = (light.shown(skies), light.shown(pixels));
+                            light.held(std::array::from_fn(|c| s[c] * fade + p[c] * (1.0 - fade)))
+                        }
+                        _ => std::array::from_fn(|c| skies[c] * fade + pixels[c] * (1.0 - fade)),
+                    };
+                }
+                for c in 0..3 {
+                    let (pixel, sky) = (pixels[c], skies[c]);
                     // Un-mix: take the old sky back out of this pixel.
                     let old_c = old[c][i];
                     let fg = if a < 0.999 && old_c >= 0.0 {
@@ -572,8 +613,6 @@ pub fn replace_sky(
                     };
                     let lit = (fg * (1.0 + relight * (ratio[c] - 1.0))).clamp(0.0, 1.0);
                     let hazed = lit * (1.0 - haze) + haze_colour[c] * haze;
-                    // fade < 1 keeps some of the photo's own sky here
-                    let sky = sky * fade + pixel * (1.0 - fade);
                     let value = a * sky + (1.0 - a) * hazed;
                     row[x * 3 + c] = (value.clamp(0.0, 1.0) * 255.0).round() as u8;
                 }
@@ -1091,6 +1130,56 @@ mod tests {
             at_seam[0] > 190 && at_seam[0] < 250,
             "seam is not a blend: {at_seam:?}"
         );
+    }
+
+    /// A RAW-like light: shown four times brighter than held, clipped to
+    /// white, so anything held above 0.25 is shown white.
+    struct ClippedLight;
+    impl ShownLight for ClippedLight {
+        fn shown(&self, held: [f32; 3]) -> [f32; 3] {
+            held.map(|v| (v * 4.0).min(1.0))
+        }
+        fn held(&self, shown: [f32; 3]) -> [f32; 3] {
+            shown.map(|v| v / 4.0)
+        }
+    }
+
+    /// Canyonlands (_DSC6705.NEF): the old sky is held far above the
+    /// rendering's white point and the plate below it. Faded as held, the
+    /// middle of the band was still all old sky once shown; faded as shown,
+    /// it is half and half.
+    #[test]
+    fn horizon_fade_on_a_raw_is_even_as_shown() {
+        let size = (120, 200);
+        // Old sky held at 0.9 (shown white), plate at 0.1 (shown 0.4).
+        let base = photo([230, 230, 230], [10, 10, 10], 150, size);
+        let plate = plain_plate([26, 26, 26]);
+        let opts = SkyReplaceOptions {
+            relight: 0.0,
+            haze: 0.0,
+            match_grain: false,
+            white_balance_match: 0.0,
+            horizon_fade: 0.2,
+            ..Default::default()
+        };
+        let shown_at = |light: Option<&dyn ShownLight>, y| {
+            let out = replace_sky_shown(&base, &matte(150, size), &plate, &opts, light)
+                .unwrap()
+                .to_rgb8();
+            ClippedLight.shown(out.get_pixel(60, y).0.map(|v| v as f32 / 255.0))[0]
+        };
+        // The horizon is row 149 and the band 40 rows: row 129 is midway.
+        let even = 0.5 * (26.0 * 4.0 / 255.0) + 0.5;
+        let held = shown_at(None, 129);
+        assert!(held > 0.99, "faded as held, midway shows {held}");
+        let shown = shown_at(Some(&ClippedLight), 129);
+        assert!(
+            (shown - even).abs() < 0.03,
+            "faded as shown, midway shows {shown}, wanted {even:.3}"
+        );
+        // Above the band it is all plate, and on the horizon all photo.
+        assert!((shown_at(Some(&ClippedLight), 60) - 104.0 / 255.0).abs() < 0.01);
+        assert!(shown_at(Some(&ClippedLight), 149) > 0.99);
     }
 
     #[test]

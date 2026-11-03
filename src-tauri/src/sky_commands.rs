@@ -24,7 +24,7 @@
 
 use crate::app_state::AppState;
 use crate::model_registry::{TaskType, mask_subtype_filter, resolve_and_prepare};
-use crate::sky_replace::{SkyReplaceOptions, replace_sky};
+use crate::sky_replace::{ShownLight, SkyReplaceOptions, replace_sky_shown};
 use base64::{Engine as _, engine::general_purpose};
 use image::{DynamicImage, GrayImage, ImageFormat, Rgb, RgbImage, imageops};
 use serde::{Deserialize, Serialize};
@@ -543,11 +543,12 @@ pub async fn preview_sky_replacement(
             Some(look) => plate_in_raw_light(&plate_image, look),
             None => (*plate_image).clone(),
         };
-        let result = replace_sky(
+        let result = replace_sky_shown(
             &DynamicImage::ImageRgb8((*base).clone()),
             &alpha,
             &plate_image,
             &options,
+            look.as_deref().map(|l| l as &dyn ShownLight),
         )
         .map_err(|e| e.to_string())?
         .to_rgb8();
@@ -632,11 +633,12 @@ async fn sky_patch(
             Some(look) => plate_in_raw_light(&plate_image, look),
             None => (*plate_image).clone(),
         };
-        let result = replace_sky(
+        let result = replace_sky_shown(
             &DynamicImage::ImageRgb8((*base).clone()),
             &alpha,
             &plate_image,
             &options,
+            look.as_deref().map(|l| l as &dyn ShownLight),
         )
         .map_err(|e| e.to_string())?
         .to_rgb8();
@@ -718,12 +720,20 @@ fn session_inputs(
 /// Pairs of (display linear luminance, the tool's linear luminance).
 pub struct RawLook(Vec<(f32, f32)>);
 
-fn srgb_to_linear(v: u8) -> f32 {
-    let v = v as f32 / 255.0;
+fn srgb_to_linear(v: f32) -> f32 {
     if v <= 0.04045 {
         v / 12.92
     } else {
         ((v + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn linear_to_srgb(v: f32) -> f32 {
+    let v = v.clamp(0.0, 1.0);
+    if v <= 0.0031308 {
+        v * 12.92
+    } else {
+        1.055 * v.powf(1.0 / 2.4) - 0.055
     }
 }
 
@@ -747,7 +757,7 @@ impl RawLook {
         let shown_l = sorted(
             shown
                 .pixels()
-                .map(|p| luma(p.0.map(srgb_to_linear)))
+                .map(|p| luma(p.0.map(|v| srgb_to_linear(v as f32 / 255.0))))
                 .collect(),
         );
         let at = |v: &[f32], q: f32| v[((v.len() - 1) as f32 * q).round() as usize];
@@ -764,27 +774,9 @@ impl RawLook {
 
     /// A picture in the tool's light, as the photo's rendering shows it.
     pub fn to_display(&self, stored: &RgbImage) -> RgbImage {
-        let encode = |v: f32| {
-            let v = v.clamp(0.0, 1.0);
-            let e = if v <= 0.0031308 {
-                v * 12.92
-            } else {
-                1.055 * v.powf(1.0 / 2.4) - 0.055
-            };
-            (e * 255.0).round() as u8
-        };
         RgbImage::from_fn(stored.width(), stored.height(), |x, y| {
-            let lin = stored
-                .get_pixel(x, y)
-                .0
-                .map(|v| (v as f32 / 255.0).powf(STORED_GAMMA));
-            let l = luma(lin);
-            let gain = if l > 1e-7 {
-                self.display_for(l) / l
-            } else {
-                0.0
-            };
-            Rgb(lin.map(|v| encode(v * gain)))
+            let held = stored.get_pixel(x, y).0.map(|v| v as f32 / 255.0);
+            Rgb(self.shown(held).map(|v| (v * 255.0).round() as u8))
         })
     }
 
@@ -826,6 +818,28 @@ impl RawLook {
     }
 }
 
+/// Each pixel scaled so its brightness lands where the rendering puts that
+/// brightness, its colour kept. What is shown is clipped to white.
+impl ShownLight for RawLook {
+    fn shown(&self, held: [f32; 3]) -> [f32; 3] {
+        let lin = held.map(|v| v.max(0.0).powf(STORED_GAMMA));
+        let l = luma(lin);
+        let gain = if l > 1e-7 {
+            self.display_for(l) / l
+        } else {
+            0.0
+        };
+        lin.map(|v| linear_to_srgb(v * gain))
+    }
+
+    fn held(&self, shown: [f32; 3]) -> [f32; 3] {
+        let lin = shown.map(srgb_to_linear);
+        let l = luma(lin);
+        let gain = if l > 1e-6 { self.base_for(l) / l } else { 0.0 };
+        lin.map(|v| (v * gain).clamp(0.0, 1.0).powf(1.0 / STORED_GAMMA))
+    }
+}
+
 /// A sky plate is an ordinary display picture; a RAW is worked on in its
 /// own light. Bring the plate into that light so that, rendered, it looks as
 /// it does on its own (as it would pasted into a JPEG): each pixel scaled so
@@ -834,15 +848,8 @@ impl RawLook {
 pub fn plate_in_raw_light(plate: &DynamicImage, look: &RawLook) -> DynamicImage {
     let rgb = plate.to_rgb8();
     let converted = RgbImage::from_fn(rgb.width(), rgb.height(), |x, y| {
-        let lin = rgb.get_pixel(x, y).0.map(srgb_to_linear);
-        let shown = luma(lin);
-        let gain = if shown > 1e-6 {
-            look.base_for(shown) / shown
-        } else {
-            0.0
-        };
-        Rgb(lin
-            .map(|v| ((v * gain).clamp(0.0, 1.0).powf(1.0 / STORED_GAMMA) * 255.0).round() as u8))
+        let shown = rgb.get_pixel(x, y).0.map(|v| v as f32 / 255.0);
+        Rgb(look.held(shown).map(|v| (v * 255.0).round() as u8))
     });
     DynamicImage::ImageRgb8(converted)
 }
