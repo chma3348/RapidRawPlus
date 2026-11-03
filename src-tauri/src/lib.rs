@@ -32,6 +32,7 @@ mod exif_processing;
 pub mod expansion;
 mod export_processing;
 mod file_management;
+#[doc(hidden)]
 pub mod fill_harness;
 pub mod fill_store;
 pub mod finder_tags;
