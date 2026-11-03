@@ -91,14 +91,39 @@ pub async fn foreground_mask(
 }
 
 /// The Masks panel's Subject with a box drawn from `start` to `end`, in the
-/// photo's pixels.
+/// photo's pixels, then honed by `clicks` (photo pixels; `true` includes, as
+/// a click does, `false` excludes, as a Shift-click does).
 pub async fn subject_mask(
     app: &tauri::AppHandle,
     path: &str,
     edits: Value,
     start: (f64, f64),
     end: (f64, f64),
+    clicks: &[(f64, f64, bool)],
 ) -> Result<Value, String> {
+    use crate::subject_selection::SubjectPoint;
+    // As the panel sends a box with clicks: its corners (labels 2 and 3),
+    // then each click.
+    let points = (!clicks.is_empty()).then(|| {
+        let mut points = vec![
+            SubjectPoint {
+                x: start.0,
+                y: start.1,
+                label: 2,
+            },
+            SubjectPoint {
+                x: end.0,
+                y: end.1,
+                label: 3,
+            },
+        ];
+        points.extend(clicks.iter().map(|&(x, y, include)| SubjectPoint {
+            x,
+            y,
+            label: include as u8,
+        }));
+        points
+    });
     let p = crate::ai_commands::generate_ai_subject_mask(
         edits,
         path.to_string(),
@@ -108,7 +133,7 @@ pub async fn subject_mask(
         false,
         false,
         0,
-        None,
+        points,
         None,
         None,
         app.state::<AppState>(),
@@ -116,6 +141,50 @@ pub async fn subject_mask(
     )
     .await?;
     serde_json::to_value(p).map_err(|e| e.to_string())
+}
+
+/// Mask number `index` of `edits` exactly as renders place it, over the
+/// whole photo as shown (uncropped, at its own pixels).
+pub fn mask_bitmap(
+    app: &tauri::AppHandle,
+    edits: &Value,
+    index: usize,
+) -> Result<image::GrayImage, String> {
+    use crate::mask_generation::{MaskDefinition, Orientation};
+    use image::GenericImageView;
+    let state = app.state::<AppState>();
+    let masks: Vec<MaskDefinition> =
+        serde_json::from_value(edits["masks"].clone()).map_err(|e| e.to_string())?;
+    let mask = masks.get(index).ok_or("No such mask")?;
+    let photo = Orientation::of_photo(edits);
+    let (w, h) = {
+        let image = state.original_image.lock().unwrap();
+        image
+            .as_ref()
+            .ok_or("No photo open")?
+            .pixels()?
+            .dimensions()
+    };
+    let (w, h) = if photo.orientation_steps % 2 == 1 {
+        (h, w)
+    } else {
+        (w, h)
+    };
+    let warped = crate::mask_generation::resolve_warped_image_for_masks(
+        &state,
+        edits,
+        std::slice::from_ref(mask),
+    );
+    crate::mask_generation::generate_photo_mask_bitmap(
+        mask,
+        w,
+        h,
+        1.0,
+        (0.0, 0.0),
+        warped.as_deref(),
+        photo,
+    )
+    .ok_or_else(|| "The mask is hidden or empty".to_string())
 }
 
 /// Sky Replace: detect, hone the sky with the panel's brush `strokes` (if

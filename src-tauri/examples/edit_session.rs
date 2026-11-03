@@ -6,7 +6,9 @@
 //!
 //!   edit_session info PHOTO OUT_DIR            neutral.jpg, size.json, sky.json, subject.json
 //!   edit_session render PHOTO EDITS.json OUT.jpg [MAX] [X,Y,W,H]
-//!   edit_session subject PHOTO X0,Y0,X1,Y1 OUT.json   (a box, in photo pixels)
+//!   edit_session subject PHOTO X0,Y0,X1,Y1 OUT.json [X,Y,+|-;...]
+//!                                   (a box, then include/exclude clicks; photo pixels)
+//!   edit_session mask PHOTO EDITS.json INDEX OUT.png   (a mask as renders place it)
 //!   edit_session sky PHOTO PLATE OPTIONS.json OUT.json [STROKES.json]   (also OUT.json.mask.png)
 //!
 //! Runs in a private home (models and transforms linked or copied in), so
@@ -182,6 +184,20 @@ fn main() -> Result<()> {
                 .map(|s| s.parse())
                 .collect::<Result<_, _>>()?;
             ensure!(v.len() == 4, "X0,Y0,X1,Y1");
+            let clicks = args
+                .get(4)
+                .map(|c| -> Result<Vec<(f64, f64, bool)>> {
+                    c.split(';')
+                        .filter(|s| !s.is_empty())
+                        .map(|s| {
+                            let f: Vec<&str> = s.split(',').collect();
+                            ensure!(f.len() == 3, "X,Y,+|-");
+                            Ok((f[0].parse()?, f[1].parse()?, f[2] == "+"))
+                        })
+                        .collect()
+                })
+                .transpose()?
+                .unwrap_or_default();
             edit_harness::open(&handle, &photo).map_err(anyhow::Error::msg)?;
             let p = tauri::async_runtime::block_on(edit_harness::subject_mask(
                 &handle,
@@ -189,9 +205,17 @@ fn main() -> Result<()> {
                 neutral,
                 (v[0], v[1]),
                 (v[2], v[3]),
+                &clicks,
             ))
             .map_err(anyhow::Error::msg)?;
             std::fs::write(&args[3], p.to_string())?;
+        }
+        "mask" => {
+            let edits: Value = serde_json::from_str(&std::fs::read_to_string(&args[2])?)?;
+            edit_harness::open(&handle, &photo).map_err(anyhow::Error::msg)?;
+            edit_harness::mask_bitmap(&handle, &edits, args[3].parse()?)
+                .map_err(anyhow::Error::msg)?
+                .save(&args[4])?;
         }
         "sky" => {
             let options: Value = serde_json::from_str(&std::fs::read_to_string(&args[3])?)?;
