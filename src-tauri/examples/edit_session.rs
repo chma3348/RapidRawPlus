@@ -9,6 +9,7 @@
 //!   edit_session subject PHOTO X0,Y0,X1,Y1 OUT.json [X,Y,+|-;...]
 //!                                   (a box, then include/exclude clicks; photo pixels)
 //!   edit_session mask PHOTO EDITS.json INDEX OUT.png   (a mask as renders place it)
+//!   edit_session snap PHOTO EDITS.json OUT.json   (saved Subject mattes refitted to edges)
 //!   edit_session sky PHOTO PLATE OPTIONS.json OUT.json [STROKES.json]   (also OUT.json.mask.png)
 //!
 //! Runs in a private home (models and transforms linked or copied in), so
@@ -234,6 +235,14 @@ fn main() -> Result<()> {
             let png = base64::engine::general_purpose::STANDARD
                 .decode(mask.split_once(',').map_or(mask.as_str(), |(_, b)| b))?;
             std::fs::write(format!("{}.mask.png", args[4]), png)?;
+        }
+        "snap" => {
+            let mut edits: Value = serde_json::from_str(&std::fs::read_to_string(&args[2])?)?;
+            edit_harness::open(&handle, &photo).map_err(anyhow::Error::msg)?;
+            let n = edit_harness::snap_saved_subjects(&handle, &mut edits)
+                .map_err(anyhow::Error::msg)?;
+            std::fs::write(&args[3], edits.to_string())?;
+            println!("{n}");
         }
         other => anyhow::bail!("unknown command {other}"),
     }

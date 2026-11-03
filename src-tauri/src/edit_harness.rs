@@ -235,3 +235,53 @@ pub async fn sky_replace(
     .await?;
     Ok((patch, mask))
 }
+
+/// Every Subject matte saved in `edits`, re-fitted to the photo's edges as
+/// new Subject masks now are (`subject_selection::snap_saved_matte`). Returns
+/// how many distinct mattes were refitted.
+pub fn snap_saved_subjects(app: &tauri::AppHandle, edits: &mut Value) -> Result<usize, String> {
+    use base64::Engine as _;
+    let state = app.state::<AppState>();
+    let neutral = serde_json::json!({"processVersion": 3, "toneMapper": "resolve"});
+    let guide = crate::get_cached_full_warped_image(&state, &neutral)?.to_rgb8();
+    let engine = base64::engine::general_purpose::STANDARD;
+    let mut done: std::collections::HashMap<String, String> = Default::default();
+    let masks = edits["masks"].as_array_mut().ok_or("No masks")?;
+    for part in masks
+        .iter_mut()
+        .filter_map(|m| m["subMasks"].as_array_mut())
+        .flatten()
+        .filter(|p| p["type"] == "ai-subject")
+    {
+        let Some(old) = part["parameters"]["maskDataBase64"]
+            .as_str()
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        if !done.contains_key(&old) {
+            let bytes = engine
+                .decode(old.split_once(',').map_or(old.as_str(), |(_, b)| b))
+                .map_err(|e| e.to_string())?;
+            let mut matte = image::load_from_memory(&bytes)
+                .map_err(|e| e.to_string())?
+                .to_luma8();
+            if matte.dimensions() != guide.dimensions() {
+                return Err(format!(
+                    "Matte {:?} doesn't match the photo {:?}",
+                    matte.dimensions(),
+                    guide.dimensions()
+                ));
+            }
+            crate::subject_selection::snap_saved_matte(&mut matte, &guide);
+            let mut png = std::io::Cursor::new(Vec::new());
+            matte
+                .write_to(&mut png, image::ImageFormat::Png)
+                .map_err(|e| e.to_string())?;
+            let url = format!("data:image/png;base64,{}", engine.encode(png.get_ref()));
+            done.insert(old.clone(), url);
+        }
+        part["parameters"]["maskDataBase64"] = Value::String(done[&old].clone());
+    }
+    Ok(done.len())
+}

@@ -806,7 +806,187 @@ fn select_grown(
     }
     clean_islands(&mut logits, side, points, scale);
     stabilize_interiors(&mut logits, side);
-    Ok(render_matte(&logits, side, &embeddings.guide))
+    let mut matte = render_matte(&logits, side, &embeddings.guide);
+    snap_to_edges(&mut matte, &embeddings.guide, w.max(h) as f32 / side as f32);
+    Ok(matte)
+}
+
+/// `snap_to_edges` for a Subject matte made before it existed (saved in a
+/// sidecar), with SAM's usual 256-cell grid. `guide` is the photo as the
+/// Subject tool sees it, the same size as the matte.
+pub fn snap_saved_matte(matte: &mut GrayImage, guide: &RgbImage) {
+    snap_to_edges(
+        matte,
+        guide,
+        matte.width().max(matte.height()) as f32 / 256.0,
+    );
+}
+
+/// SAM places its boundary on a grid of `cell`-pixel cells (15–25 px on a
+/// full-size photo), and `render_matte` aligns it to the photo only on a copy
+/// of at most 1024 px. So an in-focus edge is left as a soft, stepped band
+/// tens of pixels wide that doesn't sit on the outline, and a mask and its
+/// inverse both half-apply across it. Re-fit that band to the photo at full
+/// resolution with a colour guided filter: within each small window the
+/// matte becomes a linear function of the pixel colours, which puts a sharp
+/// edge exactly where the colours change, keeps hair and defocus partial,
+/// and leaves flat areas flat. Only tiles along the band are computed.
+fn snap_to_edges(matte: &mut GrayImage, guide: &RgbImage, cell: f32) {
+    let (w, h) = (matte.width() as usize, matte.height() as usize);
+    // The band: within a cell of anything SAM was unsure about.
+    let radius = cell.round().max(2.0) as usize;
+    let tile = 256usize;
+    let (tw, th) = (w.div_ceil(tile), h.div_ceil(tile));
+    let unsure = |x: usize, y: usize| {
+        let a = matte.get_pixel(x as u32, y as u32)[0];
+        a > 5 && a < 250
+    };
+    let tiles: Vec<(usize, usize)> = (0..tw * th)
+        .into_par_iter()
+        .map(|i| (i % tw, i / tw))
+        .filter(|&(tx, ty)| {
+            let (x0, y0) = (tx * tile, ty * tile);
+            (y0..(y0 + tile).min(h)).any(|y| (x0..(x0 + tile).min(w)).any(|x| unsure(x, y)))
+        })
+        .collect();
+    let fitted: Vec<((usize, usize), Vec<u8>)> = tiles
+        .into_par_iter()
+        .map(|(tx, ty)| {
+            // The tile, with room around it for the windows and the band.
+            let pad = radius * 3;
+            let (x0, y0) = (
+                (tx * tile).saturating_sub(pad),
+                (ty * tile).saturating_sub(pad),
+            );
+            let (x1, y1) = (
+                ((tx + 1) * tile + pad).min(w),
+                ((ty + 1) * tile + pad).min(h),
+            );
+            let (rw, rh) = (x1 - x0, y1 - y0);
+            let mut p = Vec::with_capacity(rw * rh);
+            let mut rgb: [Vec<f32>; 3] = std::array::from_fn(|_| Vec::with_capacity(rw * rh));
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    p.push(matte.get_pixel(x as u32, y as u32)[0] as f32 / 255.0);
+                    let c = guide.get_pixel(x as u32, y as u32);
+                    for k in 0..3 {
+                        rgb[k].push(c[k] as f32 / 255.0);
+                    }
+                }
+            }
+            // The fit leaves each region of one colour at the share of it
+            // SAM selected (an edge drawn 8 px off covers part of the
+            // background). Pushing gently away from one half and refitting
+            // settles a region mostly in the selection fully in, and one
+            // mostly out fully out; a true half-cover (fine hair) stays.
+            let mut q = guided_filter(&p, &rgb, rw, rh, radius, GUIDED_EPS);
+            for _ in 0..SETTLE_ROUNDS {
+                q.iter_mut()
+                    .for_each(|v| *v = (0.5 + (*v - 0.5) * SETTLE_GAIN).clamp(0.0, 1.0));
+                q = guided_filter(&q, &rgb, rw, rh, radius / 2, GUIDED_EPS);
+            }
+            // Near SAM's uncertainty, the fit; well inside either side, the
+            // model (a flat area must not pick up the fit's small ripple).
+            let near: Vec<f32> = p
+                .iter()
+                .map(|a| (*a > 0.02 && *a < 0.98) as u8 as f32)
+                .collect();
+            let near = box_mean(&near, rw, rh, radius);
+            let (cx0, cy0) = (tx * tile, ty * tile);
+            let (cx1, cy1) = ((cx0 + tile).min(w), (cy0 + tile).min(h));
+            let mut out = Vec::with_capacity((cx1 - cx0) * (cy1 - cy0));
+            for y in cy0..cy1 {
+                for x in cx0..cx1 {
+                    let i = (y - y0) * rw + (x - x0);
+                    let weight = (near[i] * 4.0).min(1.0);
+                    let alpha = p[i] + (q[i].clamp(0.0, 1.0) - p[i]) * weight;
+                    out.push((alpha * 255.0).round() as u8);
+                }
+            }
+            ((tx, ty), out)
+        })
+        .collect();
+    for ((tx, ty), out) in fitted {
+        let (cx0, cy0) = (tx * tile, ty * tile);
+        let cw = (cx0 + tile).min(w) - cx0;
+        for (i, v) in out.into_iter().enumerate() {
+            matte.put_pixel(
+                (cx0 + i % cw) as u32,
+                (cy0 + i / cw) as u32,
+                image::Luma([v]),
+            );
+        }
+    }
+}
+
+/// How closely the full-resolution fit follows colour (0–1 RGB variance):
+/// small enough that a real edge is sharp, large enough that noise and fine
+/// texture inside the subject are not mistaken for edges.
+const GUIDED_EPS: f32 = 2e-4;
+/// Rounds and strength of the push that settles part-selected regions.
+const SETTLE_ROUNDS: usize = 3;
+const SETTLE_GAIN: f32 = 1.6;
+
+/// He et al.'s guided filter with a colour guide: `p` re-expressed, window
+/// by window, as a linear function of the guide's colours.
+fn guided_filter(
+    p: &[f32],
+    rgb: &[Vec<f32>; 3],
+    w: usize,
+    h: usize,
+    radius: usize,
+    eps: f32,
+) -> Vec<f32> {
+    use nalgebra::{Matrix3, Vector3};
+    let radius = radius.max(1);
+    let mean = |v: &[f32]| box_mean(v, w, h, radius);
+    let product = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(a, b)| a * b).collect::<Vec<_>>();
+    let mp = mean(p);
+    let mc: [Vec<f32>; 3] = std::array::from_fn(|c| mean(&rgb[c]));
+    let cov_p: [Vec<f32>; 3] = std::array::from_fn(|c| {
+        mean(&product(&rgb[c], p))
+            .iter()
+            .zip(mc[c].iter().zip(&mp))
+            .map(|(v, (a, b))| v - a * b)
+            .collect()
+    });
+    let pairs = [(0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2)];
+    let var: Vec<Vec<f32>> = pairs
+        .iter()
+        .map(|&(a, b)| {
+            mean(&product(&rgb[a], &rgb[b]))
+                .iter()
+                .zip(mc[a].iter().zip(&mc[b]))
+                .map(|(v, (x, y))| v - x * y)
+                .collect()
+        })
+        .collect();
+    let mut coefficients: [Vec<f32>; 4] = std::array::from_fn(|_| vec![0.0; w * h]);
+    for i in 0..w * h {
+        let sigma = Matrix3::new(
+            var[0][i] + eps,
+            var[1][i],
+            var[2][i],
+            var[1][i],
+            var[3][i] + eps,
+            var[4][i],
+            var[2][i],
+            var[4][i],
+            var[5][i] + eps,
+        );
+        let a = sigma
+            .cholesky()
+            .map(|m| m.solve(&Vector3::new(cov_p[0][i], cov_p[1][i], cov_p[2][i])))
+            .unwrap_or_else(Vector3::zeros);
+        coefficients[0][i] = a[0];
+        coefficients[1][i] = a[1];
+        coefficients[2][i] = a[2];
+        coefficients[3][i] = mp[i] - (0..3).map(|c| a[c] * mc[c][i]).sum::<f32>();
+    }
+    let averaged: [Vec<f32>; 4] = std::array::from_fn(|k| mean(&coefficients[k]));
+    (0..w * h)
+        .map(|i| averaged[3][i] + (0..3).map(|c| averaged[c][i] * rgb[c][i]).sum::<f32>())
+        .collect()
 }
 
 /// Self-feedback must not silently replace a good object with a different one.
@@ -1005,6 +1185,50 @@ fn confine_to_paint(mask: &mut GrayImage, paint: &GrayImage, excluded: &GrayImag
 mod tests {
     use super::*;
     use image::Luma;
+
+    /// A sharp-edged subject whose model matte is SAM-like: a soft band
+    /// 30 px wide, stepped on a 16 px grid and shifted 8 px off the outline.
+    /// After snapping, the matte must sit on the outline with a narrow edge,
+    /// the interior and the far background untouched.
+    #[test]
+    fn snap_to_edges_puts_a_blocky_offset_edge_on_the_outline() {
+        let (w, h) = (640u32, 480u32);
+        let (cx, cy, r) = (320.0f32, 240.0f32, 150.0f32);
+        let edge = |x: u32, y: u32| (x as f32 - cx).hypot(y as f32 - cy) - r;
+        let guide = RgbImage::from_fn(w, h, |x, y| {
+            if edge(x, y) < 0.0 {
+                image::Rgb([190, 140, 110])
+            } else {
+                image::Rgb([220, 170, 40])
+            }
+        });
+        let mut matte = GrayImage::from_fn(w, h, |x, y| {
+            // Stepped and offset, as SAM's coarse grid leaves it.
+            let (bx, by) = ((x / 16) * 16 + 8, (y / 16) * 16 + 8);
+            let d = edge(bx, by) - 8.0;
+            Luma([(255.0 / (1.0 + (d / 6.0).exp())).round() as u8])
+        });
+        snap_to_edges(&mut matte, &guide, 16.0);
+        let at = |x: u32, y: u32| matte.get_pixel(x, y)[0];
+        for angle in (0..360).step_by(15) {
+            let (s, c) = (angle as f32).to_radians().sin_cos();
+            let point = |d: f32| ((cx + c * (r + d)) as u32, (cy + s * (r + d)) as u32);
+            let (ix, iy) = point(-3.0);
+            let (ox, oy) = point(3.0);
+            assert!(
+                at(ix, iy) > 220,
+                "inside the edge at {angle}°: {}",
+                at(ix, iy)
+            );
+            assert!(
+                at(ox, oy) < 35,
+                "outside the edge at {angle}°: {}",
+                at(ox, oy)
+            );
+        }
+        assert_eq!(at(cx as u32, cy as u32), 255, "interior");
+        assert_eq!(at(5, 5), 0, "far background");
+    }
     #[test]
     fn self_feedback_cannot_switch_to_a_larger_unrelated_object() {
         let p = box_or_point((0.0, 0.0), (0.0, 0.0));
