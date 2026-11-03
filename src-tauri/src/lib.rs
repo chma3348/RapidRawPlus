@@ -24,13 +24,14 @@ pub mod convert;
 pub mod cull_preview;
 mod culling;
 mod denoising;
+#[doc(hidden)]
+pub mod edit_harness;
 pub mod engine_models;
 pub mod enhancement;
 mod exif_processing;
 pub mod expansion;
 mod export_processing;
 mod file_management;
-#[doc(hidden)]
 pub mod fill_harness;
 pub mod fill_store;
 pub mod finder_tags;
