@@ -227,31 +227,56 @@ pub fn adjust_edges(alpha: &GrayImage, shift: f32, feather: f32) -> GrayImage {
     }
     let (w, h) = alpha.dimensions();
     let (wu, hu) = (w as usize, h as usize);
-    // A blur turns the hard matte into a ramp whose 0.5 level is the
-    // boundary; offsetting the level moves the boundary, and rescaling the
-    // ramp sets how wide the hand-over is.
-    let radius = (feather.max(shift.abs()).max(1.0)).round() as usize;
+    // A blur turns the matte into a ramp from which each pixel's distance
+    // to the boundary can be read back. The boundary is moved by that
+    // distance plus `shift` and redrawn as the ramp a feather-sized blur
+    // would give, so with no shift the result is exactly that blur.
+    let hand_over = if feather >= 0.5 {
+        (2 * (feather.round() as usize) + 1) as f32
+    } else {
+        1.0
+    };
+    // The ramp has to reach past the moved boundary and its hand-over:
+    // shorter, and the sky's interior never gets back to full coverage —
+    // some of the old sky then stays mixed into all of the new one.
+    let radius = ((shift.abs() + hand_over - 1.0) / 2.0).ceil().max(1.0) as usize;
+    let reach = (2 * radius + 1) as f32;
     let values: Vec<f32> = alpha.pixels().map(|p| p[0] as f32 / 255.0).collect();
     let blurred = box_mean(&box_mean(&values, wu, hu, radius), wu, hu, radius);
-    // Each unit of blurred value is roughly `radius` pixels of distance.
-    let slope = if feather >= 0.5 {
-        radius as f32 / feather
-    } else {
-        6.0
-    };
-    let offset = shift / radius.max(1) as f32 * 0.5;
     GrayImage::from_raw(
         w,
         h,
         blurred
             .iter()
-            .map(|v| {
-                let t = ((v - 0.5 + offset) * slope + 0.5).clamp(0.0, 1.0);
+            .map(|&v| {
+                let t = step_ramp(ramp_distance(v, reach) + shift, hand_over);
                 (t * 255.0).round() as u8
             })
             .collect(),
     )
     .expect("edge-adjusted matte")
+}
+
+/// A straight edge after two box means of width `reach` (a triangle blur):
+/// the coverage at `d` pixels into the sky, 0.5 on the edge and full from
+/// `reach` in.
+fn step_ramp(d: f32, reach: f32) -> f32 {
+    let d = d.clamp(-reach, reach);
+    let s = 2.0 * reach * reach;
+    if d >= 0.0 {
+        1.0 - (reach - d).powi(2) / s
+    } else {
+        (reach + d).powi(2) / s
+    }
+}
+
+/// The inverse of `step_ramp`: how far into the sky a coverage puts a pixel.
+fn ramp_distance(v: f32, reach: f32) -> f32 {
+    if v >= 0.5 {
+        reach * (1.0 - (2.0 * (1.0 - v)).max(0.0).sqrt())
+    } else {
+        reach * ((2.0 * v).max(0.0).sqrt() - 1.0)
+    }
 }
 
 /// Per-channel gains that move `plate_mean` toward `scene_mean` in colour
@@ -766,6 +791,91 @@ mod tests {
             shrunk + 200 < base,
             "sky did not shrink: {base} -> {shrunk}"
         );
+    }
+
+    /// Pulling the edge back must not pull the sky's interior down with it:
+    /// auto-match's −0.0008 shift and 0.0015 feather on a 6048-px frame
+    /// left all of the sky at 186 of 255.
+    #[test]
+    fn shifting_the_edge_keeps_the_sky_interior_full() {
+        let size = (600u32, 400u32);
+        let hard = matte(200, size);
+        for (shift, feather) in [(-4.8, 9.1), (4.8, 9.1), (-4.8, 0.0), (-12.0, 2.0)] {
+            let moved = adjust_edges(&hard, shift, feather);
+            assert_eq!(
+                moved.get_pixel(300, 100)[0],
+                255,
+                "sky interior not full (shift {shift}, feather {feather})"
+            );
+            assert_eq!(
+                moved.get_pixel(300, 300)[0],
+                0,
+                "ground interior not clear (shift {shift}, feather {feather})"
+            );
+            // The boundary (the last row still over half) moved by the shift.
+            let edge = (0..400)
+                .rfind(|&y| moved.get_pixel(300, y)[0] > 127)
+                .unwrap() as f32;
+            assert!(
+                (edge + 1.0 - (200.0 + shift)).abs() <= 1.0,
+                "boundary at {edge}, wanted {} (shift {shift}, feather {feather})",
+                200.0 + shift - 1.0
+            );
+        }
+        // With no shift, the feather is the plain blur it always was.
+        let soft = adjust_edges(&hard, 0.0, 6.0);
+        let values: Vec<f32> = hard.pixels().map(|p| p[0] as f32 / 255.0).collect();
+        let (w, h) = (size.0 as usize, size.1 as usize);
+        let blur = box_mean(&box_mean(&values, w, h, 6), w, h, 6);
+        for y in 180..220 {
+            let want = blur[y * w + 300] * 255.0;
+            let got = soft.get_pixel(300, y as u32)[0] as f32;
+            assert!((got - want).abs() <= 1.0, "row {y}: {got} vs {want:.1}");
+        }
+    }
+
+    /// A RAW's sky can sit far above the render's white point, so a plate
+    /// brought into its light is much darker than the sky it replaces. Any
+    /// coverage short of full then shows the old sky's clouds through the
+    /// new one, as on Canyonlands (_DSC6705): the same dark wedge and
+    /// clouds whichever plate was chosen.
+    #[test]
+    fn a_bright_old_sky_does_not_show_through_a_darker_plate() {
+        let size = (600u32, 400u32);
+        let mut rgb = photo([250, 250, 250], [40, 30, 25], 200, size).to_rgb8();
+        // A darker patch of the old sky, like the photo's blue wedge.
+        for y in 0..60 {
+            for x in 0..120 {
+                rgb.put_pixel(x, y, Rgb([90, 120, 160]));
+            }
+        }
+        let opts = SkyReplaceOptions {
+            relight: 0.0,
+            haze: 0.0,
+            match_grain: false,
+            white_balance_match: 0.0,
+            horizon_fade: 0.0,
+            // Auto-match's edge settings, scaled to this frame.
+            edge_shift: -0.008,
+            edge_feather: 0.015,
+            ..Default::default()
+        };
+        let plate = [20, 30, 60];
+        let out = replace_sky(
+            &DynamicImage::ImageRgb8(rgb),
+            &matte(200, size),
+            &plain_plate(plate),
+            &opts,
+        )
+        .unwrap()
+        .to_rgb8();
+        for (x, y) in [(30, 20), (300, 100), (500, 150)] {
+            assert_eq!(
+                out.get_pixel(x, y).0,
+                plate,
+                "old sky shows through at ({x}, {y})"
+            );
+        }
     }
 
     #[test]
