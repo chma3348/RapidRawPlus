@@ -644,7 +644,9 @@
         "startOver": "Start over"
       },
       "actions": {
+        "add": "Add",
         "addNewComponent": "Add New Component",
+        "addToMask": "Add to Mask",
         "applyPreset": "Apply Preset",
         "copyComponent": "Copy Component",
         "copyMask": "Copy Mask",
@@ -656,6 +658,7 @@
         "duplicateMask": "Duplicate Mask",
         "hideComponent": "Hide Component",
         "hideMask": "Hide Mask",
+        "intersect": "Intersect",
         "intersectMaskWith": "Intersect Mask with",
         "noPresets": "No presets",
         "pasteComponent": "Paste Component",
@@ -665,6 +668,7 @@
         "resetMaskAdjustments": "Reset Mask Adjustments",
         "showComponent": "Show Component",
         "showMask": "Show Mask",
+        "subtract": "Subtract",
         "subtractFromMask": "Subtract from Mask",
         "switchToAdd": "Switch to Add",
         "switchToIntersect": "Switch to Intersect",

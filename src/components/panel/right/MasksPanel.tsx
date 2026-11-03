@@ -984,6 +984,26 @@ export default function MasksPanel() {
     showContextMenu(rect.left, rect.bottom + 5, options);
   };
 
+  // A set mask's Add / Subtract / Intersect buttons, as in Lightroom: every
+  // tool, adding its selection to the mask in that mode.
+  const handleModeMenu = (event: React.MouseEvent, containerId: string, mode: SubMaskMode) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    const items = (types: MaskType[]) =>
+      types.map((maskType: MaskType) => ({
+        label: getMaskTypeName(maskType),
+        icon: maskType.icon,
+        disabled: maskType.disabled,
+        onClick: () => handleAddSubMask(containerId, maskType.type, mode),
+      }));
+    const others = MASK_PANEL_CREATION_TYPES.find((m) => m.id === 'others');
+    showContextMenu(rect.left, rect.bottom + 5, [
+      ...items(MASK_PANEL_CREATION_TYPES.filter((m) => m.id !== 'others')),
+      ...(others ? [{ label: getMaskTypeName(others), icon: others.icon, submenu: items(OTHERS_MASK_TYPES) }] : []),
+    ]);
+  };
+
   const updateContainer = (id: string, data: any) =>
     setAdjustments((prev: Adjustments) => ({
       ...prev,
@@ -1176,7 +1196,7 @@ export default function MasksPanel() {
           const container = adjustments.masks.find((m) => m.id === overData.parentId);
           if (container) {
             const targetIndex = container.subMasks.findIndex((sm) => sm.id === over.id);
-            handleAddSubMask(overData.parentId!, dragData.maskType!, targetIndex);
+            handleAddSubMask(overData.parentId!, dragData.maskType!, SubMaskMode.Additive, targetIndex);
           }
         } else {
           handleAddMaskContainer(dragData.maskType!);
@@ -1510,7 +1530,7 @@ export default function MasksPanel() {
                       copiedSubMask={copiedSubMask}
                       analyzingSubMaskId={analyzingSubMaskId}
                       setIsMaskControlHovered={setIsMaskControlHovered}
-                      onAddComponent={(e: React.MouseEvent) => handleAddMaskContextMenu(e, container.id)}
+                      onModeMenu={(e: React.MouseEvent, mode: SubMaskMode) => handleModeMenu(e, container.id, mode)}
                     />
                   ))}
                 </AnimatePresence>
@@ -1734,7 +1754,7 @@ function ContainerRow({
   copiedSubMask,
   analyzingSubMaskId,
   setIsMaskControlHovered,
-  onAddComponent,
+  onModeMenu,
 }: any) {
   const { t } = useTranslation();
   const { setNodeRef: setDroppableRef, isOver } = useDroppable({
@@ -1975,34 +1995,58 @@ function ContainerRow({
                 />
               ))}
             </AnimatePresence>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
-            <AnimatePresence initial={false}>
-              {(isSelected || hasActiveChild || container.subMasks.length === 0) && (
-                <motion.div
-                  key="add-component-btn"
-                  layout="position"
-                  initial={{ opacity: 0, height: 0, overflow: 'hidden' }}
-                  animate={{ opacity: 1, height: 'auto', overflow: 'hidden' }}
-                  exit={{ opacity: 0, height: 0, overflow: 'hidden' }}
-                  transition={{ duration: 0.2 }}
+      {/* Add to / subtract from / intersect the set mask with any tool, as
+          Lightroom's Add and Subtract. Shown while the mask (or one of its
+          components) is selected, expanded or not. */}
+      <AnimatePresence initial={false}>
+        {(isSelected || hasActiveChild || container.subMasks.length === 0) && (
+          <motion.div
+            key="mask-mode-buttons"
+            layout="position"
+            initial={{ opacity: 0, height: 0, overflow: 'hidden' }}
+            animate={{ opacity: 1, height: 'auto', overflow: 'hidden' }}
+            exit={{ opacity: 0, height: 0, overflow: 'hidden' }}
+            transition={{ duration: 0.2 }}
+            className="flex items-center gap-1 pl-2 ml-3.75 py-1"
+          >
+            {[
+              {
+                mode: SubMaskMode.Additive,
+                icon: Plus,
+                label: t('editor.masks.actions.add', { defaultValue: 'Add' }),
+                hint: t('editor.masks.actions.addToMask', { defaultValue: 'Add to Mask' }),
+              },
+              {
+                mode: SubMaskMode.Subtractive,
+                icon: Minus,
+                label: t('editor.masks.actions.subtract', { defaultValue: 'Subtract' }),
+                hint: t('editor.masks.actions.subtractFromMask'),
+              },
+              {
+                mode: SubMaskMode.Intersect,
+                icon: SquaresIntersect,
+                label: t('editor.masks.actions.intersect', { defaultValue: 'Intersect' }),
+                hint: t('editor.masks.actions.intersectMaskWith'),
+              },
+            ]
+              // Nothing to take away from or intersect with until the mask has a part.
+              .filter((b) => b.mode === SubMaskMode.Additive || container.subMasks.length > 0)
+              .map(({ mode, icon: Icon, label, hint }) => (
+                <button
+                  key={mode}
+                  type="button"
+                  data-tooltip={hint}
+                  onClick={(e) => onModeMenu(e, mode)}
+                  className="flex flex-1 items-center justify-center gap-1.5 rounded-md px-2 py-1 text-xs bg-bg-secondary hover:bg-card-active text-text-secondary hover:text-text-primary transition-colors"
                 >
-                  <Text
-                    as="div"
-                    weight={TextWeights.medium}
-                    className="flex items-center gap-2 p-2 rounded-md transition-colors transition-opacity opacity-70 hover:opacity-100 hover:bg-card-active cursor-pointer hover:text-text-primary"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onAddComponent(e);
-                    }}
-                  >
-                    <div className="relative w-4 h-4 ml-1 shrink-0 flex items-center justify-center">
-                      <Plus size={16} />
-                    </div>
-                    <span className="select-none">{t('editor.masks.actions.addNewComponent')}</span>
-                  </Text>
-                </motion.div>
-              )}
-            </AnimatePresence>
+                  <Icon size={14} />
+                  {label}
+                </button>
+              ))}
           </motion.div>
         )}
       </AnimatePresence>
