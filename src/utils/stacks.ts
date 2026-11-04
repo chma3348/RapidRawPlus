@@ -42,6 +42,17 @@ export function buildStacks(list: ImageFile[]): Stacks {
   const byPath = new Map<string, ImageFile>();
   for (const f of list) byPath.set(f.path, f);
 
+  // A merge records the frames it used, and of a RAW + JPEG pair that is
+  // only the RAW: the camera's JPEG of the same frame goes in the stack
+  // too, rather than standing in the library beside the merge.
+  const stemOf = (path: string) => path.replace(/\.[^./\\]+$/, '');
+  const bracketOfStem = new Map<string, string>();
+  for (const f of list) {
+    if (f.derived_kind === BRACKET_KIND && f.derived_from && byPath.has(f.derived_from) && !f.path.includes('?vc=')) {
+      bracketOfStem.set(stemOf(f.path), f.derived_from);
+    }
+  }
+
   const frameSource = new Map<string, string>();
   const parentOf = (f: ImageFile): string | null => {
     if (f.is_virtual_copy || f.path.includes('?vc=')) {
@@ -52,7 +63,8 @@ export function buildStacks(list: ImageFile[]): Stacks {
     if (f.derived_from && f.derived_kind !== FRAME_KIND && byPath.has(f.derived_from)) {
       return f.derived_from;
     }
-    return null;
+    const merge = !f.derived_from ? bracketOfStem.get(stemOf(f.path)) : undefined;
+    return merge && merge !== f.path ? merge : null;
   };
 
   for (const f of list) {
@@ -97,12 +109,16 @@ export const stackRootOf = (stacks: Stacks, path: string | null | undefined) =>
 export function versionLabels(group: ImageFile[]): Map<string, string> {
   const labels = new Map<string, string>();
   let copies = 0;
-  // A merge heads its own stack (HDR), holding the frames it was made from.
-  const brackets = group.filter((f) => f.derived_kind === BRACKET_KIND);
+  // A merge heads its own stack (HDR, panorama), holding the frames it was
+  // made from, and the camera's JPEGs of RAW frames (recorded nowhere).
+  const isMerge = group.slice(1).some((f) => f.derived_kind === BRACKET_KIND);
+  const isFrame = (f: ImageFile) =>
+    f.derived_kind === BRACKET_KIND || (isMerge && !f.derived_kind && !f.path.includes('?vc='));
+  const brackets = group.slice(1).filter(isFrame);
   group.forEach((f, i) => {
     if (i === 0) {
       labels.set(f.path, f.derived_kind || 'Original');
-    } else if (f.derived_kind === BRACKET_KIND) {
+    } else if (isFrame(f)) {
       labels.set(f.path, brackets.length > 1 ? `${BRACKET_KIND} ${brackets.indexOf(f) + 1}` : BRACKET_KIND);
     } else if (f.path.includes('?vc=')) {
       copies += 1;
