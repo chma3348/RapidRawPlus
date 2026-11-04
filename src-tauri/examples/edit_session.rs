@@ -10,6 +10,7 @@
 //!                                   (a box, then include/exclude clicks; photo pixels)
 //!   edit_session mask PHOTO EDITS.json INDEX OUT.png   (a mask as renders place it)
 //!   edit_session snap PHOTO EDITS.json OUT.json   (saved Subject mattes refitted to edges)
+//!   edit_session pano PHOTO OUT.jpg PHOTO2 [PHOTO3...]   (a panorama stitch, as a 2400 px JPEG)
 //!   edit_session sky PHOTO PLATE OPTIONS.json OUT.json [STROKES.json]   (also OUT.json.mask.png)
 //!
 //! Runs in a private home (models and transforms linked or copied in), so
@@ -243,6 +244,17 @@ fn main() -> Result<()> {
                 .map_err(anyhow::Error::msg)?;
             std::fs::write(&args[3], edits.to_string())?;
             println!("{n}");
+        }
+        "pano" => {
+            let mut paths = vec![photo.clone()];
+            for p in &args[3..] {
+                paths.push(std::fs::canonicalize(p)?.to_string_lossy().into_owned());
+            }
+            let pano = edit_harness::panorama(&handle, &paths).map_err(anyhow::Error::msg)?;
+            let rgb = pano.thumbnail(2400, 2400).to_rgb8();
+            let mut file = std::fs::File::create(&args[2])?;
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut file, 88).encode_image(&rgb)?;
+            println!("{}x{}", pano.width(), pano.height());
         }
         other => anyhow::bail!("unknown command {other}"),
     }

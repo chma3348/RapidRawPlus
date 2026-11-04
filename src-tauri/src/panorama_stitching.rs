@@ -148,7 +148,10 @@ pub async fn save_panorama(
     Ok(output_path.to_string_lossy().to_string())
 }
 
-fn stitch_images(image_paths: Vec<String>, app_handle: AppHandle) -> Result<DynamicImage, String> {
+pub(crate) fn stitch_images(
+    image_paths: Vec<String>,
+    app_handle: AppHandle,
+) -> Result<DynamicImage, String> {
     if image_paths.len() < 2 {
         return Err("At least two images are required for a panorama.".to_string());
     }

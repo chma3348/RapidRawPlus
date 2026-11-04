@@ -285,3 +285,10 @@ pub fn snap_saved_subjects(app: &tauri::AppHandle, edits: &mut Value) -> Result<
     }
     Ok(done.len())
 }
+
+/// Merge → Panorama's stitch of `paths`, before it is finished and saved:
+/// the stitched picture itself, for judging a set as the one photo it was
+/// shot to be.
+pub fn panorama(app: &tauri::AppHandle, paths: &[String]) -> Result<image::DynamicImage, String> {
+    crate::panorama_stitching::stitch_images(paths.to_vec(), app.clone())
+}
