@@ -38,6 +38,8 @@ pub struct ImageInfo {
     pub id: usize,
     pub filename: String,
     pub image: Rgb32FImage,
+    /// Every colour of the frame lies inside sRGB.
+    pub fits_srgb: bool,
     pub low_detail_mask: GrayImage,
     pub scale_factor: f64,
     pub features: Vec<Feature>,
@@ -244,6 +246,7 @@ pub(crate) fn stitch_images(
             Ok(ImageInfo {
                 id: i,
                 filename: filename.to_string(),
+                fits_srgb: crate::hdr_output::fits_srgb(&image_f32),
                 image: image_f32,
                 low_detail_mask,
                 scale_factor,
@@ -288,51 +291,43 @@ pub(crate) fn stitch_images(
             let keypoints1: Vec<KeyPoint> = features1.iter().map(|f| f.keypoint).collect();
             let keypoints2: Vec<KeyPoint> = features2.iter().map(|f| f.keypoint).collect();
 
-            if let Some((_h_small, inliers)) =
-                processing::find_homography_ransac(&initial_matches, &keypoints1, &keypoints2)
-                && inliers.len() >= processing::MIN_INLIERS_FOR_CONNECTION
-            {
-                println!(
-                    "  - Good match found: '{}' <-> '{}' ({} inliers)",
-                    Path::new(&image_data[i].filename)
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy(),
-                    Path::new(&image_data[j].filename)
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy(),
-                    inliers.len()
-                );
-
-                let inlier_points: Vec<(nalgebra::Point2<f64>, nalgebra::Point2<f64>)> = inliers
-                    .iter()
-                    .map(|m| {
-                        let p1 = keypoints1[m.index1];
-                        let p2 = keypoints2[m.index2];
-                        (
-                            nalgebra::Point2::new(p1.x as f64, p1.y as f64),
-                            nalgebra::Point2::new(p2.x as f64, p2.y as f64),
-                        )
-                    })
-                    .collect();
-
-                if let Some(h_refined) = processing::compute_homography(&inlier_points) {
-                    let s1 = image_data[i].scale_factor;
-                    let s2 = image_data[j].scale_factor;
-                    let scale_mat_i_inv =
-                        Matrix3::new(1.0 / s1, 0.0, 0.0, 0.0, 1.0 / s1, 0.0, 0.0, 0.0, 1.0);
-                    let scale_mat_j = Matrix3::new(s2, 0.0, 0.0, 0.0, s2, 0.0, 0.0, 0.0, 1.0);
-                    let h_full = scale_mat_j * h_refined * scale_mat_i_inv;
-
-                    let match_info = MatchInfo {
-                        homography: h_full,
-                        inliers: inliers.len(),
-                    };
-                    return Some(((i, j), match_info));
-                }
-            }
-            None
+            let feature_size = {
+                let (w, h) = image_data[i].image.dimensions();
+                let (sw, sh, _) = processing::calculate_downscale_dimensions(w, h);
+                (sw, sh)
+            };
+            let (h_small, inliers) = processing::find_homography_ransac(
+                &initial_matches,
+                &keypoints1,
+                &keypoints2,
+                feature_size,
+            )?;
+            println!(
+                "  - Good match found: '{}' <-> '{}' ({} inliers of {} matches)",
+                Path::new(&image_data[i].filename)
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy(),
+                Path::new(&image_data[j].filename)
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy(),
+                inliers.len(),
+                initial_matches.len()
+            );
+            let s1 = image_data[i].scale_factor;
+            let s2 = image_data[j].scale_factor;
+            let scale_mat_i_inv =
+                Matrix3::new(1.0 / s1, 0.0, 0.0, 0.0, 1.0 / s1, 0.0, 0.0, 0.0, 1.0);
+            let scale_mat_j = Matrix3::new(s2, 0.0, 0.0, 0.0, s2, 0.0, 0.0, 0.0, 1.0);
+            let h_full = scale_mat_j * h_small * scale_mat_i_inv;
+            Some((
+                (i, j),
+                MatchInfo {
+                    homography: h_full,
+                    inliers: inliers.len(),
+                },
+            ))
         })
         .collect();
 
@@ -478,7 +473,7 @@ pub(crate) fn stitch_images(
     // Trim the canvas the warp never wrote to. Conservative by design:
     // only completely unwritten lines go, so dark scene content is safe.
     let (crop_x, crop_y, crop_w, crop_h) = finishing::trim_empty_borders(&panorama);
-    let panorama = if crop_w != panorama.width() || crop_h != panorama.height() {
+    let mut panorama = if crop_w != panorama.width() || crop_h != panorama.height() {
         println!(
             "Trimmed unwritten canvas: {}x{} -> {}x{}",
             panorama.width(),
@@ -491,8 +486,19 @@ pub(crate) fn stitch_images(
         panorama
     };
 
+    // Frames that all fit in sRGB make a panorama that does too: what
+    // strays outside was made by the stitch (see `clip_to_srgb`).
+    if stitched_images_info.iter().all(|info| info.fits_srgb) {
+        crate::hdr_output::clip_to_srgb(&mut panorama);
+    }
+
     Ok(DynamicImage::ImageRgb32F(panorama))
 }
+
+/// How much larger than itself a frame may become on the reference frame's
+/// plane before it is left out: beyond this the plane is being asked to
+/// hold too wide a view, and the frame would be a smear.
+const MAX_GLOBAL_AREA_RATIO: f64 = 8.0;
 
 struct Dsu {
     parent: Vec<usize>,
@@ -561,10 +567,34 @@ fn build_stitching_order(
         }
     }
 
+    // The reference frame — the one left undistorted, the others warped
+    // onto its plane — is the middle of the largest connected group: the
+    // frame fewest hops from the farthest. (A leaf of whichever group came
+    // first was used: an end frame, which leaves the far end of a wide
+    // panorama stretched most, or a pair while five frames matched
+    // elsewhere.)
+    let hops_from = |start: usize| -> HashMap<usize, usize> {
+        let mut hops = HashMap::from([(start, 0)]);
+        let mut q = VecDeque::from([start]);
+        while let Some(u) = q.pop_front() {
+            for &v in mst_adj.get(&u).into_iter().flatten() {
+                if !hops.contains_key(&v) {
+                    hops.insert(v, hops[&u] + 1);
+                    q.push_back(v);
+                }
+            }
+        }
+        hops
+    };
     let start_node = (0..n)
         .filter(|i| mst_adj.contains_key(i))
-        .min_by_key(|&i| mst_adj.get(&i).map_or(usize::MAX, |v| v.len()))
-        .unwrap_or_else(|| mst_adj.keys().next().copied().unwrap_or(0));
+        .map(|i| {
+            let hops = hops_from(i);
+            let eccentricity = hops.values().copied().max().unwrap_or(0);
+            (i, hops.len(), eccentricity)
+        })
+        .max_by(|a, b| a.1.cmp(&b.1).then(b.2.cmp(&a.2)).then(b.0.cmp(&a.0)))
+        .map_or(0, |(i, _, _)| i);
 
     let mut ordered_indices = Vec::new();
     let mut global_homographies = HashMap::new();
@@ -584,16 +614,36 @@ fn build_stitching_order(
                     visited.insert(v);
 
                     let h_vu = if let Some(m) = matches.get(&(v, u)) {
-                        m.homography
+                        Some(m.homography)
                     } else if let Some(m) = matches.get(&(u, v)) {
-                        m.homography
-                            .try_inverse()
-                            .expect("Failed to invert homography for MST edge")
+                        m.homography.try_inverse()
                     } else {
-                        panic!("Match not found for MST edge between {} and {}", u, v);
+                        None
                     };
-
-                    let h_v_global = h_u_global * h_vu;
+                    // Scaled so frames in front of the camera map with z > 0.
+                    let Some(h_v_global) = h_vu
+                        .map(|h| h_u_global * h)
+                        .map(|h: Matrix3<f64>| h / h[(2, 2)])
+                        .filter(|h| {
+                            processing::is_plausible_warp(
+                                h,
+                                images[v].image.dimensions(),
+                                MAX_GLOBAL_AREA_RATIO,
+                            )
+                        })
+                    else {
+                        // Its warp onto the reference would fold or blow
+                        // up (too far round for one plane): left out, with
+                        // the frames reached through it.
+                        println!(
+                            "  - '{}' cannot be placed on the reference frame's plane; left out.",
+                            Path::new(&images[v].filename)
+                                .file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                        );
+                        continue;
+                    };
                     q.push_back((v, h_v_global));
                 }
             }

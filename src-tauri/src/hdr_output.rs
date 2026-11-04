@@ -140,13 +140,30 @@ pub fn finish(
 
 /// Does every colour of a finished-picture merge (Display P3-encoded) fit
 /// in sRGB? A hair of tolerance for the round trip through the two spaces.
-fn fits_srgb(encoded: &Rgb32FImage) -> bool {
+pub fn fits_srgb(encoded: &Rgb32FImage) -> bool {
     let p3_to_srgb = p3_to_srgb();
     encoded.as_raw().par_chunks(3).all(|p| {
         mul(&p3_to_srgb, [decode(p[0]), decode(p[1]), decode(p[2])])
             .iter()
             .all(|v| (-1e-4..=1.0 + 1e-4).contains(v))
     })
+}
+
+/// Bring a finished-picture merge (Display P3-encoded) back inside sRGB,
+/// for a merge made only of sRGB frames: everything outside it then came
+/// from making the merge, not from the photos — warping and blending mix
+/// encoded values, which strays a hair past sRGB's edge, and brightening a
+/// frame to match its neighbours lifts its highlights past white. Either
+/// sent compact panoramas to a lossless TIFF of hundreds of megabytes.
+pub fn clip_to_srgb(encoded: &mut Rgb32FImage) {
+    let p3_to_srgb = p3_to_srgb();
+    encoded.par_chunks_mut(3).for_each(|p| {
+        let linear = mul(&p3_to_srgb, [decode(p[0]), decode(p[1]), decode(p[2])]);
+        let back = mul(&SRGB_TO_P3, linear.map(|v| v.clamp(0.0, 1.0)));
+        for (v, b) in p.iter_mut().zip(back) {
+            *v = encode(b.clamp(0.0, 1.0));
+        }
+    });
 }
 
 /// A finished-picture merge (Display P3, sRGB's curve, 0..1): JPEG XL at
@@ -442,6 +459,33 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// A bright sRGB colour brightened in encoded P3 (as a panorama's
+    /// exposure matching brightens a frame) lands outside sRGB; clipping
+    /// brings it back, moving it no more than it strayed, and leaves sRGB
+    /// colours alone.
+    #[test]
+    fn stitched_srgb_colours_clip_back_inside_srgb() {
+        let mut merged = Rgb32FImage::from_fn(2, 1, |x, _| match x {
+            0 => Rgb([0.95, 0.5, 0.2]),
+            _ => Rgb([0.3, 0.5, 0.2]),
+        });
+        to_display_p3(&mut merged);
+        encode_srgb(&mut merged);
+        crate::panorama_utils::finishing::apply_gain(&mut merged, 1.08);
+        let gained = merged.clone();
+        assert!(!fits_srgb(&merged), "the gain should stray outside sRGB");
+        clip_to_srgb(&mut merged);
+        assert!(fits_srgb(&merged));
+        for (a, b) in gained.pixels().zip(merged.pixels()) {
+            for c in 0..3 {
+                assert!((a[c] - b[c]).abs() < 0.1, "{a:?} -> {b:?}");
+            }
+        }
+        for c in 0..3 {
+            assert!((gained.get_pixel(1, 0)[c] - merged.get_pixel(1, 0)[c]).abs() < 1e-4);
         }
     }
 
