@@ -7,6 +7,7 @@ use rawler::{
     rawimage::{RawImage, RawPhotometricInterpretation},
     rawsource::RawSource,
 };
+use rayon::prelude::*;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -47,6 +48,60 @@ fn srgb_to_linear(value: f32) -> f32 {
     }
 }
 
+/// Light past white desaturated toward neutral, then held under the limit.
+fn settle_highlights(
+    [r, g, b]: [f32; 3],
+    safe_highlight_compression: f32,
+    clamp_limit: f32,
+) -> [f32; 3] {
+    let max_c = r.max(g).max(b);
+
+    let (final_r, final_g, final_b) = if max_c > 1.0 {
+        let min_c = r.min(g).min(b);
+        // Chroma rolls off asymptotically. The old ramp was linear
+        // and reached exactly ZERO at the limit, so any highlight
+        // further over than `safe_highlight_compression` lost all
+        // colour and became a flat grey disc. Measured by decoding
+        // a sunset frame (DSC03520.ARW, sun peaking at 3.1 against
+        // the 2.5 default), the brightest 0.1% of pixels came back
+        // with saturation 0.0000 -- a grey sun, which is exactly
+        // the "white cast" this looked like next to Resolve, whose
+        // own render keeps a white core inside a golden surround.
+        //
+        // Desaturating clipped highlights is still right: once a
+        // channel saturates its true colour is unknown, and holding
+        // it produces magenta suns. But it should approach neutral,
+        // not snap to it. 1/(1+x^2) matches the old curve closely
+        // where it mattered (0.5 at the limit against the old 0.0)
+        // and never quite reaches zero.
+        let over = ((max_c - 1.0) / (safe_highlight_compression - 1.0)).max(0.0);
+        let compression_factor = 1.0 / (1.0 + over * over);
+        let compressed_r = min_c + (r - min_c) * compression_factor;
+        let compressed_g = min_c + (g - min_c) * compression_factor;
+        let compressed_b = min_c + (b - min_c) * compression_factor;
+        let compressed_max = compressed_r.max(compressed_g).max(compressed_b);
+
+        if compressed_max > 1e-6 {
+            let rescale = max_c / compressed_max;
+            (
+                compressed_r * rescale,
+                compressed_g * rescale,
+                compressed_b * rescale,
+            )
+        } else {
+            (max_c, max_c, max_c)
+        }
+    } else {
+        (r, g, b)
+    };
+
+    [
+        final_r.clamp(0.0, clamp_limit),
+        final_g.clamp(0.0, clamp_limit),
+        final_b.clamp(0.0, clamp_limit),
+    ]
+}
+
 fn develop_internal(
     file_bytes: &[u8],
     fast_demosaic: bool,
@@ -64,6 +119,32 @@ fn develop_internal(
     };
 
     check_cancel()?;
+
+    let safe_highlight_compression = highlight_compression.max(1.01);
+
+    let clamp_limit = if fast_demosaic {
+        1.0
+    } else {
+        safe_highlight_compression
+    };
+
+    // Floating-point LinearRaw DNGs (HDR merges, ours or Lightroom's), which
+    // rawler cannot read, are read as v3 reads them: demosaiced linear sRGB,
+    // white balanced, upright, 1.0 where the sensor clipped. The tools then
+    // see the render's own frame, as for any other RAW. The linear-mode
+    // setting is for gamma-encoded integer LinearRaw files, not these.
+    if crate::hdr_dng::is_float_linear_dng(file_bytes) {
+        let mut pixels = crate::hdr_dng::decode_float_dng(file_bytes)?.pixels;
+        check_cancel()?;
+        pixels.par_chunks_exact_mut(4).for_each(|p| {
+            [p[0], p[1], p[2]] = settle_highlights(
+                [p[0].max(0.0), p[1].max(0.0), p[2].max(0.0)],
+                safe_highlight_compression,
+                clamp_limit,
+            );
+        });
+        return Ok((DynamicImage::ImageRgba32F(pixels), Orientation::Normal));
+    }
 
     let source = RawSource::new_from_slice(file_bytes);
     let decoder = rawler::get_decoder(&source)?;
@@ -127,14 +208,6 @@ fn develop_internal(
     let denominator = (original_white_level - original_black_level).max(1.0);
     let rescale_factor = (u32::MAX as f32 - original_black_level) / denominator;
 
-    let safe_highlight_compression = highlight_compression.max(1.01);
-
-    let clamp_limit = if fast_demosaic {
-        1.0
-    } else {
-        safe_highlight_compression
-    };
-
     check_cancel()?;
 
     match &mut developed_intermediate {
@@ -159,50 +232,8 @@ fn develop_internal(
                     b = srgb_to_linear(b.clamp(0.0, 1.0));
                 }
 
-                let max_c = r.max(g).max(b);
-
-                let (final_r, final_g, final_b) = if max_c > 1.0 {
-                    let min_c = r.min(g).min(b);
-                    // Chroma rolls off asymptotically. The old ramp was linear
-                    // and reached exactly ZERO at the limit, so any highlight
-                    // further over than `safe_highlight_compression` lost all
-                    // colour and became a flat grey disc. Measured by decoding
-                    // a sunset frame (DSC03520.ARW, sun peaking at 3.1 against
-                    // the 2.5 default), the brightest 0.1% of pixels came back
-                    // with saturation 0.0000 -- a grey sun, which is exactly
-                    // the "white cast" this looked like next to Resolve, whose
-                    // own render keeps a white core inside a golden surround.
-                    //
-                    // Desaturating clipped highlights is still right: once a
-                    // channel saturates its true colour is unknown, and holding
-                    // it produces magenta suns. But it should approach neutral,
-                    // not snap to it. 1/(1+x^2) matches the old curve closely
-                    // where it mattered (0.5 at the limit against the old 0.0)
-                    // and never quite reaches zero.
-                    let over = ((max_c - 1.0) / (safe_highlight_compression - 1.0)).max(0.0);
-                    let compression_factor = 1.0 / (1.0 + over * over);
-                    let compressed_r = min_c + (r - min_c) * compression_factor;
-                    let compressed_g = min_c + (g - min_c) * compression_factor;
-                    let compressed_b = min_c + (b - min_c) * compression_factor;
-                    let compressed_max = compressed_r.max(compressed_g).max(compressed_b);
-
-                    if compressed_max > 1e-6 {
-                        let rescale = max_c / compressed_max;
-                        (
-                            compressed_r * rescale,
-                            compressed_g * rescale,
-                            compressed_b * rescale,
-                        )
-                    } else {
-                        (max_c, max_c, max_c)
-                    }
-                } else {
-                    (r, g, b)
-                };
-
-                p[0] = final_r.clamp(0.0, clamp_limit);
-                p[1] = final_g.clamp(0.0, clamp_limit);
-                p[2] = final_b.clamp(0.0, clamp_limit);
+                [p[0], p[1], p[2]] =
+                    settle_highlights([r, g, b], safe_highlight_compression, clamp_limit);
             });
         }
         Intermediate::FourColor(pixels) => {
@@ -371,6 +402,56 @@ mod decode_probe {
                  pixels above 1.0: {:.3}%",
                 above_one * 100.0
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod float_dng {
+    use crate::hdr_dng::{COMPACT, Compression, DngCamera, decode_float_dng, write_float_dng};
+
+    /// A merge, compact or lossless, preview-first (as Lightroom lays its
+    /// files out) or not, reaches the tools as v3 reads it: the same frame,
+    /// the same light, highlights settled as any RAW's are.
+    #[test]
+    fn merges_develop_as_v3_reads_them() {
+        let (w, h) = (300u32, 170u32);
+        let linear = image::Rgb32FImage::from_fn(w, h, |x, y| {
+            let v = 0.02 + 4.0 * (x as f32 / w as f32).powi(3) + 0.01 * (y % 7) as f32;
+            image::Rgb([v * 0.8, v, v * 1.2])
+        });
+        let dir = std::env::temp_dir().join("darkroom-legacy-float-dng-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let camera = DngCamera {
+            make: "Sony".into(),
+            model: "ILCE-7M3".into(),
+        };
+        let preview = image::RgbImage::new(60, 34);
+        for (name, compression, preview) in [
+            ("compact.dng", COMPACT, Some(&preview)),
+            ("lossless.dng", Compression::Lossless, None),
+            (
+                "lossless-preview.dng",
+                Compression::Lossless,
+                Some(&preview),
+            ),
+        ] {
+            let path = dir.join(name);
+            write_float_dng(&path, &linear, &camera, compression, preview).unwrap();
+            let bytes = std::fs::read(&path).unwrap();
+            let v3 = decode_float_dng(&bytes).unwrap().pixels;
+            let legacy = super::develop_raw_image(&bytes, false, 2.5, "auto".into(), None)
+                .unwrap_or_else(|e| panic!("{name}: {e}"))
+                .into_rgba32f();
+            assert_eq!(legacy.dimensions(), v3.dimensions(), "{name}");
+            for (got, want) in legacy.pixels().zip(v3.pixels()) {
+                let [r, g, b, _] = want.0;
+                if r.max(g).max(b) <= 1.0 {
+                    assert_eq!(got.0[..3], [r, g, b].map(|v| v.max(0.0)), "{name}");
+                } else {
+                    assert!(got.0[..3].iter().all(|v| *v <= 2.5), "{name}");
+                }
+            }
         }
     }
 }

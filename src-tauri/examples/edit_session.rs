@@ -189,7 +189,7 @@ fn main() -> Result<()> {
                 .transpose()?;
             let context = gpu()?;
             // The editor renders straight from the file; holding it open only
-            // matters to the tools (and the legacy loader can't read merges).
+            // matters to the tools.
             if let Err(e) = edit_harness::open(&handle, &photo) {
                 eprintln!("(not held open: {e})");
             }
