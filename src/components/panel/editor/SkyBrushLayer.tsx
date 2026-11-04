@@ -125,6 +125,19 @@ export default function SkyBrushLayer({ brush, left, top, width, height, diamete
               strokeWidth={1.5}
               vectorEffect="non-scaling-stroke"
             />
+            {/* Where the feather starts: full strength inside, fading out to the outer ring. */}
+            {brush.feather > 0.02 && (
+              <circle
+                cx={cursor.x}
+                cy={cursor.y}
+                r={(diameter / 2) * (1 - brush.feather)}
+                fill="none"
+                stroke={tint(erase, 0.9)}
+                strokeWidth={1}
+                strokeDasharray="3 3"
+                vectorEffect="non-scaling-stroke"
+              />
+            )}
             <line
               x1={cursor.x - 5}
               x2={cursor.x + 5}

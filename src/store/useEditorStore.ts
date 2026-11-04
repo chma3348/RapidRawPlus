@@ -13,6 +13,8 @@ export interface SkyBrush {
   erase: boolean;
   /** Diameter, as a share of the photo's long edge. */
   size: number;
+  /** 0..1: the share of the radius, from the edge in, that fades. */
+  feather: number;
   /** A finished stroke, as fractions of the photo as shown (turned, flipped
    *  and straightened, before the crop). */
   onStroke(points: Array<{ x: number; y: number }>, erase: boolean): void;

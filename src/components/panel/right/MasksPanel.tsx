@@ -64,7 +64,9 @@ import {
   formatMaskTypeName,
   getSubMaskName,
   getMaskTypeName,
+  brushFirst,
 } from './Masks';
+import MaskModeButtons from './MaskModeButtons';
 import {
   Adjustments,
   INITIAL_MASK_ADJUSTMENTS,
@@ -230,7 +232,7 @@ const FlowBrushTool = ({
   const { t } = useTranslation();
 
   return (
-    <div className="space-y-4 border-t border-surface">
+    <div className="space-y-4">
       <Slider
         defaultValue={10}
         label={t('editor.masks.brush.flow')}
@@ -985,7 +987,7 @@ export default function MasksPanel() {
   };
 
   // A set mask's Add / Subtract / Intersect buttons, as in Lightroom: every
-  // tool, adding its selection to the mask in that mode.
+  // tool (the Brush first), adding its selection to the mask in that mode.
   const handleModeMenu = (event: React.MouseEvent, containerId: string, mode: SubMaskMode) => {
     event.preventDefault();
     event.stopPropagation();
@@ -999,8 +1001,16 @@ export default function MasksPanel() {
       }));
     const others = MASK_PANEL_CREATION_TYPES.find((m) => m.id === 'others');
     showContextMenu(rect.left, rect.bottom + 5, [
-      ...items(MASK_PANEL_CREATION_TYPES.filter((m) => m.id !== 'others')),
-      ...(others ? [{ label: getMaskTypeName(others), icon: others.icon, submenu: items(OTHERS_MASK_TYPES) }] : []),
+      ...items(brushFirst(MASK_PANEL_CREATION_TYPES.filter((m) => m.id !== 'others'))),
+      ...(others
+        ? [
+            {
+              label: getMaskTypeName(others),
+              icon: others.icon,
+              submenu: items(OTHERS_MASK_TYPES.filter((m) => m.type !== Mask.Brush)),
+            },
+          ]
+        : []),
     ]);
   };
 
@@ -1999,57 +2009,16 @@ function ContainerRow({
         )}
       </AnimatePresence>
 
-      {/* Add to / subtract from / intersect the set mask with any tool, as
-          Lightroom's Add and Subtract. Shown while the mask (or one of its
-          components) is selected, expanded or not. */}
-      <AnimatePresence initial={false}>
-        {(isSelected || hasActiveChild || container.subMasks.length === 0) && (
-          <motion.div
-            key="mask-mode-buttons"
-            layout="position"
-            initial={{ opacity: 0, height: 0, overflow: 'hidden' }}
-            animate={{ opacity: 1, height: 'auto', overflow: 'hidden' }}
-            exit={{ opacity: 0, height: 0, overflow: 'hidden' }}
-            transition={{ duration: 0.2 }}
-            className="flex items-center gap-1 pl-2 ml-3.75 py-1"
-          >
-            {[
-              {
-                mode: SubMaskMode.Additive,
-                icon: Plus,
-                label: t('editor.masks.actions.add', { defaultValue: 'Add' }),
-                hint: t('editor.masks.actions.addToMask', { defaultValue: 'Add to Mask' }),
-              },
-              {
-                mode: SubMaskMode.Subtractive,
-                icon: Minus,
-                label: t('editor.masks.actions.subtract', { defaultValue: 'Subtract' }),
-                hint: t('editor.masks.actions.subtractFromMask'),
-              },
-              {
-                mode: SubMaskMode.Intersect,
-                icon: SquaresIntersect,
-                label: t('editor.masks.actions.intersect', { defaultValue: 'Intersect' }),
-                hint: t('editor.masks.actions.intersectMaskWith'),
-              },
-            ]
-              // Nothing to take away from or intersect with until the mask has a part.
-              .filter((b) => b.mode === SubMaskMode.Additive || container.subMasks.length > 0)
-              .map(({ mode, icon: Icon, label, hint }) => (
-                <button
-                  key={mode}
-                  type="button"
-                  data-tooltip={hint}
-                  onClick={(e) => onModeMenu(e, mode)}
-                  className="flex flex-1 items-center justify-center gap-1.5 rounded-md px-2 py-1 text-xs bg-bg-secondary hover:bg-card-active text-text-secondary hover:text-text-primary transition-colors"
-                >
-                  <Icon size={14} />
-                  {label}
-                </button>
-              ))}
-          </motion.div>
-        )}
-      </AnimatePresence>
+      <MaskModeButtons
+        visible={isSelected || hasActiveChild || container.subMasks.length === 0}
+        hasParts={container.subMasks.length > 0}
+        onPick={onModeMenu}
+        hints={{
+          [SubMaskMode.Additive]: t('editor.masks.actions.addToMask', { defaultValue: 'Add to Mask' }),
+          [SubMaskMode.Subtractive]: t('editor.masks.actions.subtractFromMask'),
+          [SubMaskMode.Intersect]: t('editor.masks.actions.intersectMaskWith'),
+        }}
+      />
     </motion.div>
   );
 }
@@ -2447,6 +2416,25 @@ function SettingsPanel({
         isContentVisible={true}
       >
         <div className="space-y-4 pt-2">
+          {/* A brush part's Size and Feather first, where they're seen while painting. */}
+          {isComponentMode &&
+            subMaskConfig.showBrushTools &&
+            brushSettings &&
+            (activeSubMask.type === Mask.Flow ? (
+              <FlowBrushTool
+                flow={activeSubMask.parameters?.flow ?? 10}
+                onFlowChange={(flow: number) => handleSubMaskParametersChange({ flow })}
+                settings={brushSettings}
+                onSettingsChange={setBrushSettings}
+                onDragStateChange={onDragStateChange}
+              />
+            ) : (
+              <BrushTools
+                settings={brushSettings}
+                onSettingsChange={setBrushSettings}
+                onDragStateChange={onDragStateChange}
+              />
+            ))}
           <Switch
             checked={!!(isComponentMode ? activeSubMask.invert : displayContainer.invert)}
             label={isComponentMode ? t('editor.masks.settings.invertComponent') : t('editor.masks.settings.invertMask')}
@@ -2584,24 +2572,6 @@ function SettingsPanel({
                 label={t('editor.masks.params.matteView')}
                 onChange={(v: boolean) => useEditorStore.getState().setMaskMatteView(v)}
               />
-
-              {subMaskConfig.showBrushTools &&
-                brushSettings &&
-                (activeSubMask.type === Mask.Flow ? (
-                  <FlowBrushTool
-                    flow={activeSubMask.parameters?.flow ?? 10}
-                    onFlowChange={(flow: number) => handleSubMaskParametersChange({ flow })}
-                    settings={brushSettings}
-                    onSettingsChange={setBrushSettings}
-                    onDragStateChange={onDragStateChange}
-                  />
-                ) : (
-                  <BrushTools
-                    settings={brushSettings}
-                    onSettingsChange={setBrushSettings}
-                    onDragStateChange={onDragStateChange}
-                  />
-                ))}
             </>
           )}
         </div>

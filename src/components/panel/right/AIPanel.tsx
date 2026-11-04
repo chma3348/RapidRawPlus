@@ -65,7 +65,9 @@ import {
   AI_SUB_MASK_COMPONENT_TYPES,
   formatMaskTypeName,
   getSubMaskName,
+  brushFirst,
 } from './Masks';
+import MaskModeButtons from './MaskModeButtons';
 import { Adjustments, AiPatch, AiPatchResultVariant } from '../../../utils/adjustments';
 import { Invokes, OPTION_SEPARATOR } from '../../ui/AppProperties';
 import { createSubMask } from '../../../utils/maskUtils';
@@ -926,6 +928,23 @@ export default function AIPanel() {
     showContextMenu(rect.left, rect.bottom + 5, options);
   };
 
+  // An edit's Add / Subtract / Intersect buttons: every component tool, the
+  // Brush first, adding its selection to the edit in that mode.
+  const handleAiModeMenu = (event: React.MouseEvent, containerId: string, mode: SubMaskMode) => {
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    showContextMenu(
+      rect.left,
+      rect.bottom + 5,
+      brushFirst(AI_SUB_MASK_COMPONENT_TYPES)
+        .filter((mt) => !mt.disabled)
+        .map((maskType: MaskType) => ({
+          label: maskType.name,
+          icon: maskType.icon,
+          onClick: () => handleAddSubMask(containerId, maskType.type, mode),
+        })),
+    );
+  };
+
   const updatePatch = (id: string, data: any) =>
     setAdjustments((prev: Adjustments) => ({
       ...prev,
@@ -1409,7 +1428,7 @@ export default function AIPanel() {
                         copySubMaskToClipboard={copySubMaskToClipboard}
                         copiedSubMask={copiedSubMask}
                         analyzingSubMaskId={analyzingSubMaskId}
-                        onAddComponent={(e: React.MouseEvent) => handleAddAiContextMenu(e, container.id)}
+                        onModeMenu={(e: React.MouseEvent, mode: SubMaskMode) => handleAiModeMenu(e, container.id, mode)}
                       />
                     ))}
                   </AnimatePresence>
@@ -1582,7 +1601,7 @@ function ContainerRow({
   copySubMaskToClipboard,
   copiedSubMask,
   analyzingSubMaskId,
-  onAddComponent,
+  onModeMenu,
 }: any) {
   const { t } = useTranslation();
   const { setNodeRef: setDroppableRef, isOver } = useDroppable({
@@ -1784,37 +1803,20 @@ function ContainerRow({
                 />
               ))}
             </AnimatePresence>
-
-            <AnimatePresence initial={false}>
-              {(isSelected || hasActiveChild || container.subMasks.length === 0) && (
-                <motion.div
-                  key="add-component-btn"
-                  layout="position"
-                  initial={{ opacity: 0, height: 0, overflow: 'hidden' }}
-                  animate={{ opacity: 1, height: 'auto', overflow: 'hidden' }}
-                  exit={{ opacity: 0, height: 0, overflow: 'hidden' }}
-                  transition={{ duration: 0.2 }}
-                >
-                  <Text
-                    as="div"
-                    weight={TextWeights.medium}
-                    className="flex items-center gap-2 p-2 rounded-md transition-colors transition-opacity opacity-70 hover:opacity-100 hover:bg-card-active cursor-pointer hover:text-text-primary"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onAddComponent(e);
-                    }}
-                  >
-                    <div className="relative w-4 h-4 ml-1 shrink-0 flex items-center justify-center">
-                      <Plus size={16} />
-                    </div>
-                    <span className="select-none">{t('editor.ai.actions.addNewComponent')}</span>
-                  </Text>
-                </motion.div>
-              )}
-            </AnimatePresence>
           </motion.div>
         )}
       </AnimatePresence>
+
+      <MaskModeButtons
+        visible={isSelected || hasActiveChild || container.subMasks.length === 0}
+        hasParts={container.subMasks.length > 0}
+        onPick={onModeMenu}
+        hints={{
+          [SubMaskMode.Additive]: t('editor.ai.actions.addToEdit', { defaultValue: 'Add to Edit' }),
+          [SubMaskMode.Subtractive]: t('editor.ai.actions.subtractFromEdit'),
+          [SubMaskMode.Intersect]: t('editor.ai.actions.intersectEditWith'),
+        }}
+      />
     </motion.div>
   );
 }

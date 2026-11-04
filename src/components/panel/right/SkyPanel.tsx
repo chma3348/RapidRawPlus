@@ -427,6 +427,7 @@ export default function SkyPanel() {
       skyBrush: {
         erase: brush === 'erase',
         size: brushDiameter(brushSize),
+        feather: brushFeather / 100,
         onStroke: (points, erase) => {
           const { size, feather, adjustments: a } = brushSettings.current;
           const list = [
@@ -449,7 +450,23 @@ export default function SkyPanel() {
       },
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [brushing, brush, brushSize]);
+  }, [brushing, brush, brushSize, brushFeather]);
+
+  // Lightroom's keys while brushing: [ and ] for size, with Shift for feather.
+  useEffect(() => {
+    if (!brushing) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.code !== 'BracketLeft' && e.code !== 'BracketRight') return;
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return;
+      e.preventDefault();
+      const step = e.code === 'BracketRight' ? 1 : -1;
+      if (e.shiftKey) setBrushFeather((f) => Math.min(100, Math.max(0, f + step * 10)));
+      else setBrushSize((v) => Math.min(100, Math.max(1, v + step * 5)));
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [brushing]);
 
   const undoStroke = () => {
     const list = strokes.slice(0, -1);

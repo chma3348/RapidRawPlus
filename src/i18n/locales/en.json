@@ -407,6 +407,7 @@
     "ai": {
       "actions": {
         "addNewComponent": "Add New Component",
+        "addToEdit": "Add to Edit",
         "copyComponent": "Copy Component",
         "copyEdit": "Copy Edit",
         "deleteComponent": "Delete Component",

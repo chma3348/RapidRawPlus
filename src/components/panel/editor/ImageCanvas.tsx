@@ -1061,6 +1061,49 @@ const MaskOverlay = memo(
   },
 );
 
+/**
+ * The brush's reach, drawn as Lightroom does: the outer ring is the brush's
+ * full size (nothing is painted beyond it), the inner ring is where its
+ * feather starts (full strength inside). Dark and light strokes so the rings
+ * read on any photo; widths stay one screen pixel at any zoom.
+ */
+const BrushCursorRings = ({
+  x,
+  y,
+  radius,
+  feather,
+  zoom,
+}: {
+  x: number;
+  y: number;
+  radius: number;
+  feather: number;
+  zoom: number;
+}) => {
+  const px = 1 / Math.max(zoom, 1e-3);
+  const ring = (r: number, dash?: number[]) => (
+    <>
+      <Circle x={x} y={y} radius={r} stroke="rgba(0,0,0,0.55)" strokeWidth={2.5 * px} listening={false} />
+      <Circle
+        x={x}
+        y={y}
+        radius={r}
+        stroke="rgba(255,255,255,0.95)"
+        strokeWidth={1.2 * px}
+        dash={dash?.map((d) => d * px)}
+        listening={false}
+      />
+    </>
+  );
+  const inner = radius * (1 - feather);
+  return (
+    <>
+      {ring(radius)}
+      {feather > 0.02 && inner > 1.5 * px && ring(inner, [3, 3])}
+    </>
+  );
+};
+
 const ImageCanvas = memo(
   ({
     appSettings,
@@ -3226,6 +3269,15 @@ const ImageCanvas = memo(
                           strokeWidth={2}
                           dash={[4, 4]}
                           listening={false}
+                        />
+                      )}
+                      {isBrushActive && cursorPreview.visible && (
+                        <BrushCursorRings
+                          x={cursorPreview.x}
+                          y={cursorPreview.y}
+                          radius={brushCursorPreview.radius}
+                          feather={Math.max(0, Math.min(1, (brushSettings?.feather ?? 0) / 100))}
+                          zoom={effectiveZoomScale}
                         />
                       )}
                       {isBrushActive && cursorPreview.visible && (

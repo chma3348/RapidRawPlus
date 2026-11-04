@@ -390,3 +390,12 @@ export const AI_SUB_MASK_COMPONENT_TYPES: Array<MaskType> = [
     type: Mask.Radial,
   },
 ];
+
+/**
+ * `types` with the Brush first: the tool reached for most when adding to or
+ * taking from a mask that is already set, as in Lightroom's Add / Subtract.
+ */
+export function brushFirst(types: Array<MaskType>): Array<MaskType> {
+  const brush = [...types, ...OTHERS_MASK_TYPES].find((m) => m.type === Mask.Brush);
+  return brush ? [brush, ...types.filter((m) => m.type !== Mask.Brush)] : types;
+}
