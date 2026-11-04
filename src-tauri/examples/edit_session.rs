@@ -11,6 +11,7 @@
 //!   edit_session mask PHOTO EDITS.json INDEX OUT.png   (a mask as renders place it)
 //!   edit_session snap PHOTO EDITS.json OUT.json   (saved Subject mattes refitted to edges)
 //!   edit_session pano PHOTO OUT.jpg PHOTO2 [PHOTO3...]   (a panorama stitch, as a 2400 px JPEG)
+//!   edit_session merge hdr|pano PHOTO PHOTO2 [...]   (Merge, then Save, as the dialog does)
 //!   edit_session sky PHOTO PLATE OPTIONS.json OUT.json [STROKES.json]   (also OUT.json.mask.png)
 //!
 //! Runs in a private home (models and transforms linked or copied in), so
@@ -115,11 +116,29 @@ fn main() -> Result<()> {
     let home = private_home(&real_home)?;
     // SAFETY: still single-threaded; nothing has read the environment.
     unsafe { std::env::set_var("HOME", &home) };
+    // As the app's setup does, so JPEG XL files open.
+    jxl_oxide::integration::register_image_decoding_hook();
     let app = tauri::Builder::default()
         .manage(darkroom_index::AppState::default())
         .build(darkroom_index::tauri_context())?;
     let handle = app.handle().clone();
     install_transforms(&handle, &home);
+    if args[0] == "merge" {
+        // Saved beside the frames, as the dialog saves it (settings and
+        // models still come from the private home).
+        let frames: Vec<String> = args[2..]
+            .iter()
+            .map(|p| Ok(std::fs::canonicalize(p)?.to_string_lossy().into_owned()))
+            .collect::<Result<_>>()?;
+        let saved = tauri::async_runtime::block_on(edit_harness::merge_and_save(
+            &handle,
+            args[1] == "pano",
+            frames,
+        ))
+        .map_err(anyhow::Error::msg)?;
+        println!("{saved}");
+        return Ok(());
+    }
     let photo = std::fs::canonicalize(&args[1])?
         .to_string_lossy()
         .into_owned();
@@ -169,7 +188,11 @@ fn main() -> Result<()> {
                 })
                 .transpose()?;
             let context = gpu()?;
-            edit_harness::open(&handle, &photo).map_err(anyhow::Error::msg)?;
+            // The editor renders straight from the file; holding it open only
+            // matters to the tools (and the legacy loader can't read merges).
+            if let Err(e) = edit_harness::open(&handle, &photo) {
+                eprintln!("(not held open: {e})");
+            }
             render(
                 &handle,
                 &context,

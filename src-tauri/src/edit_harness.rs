@@ -292,3 +292,22 @@ pub fn snap_saved_subjects(app: &tauri::AppHandle, edits: &mut Value) -> Result<
 pub fn panorama(app: &tauri::AppHandle, paths: &[String]) -> Result<image::DynamicImage, String> {
     crate::panorama_stitching::stitch_images(paths.to_vec(), app.clone())
 }
+
+/// Merge → HDR or Merge → Panorama on `paths`, then Save, exactly as the
+/// dialog does: the merged file next to the first frame, its EXIF sidecar,
+/// and the library stack of the merge over its frames. Returns its path.
+pub async fn merge_and_save(
+    app: &tauri::AppHandle,
+    panorama: bool,
+    paths: Vec<String>,
+) -> Result<String, String> {
+    let first = paths.first().cloned().ok_or("No frames")?;
+    if panorama {
+        crate::panorama_stitching::stitch_panorama(paths, app.clone(), app.state::<AppState>())
+            .await?;
+        crate::panorama_stitching::save_panorama(first, app.state::<AppState>()).await
+    } else {
+        crate::merge_hdr(paths, app.clone(), app.state::<AppState>()).await?;
+        crate::save_hdr(first, app.state::<AppState>()).await
+    }
+}
