@@ -274,7 +274,12 @@ fn main() -> Result<()> {
                 paths.push(std::fs::canonicalize(p)?.to_string_lossy().into_owned());
             }
             let pano = edit_harness::panorama(&handle, &paths).map_err(anyhow::Error::msg)?;
-            let rgb = pano.thumbnail(2400, 2400).to_rgb8();
+            // EDIT_PANO_MAX: a larger preview, for judging seams at 1:1.
+            let max = std::env::var("EDIT_PANO_MAX")
+                .ok()
+                .and_then(|m| m.parse().ok())
+                .unwrap_or(2400);
+            let rgb = pano.thumbnail(max, max).to_rgb8();
             let mut file = std::fs::File::create(&args[2])?;
             image::codecs::jpeg::JpegEncoder::new_with_quality(&mut file, 88).encode_image(&rgb)?;
             println!("{}x{}", pano.width(), pano.height());
