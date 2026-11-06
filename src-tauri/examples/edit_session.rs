@@ -279,10 +279,31 @@ fn main() -> Result<()> {
                 .ok()
                 .and_then(|m| m.parse().ok())
                 .unwrap_or(2400);
-            let rgb = pano.thumbnail(max, max).to_rgb8();
+            // Never enlarged (`thumbnail` scales up to fit as well as
+            // down), and the stitch's encoded values written as they are:
+            // `to_rgb8` and `thumbnail` each convert floats their own way.
+            let (pano_w, pano_h) = (pano.width(), pano.height());
+            let mut float = pano.into_rgb32f();
+            let longest = float.width().max(float.height());
+            if longest > max {
+                let scale = max as f64 / longest as f64;
+                float = image::imageops::resize(
+                    &float,
+                    (float.width() as f64 * scale).round().max(1.0) as u32,
+                    (float.height() as f64 * scale).round().max(1.0) as u32,
+                    image::imageops::FilterType::Triangle,
+                );
+            }
+            let (w, h) = float.dimensions();
+            let bytes = float
+                .as_raw()
+                .iter()
+                .map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)
+                .collect();
+            let rgb = image::RgbImage::from_raw(w, h, bytes).context("panorama size")?;
             let mut file = std::fs::File::create(&args[2])?;
             image::codecs::jpeg::JpegEncoder::new_with_quality(&mut file, 88).encode_image(&rgb)?;
-            println!("{}x{}", pano.width(), pano.height());
+            println!("{pano_w}x{pano_h}");
         }
         other => anyhow::bail!("unknown command {other}"),
     }
