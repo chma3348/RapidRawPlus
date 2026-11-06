@@ -131,6 +131,12 @@ fn solve_correction(
     c
 }
 
+/// The smooth correction that takes `diff`'s values outside `inside` and
+/// carries them across it (`∇²c = 0` inside), for the heal engine.
+pub(crate) fn solve_membrane(diff: &[f32], inside: &[bool], w: usize, h: usize) -> Vec<f32> {
+    solve_correction(diff, inside, w, h, LEVELS)
+}
+
 /// How much of the destination's tone the blended result should take on.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SeamMode {

@@ -30,6 +30,8 @@ export interface HealLine {
   autoOffset?: Offset;
   /** Sources turned down with Refresh source, kept clear of next time. */
   rejectedSources?: Offset[];
+  /** 'eraser' for a stroke that takes away from the others, not a spot. */
+  tool?: string;
 }
 
 /** The lines of a brush sub-mask's parameters, if it has any. */
@@ -38,12 +40,35 @@ export const healLines = (parameters: unknown): HealLine[] | undefined => {
   return Array.isArray(lines) ? (lines as HealLine[]) : undefined;
 };
 
+/**
+ * Lightroom's Tool Overlay: when the spots' pins show. Auto shows them while
+ * the pointer is over the photo, Always keeps them up, Never hides them.
+ */
+export type HealOverlayMode = 'auto' | 'always' | 'never';
+
+const OVERLAY_MODE_KEY = 'darkroom.healOverlayMode';
+
+const loadOverlayMode = (): HealOverlayMode => {
+  try {
+    const stored = localStorage.getItem(OVERLAY_MODE_KEY);
+    if (stored === 'auto' || stored === 'always' || stored === 'never') return stored;
+  } catch {
+    // Storage unavailable: fall back to the default.
+  }
+  return 'auto';
+};
+
 interface HealSelectionState {
   selected: HealSpotRef | null;
   select: (spot: HealSpotRef | null) => void;
   /** Asked for by the panel or a key; the canvas, which owns the spots, acts. */
   action: { kind: HealAction; id: number } | null;
   request: (kind: HealAction) => void;
+  overlayMode: HealOverlayMode;
+  setOverlayMode: (mode: HealOverlayMode) => void;
+  /** Toggled with O to see the result: pins, outlines and red mask hidden. */
+  overlaysHidden: boolean;
+  setOverlaysHidden: (hidden: boolean) => void;
 }
 
 export const useHealSelection = create<HealSelectionState>((set) => ({
@@ -51,4 +76,15 @@ export const useHealSelection = create<HealSelectionState>((set) => ({
   select: (selected) => set({ selected }),
   action: null,
   request: (kind) => set((s) => ({ action: { kind, id: (s.action?.id ?? 0) + 1 } })),
+  overlayMode: loadOverlayMode(),
+  setOverlayMode: (overlayMode) => {
+    try {
+      localStorage.setItem(OVERLAY_MODE_KEY, overlayMode);
+    } catch {
+      // Not remembered this time; the choice still applies.
+    }
+    set({ overlayMode });
+  },
+  overlaysHidden: false,
+  setOverlaysHidden: (overlaysHidden) => set({ overlaysHidden }),
 }));

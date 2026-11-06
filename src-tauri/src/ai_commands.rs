@@ -4540,6 +4540,7 @@ pub(crate) fn split_heal_units(
 }
 
 /// Bounding box of every non-zero pixel in a mask.
+#[cfg(test)]
 fn mask_bounds(mask: &GrayImage) -> Option<(u32, u32, u32, u32)> {
     let (w, h) = mask.dimensions();
     let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
@@ -4568,157 +4569,15 @@ pub(crate) fn auto_clone_offset(
     auto_clone_offset_avoiding(image, mask, bounds, &[])
 }
 
-/// Chooses where a heal spot should sample from, so the user never has to.
-///
-/// A heal needs a source — it repairs by borrowing texture from elsewhere —
-/// but picking that spot by hand is busywork. This scores candidate offsets
-/// by how closely the photo around the *source* matches the photo around
-/// the *destination*, which is exactly the condition under which the
-/// gradient-domain blend disappears, and rejects any candidate that would
-/// sample the hole being repaired. Nearer sources win ties, since texture
-/// and lighting drift across a frame.
-///
-/// Sources already turned down (Refresh source) are kept clear of: no
-/// candidate near one of `avoid` is taken. When nothing else fits, the best
-/// source is given again.
+/// The source the heal picked before `heal_engine::find_source`; kept for the
+/// clone path and comparisons.
 pub(crate) fn auto_clone_offset_avoiding(
     image: &RgbaImage,
     mask: &GrayImage,
     bounds: (u32, u32, u32, u32),
     avoid: &[(i32, i32)],
 ) -> (i32, i32) {
-    let (w, h) = image.dimensions();
-    let (bx0, by0, bx1, by1) = bounds;
-    let bw = (bx1 - bx0 + 1) as i32;
-    let bh = (by1 - by0 + 1) as i32;
-    let size = bw.max(bh).max(8);
-    let luma = |x: i32, y: i32| -> f32 {
-        let p = image.get_pixel(
-            x.clamp(0, w as i32 - 1) as u32,
-            y.clamp(0, h as i32 - 1) as u32,
-        );
-        0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32
-    };
-
-    // Sample the clean photo in a band around the spot. These are the pixels
-    // a good source has to agree with.
-    let band = (size / 6).clamp(4, 48);
-    let stride = (size / 16).max(2);
-    let mut ring: Vec<(i32, i32)> = Vec::new();
-    let mut y = by0 as i32 - band;
-    while y <= by1 as i32 + band {
-        let mut x = bx0 as i32 - band;
-        while x <= bx1 as i32 + band {
-            let inside_core = x > bx0 as i32 && x < bx1 as i32 && y > by0 as i32 && y < by1 as i32;
-            let in_frame = x >= 0 && y >= 0 && x < w as i32 && y < h as i32;
-            if in_frame && !inside_core && mask.get_pixel(x as u32, y as u32)[0] == 0 {
-                ring.push((x, y));
-            }
-            x += stride;
-        }
-        y += stride;
-    }
-    // Grid of spot pixels used to check a candidate does not sample the hole.
-    let mut core: Vec<(i32, i32)> = Vec::new();
-    let mut y = by0 as i32;
-    while y <= by1 as i32 {
-        let mut x = bx0 as i32;
-        while x <= bx1 as i32 {
-            if mask.get_pixel(x as u32, y as u32)[0] > 127 {
-                core.push((x, y));
-            }
-            x += stride;
-        }
-        y += stride;
-    }
-    if ring.len() < 8 || core.is_empty() {
-        return (0, -size.max(40));
-    }
-
-    let score = |dx: i32, dy: i32| -> Option<f32> {
-        // Never sample the area being repaired.
-        let mut hit = 0usize;
-        for (x, y) in &core {
-            let (sx, sy) = (x + dx, y + dy);
-            if sx < 0 || sy < 0 || sx >= w as i32 || sy >= h as i32 {
-                return None;
-            }
-            if mask.get_pixel(sx as u32, sy as u32)[0] > 0 {
-                hit += 1;
-            }
-        }
-        if hit * 50 > core.len() {
-            return None;
-        }
-        let mut err = 0.0f32;
-        for (x, y) in &ring {
-            let (sx, sy) = (x + dx, y + dy);
-            if sx < 0 || sy < 0 || sx >= w as i32 || sy >= h as i32 {
-                return None;
-            }
-            err += (luma(*x, *y) - luma(sx, sy)).abs();
-        }
-        let mean = err / ring.len() as f32;
-        // Mild pull toward nearer sources: lighting and texture drift.
-        Some(mean + 0.004 * ((dx * dx + dy * dy) as f32).sqrt())
-    };
-
-    let min_shift = (size * 3) / 4;
-    let max_shift = size * 3;
-    // A turned-down source rules out the candidates that would look the same.
-    let clear = (size * 2 / 3).max(12);
-    let allowed = |dx: i32, dy: i32| {
-        avoid
-            .iter()
-            .all(|(ax, ay)| (dx - ax).pow(2) + (dy - ay).pow(2) >= clear * clear)
-    };
-    if !avoid.is_empty() {
-        let fresh = auto_clone_offset_avoiding(image, mask, bounds, &[]);
-        if allowed(fresh.0, fresh.1) {
-            return fresh;
-        }
-    }
-    let mut best: Option<(f32, i32, i32)> = None;
-    let coarse = (size / 6).max(8);
-    let mut dy = -max_shift;
-    while dy <= max_shift {
-        let mut dx = -max_shift;
-        while dx <= max_shift {
-            let far_enough = dx * dx + dy * dy >= min_shift * min_shift && allowed(dx, dy);
-            match far_enough.then(|| score(dx, dy)).flatten() {
-                Some(sc) if best.is_none_or(|(b, _, _)| sc < b) => best = Some((sc, dx, dy)),
-                _ => {}
-            }
-            dx += coarse;
-        }
-        dy += coarse;
-    }
-    let Some((_, cx, cy)) = best else {
-        // Nothing but the turned-down sources fits: give the best again.
-        return if avoid.is_empty() {
-            (0, -size.max(40))
-        } else {
-            auto_clone_offset_avoiding(image, mask, bounds, &[])
-        };
-    };
-
-    // Refine around the winner so the answer is not stuck on the coarse grid.
-    let fine = (coarse / 3).max(2);
-    let mut refined = (f32::MAX, cx, cy);
-    let mut dy = cy - coarse;
-    while dy <= cy + coarse {
-        let mut dx = cx - coarse;
-        while dx <= cx + coarse {
-            let far_enough = dx * dx + dy * dy >= min_shift * min_shift && allowed(dx, dy);
-            match far_enough.then(|| score(dx, dy)).flatten() {
-                Some(sc) if sc < refined.0 => refined = (sc, dx, dy),
-                _ => {}
-            }
-            dx += fine;
-        }
-        dy += fine;
-    }
-    (refined.1, refined.2)
+    crate::heal_engine::legacy_find_source(image, mask, bounds, avoid)
 }
 
 /// A region the fill will process: a mask component — possibly one tile of
@@ -4910,50 +4769,88 @@ pub async fn apply_clone_patch(
     let mut healed_spots = 0usize;
     let mut auto_sourced = 0usize;
     let (mut ms_masks, mut ms_heal) = (0u128, 0u128);
+    // Every stroke's mask first: a heal's source must keep clear of all of
+    // them, not only its own.
+    let t_mask = std::time::Instant::now();
+    let mut spots = Vec::with_capacity(units.len());
     for (unit, unit_offset) in units {
-        chosen_sources.push(serde_json::Value::Null);
-        let t_mask = std::time::Instant::now();
         let avoid = rejected(&unit);
         let unit_def = build_def(vec![unit]);
-        let Some(bitmap) =
-            generate_mask_bitmap(&unit_def, img_w, img_h, 1.0, (0.0, 0.0), warped.as_deref())
-        else {
+        let mask =
+            generate_mask_bitmap(&unit_def, img_w, img_h, 1.0, (0.0, 0.0), warped.as_deref()).map(
+                |bitmap| {
+                    let unwarped = apply_unwarp_geometry(
+                        Cow::Owned(DynamicImage::ImageLuma8(bitmap)),
+                        &current_adjustments,
+                    )
+                    .into_owned();
+                    let mut spot_mask = unwarped.to_luma8();
+                    // Same promotion the generative path does: a Clipped selection
+                    // hands over confidence values (one measured mask peaked at
+                    // 68/255), which consumed literally would clone at quarter
+                    // strength. On a brush stroke it keeps the painted area whole
+                    // and leaves the outer part of the Feather as the soft edge.
+                    boost_mask_confidence(&mut spot_mask);
+                    spot_mask
+                },
+            );
+        spots.push((mask, unit_offset, avoid));
+    }
+    let mut occupied = image::GrayImage::new(img_w, img_h);
+    for mask in spots.iter().filter_map(|s| s.0.as_ref()) {
+        for (o, m) in occupied.pixels_mut().zip(mask.pixels()) {
+            o[0] = o[0].max(m[0]);
+        }
+    }
+    ms_masks += t_mask.elapsed().as_millis();
+    for (mask, unit_offset, avoid) in spots {
+        chosen_sources.push(serde_json::Value::Null);
+        let Some(spot_mask) = mask else {
             continue;
         };
-        let unwarped = apply_unwarp_geometry(
-            Cow::Owned(DynamicImage::ImageLuma8(bitmap)),
-            &current_adjustments,
-        )
-        .into_owned();
-        let mut spot_mask = unwarped.to_luma8();
-        // Same promotion the generative path does: a Clipped selection
-        // hands over confidence values (one measured mask peaked at
-        // 68/255), which consumed literally would clone at quarter strength.
-        boost_mask_confidence(&mut spot_mask);
-        let Some(spot_bounds) = mask_bounds(&spot_mask) else {
+        let t_source = std::time::Instant::now();
+        let Some(spot) = crate::heal_engine::Spot::from_mask(&spot_mask) else {
             continue;
         };
         let (ox, oy) = match unit_offset {
             Some(off) => off,
             None => {
                 auto_sourced += 1;
-                auto_clone_offset_avoiding(&encoded_full, &spot_mask, spot_bounds, &avoid)
+                if heal {
+                    crate::heal_engine::find_source(&encoded_full, &spot, Some(&occupied), &avoid)
+                } else {
+                    let bounds = (
+                        spot.x0 as u32,
+                        spot.y0 as u32,
+                        (spot.x0 + spot.w as i32 - 1) as u32,
+                        (spot.y0 + spot.h as i32 - 1) as u32,
+                    );
+                    auto_clone_offset_avoiding(&encoded_full, &spot_mask, bounds, &avoid)
+                }
             }
         };
         *chosen_sources.last_mut().unwrap() = to_display((ox, oy));
-        ms_masks += t_mask.elapsed().as_millis();
+        ms_masks += t_source.elapsed().as_millis();
         let t_heal = std::time::Instant::now();
-        working = if heal {
-            crate::heal_blend::heal_blend(&working, &spot_mask, ox, oy)
+        if heal {
+            // The heal blends its own soft edge into `working`, so the patch
+            // it hands back covers the stroke at full strength: compositing
+            // through the soft mask again would leave the edge half-healed.
+            crate::heal_engine::heal_in_place(&mut working, &spot, (ox, oy), Some(&occupied));
+            for (u, s) in union_mask.pixels_mut().zip(spot_mask.pixels()) {
+                if s[0] > 0 {
+                    u[0] = 255;
+                }
+            }
         } else {
             let mut c = clone_offset_copy(&working, &spot_mask, ox, oy);
             harmonize_patch(&working, &mut c, &spot_mask, 1.0);
-            c
-        };
-        ms_heal += t_heal.elapsed().as_millis();
-        for (u, s) in union_mask.pixels_mut().zip(spot_mask.pixels()) {
-            u[0] = u[0].max(s[0]);
+            working = c;
+            for (u, s) in union_mask.pixels_mut().zip(spot_mask.pixels()) {
+                u[0] = u[0].max(s[0]);
+            }
         }
+        ms_heal += t_heal.elapsed().as_millis();
         healed_spots += 1;
     }
 

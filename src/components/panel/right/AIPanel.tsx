@@ -44,7 +44,7 @@ import {
 } from 'lucide-react';
 
 import CollapsibleSection from '../../ui/CollapsibleSection';
-import { useHealSelection } from '../../../store/useHealSelection';
+import { useHealSelection, type HealOverlayMode } from '../../../store/useHealSelection';
 import ReplacementBlendControls from './ReplacementBlendControls';
 import Switch from '../../ui/Switch';
 import Slider from '../../ui/Slider';
@@ -2082,6 +2082,51 @@ function HealSpotActions() {
   );
 }
 
+/**
+ * Lightroom's Tool Overlay for the spots' pins: Auto while the pointer is
+ * over the photo, Always, or Never. O hides every overlay for a look at the
+ * result, and brings them back.
+ */
+function HealOverlayControl() {
+  const { t } = useTranslation();
+  const overlayMode = useHealSelection((s) => s.overlayMode);
+  const setOverlayMode = useHealSelection((s) => s.setOverlayMode);
+  const overlaysHidden = useHealSelection((s) => s.overlaysHidden);
+  const modes: Array<{ mode: HealOverlayMode; label: string }> = [
+    { mode: 'auto', label: t('editor.ai.settings.healOverlayAuto', { defaultValue: 'Auto' }) },
+    { mode: 'always', label: t('editor.ai.settings.healOverlayAlways', { defaultValue: 'Always' }) },
+    { mode: 'never', label: t('editor.ai.settings.healOverlayNever', { defaultValue: 'Never' }) },
+  ];
+  return (
+    <div
+      className="mt-2 flex items-center gap-2"
+      data-tooltip={t('editor.ai.settings.healOverlayHint', {
+        defaultValue: 'When the spots show on the photo. Press O to hide or show them all.',
+      })}
+    >
+      <Text variant={TextVariants.small} className="flex-1 text-text-secondary">
+        {overlaysHidden
+          ? t('editor.ai.settings.healOverlayHidden', { defaultValue: 'Overlay hidden (O)' })
+          : t('editor.ai.settings.healOverlay', { defaultValue: 'Show overlay' })}
+      </Text>
+      <div className="flex rounded-md bg-surface p-0.5">
+        {modes.map(({ mode, label }) => (
+          <button
+            key={mode}
+            type="button"
+            onClick={() => setOverlayMode(mode)}
+            className={`rounded px-2 py-0.5 text-xs transition-colors ${
+              overlayMode === mode ? 'bg-card-active text-text-primary' : 'text-text-secondary hover:text-text-primary'
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function SettingsPanel({
   container,
   activeSubMask,
@@ -2413,6 +2458,7 @@ function SettingsPanel({
             {t('editor.ai.settings.cloneHint')}
           </Text>
           <HealSpotActions />
+          <HealOverlayControl />
         </div>
       )}
       {(container as any)?.patchType === 'sky' && (

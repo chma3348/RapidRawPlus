@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, memo, useMemo } from 'react';
 import ReactCrop from 'react-image-crop';
 import 'react-image-crop/dist/ReactCrop.css';
-import { Stage, Layer, Ellipse, Line, Transformer, Group, Circle, Rect } from 'react-konva';
+import { Stage, Layer, Ellipse, Line, Transformer, Group, Circle, Rect, Shape, Arrow } from 'react-konva';
 import { PercentCrop, Crop } from 'react-image-crop';
 import PickerLoupe from './PickerLoupe';
 import { Adjustments, AiPatch, Coord, MaskContainer } from '../../../utils/adjustments';
@@ -11,7 +11,9 @@ import { RenderSize } from '../../../hooks/useImageRenderSize';
 import type { OverlayMode } from '../right/CropPanel';
 import CompositionOverlays from './overlays/CompositionOverlays';
 import { healLines, useHealSelection, type HealLine, type Offset } from '../../../store/useHealSelection';
-import type { KonvaEventObject } from 'konva/lib/Node';
+import type { KonvaEventObject, Node as KonvaNode } from 'konva/lib/Node';
+import type { Stage as KonvaStage } from 'konva/lib/Stage';
+import type { Context as KonvaContext } from 'konva/lib/Context';
 import SkyBrushLayer from './SkyBrushLayer';
 import type { SkyBrush } from '../../../store/useEditorStore';
 
@@ -21,15 +23,287 @@ interface HealSpot {
   subMaskId: string;
   lineIndex: number;
   patchId: string;
-  x: number;
-  y: number;
+  /** Where the pin sits: the stroke's point nearest its centroid. */
+  cx: number;
+  cy: number;
+  /** The stroke as painted, flattened for a Konva Line. */
+  points: number[];
+  /** The brush's diameter. */
   width: number;
-  height: number;
   offset: Offset;
   /** The source offset as stored, in image pixels. */
   imageOffset: Offset;
   scale: number;
 }
+
+/**
+ * The selected spot's outline as last cut, kept while the stroke and the
+ * zoom stay the same: the layer redraws on every brush-cursor move, and the
+ * stroke and its source share the one picture, only placed apart.
+ */
+let healOutlineCache: {
+  points: number[];
+  width: number;
+  px: number;
+  matrix: string;
+  canvas: HTMLCanvasElement;
+} | null = null;
+
+// Past this many device pixels a stroke is cut afresh each draw, kept to the
+// part on the canvas, rather than held whole.
+const HEAL_OUTLINE_CACHE_AREA = 2048 * 2048;
+
+/** Strokes a brush stroke as an outline onto a scratch canvas. */
+const cutHealOutline = (
+  canvas: HTMLCanvasElement,
+  transform: [number, number, number, number, number, number],
+  points: number[],
+  width: number,
+  px: number,
+) => {
+  const sctx = canvas.getContext('2d');
+  if (!sctx) return;
+  sctx.setTransform(...transform);
+  sctx.lineCap = 'round';
+  sctx.lineJoin = 'round';
+  const stroke = (lineWidth: number, color: string, erase = false) => {
+    if (lineWidth <= 0) return;
+    sctx.globalCompositeOperation = erase ? 'destination-out' : 'source-over';
+    sctx.strokeStyle = color;
+    sctx.lineWidth = lineWidth;
+    sctx.beginPath();
+    sctx.moveTo(points[0], points[1]);
+    for (let i = 2; i < points.length; i += 2) sctx.lineTo(points[i], points[i + 1]);
+    sctx.stroke();
+  };
+  stroke(width + 5 * px, 'rgba(15,23,42,0.7)');
+  stroke(width + 3 * px, '#f8fafc');
+  stroke(width, '#000', true);
+  stroke(width, 'rgba(15,23,42,0.45)');
+  stroke(width - 2 * px, '#000', true);
+};
+
+/**
+ * Draws a brush stroke as an outline only, Lightroom's look for the
+ * selected spot: a white edge with a thin dark rim either side, and the
+ * inside left clear so the repair shows through. The outline is cut out on
+ * a scratch canvas (erasing on the layer itself would erase what lies
+ * under it), then copied in. `px` is one screen pixel in the shape's units.
+ */
+const drawHealOutline = (context: KonvaContext, points: number[], width: number, px: number, alpha: number) => {
+  const ctx = context._context;
+  const m = ctx.getTransform();
+  const pad = width / 2 + 4 * px;
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (let i = 0; i < points.length; i += 2) {
+    minX = Math.min(minX, points[i]);
+    maxX = Math.max(maxX, points[i]);
+    minY = Math.min(minY, points[i + 1]);
+    maxY = Math.max(maxY, points[i + 1]);
+  }
+  // The stroke's box in device pixels, relative to the shape's origin.
+  const corners = [
+    [minX - pad, minY - pad],
+    [maxX + pad, minY - pad],
+    [minX - pad, maxY + pad],
+    [maxX + pad, maxY + pad],
+  ].map(([x, y]) => [m.a * x + m.c * y, m.b * x + m.d * y]);
+  const relLeft = Math.floor(Math.min(...corners.map((c) => c[0])));
+  const relTop = Math.floor(Math.min(...corners.map((c) => c[1])));
+  const relRight = Math.ceil(Math.max(...corners.map((c) => c[0])));
+  const relBottom = Math.ceil(Math.max(...corners.map((c) => c[1])));
+  const originX = Math.round(m.e);
+  const originY = Math.round(m.f);
+
+  let picture: HTMLCanvasElement;
+  let left: number;
+  let top: number;
+  if ((relRight - relLeft) * (relBottom - relTop) <= HEAL_OUTLINE_CACHE_AREA) {
+    const matrix = `${m.a},${m.b},${m.c},${m.d}`;
+    let cache = healOutlineCache;
+    if (!cache || cache.points !== points || cache.width !== width || cache.px !== px || cache.matrix !== matrix) {
+      const canvas = cache?.canvas ?? document.createElement('canvas');
+      canvas.width = Math.max(1, relRight - relLeft);
+      canvas.height = Math.max(1, relBottom - relTop);
+      cutHealOutline(canvas, [m.a, m.b, m.c, m.d, -relLeft, -relTop], points, width, px);
+      cache = { points, width, px, matrix, canvas };
+      healOutlineCache = cache;
+    }
+    picture = cache.canvas;
+    left = originX + relLeft;
+    top = originY + relTop;
+  } else {
+    // Too big to hold: cut just the part on the canvas, every draw.
+    left = Math.max(0, originX + relLeft);
+    top = Math.max(0, originY + relTop);
+    const right = Math.min(ctx.canvas.width, originX + relRight);
+    const bottom = Math.min(ctx.canvas.height, originY + relBottom);
+    if (right <= left || bottom <= top) return;
+    picture = document.createElement('canvas');
+    picture.width = right - left;
+    picture.height = bottom - top;
+    cutHealOutline(picture, [m.a, m.b, m.c, m.d, originX - left, originY - top], points, width, px);
+  }
+
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha *= alpha;
+  ctx.drawImage(picture, left, top);
+  ctx.restore();
+};
+
+/** What of a heal spot the pointer is over. */
+type HealPart = 'pin' | 'spot' | 'source' | 'delete';
+
+/** Screen pixels from a pin within which a press picks it. */
+const HEAL_PIN_REACH = 10;
+
+/**
+ * A spot's pin, the same size on screen at any zoom (`px` is one screen
+ * pixel): a faint ring, brighter under the pointer, filled when selected.
+ * Pins never take the pointer themselves; the canvas picks the nearest.
+ */
+const HealPin = ({ x, y, px, state }: { x: number; y: number; px: number; state: 'idle' | 'hover' | 'selected' }) =>
+  state === 'selected' ? (
+    <Group x={x} y={y} listening={false}>
+      <Circle radius={6.25 * px} stroke="rgba(15,23,42,0.7)" strokeWidth={px} perfectDrawEnabled={false} />
+      <Circle radius={5 * px} fill="#38bdf8" stroke="#f8fafc" strokeWidth={1.5 * px} perfectDrawEnabled={false} />
+    </Group>
+  ) : (
+    <Group x={x} y={y} listening={false}>
+      <Circle
+        radius={4 * px}
+        stroke={state === 'hover' ? 'rgba(15,23,42,0.8)' : 'rgba(15,23,42,0.5)'}
+        strokeWidth={3.5 * px}
+        perfectDrawEnabled={false}
+      />
+      <Circle
+        radius={4 * px}
+        fill={state === 'hover' ? 'rgba(248,250,252,0.35)' : undefined}
+        stroke={state === 'hover' ? '#ffffff' : 'rgba(248,250,252,0.75)'}
+        strokeWidth={1.75 * px}
+        perfectDrawEnabled={false}
+      />
+    </Group>
+  );
+
+/**
+ * The selected spot: its stroke and its source drawn as outlines, an arrow
+ * from the one to the other, its pin, and a small delete badge beside the
+ * pin. Under them sit invisible copies of both strokes, named so a press
+ * on either can drag it (see pickHealTarget); they stay live when the
+ * outlines are hidden, so the selected spot can still be found by hovering.
+ */
+const HealSelectedSpot = ({
+  spot,
+  drag,
+  px,
+  showOutline,
+  onDelete,
+}: {
+  spot: HealSpot;
+  drag: { part: 'spot' | 'source'; dx: number; dy: number } | null;
+  px: number;
+  showOutline: boolean;
+  onDelete(): void;
+}) => {
+  // Dragging the spot carries its source along (the source is an offset
+  // from it); dragging the source moves only the source.
+  const spotDx = drag?.part === 'spot' ? drag.dx : 0;
+  const spotDy = drag?.part === 'spot' ? drag.dy : 0;
+  const sourceX = spot.offset.x + (drag ? drag.dx : 0);
+  const sourceY = spot.offset.y + (drag ? drag.dy : 0);
+  const cx = spot.cx + spotDx;
+  const cy = spot.cy + spotDy;
+  const sx = spot.cx + sourceX;
+  const sy = spot.cy + sourceY;
+  const length = Math.hypot(sx - cx, sy - cy);
+  const ux = length > 0 ? (sx - cx) / length : 0;
+  const uy = length > 0 ? (sy - cy) / length : 0;
+  const hitLine = {
+    points: spot.points,
+    // Seen by the hit canvas only.
+    stroke: 'rgba(0,0,0,0.001)',
+    strokeWidth: spot.width,
+    lineCap: 'round' as const,
+    lineJoin: 'round' as const,
+    perfectDrawEnabled: false,
+  };
+  return (
+    <Group>
+      <Line {...hitLine} name="heal-source" x={sourceX} y={sourceY} />
+      <Line {...hitLine} name="heal-spot" x={spotDx} y={spotDy} />
+      {showOutline && (
+        <>
+          <Shape
+            x={sourceX}
+            y={sourceY}
+            listening={false}
+            sceneFunc={(context) => drawHealOutline(context, spot.points, spot.width, px, 0.6)}
+          />
+          <Shape
+            x={spotDx}
+            y={spotDy}
+            listening={false}
+            sceneFunc={(context) => drawHealOutline(context, spot.points, spot.width, px, 1)}
+          />
+          {length > 16 * px && (
+            <>
+              <Line
+                points={[cx + ux * 8 * px, cy + uy * 8 * px, sx, sy]}
+                stroke="rgba(15,23,42,0.55)"
+                strokeWidth={3 * px}
+                lineCap="round"
+                listening={false}
+              />
+              <Arrow
+                points={[cx + ux * 8 * px, cy + uy * 8 * px, sx, sy]}
+                stroke="#f8fafc"
+                fill="#f8fafc"
+                strokeWidth={1.25 * px}
+                pointerLength={6 * px}
+                pointerWidth={6 * px}
+                listening={false}
+              />
+            </>
+          )}
+          <HealPin x={cx} y={cy} px={px} state="selected" />
+          <Group
+            x={cx + 13 * px}
+            y={cy - 13 * px}
+            // Delete on mousedown, not click: Konva only synthesises a click
+            // when press and release land on the same node, and the hover
+            // state changing in between re-renders it, so the click never
+            // arrived and the x did nothing.
+            onMouseDown={(e: KonvaEventObject<MouseEvent>) => {
+              e.cancelBubble = true;
+              onDelete();
+            }}
+          >
+            {/* Invisible hit pad: the visible badge is small. */}
+            <Circle name="heal-delete" radius={9 * px} fill="rgba(0,0,0,0.01)" />
+            <Circle name="heal-delete" radius={6.5 * px} fill="#0f172a" stroke="#f8fafc" strokeWidth={1.25 * px} />
+            <Line
+              points={[-2.25 * px, -2.25 * px, 2.25 * px, 2.25 * px]}
+              stroke="#f8fafc"
+              strokeWidth={1.25 * px}
+              listening={false}
+            />
+            <Line
+              points={[2.25 * px, -2.25 * px, -2.25 * px, 2.25 * px]}
+              stroke="#f8fafc"
+              strokeWidth={1.25 * px}
+              listening={false}
+            />
+          </Group>
+        </>
+      )}
+    </Group>
+  );
+};
 
 interface CursorPreview {
   visible: boolean;
@@ -1367,19 +1641,32 @@ const ImageCanvas = memo(
     const selectHeal = useHealSelection((s) => s.select);
     const healAction = useHealSelection((s) => s.action);
     const selectedHealKey = selectedHeal?.key ?? null;
-    const [hoveredHealKey, setHoveredHealKey] = useState<string | null>(null);
-    // A marker being dragged, by how far: the line to the source (and, for
-    // the spot itself, its source box) follow the pointer instead of
-    // jumping when it is let go.
+    // What the pointer is over: a spot's pin, or the selected spot's
+    // stroke, source or delete badge. Pins are found by distance, not
+    // Konva's topmost shape, so the nearest wins where spots overlap.
+    const [healHover, setHealHover] = useState<{ key: string; part: HealPart } | null>(null);
+    const hoveredHealKey = healHover?.part === 'pin' ? healHover.key : null;
+    // A spot being dragged, by how far: its outline, pin and the line to
+    // the source follow the pointer instead of jumping when it is let go.
     const [healDrag, setHealDrag] = useState<{ key: string; part: 'spot' | 'source'; dx: number; dy: number } | null>(
       null,
     );
+    const healOverlayMode = useHealSelection((s) => s.overlayMode);
+    const healOverlaysHidden = useHealSelection((s) => s.overlaysHidden);
+    const [isPointerOverCanvas, setIsPointerOverCanvas] = useState(false);
+    // A heal stroke being painted: the red mask shows only then (and over
+    // a hovered pin), never sitting over the result.
+    const [isHealPainting, setIsHealPainting] = useState(false);
+    const isHealEditing =
+      isAiEditing &&
+      ((activeContainer as any)?.patchType === 'heal' || (activeContainer as any)?.patchType === 'clone');
 
     // Every brush stroke is its own heal spot pulling from its own source,
-    // the way Lightroom models them: hover highlights a stroke, clicking
-    // selects it and reveals where that one pulls from, and either box can
-    // then be dragged. A stroke that has never had its source moved falls
-    // back to the container's offset.
+    // the way Lightroom models them: each shows as a small pin, clicking
+    // one selects it and reveals the stroke and where it pulls from, and
+    // either can then be dragged. A stroke that has never had its source
+    // moved falls back to the container's offset. Eraser strokes take away
+    // from the others and are not spots.
     const healSpots = useMemo(() => {
       const container: any = activeContainer;
       if (!isAiEditing || !container || (container.patchType !== 'heal' && container.patchType !== 'clone')) {
@@ -1404,17 +1691,36 @@ const ImageCanvas = memo(
       for (const sm of container.subMasks || []) {
         const lines = (sm.parameters as any)?.lines || [];
         lines.forEach((line: any, lineIndex: number) => {
+          if (line.tool === ToolType.Eraser) {
+            return;
+          }
           const pts = (line.points || []).filter(
             (p: any) => typeof p?.x === 'number' && typeof p?.y === 'number',
           );
           if (pts.length === 0) {
             return;
           }
-          const pad = Math.max(line.brushSize || 0, 20) / 2;
-          const xs = pts.map((p: any) => p.x);
-          const ys = pts.map((p: any) => p.y);
-          const minX = Math.min(...xs);
-          const minY = Math.min(...ys);
+          // The pin goes on the stroke itself, at its point nearest the
+          // centroid, so a curved stroke's pin never floats off it.
+          const mx = pts.reduce((sum: number, p: any) => sum + p.x, 0) / pts.length;
+          const my = pts.reduce((sum: number, p: any) => sum + p.y, 0) / pts.length;
+          let pin = pts[0];
+          let best = Infinity;
+          for (const p of pts) {
+            const d = (p.x - mx) ** 2 + (p.y - my) ** 2;
+            if (d < best) {
+              best = d;
+              pin = p;
+            }
+          }
+          const points: number[] = [];
+          for (const p of pts) {
+            points.push((p.x - cropX) * scale, (p.y - cropY) * scale);
+          }
+          // A click is one point; a hair of length lets the round cap draw.
+          if (points.length === 2) {
+            points.push(points[0] + 0.01, points[1]);
+          }
           // The source the stroke was given by hand, else the one the heal
           // chose for it (reported back after each run).
           const offset = line.cloneOffset || line.autoOffset || fallback;
@@ -1423,10 +1729,10 @@ const ImageCanvas = memo(
             subMaskId: sm.id,
             lineIndex,
             patchId: container.id,
-            x: (minX - pad - cropX) * scale,
-            y: (minY - pad - cropY) * scale,
-            width: (Math.max(...xs) - minX + pad * 2) * scale,
-            height: (Math.max(...ys) - minY + pad * 2) * scale,
+            cx: (pin.x - cropX) * scale,
+            cy: (pin.y - cropY) * scale,
+            points,
+            width: Math.max(line.brushSize || 20, 1) * scale,
             offset: { x: offset.x * scale, y: offset.y * scale },
             imageOffset: { x: offset.x, y: offset.y },
             scale,
@@ -1587,7 +1893,182 @@ const ImageCanvas = memo(
       return () => window.removeEventListener('keydown', onKey, true);
     }, [selectedHealKey]);
 
+    // O hides every heal overlay (pins, outlines, the red mask) to look at
+    // the result, and brings them back. O cycles the crop guides only in
+    // the Crop panel, so it is free here. Leaving the patch shows them again.
+    useEffect(() => {
+      if (!isHealEditing) return;
+      const onKey = (e: KeyboardEvent) => {
+        if (e.code !== 'KeyO' || e.repeat) return;
+        const target = e.target as HTMLElement | null;
+        if (target && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))) return;
+        if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
+        e.preventDefault();
+        const state = useHealSelection.getState();
+        state.setOverlaysHidden(!state.overlaysHidden);
+      };
+      window.addEventListener('keydown', onKey, true);
+      return () => {
+        window.removeEventListener('keydown', onKey, true);
+        useHealSelection.getState().setOverlaysHidden(false);
+      };
+    }, [isHealEditing, activeAiPatchContainerId]);
+
     const effectiveZoomScale = transformState.scale > 0 ? transformState.scale : 1;
+    // One screen pixel in the overlay's units, for marks that keep their
+    // size on screen at any zoom.
+    const healPx = 1 / effectiveZoomScale;
+    const selectedHealSpot = useMemo(
+      () => healSpots.find((spot) => spot.key === selectedHealKey) ?? null,
+      [healSpots, selectedHealKey],
+    );
+    // Lightroom's Tool Overlay: Auto shows the pins while the pointer is
+    // over the photo, Always keeps them, Never hides them.
+    const healPinsVisible =
+      isHealEditing &&
+      !healOverlaysHidden &&
+      (healOverlayMode === 'always' || (healOverlayMode === 'auto' && (isPointerOverCanvas || !!healDrag)));
+    const showSelectedHealOutline =
+      !!selectedHealSpot &&
+      !healOverlaysHidden &&
+      (healPinsVisible || healDrag?.key === selectedHealSpot.key || healHover?.key === selectedHealSpot.key);
+    // The red mask over a heal patch shows only while painting or over a
+    // pin, never sitting over the result.
+    const hideHealMask =
+      isHealEditing && (healOverlaysHidden || !!healDrag || (!isHealPainting && !hoveredHealKey));
+
+    // Over a pin, the red mask shows just that spot (less what was erased
+    // from it after); leaving puts the whole patch back for the next time
+    // it shows, so painting never opens on a single spot's mask.
+    useEffect(() => {
+      if (!hoveredHealKey || !isHealEditing || !onLiveMaskPreview || !activeContainer) return;
+      const spot = healSpots.find((s) => s.key === hoveredHealKey);
+      const container = activeContainer as AiPatch;
+      const subMask = spot ? container.subMasks.find((sm: SubMask) => sm.id === spot.subMaskId) : null;
+      const lines = healLines(subMask?.parameters);
+      if (!spot || !subMask || !lines) return;
+      const own = lines.filter(
+        (line, i) => i === spot.lineIndex || (i > spot.lineIndex && line.tool === ToolType.Eraser),
+      );
+      onLiveMaskPreview({
+        ...container,
+        adjustments: {},
+        opacity: 100,
+        subMasks: [{ ...subMask, parameters: { ...subMask.parameters, lines: own } }],
+      });
+      return () => onLiveMaskPreview({ ...container, adjustments: {}, opacity: 100 });
+    }, [hoveredHealKey, isHealEditing, onLiveMaskPreview, activeContainer, healSpots]);
+
+    // What a press at `pos` lands on. The nearest pin within reach wins,
+    // wherever spots overlap; then the selected spot's stroke or source
+    // (Konva's hit on their invisible copies). Anything else paints.
+    const pickHealTarget = useCallback(
+      (target: KonvaNode | null | undefined, pos: Coord | null): { spot: HealSpot; part: HealPart } | null => {
+        if (!pos || !isHealEditing || healOverlaysHidden) return null;
+        const name = target?.name() ?? '';
+        if (name === 'heal-delete' && selectedHealSpot) {
+          return { spot: selectedHealSpot, part: 'delete' };
+        }
+        if (healPinsVisible) {
+          let nearest: HealSpot | null = null;
+          let best = (HEAL_PIN_REACH * healPx) ** 2;
+          for (const spot of healSpots) {
+            const d = (spot.cx - pos.x) ** 2 + (spot.cy - pos.y) ** 2;
+            if (d < best || (d === best && spot.key === selectedHealKey)) {
+              best = d;
+              nearest = spot;
+            }
+          }
+          if (nearest) return { spot: nearest, part: 'pin' };
+        }
+        if ((name === 'heal-spot' || name === 'heal-source') && selectedHealSpot) {
+          return { spot: selectedHealSpot, part: name === 'heal-spot' ? 'spot' : 'source' };
+        }
+        return null;
+      },
+      [isHealEditing, healOverlaysHidden, selectedHealSpot, healPinsVisible, healPx, healSpots, selectedHealKey],
+    );
+
+    const healHoverRef = useRef<typeof healHover>(null);
+    const updateHealHover = useCallback(
+      (target: KonvaNode | null | undefined, pos: Coord | null) => {
+        const hit = pickHealTarget(target, pos);
+        const next = hit ? { key: hit.spot.key, part: hit.part } : null;
+        const prev = healHoverRef.current;
+        if (prev?.key === next?.key && prev?.part === next?.part) return;
+        healHoverRef.current = next;
+        setHealHover(next);
+        // Over a pin or the selected spot the photo must not pan: the
+        // editor otherwise captures the pointer on press.
+        if (!!prev !== !!next) setIsMaskHovered(!!next);
+        const stage = target?.getStage();
+        if (stage) {
+          stage.container().style.cursor = next
+            ? next.part === 'spot' || next.part === 'source'
+              ? 'move'
+              : 'pointer'
+            : '';
+        }
+      },
+      [pickHealTarget, setIsMaskHovered],
+    );
+
+    useEffect(() => {
+      if (isHealEditing || !healHoverRef.current) return;
+      healHoverRef.current = null;
+      setHealHover(null);
+      setIsMaskHovered(false);
+    }, [isHealEditing, setIsMaskHovered]);
+
+    // A press on a pin or the selected spot: it selects at once, and if
+    // the pointer then moves, drags the spot (or its source) until release.
+    // Followed on the window so a drag can leave the canvas.
+    const healPressCleanup = useRef<(() => void) | null>(null);
+    const beginHealPress = useCallback(
+      (stage: KonvaStage, spot: HealSpot, part: 'spot' | 'source', start: Coord) => {
+        healPressCleanup.current?.();
+        let delta: Offset | null = null;
+        const onMove = (ev: MouseEvent | TouchEvent) => {
+          stage.setPointersPositions(ev);
+          const p = getCanvasPointer(stage);
+          if (!p) return;
+          const dx = p.x - start.x;
+          const dy = p.y - start.y;
+          // A press that barely moves is a click: it selects, nothing more.
+          if (!delta && dx * dx + dy * dy < (3 * healPx) ** 2) return;
+          delta = { x: dx, y: dy };
+          setHealDrag({ key: spot.key, part, dx, dy });
+          if (ev.cancelable) ev.preventDefault();
+        };
+        const cleanup = () => {
+          window.removeEventListener('mousemove', onMove);
+          window.removeEventListener('touchmove', onMove);
+          window.removeEventListener('mouseup', onUp);
+          window.removeEventListener('touchend', onUp);
+          window.removeEventListener('touchcancel', onUp);
+          healPressCleanup.current = null;
+        };
+        const onUp = () => {
+          cleanup();
+          setHealDrag(null);
+          const moved = delta as Offset | null;
+          if (!moved) return;
+          if (part === 'spot') {
+            moveHealSpot(spot, Math.round(moved.x), Math.round(moved.y));
+          } else {
+            setHealSpotSource(spot, { x: spot.offset.x + moved.x, y: spot.offset.y + moved.y });
+          }
+        };
+        window.addEventListener('mousemove', onMove);
+        window.addEventListener('touchmove', onMove, { passive: false });
+        window.addEventListener('mouseup', onUp);
+        window.addEventListener('touchend', onUp);
+        window.addEventListener('touchcancel', onUp);
+        healPressCleanup.current = cleanup;
+      },
+      [getCanvasPointer, healPx, moveHealSpot, setHealSpotSource],
+    );
+    useEffect(() => () => healPressCleanup.current?.(), []);
     const brushStageSize = (brushSettings?.size ?? 0) / effectiveZoomScale;
     const brushImageSpaceSize = brushStageSize / (imageRenderSize.scale || 1);
 
@@ -1678,6 +2159,7 @@ const ImageCanvas = memo(
       dragStartPointer.current = null;
       currentLine.current = null;
       lastBrushPoint.current = null;
+      setIsHealPainting(false);
       setPreviewBox(null);
       previewBoxRef.current = null;
       setLocalInitialDrawParams(null);
@@ -1884,6 +2366,25 @@ const ImageCanvas = memo(
           return;
         }
 
+        if (isHealEditing) {
+          const stage = e.target.getStage();
+          const pos = stage ? getCanvasPointer(stage) : null;
+          const hit = pickHealTarget(e.target, pos);
+          if (hit && pos && hit.part !== 'delete') {
+            selectHeal({
+              key: hit.spot.key,
+              patchId: hit.spot.patchId,
+              subMaskId: hit.spot.subMaskId,
+              lineIndex: hit.spot.lineIndex,
+            });
+            beginHealPress(stage, hit.spot, hit.part === 'source' ? 'source' : 'spot', pos);
+            return;
+          }
+          // Painting a new spot, or pressing off the spots, lets the
+          // selected one go.
+          selectHeal(null);
+        }
+
         if (isParametricActive && activeSubMask) {
           const pos = getCanvasPointer(e.target.getStage());
           if (!pos) return;
@@ -2074,6 +2575,7 @@ const ImageCanvas = memo(
 
           isDrawing.current = true;
           drawingStageRef.current = stage;
+          if (isHealEditing && isBrushActive) setIsHealPainting(true);
 
           const newLine: DrawnLine = {
             brushSize: isBrushActive && brushSettings?.size ? brushStageSize : 2,
@@ -2119,6 +2621,10 @@ const ImageCanvas = memo(
         brushStageSize,
         baseTool,
         getCanvasPointer,
+        isHealEditing,
+        pickHealTarget,
+        selectHeal,
+        beginHealPress,
       ],
     );
 
@@ -2152,6 +2658,15 @@ const ImageCanvas = memo(
             stage.setPointersPositions(e);
             pos = getCanvasPointer(stage);
           }
+        }
+
+        if (
+          isHealEditing &&
+          typeof e?.target?.getStage === 'function' &&
+          !isDrawing.current &&
+          !healPressCleanup.current
+        ) {
+          updateHealHover(e.target, pos ?? null);
         }
 
         if (isToolActive) {
@@ -2334,10 +2849,13 @@ const ImageCanvas = memo(
         brushImageSpaceSize,
         baseTool,
         getCanvasPointer,
+        isHealEditing,
+        updateHealHover,
       ],
     );
 
     const handleUp = useCallback(() => {
+      setIsHealPainting(false);
       if (!isDrawing.current) {
         return;
       }
@@ -2506,15 +3024,21 @@ const ImageCanvas = memo(
     ]);
 
     const handleMouseEnter = useCallback(() => {
+      setIsPointerOverCanvas(true);
       if (isToolActive) {
         setCursorPreview((p: CursorPreview) => ({ ...p, visible: true }));
       }
     }, [isToolActive]);
 
-    const handleMouseLeave = useCallback(() => {
-      setCursorPreview((p: CursorPreview) => ({ ...p, visible: false }));
-      setPickerHover(null);
-    }, []);
+    const handleMouseLeave = useCallback(
+      (e: KonvaEventObject<MouseEvent>) => {
+        setIsPointerOverCanvas(false);
+        setCursorPreview((p: CursorPreview) => ({ ...p, visible: false }));
+        setPickerHover(null);
+        if (healHoverRef.current && !healPressCleanup.current) updateHealHover(e?.target, null);
+      },
+      [updateHealHover],
+    );
 
     useEffect(() => {
       if (!isToolActive) return;
@@ -2906,7 +3430,13 @@ const ImageCanvas = memo(
                     height: `${imageRenderSize.height}px`,
                     left: `${imageRenderSize.offsetX}px`,
                     opacity:
-                      isShowingOriginal || isMaskControlHovered || isSliderDragging || isMaskInteractionActive ? 0 : 1,
+                      isShowingOriginal ||
+                      isMaskControlHovered ||
+                      isSliderDragging ||
+                      isMaskInteractionActive ||
+                      hideHealMask
+                        ? 0
+                        : 1,
                     top: `${imageRenderSize.offsetY}px`,
                     transition: 'opacity 300ms ease-in-out',
                     width: `${imageRenderSize.width}px`,
@@ -3059,205 +3589,40 @@ const ImageCanvas = memo(
                           );
                         })}
 
-                      {healSpots.map((spot) => {
-                        const isSelected = selectedHealKey === spot.key;
-                        const isHovered = hoveredHealKey === spot.key;
-                        const drag = healDrag?.key === spot.key ? healDrag : null;
-                        // Dragging the spot carries its source along (the
-                        // source is an offset from it); dragging the source
-                        // moves only the source.
-                        const spotDx = drag?.part === 'spot' ? drag.dx : 0;
-                        const spotDy = drag?.part === 'spot' ? drag.dy : 0;
-                        const sourceDx = drag ? drag.dx : 0;
-                        const sourceDy = drag ? drag.dy : 0;
-                        const cx = spot.x + spot.width / 2 + spotDx;
-                        const cy = spot.y + spot.height / 2 + spotDy;
-                        const sx = spot.x + spot.width / 2 + spot.offset.x + sourceDx;
-                        const sy = spot.y + spot.height / 2 + spot.offset.y + sourceDy;
-                        // Over a marker the photo must not pan: the editor
-                        // otherwise captures the pointer on press and the
-                        // marker never sees the drag.
-                        const enter = (e: KonvaEventObject<MouseEvent>, cursor: string) => {
-                          setIsMaskHovered(true);
-                          const stage = e.target.getStage();
-                          if (stage) stage.container().style.cursor = cursor;
-                        };
-                        const leave = (e: KonvaEventObject<MouseEvent>) => {
-                          setIsMaskHovered(false);
-                          const stage = e.target.getStage();
-                          if (stage) stage.container().style.cursor = '';
-                        };
-                        const spotRef = {
-                          key: spot.key,
-                          patchId: spot.patchId,
-                          subMaskId: spot.subMaskId,
-                          lineIndex: spot.lineIndex,
-                        };
-                        return (
-                          <Group key={spot.key}>
-                            {isSelected && (
-                              <>
-                                <Line
-                                  points={[cx, cy, sx, sy]}
-                                  stroke="#38bdf8"
-                                  strokeWidth={1.5 / maxSafeScale}
-                                  dash={[6 / maxSafeScale, 6 / maxSafeScale]}
-                                  listening={false}
+                      {/* Heal and clone spots, Lightroom's way: a small pin
+                          each, and for the selected one its stroke and
+                          source as outlines, drawn last so it sits on top. */}
+                      {isHealEditing && !healOverlaysHidden && (
+                        <Group>
+                          {healPinsVisible &&
+                            healSpots.map((spot) =>
+                              spot.key === selectedHealKey ? null : (
+                                <HealPin
+                                  key={spot.key}
+                                  x={spot.cx}
+                                  y={spot.cy}
+                                  px={healPx}
+                                  state={hoveredHealKey === spot.key ? 'hover' : 'idle'}
                                 />
-                                <Rect
-                                  x={spot.x + spot.offset.x + (drag?.part === 'spot' ? spotDx : 0)}
-                                  y={spot.y + spot.offset.y + (drag?.part === 'spot' ? spotDy : 0)}
-                                  width={spot.width}
-                                  height={spot.height}
-                                  stroke="#f8fafc"
-                                  strokeWidth={2 / maxSafeScale}
-                                  dash={[10 / maxSafeScale, 6 / maxSafeScale]}
-                                  cornerRadius={4 / maxSafeScale}
-                                  // A stroke-only Rect is hit only on its
-                                  // outline, so clicks inside it fell through
-                                  // to the stage and panned the photo. A faint
-                                  // fill makes the whole marker grabbable.
-                                  fill="rgba(248,250,252,0.06)"
-                                  draggable
-                                  onMouseDown={(e: any) => {
-                                    e.cancelBubble = true;
-                                  }}
-                                  onDragStart={(e: any) => {
-                                    e.cancelBubble = true;
-                                  }}
-                                  onDragMove={(e: any) => {
-                                    e.cancelBubble = true;
-                                    setHealDrag({
-                                      key: spot.key,
-                                      part: 'source',
-                                      dx: e.target.x() - (spot.x + spot.offset.x),
-                                      dy: e.target.y() - (spot.y + spot.offset.y),
-                                    });
-                                  }}
-                                  onDragEnd={(e: any) => {
-                                    e.cancelBubble = true;
-                                    setHealDrag(null);
-                                    setHealSpotSource(spot, {
-                                      x: e.target.x() - spot.x,
-                                      y: e.target.y() - spot.y,
-                                    });
-                                  }}
-                                  onMouseEnter={(e: any) => enter(e, 'move')}
-                                  onMouseLeave={leave}
-                                />
-                              </>
+                              ),
                             )}
-                            <Rect
-                              x={spot.x}
-                              y={spot.y}
-                              width={spot.width}
-                              height={spot.height}
-                              stroke={
-                                isSelected ? '#38bdf8' : isHovered ? '#7dd3fc' : 'rgba(56,189,248,0.5)'
-                              }
-                              strokeWidth={(isSelected ? 2 : 1.5) / maxSafeScale}
-                              fill={
-                                isSelected
-                                  ? 'rgba(56,189,248,0.14)'
-                                  : isHovered
-                                    ? 'rgba(56,189,248,0.10)'
-                                    : 'rgba(56,189,248,0.03)'
-                              }
-                              cornerRadius={4 / maxSafeScale}
-                              draggable
-                              onMouseDown={(e: any) => {
-                                e.cancelBubble = true;
-                                selectHeal(spotRef);
-                              }}
-                              onDragStart={(e: any) => {
-                                e.cancelBubble = true;
-                              }}
-                              onDragMove={(e: any) => {
-                                e.cancelBubble = true;
-                                setHealDrag({
-                                  key: spot.key,
-                                  part: 'spot',
-                                  dx: e.target.x() - spot.x,
-                                  dy: e.target.y() - spot.y,
-                                });
-                              }}
-                              onDragEnd={(e: any) => {
-                                e.cancelBubble = true;
-                                setHealDrag(null);
-                                moveHealSpot(
-                                  spot,
-                                  Math.round(e.target.x() - spot.x),
-                                  Math.round(e.target.y() - spot.y),
-                                );
-                                e.target.position({ x: spot.x, y: spot.y });
-                              }}
-                              onMouseEnter={(e: any) => {
-                                setHoveredHealKey(spot.key);
-                                enter(e, 'move');
-                              }}
-                              onMouseLeave={(e: any) => {
-                                setHoveredHealKey((k: string | null) => (k === spot.key ? null : k));
-                                leave(e);
+                          {selectedHealSpot && (
+                            <HealSelectedSpot
+                              spot={selectedHealSpot}
+                              drag={healDrag?.key === selectedHealSpot.key ? healDrag : null}
+                              px={healPx}
+                              showOutline={showSelectedHealOutline}
+                              onDelete={() => {
+                                deleteHealSpot(selectedHealSpot);
+                                selectHeal(null);
+                                healHoverRef.current = null;
+                                setHealHover(null);
+                                setIsMaskHovered(false);
                               }}
                             />
-                            {isSelected && (
-                              <Group
-                                // Sat mostly outside the box: this deletes on
-                                // press, so its hit area must not overlap the
-                                // draggable spot any more than necessary.
-                                x={spot.x + spotDx + spot.width + 7 / maxSafeScale}
-                                y={spot.y + spotDy - 7 / maxSafeScale}
-                                // Delete on mousedown, not click: Konva only
-                                // synthesises a click when press and release
-                                // land on the same node, and the hover state
-                                // flipping as the pointer crosses onto the
-                                // badge re-renders it in between — so the
-                                // click never arrived and the x did nothing.
-                                onMouseDown={(e: any) => {
-                                  e.cancelBubble = true;
-                                  deleteHealSpot(spot);
-                                  selectHeal(null);
-                                  setIsMaskHovered(false);
-                                }}
-                                onMouseEnter={(e: any) => enter(e, 'pointer')}
-                                onMouseLeave={leave}
-                              >
-                                {/* Invisible hit pad: the visible badge is
-                                    only 9px across, an awkward target. */}
-                                <Circle radius={14 / maxSafeScale} fill="rgba(0,0,0,0.01)" />
-                                <Circle
-                                  radius={9 / maxSafeScale}
-                                  fill="#0f172a"
-                                  stroke="#f8fafc"
-                                  strokeWidth={1.5 / maxSafeScale}
-                                />
-                                <Line
-                                  points={[
-                                    -3.5 / maxSafeScale,
-                                    -3.5 / maxSafeScale,
-                                    3.5 / maxSafeScale,
-                                    3.5 / maxSafeScale,
-                                  ]}
-                                  stroke="#f8fafc"
-                                  strokeWidth={1.5 / maxSafeScale}
-                                  listening={false}
-                                />
-                                <Line
-                                  points={[
-                                    3.5 / maxSafeScale,
-                                    -3.5 / maxSafeScale,
-                                    -3.5 / maxSafeScale,
-                                    3.5 / maxSafeScale,
-                                  ]}
-                                  stroke="#f8fafc"
-                                  strokeWidth={1.5 / maxSafeScale}
-                                  listening={false}
-                                />
-                              </Group>
-                            )}
-                          </Group>
-                        );
-                      })}
+                          )}
+                        </Group>
+                      )}
 
                       {previewBox && (
                         <Rect
@@ -3271,7 +3636,7 @@ const ImageCanvas = memo(
                           listening={false}
                         />
                       )}
-                      {isBrushActive && cursorPreview.visible && (
+                      {isBrushActive && cursorPreview.visible && !healHover && (
                         <BrushCursorRings
                           x={cursorPreview.x}
                           y={cursorPreview.y}
@@ -3280,7 +3645,7 @@ const ImageCanvas = memo(
                           zoom={effectiveZoomScale}
                         />
                       )}
-                      {isBrushActive && cursorPreview.visible && (
+                      {isBrushActive && cursorPreview.visible && !healHover && (
                         <Circle
                           {...(brushCursorPreview.colorStops
                             ? {

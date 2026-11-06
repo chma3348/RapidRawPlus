@@ -44,6 +44,7 @@ pub mod hdr_dng;
 pub mod hdr_merge;
 pub mod hdr_output;
 pub mod heal_blend;
+pub mod heal_engine;
 pub mod image_loader;
 pub mod image_processing;
 pub mod journal;
