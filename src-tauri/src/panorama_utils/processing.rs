@@ -23,8 +23,6 @@ pub const MIN_INLIERS_FOR_CONNECTION: usize = 15;
 /// A pair's inliers must span at least this share of the frame's width
 /// and of its height: a tight cluster fits any warp at all.
 const MIN_INLIER_SPREAD: f64 = 0.1;
-const LOW_DETAIL_WINDOW_RADIUS: u32 = 16;
-const LOW_DETAIL_VARIANCE_THRESHOLD: f64 = 60.0;
 
 pub fn calculate_downscale_dimensions(width: u32, height: u32) -> (u32, u32, f64) {
     let long_side = width.max(height);
@@ -495,102 +493,6 @@ fn convert_gray_u8_to_f32(img: &GrayImage) -> ImageBuffer<Luma<f32>, Vec<f32>> {
     ImageBuffer::from_fn(width, height, |x, y| {
         Luma([img.get_pixel(x, y)[0] as f32 / 255.0])
     })
-}
-
-fn build_integral_images(gray: &GrayImage) -> (Vec<u64>, Vec<u128>) {
-    let (width, height) = gray.dimensions();
-    let mut sat = vec![0u64; (width * height) as usize];
-    let mut sat_sq = vec![0u128; (width * height) as usize];
-
-    for y in 0..height {
-        let mut row_sum = 0u64;
-        let mut row_sum_sq = 0u128;
-        for x in 0..width {
-            let pixel_val = gray.get_pixel(x, y)[0] as u64;
-            let pixel_val_sq = pixel_val as u128 * pixel_val as u128;
-            row_sum += pixel_val;
-            row_sum_sq += pixel_val_sq;
-
-            let idx = (y * width + x) as usize;
-            let above_idx = if y > 0 {
-                ((y - 1) * width + x) as usize
-            } else {
-                usize::MAX
-            };
-
-            sat[idx] = row_sum
-                + if above_idx != usize::MAX {
-                    sat[above_idx]
-                } else {
-                    0
-                };
-            sat_sq[idx] = row_sum_sq
-                + if above_idx != usize::MAX {
-                    sat_sq[above_idx]
-                } else {
-                    0
-                };
-        }
-    }
-    (sat, sat_sq)
-}
-
-pub fn generate_low_detail_mask(gray_full: &GrayImage) -> GrayImage {
-    println!("    - Generating low-detail mask...");
-    let (width, height) = gray_full.dimensions();
-    let mut mask = GrayImage::new(width, height);
-    let (sat, sat_sq) = build_integral_images(gray_full);
-    let r = LOW_DETAIL_WINDOW_RADIUS as i32;
-
-    let get_sat_val = |s: &Vec<u64>, x: i32, y: i32| -> u64 {
-        if x < 0 || y < 0 {
-            0
-        } else {
-            s[(y as u32 * width + x as u32) as usize]
-        }
-    };
-    let get_sat_sq_val = |s: &Vec<u128>, x: i32, y: i32| -> u128 {
-        if x < 0 || y < 0 {
-            0
-        } else {
-            s[(y as u32 * width + x as u32) as usize]
-        }
-    };
-
-    mask.par_chunks_mut(width as usize)
-        .enumerate()
-        .for_each(|(y, row)| {
-            for x in 0..width as i32 {
-                let x1 = x - r - 1;
-                let y1 = y as i32 - r - 1;
-                let x2 = (x + r).min(width as i32 - 1);
-                let y2 = (y as i32 + r).min(height as i32 - 1);
-
-                let n_x = (x2 - (x1 + 1) + 1) as f64;
-                let n_y = (y2 - (y1 + 1) + 1) as f64;
-                let n = n_x * n_y;
-                if n < 1.0 {
-                    continue;
-                }
-
-                let sum = get_sat_val(&sat, x2, y2) + get_sat_val(&sat, x1, y1)
-                    - get_sat_val(&sat, x2, y1)
-                    - get_sat_val(&sat, x1, y2);
-                let sum_sq = get_sat_sq_val(&sat_sq, x2, y2) + get_sat_sq_val(&sat_sq, x1, y1)
-                    - get_sat_sq_val(&sat_sq, x2, y1)
-                    - get_sat_sq_val(&sat_sq, x1, y2);
-
-                let mean = sum as f64 / n;
-                let variance = (sum_sq as f64 / n) - mean.powi(2);
-
-                if variance < LOW_DETAIL_VARIANCE_THRESHOLD {
-                    row[x as usize] = 255;
-                } else {
-                    row[x as usize] = 0;
-                }
-            }
-        });
-    mask
 }
 
 #[cfg(test)]

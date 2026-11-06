@@ -1,7 +1,7 @@
 use crate::app_settings::load_settings;
 use crate::app_state::AppState;
 use crate::file_management::parse_virtual_path;
-use image::{DynamicImage, GrayImage, Rgb32FImage};
+use image::{DynamicImage, Rgb32FImage};
 use nalgebra::{Matrix3, Vector3};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -40,7 +40,6 @@ pub struct ImageInfo {
     pub image: Rgb32FImage,
     /// Every colour of the frame lies inside sRGB.
     pub fits_srgb: bool,
-    pub low_detail_mask: GrayImage,
     pub scale_factor: f64,
     pub features: Vec<Feature>,
 }
@@ -238,8 +237,6 @@ pub(crate) fn stitch_images(
                 image::imageops::FilterType::Triangle,
             );
 
-            let low_detail_mask = processing::generate_low_detail_mask(&gray_full);
-
             let features = processing::find_features(&gray_small, &brief_pairs);
             println!("    Found {} features in '{}'", features.len(), filename);
 
@@ -248,7 +245,6 @@ pub(crate) fn stitch_images(
                 filename: filename.to_string(),
                 fits_srgb: crate::hdr_output::fits_srgb(&image_f32),
                 image: image_f32,
-                low_detail_mask,
                 scale_factor,
                 features,
             })
