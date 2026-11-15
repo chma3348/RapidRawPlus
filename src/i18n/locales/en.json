@@ -1553,7 +1553,9 @@
       "savedSuccess": "HDR Saved Successfully!",
       "speedNotice": "This may take a few minutes depending on the number and size of your exposures.",
       "start": "Start",
-      "title": "Merge to HDR"
+      "title": "Merge to HDR",
+      "autoSettings": "Auto settings",
+      "autoSettingsTooltip": "Balances highlights and shadows across the bracket, as Lightroom's merge does. Turn off to open the merge as the middle exposure looked; change it, then Retry, to compare."
     },
     "importSettings": {
       "cancel": "Cancel",

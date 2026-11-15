@@ -93,6 +93,7 @@ pub async fn stitch_panorama(
                             crate::hdr_output::compact_from_settings(&settings),
                             sources,
                             "Pano",
+                            false,
                         )
                         .map_err(|e| format!("Failed to write the panorama: {e:#}"))
                     });

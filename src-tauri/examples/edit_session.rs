@@ -6,6 +6,7 @@
 //!
 //!   edit_session info PHOTO OUT_DIR            neutral.jpg, size.json, sky.json, subject.json
 //!   edit_session render PHOTO EDITS.json OUT.jpg [MAX] [X,Y,W,H]
+//!   edit_session auto PHOTO [EDITS.json|hdr]   (what Auto sets; hdr: a merge's Auto settings)
 //!   edit_session subject PHOTO X0,Y0,X1,Y1 OUT.json [X,Y,+|-;...]
 //!                                   (a box, then include/exclude clicks; photo pixels)
 //!   edit_session mask PHOTO EDITS.json INDEX OUT.png   (a mask as renders place it)
@@ -175,6 +176,22 @@ fn main() -> Result<()> {
                 Err(e) => eprintln!("subject: {e}"),
             }
             println!("{w}x{h}");
+        }
+        "auto" => {
+            // What the editor's Auto button sets, over EDITS.json if given;
+            // `hdr`: what a merge's Auto settings set.
+            let state = handle.state::<darkroom_index::AppState>();
+            let auto = match args.get(2).map(String::as_str) {
+                Some("hdr") => application::auto_hdr_controls(&gpu()?, &state, &photo)?,
+                given => {
+                    let edits = match given {
+                        Some(p) => serde_json::from_str(&std::fs::read_to_string(p)?)?,
+                        None => neutral.clone(),
+                    };
+                    application::auto_controls(&gpu()?, &state, &photo, &edits)?
+                }
+            };
+            println!("{auto}");
         }
         "render" => {
             let edits: Value = serde_json::from_str(&std::fs::read_to_string(&args[2])?)?;

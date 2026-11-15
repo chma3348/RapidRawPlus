@@ -1140,6 +1140,7 @@ async fn save_temp_file(bytes: Vec<u8>) -> Result<String, String> {
 #[tauri::command]
 async fn merge_hdr(
     paths: Vec<String>,
+    auto_settings: Option<bool>,
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
@@ -1322,6 +1323,8 @@ async fn merge_hdr(
         crate::hdr_output::compact_from_settings(&settings),
         sources,
         "HDR",
+        // On unless turned off, as Lightroom's merge has it.
+        auto_settings.unwrap_or(true),
     )
     .map_err(|e| format!("Failed to write the merge: {e:#}"))?;
     drop(merged);
@@ -1349,6 +1352,21 @@ async fn save_hdr(
     let output_path = crate::hdr_output::save(&result).map_err(|e| format!("{e:#}"))?;
     let (real_path, _) = crate::file_management::parse_virtual_path(&first_path_str);
     let _ = crate::exif_processing::write_exif_sidecar(&real_path.to_string_lossy(), &output_path);
+    // The merge opens with the settings its preview showed.
+    if let Some(auto) = result.adjustments.as_ref().and_then(|a| a.as_object()) {
+        let (_, sidecar) =
+            crate::file_management::parse_virtual_path(&output_path.to_string_lossy());
+        crate::exif_processing::modify_sidecar(&sidecar, |meta| {
+            if !meta.adjustments.is_object() {
+                meta.adjustments = serde_json::json!({});
+            }
+            let adjustments = meta.adjustments.as_object_mut().unwrap();
+            for (key, value) in auto {
+                adjustments.insert(key.clone(), value.clone());
+            }
+            true
+        })?;
+    }
     // One stack in the library: the merge on top, its frames inside.
     crate::versions::record_merge(&output_path, &result.sources, result.kind);
     Ok(output_path.to_string_lossy().to_string())

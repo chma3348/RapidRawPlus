@@ -34,6 +34,9 @@ pub struct HdrResult {
     pub sources: Vec<PathBuf>,
     /// "HDR" or "Pano": the saved file's suffix and its stack's label.
     pub kind: &'static str,
+    /// The tone settings the merge opens with (its Auto settings), written
+    /// to its sidecar when it is saved.
+    pub adjustments: Option<serde_json::Value>,
 }
 
 /// What a merge's pixels are.
@@ -68,7 +71,12 @@ const COMPACT_MAX_PIXELS: u64 = 150_000_000;
 /// Write a merge to a temporary file, render its preview through the
 /// editor's pipeline (at 1600 px, for the merge window), and for a DNG
 /// embed that preview in the file (Finder, Quick Look and Nextcloud's web
-/// view show it). Returns the merge and the preview as a JPEG data URL.
+/// view show it). With `auto_settings`, the merge opens with Lightroom's
+/// "Auto Settings" ([`auto_hdr_controls`]), and its preview shows them.
+/// Returns the merge and the preview as a JPEG data URL.
+///
+/// [`auto_hdr_controls`]: crate::color_engine::application::auto_hdr_controls
+#[allow(clippy::too_many_arguments)]
 pub fn finish(
     context: &crate::image_processing::GpuContext,
     state: &crate::AppState,
@@ -77,6 +85,7 @@ pub fn finish(
     compact: bool,
     sources: Vec<PathBuf>,
     kind: &'static str,
+    auto_settings: bool,
 ) -> Result<(HdrResult, String)> {
     let dng_compression = if compact {
         crate::hdr_dng::COMPACT
@@ -97,23 +106,39 @@ pub fn finish(
         Merged::Rendered => "tif",
     };
     let file = temporary_path(extension)?;
-    let result = HdrResult {
-        file: file.clone(),
-        extension,
-        sources,
-        kind,
-    };
     match merged {
         Merged::Raw(camera) => {
             crate::hdr_dng::write_float_dng(&file, pixels, camera, dng_compression, None)?
         }
         Merged::Rendered => write_rendered(&file, pixels, compact_rendered)?,
     }
+    // A merge whose settings cannot be worked out still opens, as it is.
+    let adjustments = auto_settings
+        .then(|| {
+            crate::color_engine::application::auto_hdr_controls(
+                context,
+                state,
+                &file.to_string_lossy(),
+            )
+            .inspect_err(|e| log::warn!("[hdr] no auto settings: {e:#}"))
+            .ok()
+        })
+        .flatten();
+    if let Some(adjustments) = &adjustments {
+        log::info!("[hdr] auto settings {adjustments}");
+    }
+    let result = HdrResult {
+        file: file.clone(),
+        extension,
+        sources,
+        kind,
+        adjustments: adjustments.clone(),
+    };
     let preview = crate::color_engine::application::render_aside(
         context,
         state,
         &file.to_string_lossy(),
-        &serde_json::Value::Null,
+        &adjustments.unwrap_or(serde_json::Value::Null),
         Some(1600),
     )
     .context("Previewing the merge")?

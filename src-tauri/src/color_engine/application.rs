@@ -2801,6 +2801,142 @@ fn interpretation_report(
     }))
 }
 
+fn luminance_weights() -> [f32; 3] {
+    let y = spaces::rgb_to_xyz(Primaries::DavinciWideGamut).row(1);
+    [y.x as f32, y.y as f32, y.z as f32]
+}
+
+/// Reinhard's key of graded scene data: the log-average luminance over the
+/// 1st–99th percentiles, so a lamp or a black border does not decide it.
+fn scene_key(graded: &image::Rgba32FImage) -> Result<f32> {
+    let weights = luminance_weights();
+    let mut lum: Vec<f32> = graded
+        .pixels()
+        .map(|p| (p[0] * weights[0] + p[1] * weights[1] + p[2] * weights[2]).max(1e-6))
+        .collect();
+    ensure!(!lum.is_empty(), "Nothing to analyse");
+    lum.sort_by(f32::total_cmp);
+    let (lo, hi) = (lum[lum.len() / 100], lum[lum.len() * 99 / 100]);
+    let body: Vec<f32> = lum
+        .iter()
+        .copied()
+        .filter(|v| (lo..=hi).contains(v))
+        .collect();
+    Ok((body.iter().map(|v| v.ln()).sum::<f32>() / body.len().max(1) as f32).exp())
+}
+
+/// High-key and low-key pictures are usually meant that way: within half
+/// a stop of mid grey nothing moves, and beyond it only part of the way.
+fn exposure_toward_grey(key: f32) -> f32 {
+    let error = (0.18 / key).log2();
+    (error.signum() * (error.abs() - 0.5).max(0.) * 0.6).clamp(-2., 2.)
+}
+
+/// Where an HDR merge's bright end is brought to (the 99.9th percentile of
+/// each pixel's brightest channel, display-encoded): just under white, so
+/// only the sun and its like still clip.
+const HDR_BRIGHT_END: f32 = 0.95;
+/// Where its darkest tenth is lifted to (display-encoded luminance): out of
+/// black, where shadows read as places rather than holes.
+const HDR_SHADOW_FLOOR: f32 = 0.10;
+
+/// Lightroom's "Auto Settings" for an HDR merge. A merge opens at its
+/// middle frame's exposure, so with nothing set it looks just like that
+/// frame; this brings the range the other frames added into view:
+///
+/// - exposure as the Auto button sets it ([`auto_controls`]), so a sunset
+///   stays a sunset;
+/// - Highlights pulled just far enough to bring the bright end under white
+///   ([`HDR_BRIGHT_END`]);
+/// - Shadows lifted just far enough to bring the darkest tenth out of black
+///   ([`HDR_SHADOW_FLOOR`]).
+///
+/// Each slider is found by bisection on small renders, so it holds whatever
+/// the tone controls' calibration does. White balance is left as shot, as
+/// Lightroom's merge leaves it.
+pub fn auto_hdr_controls(context: &GpuContext, state: &AppState, path: &str) -> Result<Value> {
+    // One set of caches for every render here: the merge is decoded once,
+    // and the editor's own are not disturbed.
+    let caches = V3Caches::aside(&state.v3, path);
+    let show = |edits: &Value, capture: bool| {
+        render(
+            context,
+            state,
+            &caches,
+            Quality::Full,
+            path,
+            edits,
+            Some(384),
+            capture,
+            OutputSpace::Srgb,
+            None,
+        )
+    };
+    let neutral = ungraded(&Value::Null);
+    let graded = show(&neutral, true)?
+        .stages
+        .context("Missing analysis stage")?
+        .graded;
+    let exposure = exposure_toward_grey(scene_key(&graded)?);
+
+    let quantile = |mut values: Vec<f32>, q: f32| {
+        let i = ((values.len().saturating_sub(1)) as f32 * q) as usize;
+        *values.select_nth_unstable_by(i, f32::total_cmp).1
+    };
+    let bright_end = |edits: &Value| -> Result<f32> {
+        let shown = show(edits, false)?.encoded_srgb;
+        Ok(quantile(
+            shown.pixels().map(|p| p[0].max(p[1]).max(p[2])).collect(),
+            0.999,
+        ))
+    };
+    let dark_tenth = |edits: &Value| -> Result<f32> {
+        let shown = show(edits, false)?.encoded_srgb;
+        Ok(quantile(
+            shown
+                .pixels()
+                .map(|p| 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2])
+                .collect(),
+            0.1,
+        ))
+    };
+    // The least slider travel (0..=100, in whole steps) that meets `ok`;
+    // 100 when even that does not.
+    let least = |ok: &dyn Fn(f32) -> Result<bool>| -> Result<f32> {
+        if ok(0.)? {
+            return Ok(0.);
+        }
+        let (mut lo, mut hi) = (0f32, 100f32);
+        if !ok(hi)? {
+            return Ok(hi);
+        }
+        while hi - lo > 4. {
+            let mid = ((lo + hi) / 2.).round();
+            if ok(mid)? {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        Ok(hi)
+    };
+    let with = |exposure: f32, highlights: f32, shadows: f32| {
+        let mut edits = neutral.clone();
+        edits["exposure"] = serde_json::json!(exposure);
+        edits["highlights"] = serde_json::json!(highlights);
+        edits["shadows"] = serde_json::json!(shadows);
+        edits
+    };
+    let pull = least(&|h| Ok(bright_end(&with(exposure, -h, 0.))? <= HDR_BRIGHT_END))?;
+    let lift = least(&|s| Ok(dark_tenth(&with(exposure, -pull, s))? >= HDR_SHADOW_FLOOR))?;
+    // Saved as the sliders show them (hundredths of a stop, whole steps).
+    Ok(serde_json::json!({
+        "exposure": (exposure as f64 * 100.).round() / 100. + 0.,
+        "highlights": -pull as f64 + 0.,
+        "shadows": lift as f64,
+    }))
+}
+
 /// Automatic exposure, white balance, highlights and shadows for v3,
 /// measured on the picture's scene data rather than its display pixels:
 ///
@@ -2824,25 +2960,9 @@ pub fn auto_controls(
     let neutral = ungraded(edits);
     let frame = render_file_with_capture(context, state, path, &neutral, Some(512), true)?;
     let graded = frame.stages.context("Missing analysis stage")?.graded;
-    let y = spaces::rgb_to_xyz(Primaries::DavinciWideGamut).row(1);
-    let weights = [y.x as f32, y.y as f32, y.z as f32];
-    let mut lum: Vec<f32> = graded
-        .pixels()
-        .map(|p| (p[0] * weights[0] + p[1] * weights[1] + p[2] * weights[2]).max(1e-6))
-        .collect();
-    ensure!(!lum.is_empty(), "Nothing to analyse");
-    lum.sort_by(f32::total_cmp);
-    let (lo, hi) = (lum[lum.len() / 100], lum[lum.len() * 99 / 100]);
-    let body: Vec<f32> = lum
-        .iter()
-        .copied()
-        .filter(|v| (lo..=hi).contains(v))
-        .collect();
-    let key = (body.iter().map(|v| v.ln()).sum::<f32>() / body.len().max(1) as f32).exp();
-    // High-key and low-key pictures are usually meant that way: within half
-    // a stop of mid grey nothing moves, and beyond it only part of the way.
-    let error = (0.18 / key).log2();
-    let exposure = (error.signum() * (error.abs() - 0.5).max(0.) * 0.6).clamp(-2., 2.);
+    let weights = luminance_weights();
+    let key = scene_key(&graded)?;
+    let exposure = exposure_toward_grey(key);
 
     // Grey world, in cone-ish RGB, over pixels within two stops of the key.
     let (mut sum, mut n) = ([0f64; 3], 0usize);

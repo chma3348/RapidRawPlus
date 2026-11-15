@@ -31,7 +31,7 @@ export interface AppModalsProps {
   handleSavePanorama: () => Promise<string>;
   handleStartPanorama: (paths: string[]) => void;
   handleSaveHdr: () => Promise<string>;
-  handleStartHdr: (paths: string[]) => void;
+  handleStartHdr: (paths: string[], autoSettings?: boolean) => void;
   refreshImageList: () => Promise<void>;
   handleApplyDenoise: (intensity: number, method: 'ai' | 'bm3d') => Promise<void>;
   handleBatchDenoise: (intensity: number, method: 'ai' | 'bm3d', paths: string[]) => Promise<string[]>;
@@ -296,7 +296,7 @@ export default function AppModals(props: AppModalsProps) {
         }
         onOpenFile={(path: string) => props.handleImageSelect(path)}
         onSave={props.handleSaveHdr}
-        onMerge={() => props.handleStartHdr(hdrModalState.stitchingSourcePaths)}
+        onMerge={(autoSettings: boolean) => props.handleStartHdr(hdrModalState.stitchingSourcePaths, autoSettings)}
         progressMessage={hdrModalState.progressMessage}
       />
       <NegativeConversionModal

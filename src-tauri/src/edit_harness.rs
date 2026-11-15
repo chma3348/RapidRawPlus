@@ -307,7 +307,7 @@ pub async fn merge_and_save(
             .await?;
         crate::panorama_stitching::save_panorama(first, app.state::<AppState>()).await
     } else {
-        crate::merge_hdr(paths, app.clone(), app.state::<AppState>()).await?;
+        crate::merge_hdr(paths, None, app.clone(), app.state::<AppState>()).await?;
         crate::save_hdr(first, app.state::<AppState>()).await
     }
 }

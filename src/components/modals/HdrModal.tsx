@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { CheckCircle, XCircle, Loader2, Save, RefreshCw, Images } from 'lucide-react';
 import { motion } from 'framer-motion';
 import Button from '../ui/Button';
+import Switch from '../ui/Switch';
 import Text from '../ui/Text';
 import { TextColors, TextVariants } from '../../types/typography';
 
@@ -16,9 +17,12 @@ interface HdrModalProps {
   onClose(): void;
   onOpenFile(path: string): void;
   onSave(): Promise<string>;
-  onMerge(): void;
+  /** `autoSettings`: open the merge with Lightroom-style Auto settings. */
+  onMerge(autoSettings: boolean): void;
   progressMessage: string | null;
 }
+
+const AUTO_SETTINGS_KEY = 'darkroom.hdrAutoSettings';
 
 export default function HdrModal({
   error,
@@ -38,6 +42,22 @@ export default function HdrModal({
   const [show, setShow] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [savedPath, setSavedPath] = useState<string | null>(null);
+  // On unless turned off, as in Lightroom's merge; remembered per viewer.
+  const [autoSettings, setAutoSettings] = useState(() => {
+    try {
+      return localStorage.getItem(AUTO_SETTINGS_KEY) !== 'false';
+    } catch {
+      return true;
+    }
+  });
+  const changeAutoSettings = (on: boolean) => {
+    setAutoSettings(on);
+    try {
+      localStorage.setItem(AUTO_SETTINGS_KEY, String(on));
+    } catch {
+      // Not remembered; it still applies to this merge.
+    }
+  };
 
   const mouseDownTarget = useRef<EventTarget | null>(null);
 
@@ -224,6 +244,14 @@ export default function HdrModal({
 
     return (
       <div className={`w-full flex items-center justify-end gap-2 ${disabled ? 'opacity-50 pointer-events-none' : ''}`}>
+        <div className="mr-auto">
+          <Switch
+            label={t('modals.hdr.autoSettings')}
+            tooltip={t('modals.hdr.autoSettingsTooltip')}
+            checked={autoSettings}
+            onChange={changeAutoSettings}
+          />
+        </div>
         <button
           onClick={handleClose}
           className="px-4 py-2 rounded-md text-text-secondary hover:bg-card-active transition-colors text-sm"
@@ -231,7 +259,11 @@ export default function HdrModal({
           {finalImageBase64 ? t('modals.hdr.close') : t('modals.hdr.cancel')}
         </button>
 
-        <Button onClick={onMerge} disabled={isProcessing} variant={finalImageBase64 ? 'secondary' : 'primary'}>
+        <Button
+          onClick={() => onMerge(autoSettings)}
+          disabled={isProcessing}
+          variant={finalImageBase64 ? 'secondary' : 'primary'}
+        >
           {isProcessing ? (
             <Loader2 className="animate-spin mr-2" size={16} />
           ) : finalImageBase64 ? (

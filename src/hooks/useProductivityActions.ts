@@ -48,7 +48,7 @@ export function useProductivityActions(refreshImageList: () => Promise<void>) {
   }, [refreshImageList, setUI]);
 
   const handleStartHdr = useCallback(
-    (paths: string[]) => {
+    (paths: string[], autoSettings = true) => {
       setUI((state) => ({
         hdrModalState: {
           ...state.hdrModalState,
@@ -58,7 +58,7 @@ export function useProductivityActions(refreshImageList: () => Promise<void>) {
           progressMessage: 'Starting HDR process...',
         },
       }));
-      invoke(Invokes.MergeHdr, { paths }).catch((err) => {
+      invoke(Invokes.MergeHdr, { paths, autoSettings }).catch((err) => {
         setUI((state) => ({ hdrModalState: { ...state.hdrModalState, isProcessing: false, error: String(err) } }));
       });
     },

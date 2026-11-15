@@ -16,6 +16,14 @@
   Weighing channels apart turned smooth skies into magenta, green and cyan arcs.
 - **RAW and JPEG twins:** a RAW and its JPEG twin both selected merge as the RAW alone. RAW and JPEG frames of different shots don't mix: the merge says so.
 - **Brightness:** set by the middle frame (`place_at`). Its midtones open as they did, not scaled down to fit the brightest light, which made merges dark and flat.
+- **Auto settings** (15 November 2026): on its own a merge opens looking just like its middle frame, the extra range only there for the sliders to find. As Lightroom's merge does by default, the merge window's "Auto settings" (on, remembered) opens it with `application::auto_hdr_controls`:
+  - Exposure as the Auto button sets it, so a sunset stays a sunset;
+  - Highlights pulled just far enough that the bright end (99.9th percentile of the brightest channel) sits under 0.95;
+  - Shadows lifted just far enough that the darkest tenth reaches 0.10 (display-encoded);
+  - each found by bisecting the slider on 384 px renders (about a second), so it follows the tone controls' calibration. White balance is left as shot.
+
+  The preview shows them; saving writes them to the merge's sidecar. Measured on the Tahiti brackets: DSC08639 (−5.3/−3.3/−1.3 EV) +0.61 / −32 / +100, valley out of black with the clouds kept; the sunsets only get Highlights. `edit_session auto PHOTO hdr` prints them; `examples/hdr_check` compares a merge's range with its frames'.
+- **ISO brackets add nothing.** In aperture priority with Auto ISO and a minimum shutter speed, a Sony brackets by ISO at one shutter speed (DSC08446–48: ISO 125/500/2000 at 1/250). The same light reaches the sensor in every frame, so the brighter ones hold no extra shadow detail: the merge is the darkest frame, brightened. Bracket in Manual (or at a fixed ISO) so the shutter speed changes.
 
 ## What it writes
 
